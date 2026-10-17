@@ -33,7 +33,7 @@ int QlCommonBaseCC::first_stack_slot_index() const {
 std::uint64_t QlCommonBaseCC::getRawParam(int slot, int argbits) {
     const int reg = argregs(slot);
     const std::uint64_t value = (reg == 0)
-        ? arch_.stack_read(static_cast<std::int64_t>((1 + shadow_ + (slot - first_stack_slot_index())) * asize_))
+        ? arch_.stack_read(static_cast<std::int64_t>((retaddr_on_stack_ + shadow_ + (slot - first_stack_slot_index())) * asize_))
         : arch_.regs().read(reg);
 
     const auto mask = (argbits != 0) ? static_cast<std::uint64_t>((1ull << argbits) - 1) : ~std::uint64_t{0};
@@ -46,7 +46,7 @@ void QlCommonBaseCC::setRawParam(int slot, std::uint64_t value, int argbits) {
     const auto masked = value & mask;
 
     if (reg == 0) {
-        arch_.stack_write(static_cast<std::int64_t>((1 + shadow_ + (slot - first_stack_slot_index())) * asize_), masked);
+        arch_.stack_write(static_cast<std::int64_t>((retaddr_on_stack_ + shadow_ + (slot - first_stack_slot_index())) * asize_), masked);
     } else {
         arch_.regs().write(reg, masked);
     }

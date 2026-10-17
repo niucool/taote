@@ -1,5 +1,6 @@
 #include "qiling/arch/utils.hpp"
 
+#include <cstdio>
 #include <cstring>
 
 #include <capstone/capstone.h>

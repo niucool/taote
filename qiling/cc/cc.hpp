@@ -104,6 +104,9 @@ protected:
     int retreg_ = 0;
     ArgRegs argregs_ = {};
     int shadow_ = 0;
+    // Python _retaddr_on_stack class attribute (QlCommonBaseCC: True; the ARM /
+    // MIPS conventions flip it to False since the return address lives in a reg)
+    int retaddr_on_stack_ = 1;
     int asize_ = 0;
 };
 
