@@ -14,6 +14,12 @@ add_library(qiling STATIC
     arch/ppc.cpp
     arch/riscv.cpp
     arch/x86.cpp
+    core_struct.cpp
+    core_hooks.cpp
+    host.cpp
+    os/memory.cpp
+    os/fcall.cpp
+    snapshot.cpp
     cc/cc.cpp
     cc/arm.cpp
     cc/intel.cpp

@@ -19,6 +19,8 @@
 #include "qiling/arch/models.hpp"
 #include "qiling/arch/register.hpp"
 
+namespace qiling { class QlMemoryManager; }
+
 namespace qiling {
 
 class Qiling;
@@ -80,9 +82,11 @@ public:
     // Get processor endianness.
     virtual QL_ENDIAN endian() const noexcept = 0;
 
-    // stack push/pop/read/write (arch.py) — require ql.mem (Phase 2 wiring);
-    // throw QlErrorBase while the composition root has not attached a memory
-    // manager. Declared for interface parity; exercised from Phase 2 tests.
+    // stack push/pop/read/write (arch.py) — operate through the attached memory
+    // manager (ql.mem); throw QlErrorBase until attach_memory() has been called.
+    void attach_memory(QlMemoryManager& mem) noexcept;
+    QlMemoryManager* memory() const noexcept { return mem_; }
+
     std::uint64_t stack_push(std::uint64_t value);
     std::uint64_t stack_pop();
     std::uint64_t stack_read(std::int64_t offset) const;
@@ -93,6 +97,7 @@ public:
 
 protected:
     Qiling* ql_;
+    QlMemoryManager* mem_ = nullptr;
 
 private:
     std::optional<std::uint32_t> cputype_;

@@ -6,6 +6,12 @@ add_executable(qiling_tests
     Arch_X86_Test.cpp
     Arch_Models_Test.cpp
     Cc_Test.cpp
+    Struct_Test.cpp
+    CoreHooks_Test.cpp
+    Memory_Test.cpp
+    Fcall_Test.cpp
+    Snapshot_Test.cpp
+    Host_Test.cpp
     Cc_Arch_Test.cpp
     Arch_Arm_Test.cpp
     Arch_Arm64_Test.cpp

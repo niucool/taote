@@ -29,7 +29,7 @@ include(${CMAKE_CURRENT_LIST_DIR}/cmake/engine-deps.cmake)
 
 # vcpkg toolchain; VS runtime deprecation noise is not useful for this port.
 if(MSVC)
-    add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
+    add_compile_definitions(_CRT_SECURE_NO_WARNINGS NOMINMAX)
 endif()
 
 add_subdirectory(qiling)

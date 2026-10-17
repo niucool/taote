@@ -22,6 +22,10 @@ public:
     explicit QlCC(QlArch& arch) : arch_(arch) {}
     virtual ~QlCC() = default;
 
+    // the underlying architecture (the Python cc carries the same reference
+    // through self.arch)
+    QlArch& arch() const noexcept { return arch_; }
+
     // Get the number of slots allocated for an argument of width `argbits`.
     static int getNumSlots(int argbits) {
         (void)argbits;
