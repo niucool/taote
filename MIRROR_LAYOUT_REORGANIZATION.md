@@ -2,12 +2,13 @@
 
 **Source tree**: the Python project being ported lives in the sibling `qiling`
 checkout (`../qiling` relative to this repo). All `qiling/...` references below are
-relative to that tree; the `cpp/` tree is this repo's port root.
+relative to that tree; the repository root is this repo's port root (the port
+lives at the top level, not under a `cpp/` subdirectory).
 
 ## Overview
 
 This document defines the complete mirror-layout mapping between the Python package
-(`qiling/`) and the C++ `cpp/` port.
+(`qiling/`) and the C++ port rooted at the repository root.
 
 **Scope** (per `PORT_PLAN.md` §1): **Windows PE first, then Linux ELF.** The initial
 path comprises the root/arch/core/loader(PE+ELF+blob)/Windows/POSIX+Linux/debugger/
@@ -42,7 +43,7 @@ keystone are *deleted*, not ported):
 
 | Library | Purpose | vcpkg Package | Notes |
 |---------|---------|---------------|-------|
-| unicorn | CPU emulator (the engine under everything) | `unicorn` | **hard-pinned to 2.1.3** (D2) |
+| unicorn | CPU emulator (the engine under everything) | `unicorn` | **hard-pinned to 2.1.4** (D2, amended by D15) |
 | capstone | Disassembly + its generated `*_const.h` headers | `capstone` | replaces `qiling/arch/*_const.py` (D3) |
 | keystone | Assembly | `keystone` | |
 | pe-parse | PE container/headers/imports/relocations parsing | `pe-parse` | Phase 3 (PE loader) |
@@ -74,7 +75,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-find_package(unicorn CONFIG REQUIRED)      # pinned to 2.1.3 in vcpkg.json
+find_package(unicorn CONFIG REQUIRED)      # pinned to 2.1.4 in vcpkg.json (D15)
 find_package(capstone CONFIG REQUIRED)
 find_package(keystone CONFIG REQUIRED)
 find_package(pe-parse CONFIG REQUIRED)
@@ -121,7 +122,7 @@ cmake --build build --target qltool --config Release
 **Test Framework**: Google Test (gtest) is used for all unit and integration tests.
 
 **Test Structure**: Test files mirror the Python `tests/` inventory — each
-`tests/test_*.py` maps to a `cpp/tests/*_Test.cpp` (mapping table in
+`tests/test_*.py` maps to a `tests/*_Test.cpp` (mapping table in
 [Test Layout Mapping](#test-layout-mapping) below). Fixture binaries come from the
 `examples/rootfs/` submodule, reused unchanged.
 
@@ -148,16 +149,16 @@ cmake --build build --target qltool --config Release
 ## Mirror Layout Rules
 
 1. **File Basename Matching**: Python `.py` files → C++ `.hpp` + `.cpp` pair with
-   **identical basenames** (`qiling/os/mapper.py` → `cpp/qiling/os/mapper.hpp` +
+   **identical basenames** (`qiling/os/mapper.py` → `qiling/os/mapper.hpp` +
    `mapper.cpp`). Header-only cases (pure enums/constants) may stay `.hpp`-only.
 2. **`__init__.py` dissolution**: package inits dissolve into the package's
    namespace and a `pkg.hpp` aggregate header where needed. Two exceptions:
-   `qiling/__init__.py` → `cpp/qiling/qiling.hpp` (the package entry), and
-   `qiling/cli.py` + the `qltool` script → `cpp/qltool/main.cpp` (the CLI is one
+   `qiling/__init__.py` → `qiling/qiling.hpp` (the package entry), and
+   `qiling/cli.py` + the `qltool` script → `qltool/main.cpp` (the CLI is one
    executable, not a library module).
 3. **Namespace to Directory Mapping**: Python packages map to C++ namespaces and
    mirrored directories (`qiling/os/posix/syscall` →
-   `namespace qiling::os::posix::syscall` under `cpp/qiling/os/posix/syscall/`).
+   `namespace qiling::os::posix::syscall` under `qiling/os/posix/syscall/`).
 4. **Directory Structure**: C++ directories **exactly mirror** the Python package
    structure — including subpackages (`os/windows/dlls/kernel32/`,
    `os/posix/syscall/abi/`, `debugger/qdb/arch/`, ...). Deferred subpackages are
@@ -191,7 +192,7 @@ cmake --build build --target qltool --config Release
 - **Deferred** — Parked subsystem (PE/ELF priority); mapped in the deferred tree,
   resumes per `PORT_PLAN.md` §10 / OQ 9
 
-Maintain `cpp/STATUS.md` listing each mirrored file with its status (initially all
+Maintain `STATUS.md` listing each mirrored file with its status (initially all
 `NEW`; deferred subsystems tracked in a separate section).
 
 ## Final Directory Layout
@@ -202,12 +203,12 @@ deferred subsystems follow in their own tree.
 ### Initial port path
 
 ```
-cpp/
+.
   CMakeLists.txt                 # top-level; adds qiling/, qltool/, tests/      [P0]
-  vcpkg.json                     # manifest (unicorn@2.1.3, capstone, keystone,
+  vcpkg.json                     # manifest (unicorn@2.1.4, capstone, keystone,
                                  #   pe-parse, elfio, nlohmann-json, spdlog,
                                  #   cxxopts, gtest; features: fuzz, RE)         [P0]
-  README                         # conventions: ownership, exceptions, fibers,
+  CONVENTIONS.md                 # conventions: ownership, exceptions, fibers,
                                  #   encoding (PORT_PLAN.md §9)                  [P0]
   qiling/
     # ---- root (qiling/*.py) ----                                            [P0-P3]
@@ -424,7 +425,7 @@ Mapped for completeness — **not built** under the current PE/ELF priority. Eac
 entry keeps the identical basename/namespace rules:
 
 ```
-cpp/qiling/
+qiling/
   loader/
     macho.hpp/.cpp               # <- macho.py (macOS path)
     macho_parser/                # <- macho_parser/ (7 files, ported as-is)

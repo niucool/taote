@@ -1,0 +1,22 @@
+{
+  "name": "qiling",
+  "version": "1.4.11",
+  "builtin-baseline": "a51bb4d1434e6d0927ff79db8033bed8522b85df",
+  "dependencies": [
+    "unicorn",
+    "capstone",
+    "keystone",
+    "pe-parse",
+    "elfio",
+    "nlohmann-json",
+    "spdlog",
+    "cxxopts",
+    "gtest"
+  ],
+  "overrides": [
+    {
+      "name": "unicorn",
+      "version": "2.1.4"
+    }
+  ]
+}

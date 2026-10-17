@@ -2,8 +2,9 @@
 
 **Source tree**: the Python project this plan ports lives in the sibling `qiling`
 checkout (`../qiling` relative to this repo). All `qiling/...` file references
-are relative to that tree; all `cpp/...` references are relative to this repo's
-future `cpp/` root.
+are relative to that tree; all other paths (`qiling/...`, `tests/...`,
+`qltool/...`, `STATUS.md`) are relative to this repo's root — the port root is the
+repository root (D16).
 
 Companion to `MIRROR_LAYOUT_REORGANIZATION.md` (the *how*: file/namespace mapping,
 the final directory layout, build outputs, test mapping) and the
@@ -53,7 +54,7 @@ Sub-scoping). The actual GUI/AddIn analogue is `qiling/extensions/idaplugin/` (b
 - `jexamples/` — legacy, unexercised by CI.
 - `Dockerfile` / packaging — replaced by the CMake/vcpkg build (8).
 - `tests/` as *tests* — the .py test files are not ported; their **behaviour** is
-  preserved as Google Test suites under `cpp/tests/` (see 11). `examples/rootfs/` is
+  preserved as Google Test suites under `tests/` (see 11). `examples/rootfs/` is
   reused as the input-fixture submodule, unchanged.
 
 ### Sub-scoping (format priority)
@@ -158,8 +159,9 @@ Key invariants we must preserve in C++ (from `CLAUDE.md` and the code):
 - **Emulation fidelity beats abstraction** (project deviation): syscall/API/peripheral
   implementations mirror the real platform's observable behavior even when that means
   repetitive per-OS code. Do *not* unify the POSIX and Windows layers in C++.
-- **`unicorn == 2.1.3` is hard-pinned** (`pyproject.toml:39`). The pin carries over;
-  touching it remains a project-wide event.
+- **`unicorn` is pinned to 2.1.4** (upstream Python pins `2.1.3`; amended for the
+  C++ port by D15 — the strict pin protected the ctypes binding ABI, which does
+  not apply to direct C linkage). Touching the pin remains a project-wide event.
 - **Robustness tenet**: guest-controlled sizes/offsets reaching host allocations must
   be checked where they occur (loader parsers are the reachable-from-untrusted-input
   surface); unverifiable input degrades to a QlError, never a host crash.
@@ -381,7 +383,7 @@ behind an optional feature and, if restored, a minimal hand-written hive reader
 
 | Need | Python source | C++ choice | Notes |
 |---|---|---|---|
-| CPU emulator | `unicorn == 2.1.3` (ctypes) | **unicorn C**, direct linkage | keep the hard pin; delete the binding layer |
+| CPU emulator | `unicorn == 2.1.3` (ctypes) | **unicorn C**, direct linkage (2.1.4 — D15) | delete the binding layer; pin amended from upstream's 2.1.3 (D15) |
 | Disassembly | `capstone ^5` (ctypes) | **capstone C** + its generated `*_const.h` headers | replaces `qiling/arch/*_const.py` (5.7) |
 | Assembly | `keystone-engine ^0.9.2` (ctypes) | **keystone C**, direct linkage | |
 | PE parsing | `pefile` | **pe-parse** (vcpkg, MIT) | thin in-tree wrapper (5.8) |
@@ -406,15 +408,15 @@ the ctypes layer all drop out.
 
 ---
 
-## 7. C++ directory layout under `cpp/`
+## 7. C++ directory layout (port root = repository root)
 
 Mirror rules live in `MIRROR_LAYOUT_REORGANIZATION.md` (file basename matching,
 namespace mapping, status legend, and the fully enumerated final tree). Summary:
 
 1. **File basename matching**: Python `foo.py` → C++ `foo.hpp` + `foo.cpp` with the
-   identical basename (`qiling/core.py` → `cpp/qiling/core.hpp/.cpp`).
+   identical basename (`qiling/core.py` → `qiling/core.hpp/.cpp`).
 2. **Namespace = directory**: `qiling/os/posix/syscall` → `namespace qiling::os::posix::syscall`
-   under `cpp/qiling/os/posix/syscall/`.
+   under `qiling/os/posix/syscall/`.
 3. **Directory structure exactly mirrors** the Python package; `_const.py` modules
    dissolve into the capstone-header reuse (5.7) or stay as headers when they carry
    real tables (`hw/const/`).
@@ -432,13 +434,13 @@ namespace mapping, status legend, and the fully enumerated final tree). Summary:
 6. **C++-only files** (trampolines, fibers, INI reader) are documented with a note
    and placed next to their consumers.
 
-Proposed root:
+Proposed root (the repository root itself; D16):
 
 ```
-cpp/
+.
   CMakeLists.txt                 # top-level; adds qiling/, qltool/, tests/
   vcpkg.json                     # manifest: pe-parse, elfio, yaml-cpp, nlohmann-json, spdlog, cxxopts, gtest
-  README                         # conventions (ownership, exceptions, fibers, encoding)
+  CONVENTIONS.md                 # conventions (ownership, exceptions, fibers, encoding)
   qiling/
     core.hpp/.cpp  core_hooks.hpp/.cpp  core_hooks_types.hpp  core_struct.hpp/.cpp
     utils.hpp/.cpp  const.hpp  exception.hpp/.cpp  host.hpp/.cpp  log.hpp/.cpp
@@ -474,7 +476,7 @@ CMake ≥ 3.15, C++17, vcpkg toolchain (same toolchain baseline as the comparabl
 decompiler port for cross-project consistency). Three targets:
 
 - `qiling` — the core static library (`qiling.lib` / `libqiling.a`), aggregating
-  everything under `cpp/qiling/` except `cli`.
+  everything under `qiling/` except `cli`.
 - `qltool` — the CLI executable, linking `qiling` + cxxopts.
 - `qiling_tests` — the gtest executable.
 
@@ -494,7 +496,7 @@ find_package(nlohmann_json CONFIG REQUIRED)
 find_package(spdlog CONFIG REQUIRED)
 find_package(cxxopts CONFIG REQUIRED)
 find_package(GTest CONFIG REQUIRED)
-# unicorn/capstone/keystone: vcpkg ports, direct linkage, unicorn pinned to 2.1.3
+# unicorn/capstone/keystone: vcpkg ports, direct linkage, unicorn pinned to 2.1.4 (D15)
 find_package(unicorn CONFIG REQUIRED)
 find_package(capstone CONFIG REQUIRED)
 find_package(keystone CONFIG REQUIRED)
@@ -552,7 +554,7 @@ failing test, show red, implement, show green. Never skip red.
 
 ### Phase 0 — Scaffolding and primitives
 
-Scope: `cpp/` skeleton, CMake/vcpkg, `QlError*` hierarchy (5.4), `QL_ARCH`/`QL_OS`/
+Scope: repo skeleton, CMake/vcpkg, `QlError*` hierarchy (5.4), `QL_ARCH`/`QL_OS`/
 `QL_ENDIAN`/`QL_STATE`/`QL_VERBOSE`/`QL_STOP` enums (`const.hpp`), logging via spdlog
 with the `qiling/log.py` surface (named loggers, level filter, regex filter), JSON
 (nlohmann), tiny INI reader for `.ql` profiles, string/path helpers, the
@@ -574,7 +576,7 @@ Scope: `qiling/arch/` minus the const modules (replaced by capstone headers — 
 `QlArch` base and per-arch classes (x86, x8664, ARM, ARM64, MIPS, RISC-V 32/64,
 PowerPC, Cortex-M, 8086), `register.py` (`QlRegisterAccessor`), `models.py` (CPU
 models, `QL_CPU`), per-arch disassembly helpers, `qiling/cc/` (`QlCC` calling
-conventions). Unicorn/Capstone/Keystone direct linkage with the 2.1.3 pin.
+conventions). Unicorn/Capstone/Keystone direct linkage with the 2.1.4 pin (D15).
 
 Dependency: Phase 0.
 
@@ -748,7 +750,7 @@ at least Python-parity on the fixture corpus is a finding; record per-fixture
 timings in CI), CI on Windows + Linux mirroring
 `.github/workflows/build-ci.yml`, `-Werror` consideration, snapshot format freeze,
 robustness fuzz pass on the loader parsers (host boundary), documentation updates
-(`ARCHITECTURE/*.md` gains a C++ note per module), `cpp/STATUS.md` completion.
+(`ARCHITECTURE/*.md` gains a C++ note per module), `STATUS.md` completion.
 
 Deliverable: CI green on both platforms; parity within agreed tolerance across the
 fixture corpus; a documented delta list of intentional Python-vs-C++ differences.
@@ -777,7 +779,7 @@ without disturbing Phases 0-8:
 ## 11. Test strategy
 
 - **Framework**: gtest. Test files mirror the flat `tests/test_*.py` inventory 1:1
-  (`tests/test_elf.py` → `cpp/tests/Loader_Elf_Test.cpp` grouping noted in each file
+  (`tests/test_elf.py` → `tests/Loader_Elf_Test.cpp` grouping noted in each file
   header), so the suite inventory maps without diffing trees.
 - **TDD**: every new behaviour gets a failing test first (per `CLAUDE.md`). The
   survey rule applies doubly here: inventory `tests/` (34 `test_*.py` files) per phase
@@ -833,11 +835,11 @@ Sequencing notes:
 ## 13. Status tracking
 
 Use the status legend from 7 on every file as it lands: `Ported`, `Audit`, `NEW`,
-`C++-only`. Maintain a `cpp/STATUS.md` (all `NEW` initially) listing each mirrored
+`C++-only`. Maintain a `STATUS.md` (all `NEW` initially) listing each mirrored
 file and its status, so progress is visible without diffing trees. The deferred
 subsystems (`os/freebsd`, `os/qnx`, `os/macos`, `os/uefi`, `os/dos`, `qiling/hw/`,
 `qiling/extensions/mcu/`) are tracked in a separate `Deferred` section of
-`cpp/STATUS.md` so their eventual resumption stays visible without polluting the
+`STATUS.md` so their eventual resumption stays visible without polluting the
 active port inventory.
 
 ---
@@ -892,5 +894,7 @@ A running record of the choices made against this plan, with rationale. Seed ent
 | D12 | Tests ported as gtest suites mirroring the flat `tests/` inventory; rootfs reused unchanged | plan | suite inventory maps 1:1; fixtures are input-only (11) |
 | D13 | `std::string` for guest bytes/paths; `std::filesystem` only at the host boundary, with a dedicated traversal test pass | plan | the mapper is the host trust boundary; C++ path semantics need explicit re-verification (5.6) |
 | D14 | Format priority: Windows PE first, Linux ELF second; UEFI/DOS/Mach-O/FreeBSD/QNX/MCU and the kernel-module paths deferred | user | stated requirement; keeps the ~48k-line initial path small and the phases re-entrant (Sub-scoping in 1, deferred table in 10) |
+| D15 | Amend the unicorn pin from 2.1.3 to 2.1.4 (2.1.x line) | 2026-10-17 | vcpkg ships only 2.1.4; the C++ port links the C API directly, so the ctypes-ABI concern behind the strict Python pin does not apply; patch-release delta accepted (user decision) |
+| D16 | Port root is the repository root, not a `cpp/` subdirectory; the conventions doc is `CONVENTIONS.md` (the root `README.md` is the project readme) | 2026-10-17 | user decision; the repo holds only the port, so a nested root added path noise without isolating anything (the Rust alternative plan keeps its own `rs/` root) |
 
 Append rows as decisions are taken during implementation.
