@@ -4,7 +4,17 @@
   "builtin-baseline": "a51bb4d1434e6d0927ff79db8033bed8522b85df",
   "dependencies": [
     "unicorn",
-    "capstone",
+    {
+      "name": "capstone",
+      "features": [
+        "x86",
+        "arm",
+        "arm64",
+        "mips",
+        "ppc",
+        "riscv"
+      ]
+    },
     "keystone",
     "pe-parse",
     "elfio",

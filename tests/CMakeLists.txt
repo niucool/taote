@@ -3,6 +3,9 @@ add_executable(qiling_tests
     Log_Test.cpp
     Profile_Test.cpp
     Exception_Test.cpp
+    Arch_X86_Test.cpp
+    Arch_Models_Test.cpp
+    Cc_Test.cpp
 )
 
 # QILING_SOURCE_DIR lets the suites reach the bundled .ql profiles without install steps.
