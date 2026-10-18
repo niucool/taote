@@ -128,6 +128,22 @@ void QlOsMacos::load() {
     // the syscall entry hook (macos.py: ql.hook_insn(hook_syscall, SYSCALL);
     // hook_syscall = load_syscall)
     install_syscall_hooks();
+
+    // macos.py load does not install the kernel-api hook here — the
+    // loader/macho.py run() does (self.ql.hook_code(hook_kernel_api) on the
+    // driver path). The port installs it here (the shellcode fixtures ride
+    // run(); the deviation note: the upstream hooks on the kext path only)
+    enable_kernel_api_hooks();
+}
+
+void QlOsMacos::hook_kernel_api(std::uint64_t address, std::uint32_t size) {
+    (void)size;
+    (void)address;
+    // hook.py hook_kernel_api: the api lookup rides the loader's
+    // import_symbols — the QlLoaderMachO slice supplies them; the dispatch
+    // stays inert until that lands (the posix ET_REL gate shape). The
+    // TODO(loader slice): the import_symbols lookup + the user-override +
+    // the registry dispatch + the os.call with the passthru
 }
 
 std::string_view QlOsMacos::map_syscall(QL_ARCH archtype, unsigned num) const {

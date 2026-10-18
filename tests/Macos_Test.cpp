@@ -14,6 +14,7 @@
 #include "qiling/core.hpp"
 #include "qiling/arch/x86.hpp"
 #include "qiling/os/filestruct.hpp"
+#include "qiling/os/macos/kernel_api.hpp"
 #include "qiling/os/macos/macos.hpp"
 #include "qiling/os/posix/posix.hpp"
 
@@ -706,6 +707,97 @@ TEST(MacosOs, OpenNocancelOpensThroughPosixOpen) {
     EXPECT_EQ(ql.os().exit_code(), 42);
     // the fd lands at the first free slot (3 — the std streams take 0..2)
     EXPECT_EQ(ql.mem().read_ptr(kCellBase, 4), 3u);
+}
+
+TEST(MacosOs, KernelApiRegistryCarriesUpstreamSurface) {
+    // the kernel_api.py handler names verbatim — the passthru stubs and the
+    // real-bodied handlers both register
+    using qiling::os::macos::KernelApiRegistry;
+    EXPECT_NE(KernelApiRegistry::instance().find("strlen"), nullptr);
+    EXPECT_NE(KernelApiRegistry::instance().find("strcmp"), nullptr);
+    EXPECT_NE(KernelApiRegistry::instance().find("memcpy"), nullptr);
+    EXPECT_NE(KernelApiRegistry::instance().find("memset"), nullptr);
+    EXPECT_NE(KernelApiRegistry::instance().find("bzero"), nullptr);
+    EXPECT_NE(KernelApiRegistry::instance().find("copyin"), nullptr);
+    EXPECT_NE(KernelApiRegistry::instance().find("copyout"), nullptr);
+    EXPECT_NE(KernelApiRegistry::instance().find("OSAddAtomic"), nullptr);
+    EXPECT_NE(KernelApiRegistry::instance().find("suulong"), nullptr);
+    EXPECT_NE(KernelApiRegistry::instance().find("fuulong"), nullptr);
+    EXPECT_NE(KernelApiRegistry::instance().find("read_random"), nullptr);
+    EXPECT_NE(KernelApiRegistry::instance().find("proc_selfpid"), nullptr);
+    EXPECT_NE(KernelApiRegistry::instance().find("_ZN9IOService5startEPS_"), nullptr);
+    EXPECT_NE(KernelApiRegistry::instance().find("sysctl_register_oid"), nullptr);
+
+    // the passthru flags
+    EXPECT_TRUE(KernelApiRegistry::instance().find("strlen")->passthru);
+    EXPECT_FALSE(KernelApiRegistry::instance().find("proc_selfpid")->passthru);
+}
+
+TEST(MacosOs, KernelApiSuulongFuulongRoundtrip) {
+    const auto rootfs = std::filesystem::temp_directory_path() / "ql_macos_rootfs";
+    std::filesystem::create_directories(rootfs);
+    QilingOptions options;
+    options.rootfs = rootfs.string();
+    options.code = {0x90, 0xC3};
+    options.ostype = QL_OS::MACOS;
+    options.archtype = QL_ARCH::X8664;
+    Qiling ql(options);
+
+    constexpr std::uint64_t kCell = 0x1002000;
+    using qiling::os::macos::KernelApiRegistry;
+
+    const auto* su = KernelApiRegistry::instance().find("suulong");
+    ASSERT_NE(su, nullptr);
+    const qiling::os::macos::ResolvedParams su_params{{"addr", kCell}, {"uword", 0x4142434445464748ull}};
+    const auto r1 = su->handler(ql, 0, su_params);
+    ASSERT_TRUE(r1.has_value());
+    EXPECT_EQ(*r1, 0u);
+    EXPECT_EQ(ql.mem().read_ptr(kCell, 8), 0x4142434445464748ull);
+
+    const auto* fu = KernelApiRegistry::instance().find("fuulong");
+    ASSERT_NE(fu, nullptr);
+    const qiling::os::macos::ResolvedParams fu_params{{"addr", kCell}};
+    const auto r2 = fu->handler(ql, 0, fu_params);
+    ASSERT_TRUE(r2.has_value());
+    EXPECT_EQ(*r2, 0x4142434445464748ull);
+}
+
+TEST(MacosOs, KernelApiReadRandomAndSelfPid) {
+    const auto rootfs = std::filesystem::temp_directory_path() / "ql_macos_rootfs";
+    std::filesystem::create_directories(rootfs);
+    QilingOptions options;
+    options.rootfs = rootfs.string();
+    options.code = {0x90, 0xC3};
+    options.ostype = QL_OS::MACOS;
+    options.archtype = QL_ARCH::X8664;
+    Qiling ql(options);
+
+    constexpr std::uint64_t kBuf = 0x1002100;
+    using qiling::os::macos::KernelApiRegistry;
+
+    // read_random: the 0xdeadbeaf stamp, no return (the passthru shape: the
+    // handler returns nullopt)
+    const auto* rr = KernelApiRegistry::instance().find("read_random");
+    ASSERT_NE(rr, nullptr);
+    const qiling::os::macos::ResolvedParams rr_params{{"buf", kBuf}, {"size", 4ull}};
+    const auto r1 = rr->handler(ql, 0, rr_params);
+    EXPECT_FALSE(r1.has_value());
+    const auto stamped = ql.mem().read(kBuf, 4);
+    EXPECT_EQ(stamped[0], 0xaf);
+    EXPECT_EQ(stamped[3], 0xde);
+
+    // proc_selfpid / proc_selfppid: the fixed constants
+    const auto* pid = KernelApiRegistry::instance().find("proc_selfpid");
+    ASSERT_NE(pid, nullptr);
+    const auto r2 = pid->handler(ql, 0, {});
+    ASSERT_TRUE(r2.has_value());
+    EXPECT_EQ(*r2, 0x1337ull);
+
+    const auto* ppid = KernelApiRegistry::instance().find("proc_selfppid");
+    ASSERT_NE(ppid, nullptr);
+    const auto r3 = ppid->handler(ql, 0, {});
+    ASSERT_TRUE(r3.has_value());
+    EXPECT_EQ(*r3, 0x13371337ull);
 }
 
 TEST(MacosOs, GetentropyReturnsSuccess) {
