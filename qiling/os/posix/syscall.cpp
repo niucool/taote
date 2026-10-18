@@ -1319,6 +1319,9 @@ void register_builtin_syscalls() {
     registry.register_syscall({"sendto", {PARAM_INTN, PARAM_PTRX, PARAM_INTN, PARAM_INTN, PARAM_PTRX, PARAM_INTN}, syscall_sendto});
     registry.register_syscall({"recvfrom", {PARAM_INTN, PARAM_PTRX, PARAM_INTN, PARAM_INTN, PARAM_PTRX, PARAM_INTN}, syscall_recvfrom});
     // the option pair (the SOL_SOCKET level + the SO_* names pass through)
+    // the msg family (the socket.py recvmsg — the sendmsg has NO upstream
+    // handler and rides the unimplemented fall-through verbatim)
+    registry.register_syscall({"recvmsg", {PARAM_INTN, PARAM_PTRX, PARAM_INTN}, syscall_recvmsg});
     // the x86 multiplexer (the x86 table rides the socketcall name at 102;
     // the x8664 never reaches it)
     registry.register_syscall({"socketcall", {PARAM_INTN, PARAM_PTRX}, syscall_socketcall});

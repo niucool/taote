@@ -1608,3 +1608,119 @@ TEST(PosixSocket, SocketcallX86MultiplexerRidesSocketBody) {
     EXPECT_EQ(ql.os().exit_code(), 0);
     EXPECT_EQ(ql.mem().read_ptr(0x1002208, 4), 3u);  // the fd rides 3 (the socket body)
 }
+
+// (the host IP_PKTINFO type value: the winsock 19 vs the linux 8 — the
+// numeric spell keeps the test free of the netinet/ws2 include ordering;
+// the winsock IN_PKTINFO payload is 8 bytes — 2 fields, no ipi_spec_dst —
+// against the linux in_pktinfo's 12)
+#ifdef _WIN32
+inline constexpr std::uint64_t kHostPktInfoType = 19;
+inline constexpr std::uint64_t kHostPktInfoDataLen = 8;
+#else
+inline constexpr std::uint64_t kHostPktInfoType = 8;
+inline constexpr std::uint64_t kHostPktInfoDataLen = 12;
+#endif
+
+// the msg family: the recvmsg ride — the UDP self-conversation with the
+// IP_PKTINFO option set; the msghdr load, the iov scatter, the cmsg
+// write-back (the cmsg_len = the data length, the verbatim quirk) and the
+// msg_flags save-back
+TEST(PosixSocket, RecvmsgRidesMsghdrIovAndCmsg) {
+    const std::vector<std::uint8_t> code = {
+        // socket(AF_INET, SOCK_DGRAM, 0) -> A (fd 3) in r15
+        0x48, 0xC7, 0xC0, 0x29, 0x00, 0x00, 0x00,
+        0x48, 0xC7, 0xC7, 0x02, 0x00, 0x00, 0x00,
+        0x48, 0xC7, 0xC6, 0x02, 0x00, 0x00, 0x00,
+        0x45, 0x31, 0xC0,
+        0x0F, 0x05,
+        0x49, 0x89, 0xC7,                           // mov r15, rax
+        // socket(AF_INET, SOCK_DGRAM, 0) -> B (fd 4) in r14
+        0x48, 0xC7, 0xC0, 0x29, 0x00, 0x00, 0x00,
+        0x48, 0xC7, 0xC7, 0x02, 0x00, 0x00, 0x00,
+        0x48, 0xC7, 0xC6, 0x02, 0x00, 0x00, 0x00,
+        0x45, 0x31, 0xC0,
+        0x0F, 0x05,
+        0x49, 0x89, 0xC6,                           // mov r14, rax
+        // setsockopt(B, IPPROTO_IP=0, IP_PKTINFO=8, one@0x1002500, 4)
+        0x4C, 0x89, 0xF7,                           // mov rdi, r14
+        0x48, 0xC7, 0xC0, 0x36, 0x00, 0x00, 0x00,  // mov rax, 54 (setsockopt)
+        0x48, 0x31, 0xF6,                           // xor rsi, rsi (the IP level)
+        0x48, 0xC7, 0xC2, 0x08, 0x00, 0x00, 0x00,  // mov rdx, 8 (IP_PKTINFO)
+        0x49, 0xBA, 0x00, 0x25, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,  // mov r10, 0x1002500
+        0x41, 0xB8, 0x04, 0x00, 0x00, 0x00,         // mov r8d, 4
+        0x0F, 0x05,
+        0x49, 0x89, 0x04, 0x25, 0x00, 0x22, 0x00, 0x01,  // mov [0x1002200], rax (the pktinfo set)
+        // bind(B, sa@0x1002600 (127.0.0.1:0), 16)
+        0x4C, 0x89, 0xF7,                           // mov rdi, r14
+        0x48, 0xC7, 0xC0, 0x31, 0x00, 0x00, 0x00,  // mov rax, 49 (bind)
+        0x48, 0xC7, 0xC6, 0x00, 0x26, 0x00, 0x01,  // mov rsi, 0x1002600
+        0x48, 0xC7, 0xC2, 0x10, 0x00, 0x00, 0x00,  // mov rdx, 16
+        0x0F, 0x05,
+        // getsockname(B, dest@0x1002400, len@0x1002410)
+        0x4C, 0x89, 0xF7,                           // mov rdi, r14
+        0x48, 0xC7, 0xC0, 0x33, 0x00, 0x00, 0x00,  // mov rax, 51 (getsockname)
+        0x48, 0xC7, 0xC6, 0x00, 0x24, 0x00, 0x01,  // mov rsi, 0x1002400
+        0x48, 0xC7, 0xC2, 0x10, 0x24, 0x00, 0x01,  // mov rdx, 0x1002410
+        0x0F, 0x05,
+        // sendto(A, "PING"@0x1002000, 4, 0, dest@0x1002400, 16)
+        0x4C, 0x89, 0xFF,                           // mov rdi, r15
+        0x48, 0xC7, 0xC0, 0x2C, 0x00, 0x00, 0x00,  // mov rax, 44 (sendto)
+        0x48, 0xC7, 0xC6, 0x00, 0x20, 0x00, 0x01,  // mov rsi, 0x1002000
+        0x48, 0xC7, 0xC2, 0x04, 0x00, 0x00, 0x00,  // mov rdx, 4
+        0x45, 0x31, 0xD2,                           // xor r10d, r10d (flags)
+        0x49, 0xB8, 0x00, 0x24, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,  // mov r8, 0x1002400 (the dest)
+        0x41, 0xB9, 0x10, 0x00, 0x00, 0x00,         // mov r9d, 16
+        0x0F, 0x05,
+        0x49, 0x89, 0x04, 0x25, 0x08, 0x22, 0x00, 0x01,  // mov [0x1002208], rax (the send)
+        // recvmsg(B, msghdr@0x1002700, 0)
+        0x4C, 0x89, 0xF7,                           // mov rdi, r14
+        0x48, 0xC7, 0xC0, 0x2F, 0x00, 0x00, 0x00,  // mov rax, 47 (recvmsg)
+        0x48, 0xC7, 0xC6, 0x00, 0x27, 0x00, 0x01,  // mov rsi, 0x1002700
+        0x48, 0x31, 0xD2,                           // xor rdx, rdx (flags 0 — the 3rd arg)
+        0x0F, 0x05,
+        0x49, 0x89, 0x04, 0x25, 0x10, 0x22, 0x00, 0x01,  // mov [0x1002210], rax (the recvmsg)
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00,
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00,
+        0x0F, 0x05,
+    };
+
+    QilingOptions options = posix_options(code);
+    Qiling ql(options);
+
+    // the preloads: the PING payload, the B sockaddr (127.0.0.1:0), the
+    // IP_PKTINFO opt value, the msghdr (the one-entry iov + the control
+    // buffer), the len cells
+    ql.mem().write(0x1002000, {'P', 'I', 'N', 'G'});
+    ql.mem().write_ptr(0x1002500, 1, 4);                    // the IP_PKTINFO opt 1
+    ql.mem().write_ptr(0x1002600, 2, 2);                    // sa_bind family = AF_INET
+    ql.mem().write(0x1002604, {127, 0, 0, 1});              // the addr at sa+4 (BE)
+
+    ql.mem().write_ptr(0x1002700, 0, 8);                    // msg_name = NULL
+    ql.mem().write_ptr(0x1002708, 32, 4);                   // msg_namelen = 32 (the verbatim quirk: the bufsize rides the namelen slot)
+    ql.mem().write_ptr(0x1002710, 0x1002740, 8);            // msg_iov -> the iov array
+    ql.mem().write_ptr(0x1002718, 1, 4);                    // msg_iovlen = 1
+    ql.mem().write_ptr(0x1002720, 0x1002780, 8);            // msg_control -> the ctrl buffer
+    ql.mem().write_ptr(0x1002728, 128, 4);                  // msg_controllen = 128
+    ql.mem().write_ptr(0x1002730, 0, 4);                    // msg_flags = 0
+    ql.mem().write_ptr(0x1002740, 0x1002800, 8);            // iov[0].iov_base
+    ql.mem().write_ptr(0x1002748, 32, 8);                   // iov[0].iov_len = 32
+    ql.mem().write_ptr(0x1002410, 16);                      // the getsockname len cell in: 16
+
+    ql.run();
+
+    EXPECT_EQ(ql.os().exit_code(), 0);
+    EXPECT_EQ(ql.mem().read_ptr(0x1002200, 8), 0u);         // the IP_PKTINFO set ok
+    EXPECT_EQ(ql.mem().read_ptr(0x1002208, 8), 4u);         // the sendto rode 4 bytes
+    EXPECT_EQ(ql.mem().read_ptr(0x1002210, 8), 4u);         // the recvmsg rode 4 bytes
+    const auto got = ql.mem().read(0x1002800, 4);
+    EXPECT_EQ(std::string(got.begin(), got.end()), "PING"); // the iov scatter
+    EXPECT_EQ(ql.mem().read_ptr(0x1002730, 4), 0u);         // the msg_flags saved back (0)
+    // the cmsg write-back: the header (the len, the level, the type) rides
+    // at the control buffer; the type carries the host IP_PKTINFO constant
+    const auto cmsg_len = ql.mem().read_ptr(0x1002780, 4);
+    const auto cmsg_level = ql.mem().read_ptr(0x1002784, 4);
+    const auto cmsg_type = ql.mem().read_ptr(0x1002788, 4);
+    EXPECT_EQ(cmsg_level, 0u);                              // IPPROTO_IP
+    EXPECT_EQ(cmsg_type, kHostPktInfoType);
+    EXPECT_EQ(cmsg_len, kHostPktInfoDataLen);               // the host pktinfo payload
+}

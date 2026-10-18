@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <tuple>
 #include <vector>
 
 namespace qiling {
@@ -83,6 +84,16 @@ public:
                         const std::string& host, std::uint16_t port);
     std::vector<std::uint8_t> recvfrom(std::size_t bufsize, int flags, std::string& path,
                                        std::string& host, std::uint16_t& port);
+
+    // the recvmsg walk (the ql_socket.recvmsg shape): the data + the
+    // ancdata (the (level, type, bytes) triples) + the returned msg_flags;
+    // the POSIX host rides recvmsg(2), the winsock rides WSARecvMsg
+    struct RecvMsgResult {
+        std::vector<std::uint8_t> data;
+        std::vector<std::tuple<int, int, std::vector<std::uint8_t>>> ancdata;
+        int mflags = 0;
+    };
+    RecvMsgResult recvmsg(std::size_t bufsize, std::size_t ancbufsize, int flags);
     std::int64_t send(const std::vector<std::uint8_t>& data, int flags);
 
     // getsockopt/setsockopt (the host-level values pass through — the
@@ -116,6 +127,7 @@ std::optional<std::int64_t> syscall_recv(Qiling& ql, const std::vector<std::uint
 std::optional<std::int64_t> syscall_socketpair(Qiling& ql, const std::vector<std::uint64_t>& params);
 std::optional<std::int64_t> syscall_sendto(Qiling& ql, const std::vector<std::uint64_t>& params);
 std::optional<std::int64_t> syscall_recvfrom(Qiling& ql, const std::vector<std::uint64_t>& params);
+std::optional<std::int64_t> syscall_recvmsg(Qiling& ql, const std::vector<std::uint64_t>& params);
 std::optional<std::int64_t> syscall_getsockopt(Qiling& ql, const std::vector<std::uint64_t>& params);
 std::optional<std::int64_t> syscall_setsockopt(Qiling& ql, const std::vector<std::uint64_t>& params);
 std::optional<std::int64_t> syscall_send(Qiling& ql, const std::vector<std::uint64_t>& params);

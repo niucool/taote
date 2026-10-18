@@ -13,6 +13,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <afunix.h>
+#include <mswsock.h>
 #else
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -54,7 +55,10 @@ std::uintptr_t host_socket_open(int domain, int socktype, int protocol) {
     if (!wsa_started()) {
         throw QlErrorBase("WSAStartup failed");
     }
-    const SOCKET s = ::socket(domain, socktype, protocol);
+    // the WSA_FLAG_OVERLAPPED socket — the WSARecvMsg ride (the msg-family
+    // slice) requires the overlapped attribute (the msdn WSARecvMsg pin)
+    const SOCKET s = ::WSASocketW(domain, socktype, protocol, nullptr, 0,
+                                  WSA_FLAG_OVERLAPPED);
     if (s == INVALID_SOCKET) {
         // the OSError translations (the "Protocol not supported" family)
         switch (WSAGetLastError()) {
@@ -453,6 +457,96 @@ std::vector<std::uint8_t> QlSocket::recvfrom(std::size_t bufsize, int flags, std
 bool QlSocket::shutdown(int how) {
     // ql_socket.shutdown: the ConnectionError shapes onto the caller's -1
     return host_socket_shutdown(host_handle_, how) == 0;
+}
+
+namespace {
+
+// the shared ancdata parse over the CMSG walk — the POSIX rides the
+// cmsghdr (the 4-byte cmsg_len); the winsock walks the WSACMSGHDR (the
+// size_t cmsg_len) inline in its branch
+#ifndef _WIN32
+void collect_ancdata_posix(struct msghdr& msg, QlSocket::RecvMsgResult& out) {
+    for (cmsghdr* c = CMSG_FIRSTHDR(&msg); c != nullptr; c = CMSG_NXTHDR(&msg, c)) {
+        const auto* d = reinterpret_cast<const std::uint8_t*>(c) + sizeof(cmsghdr);
+        const auto dlen = (c->cmsg_len > sizeof(cmsghdr)) ? static_cast<std::size_t>(c->cmsg_len - sizeof(cmsghdr)) : 0;
+        out.ancdata.emplace_back(c->cmsg_level, c->cmsg_type,
+                                 std::vector<std::uint8_t>(d, d + dlen));
+    }
+}
+#endif  // !_WIN32
+
+}  // namespace
+
+QlSocket::RecvMsgResult QlSocket::recvmsg(std::size_t bufsize, std::size_t ancbufsize, int flags) {
+    // ql_socket.recvmsg: the socket.recvmsg(bufsize, ancbufsize, flags)
+    RecvMsgResult out;
+#ifdef _WIN32
+    // the winsock lacks recvmsg(2) — the WSARecvMsg ride via the extension
+    // function pointer (the WSAID_WSARECVMSG dance)
+    using LPFN_WSARECVMSG = INT(WSAAPI*)(SOCKET, LPWSAMSG, LPDWORD, LPWSAOVERLAPPED,
+                                         LPWSAOVERLAPPED_COMPLETION_ROUTINE);
+    static const GUID kRecvMsgGuid = WSAID_WSARECVMSG;  // GUID
+    LPFN_WSARECVMSG wsa_recvmsg = nullptr;
+    DWORD nbr = 0;
+    if (::WSAIoctl(static_cast<SOCKET>(host_handle_), SIO_GET_EXTENSION_FUNCTION_POINTER,
+                   const_cast<GUID*>(&kRecvMsgGuid), sizeof(kRecvMsgGuid),
+                   &wsa_recvmsg, sizeof(wsa_recvmsg), &nbr, nullptr, nullptr) != 0 ||
+        wsa_recvmsg == nullptr) {
+        throw QlErrorBase("recvmsg: the WSARecvMsg extension is unavailable");
+    }
+
+    std::vector<std::uint8_t> data(bufsize, 0);
+    WSABUF wbuf{static_cast<ULONG>(bufsize), reinterpret_cast<char*>(data.data())};
+    std::vector<char> ctrl(ancbufsize, 0);
+    sockaddr_storage ss{};
+    WSAMSG wmsg{};
+    wmsg.name = reinterpret_cast<LPSOCKADDR>(&ss);
+    wmsg.namelen = static_cast<INT>(sizeof(ss));
+    wmsg.lpBuffers = &wbuf;
+    wmsg.dwBufferCount = 1;
+    wmsg.Control.len = static_cast<ULONG>(ancbufsize);
+    wmsg.Control.buf = ctrl.data();
+    wmsg.dwFlags = static_cast<DWORD>(flags);
+    DWORD nrecvd = 0;
+    INT rc = wsa_recvmsg(static_cast<SOCKET>(host_handle_), &wmsg, &nrecvd, nullptr, nullptr);
+    if (rc != 0) {
+        throw QlErrorBase("recvmsg: the WSARecvMsg call failed");
+    }
+
+    data.resize(static_cast<std::size_t>(nrecvd));
+    out.data = std::move(data);
+    out.mflags = static_cast<int>(wmsg.dwFlags);
+    for (WSACMSGHDR* c = CMSG_FIRSTHDR(&wmsg); c != nullptr; c = CMSG_NXTHDR(&wmsg, c)) {
+        const auto* d = reinterpret_cast<const std::uint8_t*>(c) + sizeof(WSACMSGHDR);
+        const auto dlen = (c->cmsg_len > sizeof(WSACMSGHDR))
+                              ? static_cast<std::size_t>(c->cmsg_len - sizeof(WSACMSGHDR))
+                              : 0;
+        out.ancdata.emplace_back(c->cmsg_level, c->cmsg_type,
+                                 std::vector<std::uint8_t>(d, d + dlen));
+    }
+    (void)nbr;
+#else
+    std::vector<std::uint8_t> data(bufsize, 0);
+    std::vector<char> ctrl(ancbufsize, 0);
+    iovec iov{};
+    iov.iov_base = data.data();
+    iov.iov_len = bufsize;
+    msghdr msg{};
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = ctrl.data();
+    msg.msg_controllen = ancbufsize;
+    msg.msg_flags = flags;
+    const auto n = ::recvmsg(static_cast<int>(host_handle_), &msg, flags);
+    if (n < 0) {
+        throw QlErrorBase("recvmsg: the host recvmsg failed");
+    }
+
+    out.data.resize(static_cast<std::size_t>(n));
+    out.mflags = msg.msg_flags;
+    collect_ancdata_posix(msg, out);
+#endif
+    return out;
 }
 
 namespace {
@@ -1290,6 +1384,74 @@ std::optional<std::int64_t> syscall_socketcall(Qiling& ql, const std::vector<std
         default:
             throw QlErrorBase("socketcall: unreachable dispatch");
     }
+}
+
+std::optional<std::int64_t> syscall_recvmsg(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    // ql_syscall_recvmsg(sockfd, msg_addr, flags): the msghdr load (the
+    // upstream's fixed make_msghdr layout), the iov scatter, the cmsg
+    // write-back, the msg_flags save-back, the count ride
+    const auto sockfd = static_cast<std::int64_t>(params[0]);
+    const auto msg_addr = params[1];
+    const auto flags = static_cast<int>(params[2]);
+
+    auto* sock = dynamic_cast<QlSocket*>(fd_get(ql, sockfd).get());
+    if (sock == nullptr) {
+        return -88;  // -ENOTSOCK
+    }
+
+    // the msghdr load (the fixed offsets — the upstream layout is
+    // arch-independent: msg_name u64@0, msg_namelen i32@8, msg_iov@16,
+    // msg_iovlen i32@24, msg_control@32, msg_controllen i32@40, the
+    // msg_flags i32@48)
+    const auto msg_namelen = ql.mem().read_ptr(msg_addr + 8, 4);
+    const auto msg_iov = ql.mem().read_ptr(msg_addr + 16);
+    const auto msg_iovlen = ql.mem().read_ptr(msg_addr + 24, 4);
+    const auto msg_control = ql.mem().read_ptr(msg_addr + 32);
+    const auto msg_controllen = ql.mem().read_ptr(msg_addr + 40, 4);
+
+    QlSocket::RecvMsgResult rm;
+    try {
+        // TODO: handle the addr (the verbatim TODO — the name is discarded)
+        rm = sock->recvmsg(static_cast<std::size_t>(msg_namelen),
+                           static_cast<std::size_t>(msg_controllen), flags);
+    } catch (const QlErrorBase&) {
+        return -1;  // the ConnectionError branch
+    }
+
+    // the iov scatter: the size = min(iov_len, the remaining data) per the
+    // verbatim min-walk (the iovec rides the arch pointer size)
+    const auto psize = static_cast<std::uint64_t>(ql.arch().pointersize());
+    auto iovec_addr = msg_iov;
+    std::size_t written = 0;
+    for (std::uint64_t i = 0; i < static_cast<std::uint64_t>(msg_iovlen); ++i) {
+        const auto iov_base = ql.mem().read_ptr(iovec_addr);
+        const auto iov_len = ql.mem().read_ptr(iovec_addr + psize, static_cast<std::uint64_t>(psize));
+        const auto size = std::min<std::size_t>(iov_len, rm.data.size() - written);
+        ql.mem().write(iov_base,
+                       std::vector<std::uint8_t>(rm.data.begin() + static_cast<std::ptrdiff_t>(written),
+                                                 rm.data.begin() + static_cast<std::ptrdiff_t>(written + size)));
+        written += size;
+        iovec_addr += 2 * psize;
+    }
+
+    // the cmsg write-back: the 12-byte cmsghdr (the 3 x i32 — the verbatim
+    // make_cmsghdr), the cmsg_len carries ONLY the data length (the verbatim
+    // quirk: obj.cmsg_len = len(cmsg_data))
+    auto cmsg_addr = msg_control;
+    for (const auto& [level, type, cdata] : rm.ancdata) {
+        ql.mem().write_ptr(cmsg_addr, static_cast<std::int64_t>(cdata.size()), 4);
+        ql.mem().write_ptr(cmsg_addr + 4, static_cast<std::uint64_t>(level), 4);
+        ql.mem().write_ptr(cmsg_addr + 8, static_cast<std::uint64_t>(type), 4);
+        cmsg_addr += 12;
+        ql.mem().write(cmsg_addr, cdata);
+        cmsg_addr += cdata.size();
+    }
+
+    // msg.msg_flags = mflags; the save_to rides the whole-struct write-back
+    // (only the flags changed — the single-cell write is equivalent)
+    ql.mem().write_ptr(msg_addr + 48, static_cast<std::uint64_t>(rm.mflags), 4);
+
+    return static_cast<std::int64_t>(rm.data.size());
 }
 
 }  // namespace posix

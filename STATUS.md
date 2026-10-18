@@ -1012,6 +1012,26 @@ remaining deferrals: recvmsg/sendmsg + the msg family (its own slice),
 accept4's verbatim NotImplemented (the upstream has no bare handler),
 sendmmsg/recvmmsg.
 
+### Phase 12 sub-slice 9 — the msg family (recvmsg + the msghdr/iov/cmsg walk)
+
+| piece | upstream | state | notes |
+|---|---|---|---|
+| recvmsg | `syscall/socket.py ql_syscall_recvmsg` | ✅ | the msghdr load (the upstream's arch-independent layout: name u64@0, namelen i32@8, iov@16, iovlen i32@24, control@32, controllen i32@40, flags i32@48); the **bufsize rides msg_namelen verbatim** (the upstream quirk — the recvmsg(bufsize=msg_namelen, ancbufsize=msg_controllen, flags) call); the iov scatter over the min-walk (the iovec rides the arch pointer size); the cmsg write-back over the 12-byte make_cmsghdr (the cmsg_len carries ONLY the data length — the verbatim quirk) + the msg_flags save-back; the ConnectionError → -1; the **TODO: handle the addr verbatim** (the name discarded) |
+| QlSocket::recvmsg | `filestruct.py ql_socket.recvmsg` | ✅ | the POSIX host rides recvmsg(2) over the CMSG_FIRSTHDR/NXTHDR walk; the winsock rides **WSARecvMsg** (the SIO_GET_EXTENSION_FUNCTION_POINTER + WSAID_WSARECVMSG dance) — the host socket creation switched to WSASocketW with **WSA_FLAG_OVERLAPPED** (the msdn WSARecvMsg requirement, pinned: the plain ::socket-socket answers WSAEOPNOTSUPP) |
+| sendmsg | `socket.py` | ✅ absent | the upstream defines NO sendmsg handler — the name rides the dispatcher's not-implemented fall-through verbatim (the warn + the continue) |
+| the fixture | `tests/Posix_Test.cpp` | ✅ | the UDP self-conversation with the IP_PKTINFO option: the msghdr (the one-entry iov + the 128-byte control), the PING scatter, the cmsg (the level IPPROTO_IP, the type the host IP_PKTINFO, the payload the host IN_PKTINFO size) and the msg_flags cell |
+
+Findings: the winsock IP_PKTINFO cmsg payload is 8 bytes (the 2-field
+IN_PKTINFO — no ipi_spec_dst) against the linux 12; the WSARecvMsg's
+Control.len/namelen are in-out (the used lengths write back); the cmsg_len
+quirk means the write-back length is the payload only, so the guest's
+CMSG_NXTHDR-style walk over the port's output needs the CMSG_ALIGN walk —
+the verbatim upstream shape (a known upstream divergence, pinned here
+rather than fixed).
+
+The remaining socket deferrals: sendmmsg/recvmmsg (the msg-family
+multiplexers over the mmsghdr array — each its own slice).
+
 ### Phase 12 sub-slice 3 — socketpair + the send/recv family
 
 | piece | upstream | state | notes |
