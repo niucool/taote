@@ -10,6 +10,7 @@
 #include "qiling/os/qnx/types.hpp"
 
 #include "qiling/os/filestruct.hpp"
+#include "qiling/loader/elf.hpp"
 
 #include <array>
 #include <cstring>
@@ -50,6 +51,7 @@ const MsgTypeEntry kMsgTypeTable[] = {
     {0x100, ql_qnx_msg_io_connect},    // io_connect
     {0x101, ql_qnx_msg_io_read},       // io_read
     {0x104, ql_qnx_msg_io_stat},       // io_stat
+    {0x040, ql_qnx_msg_mem_map},       // mem_map
     {0x109, ql_qnx_msg_io_lseek},      // io_lseek
     {0x102, ql_qnx_msg_io_write},      // io_write
 };
@@ -174,6 +176,115 @@ std::optional<std::int64_t> ql_qnx_msg_io_read(Qiling& ql, std::uint64_t coid, s
     const std::vector<std::uint64_t> read_args{static_cast<std::uint64_t>(*conn.fd), rmsg,
                                                static_cast<std::uint64_t>(nbytes)};
     return read_entry->handler(ql, read_args);
+}
+
+// mman.py syscall_mmap_impl (the qnx shape): the enclosing-page mapping with
+// the unaligned base allowed (the QNX note, verbatim); the anonymous pages
+// zero-fill and the file pages ride the fd's QlFile
+std::optional<std::int64_t> syscall_mmap_impl(Qiling& ql, std::uint64_t addr, std::uint64_t length,
+                                              std::uint64_t prot, std::uint64_t flags, std::int64_t fd,
+                                              std::int64_t pgoffset) {
+    const auto pagesize = ql.mem().pagesize();
+    const auto mapping_size = ql.mem().align_up(length + (addr & (pagesize - 1)));
+
+    // the mapping boundaries (the fixed base rides as-is; the QNX allows an
+    // unaligned base — the enclosing pages get mapped)
+    if ((flags & MMAP_MAP_FIXED) == 0) {
+        const auto hint = std::max(addr, static_cast<loader::QlLoaderELF&>(ql.loader()).mmap_address());
+        addr = ql.mem().find_free_space(mapping_size, hint);
+    }
+    const auto lbound = ql.mem().align(addr);
+    const auto ubound = lbound + mapping_size;
+
+    if ((flags & MMAP_MAP_FIXED) != 0) {
+        ql.mem().unmap_between(lbound, ubound);
+    }
+
+    std::vector<std::uint8_t> data;
+    if ((flags & MMAP_MAP_ANON) == 0) {
+        auto* f = posix::fd_get(ql, fd).get();
+        if (f == nullptr) {
+            return -9;  // -EBADF
+        }
+        f->lseek(static_cast<std::uint64_t>(pgoffset), 0 /* SEEK_SET */);
+        data = f->read(static_cast<std::size_t>(length));
+    }
+
+    // the map-then-protect shape (the write needs the write bit first)
+    ql.mem().map(lbound, mapping_size, UC_PROT_ALL, "[mmap anonymous]");
+    if (!data.empty()) {
+        ql.mem().write(addr, data);
+    }
+    ql.mem().protect(lbound, mapping_size, static_cast<int>(prot));
+
+    return static_cast<std::int64_t>(addr);
+}
+
+// message.py ql_qnx_msg_mem_map (services/system/public/sys/memmsg.h): the
+// flat _mem_map (sparts=-56, rparts=-24); the qnx prot bits shift down eight
+// to the posix spellings and the reply carries <len, addr, addr>
+std::optional<std::int64_t> ql_qnx_msg_mem_map(Qiling& ql, std::uint64_t coid, std::uint64_t smsg,
+                                               std::int32_t sparts, std::uint64_t rmsg, std::int32_t rparts) {
+    (void)coid;
+
+    // struct _mem_map in services/system/public/sys/memmsg.h:
+    // (type, zero, reserved1, addr, len, prot, flags, fd, preload, align,
+    //  offset) = unpack("<HHIQQIIiIQq", body)
+    if (sparts != -56 || rparts != -24) {
+        throw QlErrorBase("qnx mem_map: the input/output sizes are wrong");
+    }
+    const auto body = get_message_body(ql, smsg, sparts);
+    const auto rd16 = [&body](std::size_t off) {
+        return static_cast<std::uint16_t>(body[off] | (body[off + 1] << 8));
+    };
+    const auto rd32 = [&body](std::size_t off) {
+        return static_cast<std::uint32_t>(body[off] | (body[off + 1] << 8) | (body[off + 2] << 16) |
+                                          (static_cast<std::uint32_t>(body[off + 3]) << 24));
+    };
+    const auto rd64 = [&body](std::size_t off) {
+        std::uint64_t v = 0;
+        for (int i = 0; i < 8; ++i) {
+            v |= static_cast<std::uint64_t>(body[off + i]) << (8 * i);
+        }
+        return v;
+    };
+    const auto type = rd16(0);
+    const auto zero = rd16(2);
+    const auto reserved1 = rd32(4);
+    const auto addr = rd64(8);
+    const auto len = rd64(16);
+    auto prot = rd32(24);
+    const auto flags = rd32(28);
+    const auto fd = static_cast<std::int32_t>(rd32(32));
+    const auto pgoffset = static_cast<std::int64_t>(rd64(52));
+
+    if (type != 0x040 || zero != 0 || reserved1 != 0) {
+        throw QlErrorBase("qnx mem_map: the message is wrong");
+    }
+
+    // the message fd names the connection when positive (the upstream shape)
+    auto mmap_fd = static_cast<std::int64_t>(fd);
+    if (fd > 0) {
+        mmap_fd = *static_cast<QlOsQnx&>(ql.os()).connections().at(static_cast<std::uint32_t>(fd)).fd;
+    }
+
+    // map the qnx protection bits to the posix ones
+    prot >>= 8;
+
+    const auto ret = syscall_mmap_impl(ql, addr, len, prot, flags, mmap_fd, pgoffset);
+
+    // struct _mem_map_reply: pack("<QQQ", len, ret, ret)
+    const auto put64 = [rmsg, &ql](std::size_t off, std::uint64_t v) {
+        std::array<std::uint8_t, 8> cell{};
+        for (int i = 0; i < 8; ++i) {
+            cell[i] = static_cast<std::uint8_t>((v >> (8 * i)) & 0xff);
+        }
+        ql.mem().write(rmsg + off, std::vector<std::uint8_t>(cell.begin(), cell.end()));
+    };
+    put64(0, len);
+    put64(8, static_cast<std::uint64_t>(ret.value_or(0)));
+    put64(16, static_cast<std::uint64_t>(ret.value_or(0)));
+    return 0;
 }
 
 // message.py ql_qnx_msg_io_stat (lib/c/1/fstat.c): the flat _io_stat

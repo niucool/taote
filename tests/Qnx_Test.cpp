@@ -978,6 +978,69 @@ TEST(QnxOs, MsgIoStatPacksQnxArmLayout) {
     EXPECT_EQ(ql.mem().read_ptr(0x2444, 4), 0u);
 }
 
+// the mem_map flow (the anonymous private page): the flat _mem_map rides
+// sparts=-56 and asks for 0x1000 PROT_READ|PROT_WRITE MAP_PRIVATE|MAP_ANON;
+// the kernel maps at the mmap_address hint floor and replies <QQQ> (len,
+// addr, addr) — the mapped page is readable from the test side
+//   00: mov r0, #1          ; coid = 1 (the sysmgr channel)
+//   04: mov r1, #0x2200     ; smsg = the flat _mem_map
+//   08: mvn r2, #55         ; sparts = -56
+//   0C: mov r3, #0x2400     ; rmsg = the 24-byte reply
+//   10: mvn r4, #23         ; rparts = -24
+//   14: mov r12, #11        ; msg_sendv
+//   18: swi 0
+//   1C: mov r4, #0x2300 ; 20: str r0, [r4]
+//   24: mvn r0, #0 ; 28: mvn r1, #0 ; 2C: mov r2, #42
+//   30: mov r12, #47 ; 34: swi 0
+TEST(QnxOs, MsgMemMapAnonymousPage) {
+    const std::vector<std::uint8_t> code = {
+        0x01, 0x00, 0xA0, 0xE3,  // 00: mov r0, #1
+        0x22, 0x1C, 0xA0, 0xE3,  // 04: mov r1, #0x2200
+        0x37, 0x20, 0xE0, 0xE3,  // 08: mvn r2, #55 (sparts = -56)
+        0x24, 0x3C, 0xA0, 0xE3,  // 0C: mov r3, #0x2400
+        0x17, 0x40, 0xE0, 0xE3,  // 10: mvn r4, #23
+        0x0B, 0xC0, 0xA0, 0xE3,  // 14: mov r12, #11
+        0x00, 0x00, 0x00, 0xEF,  // 18: swi 0
+        0x23, 0x4C, 0xA0, 0xE3,  // 1C: mov r4, #0x2300
+        0x00, 0x00, 0x84, 0xE5,  // 20: str r0, [r4]
+        0x00, 0x00, 0xE0, 0xE3,  // 24: mvn r0, #0
+        0x00, 0x10, 0xE0, 0xE3,  // 28: mvn r1, #0
+        0x2A, 0x20, 0xA0, 0xE3,  // 2C: mov r2, #42
+        0x2F, 0xC0, 0xA0, 0xE3,  // 30: mov r12, #47
+        0x00, 0x00, 0x00, 0xEF,  // 34: swi 0
+    };
+    auto ql = make_qnx_qiling(code);
+
+    ql.mem().map(kScratch, 0x1000, UC_PROT_ALL, "[qnx-scratch]");
+
+    // the flat _mem_map (56 bytes): type=0x040, zero=0, reserved1=0, addr=0,
+    // len=0x1000, prot=PROT_READ|PROT_WRITE (the qnx bits 0x300), flags=
+    // MAP_PRIVATE|MAP_ANON, fd=-1, preload=0, align=0, offset=0
+    ql.mem().write_ptr(0x2200, 0x040, 2);
+    ql.mem().write_ptr(0x2202, 0, 2);
+    ql.mem().write_ptr(0x2204, 0, 4);
+    ql.mem().write_ptr(0x2208, 0, 8);
+    ql.mem().write_ptr(0x2210, 0x1000, 8);
+    ql.mem().write_ptr(0x2218, 0x300, 4);
+    ql.mem().write_ptr(0x221C, 0x80002, 4);
+    ql.mem().write_ptr(0x2220, static_cast<std::uint64_t>(-1), 4);
+    ql.mem().write_ptr(0x2224, 0, 8);
+    ql.mem().write_ptr(0x222C, 0, 8);
+    ql.mem().write_ptr(0x2234, 0, 8);
+
+    ql.run();
+
+    EXPECT_EQ(ql.os().exit_code(), 42);
+    EXPECT_EQ(ql.mem().read_ptr(0x2300, 4), 0u);
+    // the reply <QQQ>: the length and the mapped address (twice)
+    EXPECT_EQ(ql.mem().read_ptr(0x2400, 8), 0x1000u);
+    const auto mapped = ql.mem().read_ptr(0x2408, 8);
+    EXPECT_EQ(ql.mem().read_ptr(0x2410, 8), mapped);
+    // the page exists and is zeroed (the anon mapping)
+    EXPECT_TRUE(ql.mem().is_mapped(mapped, 0x1000));
+    EXPECT_EQ(ql.mem().read_ptr(mapped, 4), 0u);
+}
+
 // the clock_cycles flow: the kernel returns the core's free-running counter
 // as the nanosecond wall clock (the upstream's simplification) in R0, which
 // the fixture stores into a second scratch cell — the pre-poisoned marker
