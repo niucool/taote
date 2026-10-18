@@ -393,6 +393,56 @@ TEST(PosixFileDes, StatxPacksTheBasicStatsImage) {
 }
 
 // the procfs slice (os/linux/procfs.py): the /proc/self pseudo files resolve
+//   0C: mov rdi, 0x1002000 ("/nonexistent" — ignored verbatim) ; 14: mov rsi, 0x1002500
+//   1C: syscall ; 20: mov [0x1002208], rax
+//   28: fstatfs(fd=-1 ignored, buf 0x1002700) ; 34: mov [0x1002210], rax
+//   3C: statfs(buf 0x3000000 unmapped) → -1 ; 48: mov [0x1002218], rax
+//   50: exit(0)
+TEST(PosixFileDes, StatfsFstatfsFillTheZeroStubBuffer) {
+    const std::vector<std::uint8_t> code = {
+        // statfs("/nonexistent", 0x1002500) — the path is ignored verbatim
+        0x48, 0xC7, 0xC0, 0x89, 0x00, 0x00, 0x00,  // mov rax, 0x89 (statfs = 137)
+        0x48, 0xC7, 0xC7, 0x00, 0x20, 0x00, 0x01,  // mov rdi, 0x1002000
+        0x48, 0xC7, 0xC6, 0x00, 0x25, 0x00, 0x01,  // mov rsi, 0x1002500
+        0x0F, 0x05,                                 // syscall
+        0x48, 0x89, 0x04, 0x25, 0x08, 0x22, 0x00, 0x01,  // mov [0x1002208], rax
+        // fstatfs(-1, 0x1002700) — the fd is ignored verbatim
+        0x48, 0xC7, 0xC0, 0x8A, 0x00, 0x00, 0x00,  // mov rax, 0x8A (fstatfs = 138)
+        0x48, 0xC7, 0xC7, 0xFF, 0xFF, 0xFF, 0xFF,  // mov rdi, -1
+        0x48, 0xC7, 0xC6, 0x00, 0x27, 0x00, 0x01,  // mov rsi, 0x1002700
+        0x0F, 0x05,                                 // syscall
+        0x48, 0x89, 0x04, 0x25, 0x10, 0x22, 0x00, 0x01,  // mov [0x1002210], rax
+        // statfs(path, 0x3000000) — the unwritable buffer: -1 (the except)
+        0x48, 0xC7, 0xC0, 0x89, 0x00, 0x00, 0x00,  // mov rax, 0x89
+        0x48, 0xC7, 0xC7, 0x00, 0x20, 0x00, 0x01,  // mov rdi, 0x1002000
+        0x48, 0xC7, 0xC6, 0x00, 0x00, 0x00, 0x03,  // mov rsi, 0x3000000
+        0x0F, 0x05,                                 // syscall
+        0x48, 0x89, 0x04, 0x25, 0x18, 0x22, 0x00, 0x01,  // mov [0x1002218], rax
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00,  // mov rax, 60 (exit)
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00,  // mov rdi, 0
+        0x0F, 0x05,                                 // syscall
+    };
+
+    QilingOptions options = posix_options(code);
+    Qiling ql(options);
+
+    ql.mem().write(0x1002000, std::vector<std::uint8_t>{'/', 'n', 'o', 'n', 'e', 'x', 'i', 's', 't', 'e', 'n', 't', 0});
+
+    ql.run();
+
+    EXPECT_EQ(ql.os().exit_code(), 0);
+    EXPECT_EQ(ql.mem().read_ptr(0x1002208, 8), 0u);
+    EXPECT_EQ(ql.mem().read_ptr(0x1002210, 8), 0u);
+    // the verbatim stub fill: the ASCII '0' (0x30) bytes, NOT NULs, and the
+    // path/fd args are ignored (the /nonexistent and fd=-1 still return 0)
+    const auto buf = ql.mem().read(0x1002500, 96);
+    EXPECT_EQ(buf[0], 0x30);
+    EXPECT_EQ(buf[95], 0x30);
+    EXPECT_EQ(ql.mem().read_ptr(0x1002700, 8), 0x3030303030303030ull);
+    // the unwritable buffer: the except branch -1 (NOT -errno)
+    EXPECT_EQ(ql.mem().read_ptr(0x1002218, 8), 0xFFFFFFFFFFFFFFFFull);
+}
+
 // through the fd flow — open("/proc/self/cmdline") reads the argv bytes; the
 // shellcode run carries the empty placeholder argv, so the read yields the
 // single NUL terminator

@@ -328,6 +328,19 @@ std::optional<std::int64_t> syscall_statx(Qiling& ql, const std::vector<std::uin
     }
 }
 
+// stat.py ql_syscall_statfs / ql_syscall_fstatfs: the verbatim stub — the
+// buffer fills with 96 copies of the ASCII '0' (the b"0" * (12*8) quirk —
+// 0x30 bytes, NOT NULs), the path/fd arguments are ignored entirely, and a
+// failed write answers -1
+std::optional<std::int64_t> syscall_statfs_family(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    try {
+        ql.mem().write(params[1], std::vector<std::uint8_t>(12 * 8, '0'));
+        return 0;
+    } catch (...) {
+        return -1;
+    }
+}
+
 std::optional<std::int64_t> syscall_uname(Qiling& ql, const std::vector<std::uint64_t>& params) {
     // unistd.py ql_syscall_uname: a fixed utsname buffer
     const auto buf = params[0];
@@ -968,6 +981,9 @@ void register_builtin_syscalls() {
     registry.register_syscall({"fstatat64", {PARAM_INTN, PARAM_PTRX, PARAM_PTRX, PARAM_INTN}, syscall_fstatat64});
     // stat.py ql_syscall_statx — the (dirfd, path, flags, mask, buf) ABI
     registry.register_syscall({"statx", {PARAM_INTN, PARAM_PTRX, PARAM_INTN, PARAM_INTN, PARAM_PTRX}, syscall_statx});
+    // stat.py ql_syscall_statfs / ql_syscall_fstatfs — the verbatim stub
+    registry.register_syscall({"statfs", {PARAM_PTRX, PARAM_PTRX}, syscall_statfs_family});
+    registry.register_syscall({"fstatfs", {PARAM_INTN, PARAM_PTRX}, syscall_statfs_family});
     registry.register_syscall({"write", {PARAM_INTN, PARAM_PTRX, PARAM_INTN}, syscall_write});
     registry.register_syscall({"uname", {PARAM_PTRX}, syscall_uname});
 
