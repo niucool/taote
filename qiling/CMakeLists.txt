@@ -46,6 +46,7 @@ add_library(qiling STATIC
     os/macos/kernel_func.cpp
     os/macos/kernel_api.cpp
     os/macos/ev.cpp
+    os/macos/utils.cpp
     os/qnx/qnx.cpp
     os/qnx/syscall.cpp
     os/qnx/helpers.cpp

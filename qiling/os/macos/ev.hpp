@@ -71,7 +71,10 @@ struct EvEntry {
     std::string name;
     MacOSEventType type;
     std::uint64_t func_addr = 0;
-    int ev_index = -1;  // set_params inserts the event object at this slot
+    std::uint64_t ev_obj = 0;  // the event-object address (set_params inserts
+                               // it at the ev_index slot when set)
+    int ev_index = -1;         // set_params inserts the event object at this slot
+    std::optional<std::uint64_t> protocol;  // the sflt/socket protocol filter
 };
 
 // a pending emit job: the callback + the resolved params
@@ -87,10 +90,12 @@ struct ProcRecord {
     std::uint64_t base = 0;  // the guest proc_t image
 };
 
-// events/macos.py QlMacOSEvManager. The RUN=True stack-pushing emit path and
-// the socket/ipf emitters land with the kext slices; the port carries the
-// proc table, the lazy ev-ctx cells, the emit/trigger job surface and the
-// policy hooks the kernel_api handlers read.
+// events/macos.py QlMacOSEvManager. The RUN=True emit path stack-pushes the
+// gen_stub_code trampoline (the guest's next ret lands in it); the RUN=false
+// path queues a job for the trigger() drain. The port carries the proc
+// table, the lazy ev-ctx cells, the emit/trigger surface and the policy
+// hooks the kernel_api handlers read. The socket-networking emitters (the
+// net_*/ctl_* methods) ride the following slice.
 class QlEvManager {
 public:
     explicit QlEvManager(Qiling& ql);
@@ -126,19 +131,38 @@ public:
     std::uint32_t cred_uid() const;    // cr_posix.cr_uid
     std::uint32_t cred_rgid() const;   // cr_posix.cr_rgid
 
-    // register/deregister: the (name, type) keyed callback list
-    void register_cb(std::uint64_t func_addr, const std::string& ev_name, MacOSEventType ev_type, int ev_index = -1);
+    // register/deregister: the (name, type) keyed callback list; ev_obj/idx
+    // carry the set_params insert and protocol the socket-emitter filter
+    void register_cb(std::uint64_t func_addr, const std::string& ev_name, MacOSEventType ev_type,
+                     std::uint64_t ev_obj = 0, int ev_index = -1,
+                     std::optional<std::uint64_t> protocol = std::nullopt);
     std::vector<const EvEntry*> get_events_by_name(const std::string& ev_name) const;
     std::vector<const EvEntry*> get_events_by_type(MacOSEventType ev_type) const;
+    std::vector<const EvEntry*> get_events_by_type_and_proto(MacOSEventType ev_type,
+                                                             std::uint64_t protocol) const;
 
-    // emit: the params resolve through set_params (the ev_index slot carries
-    // the event object address when one is set — the port's fixtures pass
-    // the params complete, so the insert applies only when idx != -1)
+    // emit: the params resolve through set_params (the ev_obj inserts at the
+    // ev_index slot when one was registered). The RUN flag splits the path —
+    // the live emulation stack-pushes the gen_stub_code trampoline (the
+    // guest's next ret lands in it); the post-run queues a job for the
+    // trigger() drain (macos.py: `if self.ql.os.RUN is True`)
     void emit(const std::string& ev_name, MacOSEventType ev_type, std::vector<std::uint64_t> params);
-    void emit_by_type(MacOSEventType ev_type, std::vector<std::uint64_t> params);
+    // emit_by_type: the ins_cookie form replaces params[0] with the ipf
+    // cookie registered for the event's name (the ipf_input/output cookie
+    // swap); set_ipf_cookie feeds the table (the kext driver side)
+    void emit_by_type(MacOSEventType ev_type, std::vector<std::uint64_t> params, bool ins_cookie = false);
+    void emit_by_type_and_proto(MacOSEventType ev_type, std::uint64_t protocol,
+                                std::vector<std::uint64_t> params);
+    void set_ipf_cookie(const std::string& ev_name, std::uint64_t cookie);
 
     // the pending jobs (the RUN=false path — the driver queues instead of
-    // stack-pushing) and the trigger that drains them
+    // stack-pushing) and the trigger that drains them: the params (<=6) land
+    // in the ms64 arg registers, the extras stack-push (the upstream leaves
+    // the stack unbalanced — verbatim), each job runs through
+    // ql.run(begin=cb); the savedrip=deadcode ride is the kext-only branch
+    // and defers with the kext slices (the default non-kext shape skips it
+    // upstream too)
+    void trigger();
     const std::vector<EvJob>& jobs() const { return jobs_; }
     void clear_jobs() { jobs_.clear(); }
 
@@ -147,6 +171,7 @@ private:
     std::vector<EvEntry> callbacks_;
     std::vector<ProcRecord> my_procs_;
     std::vector<EvJob> jobs_;
+    std::map<std::string, std::uint64_t> ipf_cookie_;  // the ipf cookie per event name
     std::uint64_t allproc_addr_ = 0;
     bool allproc_set_ = false;
     std::string current_proc_;

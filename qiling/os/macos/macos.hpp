@@ -32,6 +32,12 @@ public:
 
     void run() override;
 
+    // macos.py QlOsMacos.RUN — the emit path consults it: true (the default,
+    // the live emulation) stack-pushes the gen_stub_code trampoline at the
+    // current guest rsp (the guest's next ret lands in it); false (the
+    // post-run/shutdown) queues a job for the ev manager's trigger() drain
+    bool RUN = true;
+
     // the mach-port/task/thread surfaces the self-trap handlers ride (the
     // upstream's loader/macho.py seeds them on the QlOs; the port seeds them
     // in the ctor until the Mach-O loader slice lands)

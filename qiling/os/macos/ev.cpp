@@ -9,6 +9,8 @@
 #include <algorithm>
 
 #include "qiling/core.hpp"
+#include "qiling/os/macos/macos.hpp"
+#include "qiling/os/macos/utils.hpp"
 #include "qiling/os/posix/posix.hpp"
 
 namespace qiling {
@@ -204,8 +206,8 @@ std::uint32_t QlEvManager::cred_rgid() const {
 }
 
 void QlEvManager::register_cb(std::uint64_t func_addr, const std::string& ev_name, MacOSEventType ev_type,
-                              int ev_index) {
-    callbacks_.push_back(EvEntry{ev_name, ev_type, func_addr, ev_index});
+                              std::uint64_t ev_obj, int ev_index, std::optional<std::uint64_t> protocol) {
+    callbacks_.push_back(EvEntry{ev_name, ev_type, func_addr, ev_obj, ev_index, protocol});
 }
 
 std::vector<const EvEntry*> QlEvManager::get_events_by_name(const std::string& ev_name) const {
@@ -228,6 +230,26 @@ std::vector<const EvEntry*> QlEvManager::get_events_by_type(MacOSEventType ev_ty
     return found;
 }
 
+std::vector<const EvEntry*> QlEvManager::get_events_by_type_and_proto(MacOSEventType ev_type,
+                                                                      std::uint64_t protocol) const {
+    std::vector<const EvEntry*> found;
+    for (const auto& cb : callbacks_) {
+        if (cb.type == ev_type && cb.protocol.has_value() && *cb.protocol == protocol) {
+            found.push_back(&cb);
+        }
+    }
+    return found;
+}
+
+// utils.py set_params: the event object inserts at the ev_index slot when
+// one was registered (the QlMacOSEv.event.base goes into the params list)
+static std::vector<std::uint64_t> set_params(const EvEntry& ev, std::vector<std::uint64_t> params) {
+    if (ev.ev_index != -1 && ev.ev_obj != 0) {
+        params.insert(params.begin() + static_cast<std::ptrdiff_t>(ev.ev_index), ev.ev_obj);
+    }
+    return params;
+}
+
 void QlEvManager::emit(const std::string& ev_name, MacOSEventType ev_type, std::vector<std::uint64_t> params) {
     // get_event_by_name_and_type: the first (name, type) match
     const EvEntry* found = nullptr;
@@ -241,15 +263,82 @@ void QlEvManager::emit(const std::string& ev_name, MacOSEventType ev_type, std::
         // "No callbacks found for (%s, %s)"
         return;
     }
-    jobs_.push_back(EvJob{found->func_addr, std::move(params)});
+    const auto resolved = set_params(*found, std::move(params));
+    // macos.py: `if self.ql.os.RUN is True: stack_push(gen_stub_code(...))`
+    // else the job queues for the trigger drain
+    if (ql_->os<QlOsMacos>().RUN) {
+        const auto stub = gen_stub_code(*ql_, resolved, found->func_addr);
+        ql_->stack_push(stub);
+    } else {
+        jobs_.push_back(EvJob{found->func_addr, std::move(resolved)});
+    }
 }
 
-void QlEvManager::emit_by_type(MacOSEventType ev_type, std::vector<std::uint64_t> params) {
+void QlEvManager::emit_by_type(MacOSEventType ev_type, std::vector<std::uint64_t> params, bool ins_cookie) {
     for (const auto& cb : callbacks_) {
         if (cb.type == ev_type) {
-            jobs_.push_back(EvJob{cb.func_addr, params});
+            auto resolved = set_params(cb, params);
+            // macos.py: `if ins_cookie is True and ev.name in self.ipf_cookie:
+            //            params[0] = self.ipf_cookie[ev.name]`
+            if (ins_cookie) {
+                const auto it = ipf_cookie_.find(cb.name);
+                if (it != ipf_cookie_.end()) {
+                    resolved[0] = it->second;
+                }
+            }
+            if (ql_->os<QlOsMacos>().RUN) {
+                const auto stub = gen_stub_code(*ql_, resolved, cb.func_addr);
+                ql_->stack_push(stub);
+            } else {
+                jobs_.push_back(EvJob{cb.func_addr, std::move(resolved)});
+            }
         }
     }
+}
+
+void QlEvManager::emit_by_type_and_proto(MacOSEventType ev_type, std::uint64_t protocol,
+                                         std::vector<std::uint64_t> params) {
+    for (const auto* cb : get_events_by_type_and_proto(ev_type, protocol)) {
+        const auto resolved = set_params(*cb, params);
+        if (ql_->os<QlOsMacos>().RUN) {
+            const auto stub = gen_stub_code(*ql_, resolved, cb->func_addr);
+            ql_->stack_push(stub);
+        } else {
+            jobs_.push_back(EvJob{cb->func_addr, std::move(resolved)});
+        }
+    }
+}
+
+void QlEvManager::set_ipf_cookie(const std::string& ev_name, std::uint64_t cookie) {
+    ipf_cookie_[ev_name] = cookie;
+}
+
+// events/macos.py trigger: the params (<=6) land in the ms64 arg registers,
+// the extras stack-push (the upstream leaves the stack unbalanced —
+// verbatim), and each job runs through ql.run(begin=cb). The
+// savedrip=deadcode line is the kext-only branch (the default non-kext
+// shape skips it upstream too); it defers with the kext slices.
+void QlEvManager::trigger() {
+    static const std::uint64_t reg_list[6] = {UC_X86_REG_RDI, UC_X86_REG_RSI, UC_X86_REG_RDX,
+                                              UC_X86_REG_RCX, UC_X86_REG_R8,  UC_X86_REG_R9};
+    for (const auto& job : jobs_) {
+        const auto& params = job.params;
+        if (params.size() <= 6) {
+            for (std::size_t idx = 0; idx < params.size(); ++idx) {
+                ql_->arch().regs().write(reg_list[idx], params[idx]);
+            }
+        } else {
+            for (std::size_t idx = 0; idx < 6; ++idx) {
+                ql_->arch().regs().write(reg_list[idx], params[idx]);
+            }
+            const auto remains = params.size() - 6;
+            for (std::size_t i = 0; i < remains; ++i) {
+                ql_->stack_push(params[6 + i]);
+            }
+        }
+        ql_->run(job.func_addr);
+    }
+    jobs_.clear();
 }
 
 void QlOsPolicy::mpo_file_check_mmap(unsigned prot, unsigned flags, unsigned file_pos) {

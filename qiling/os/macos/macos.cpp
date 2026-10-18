@@ -228,7 +228,16 @@ void QlOsMacos::run() {
     // vmmap_trap_address — read here (the profile loads after the os
     // construction; the qnx prelude reads its keys on the same pattern)
     macho_vmmap_end_ = static_cast<std::uint64_t>(profile().get_int("OS64", "vmmap_trap_address"));
-    QlOsPosix::run();
+    try {
+        QlOsPosix::run();
+    } catch (...) {
+        // macos.py: the UcError path clears RUN before the raise/return
+        RUN = false;
+        throw;
+    }
+    // macos.py: the normal return clears RUN (the post-run emits queue for
+    // the trigger drain)
+    RUN = false;
 }
 
 }  // namespace macos
