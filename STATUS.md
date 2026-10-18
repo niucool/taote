@@ -303,6 +303,23 @@ The ELF container parsing, the interpreter loading, the vsyscall page, the ET_RE
 - **the QlOsPosix `final` was dropped** to admit the QlOsLinux subclass (the mirror-layout rule outranks the leaf-class final here; the Python class hierarchy is open).
 - **the auxv pair-walk termination**: the loop breaks after the AT_NULL pair (both words zero) is appended - matching the upstream `endswith(null_entry)` check.
 
+## Phase 5 - the QlOsUtils printf engine + the printk api (251/251 gtest green)
+
+| File | Python counterpart | Status | Notes |
+|---|---|---|---|
+| `qiling/os/utils.*` (QlOsUtils) | `os/utils.py` | Ported (core) | read_string (the char-width-stepped NUL walk; the stats log_string feed), read_cstring/read_wstring/read_guid (the bytes_le uuid in the canonical text form), printf/sprintf (the utf-8 stdout write / the utf-16le+NUL guest write) |
+| the printf engine | `__common_printf` | Ported (single-pass deviation) | the %[flags][width][.precision][size]type walk; the %s guest-string read (the C snprintf cannot take it - the manual width/precision pad), the %S flipped-width form, the %Z UNICODE_STRING Buffer at +8 (both the 32- and the 64-bit layouts), the %p -> #x, the numeric conversions through the host snprintf (the size modifiers hh/h/l/ll/I32/I64/j/t/z pass through); the `*` width/precision pull extra slots; the float types promote the slot as an integer (the upstream quirk kept) |
+| `hook_printk` | `kernel_api.py hook_printk` | Ported | the KERN_* level table verbatim, the level = format[1] digit else 4, the format[2:] strip (the '>' survives upstream - kept), the short-format guard (the port's addition), the variadic args through read_ellipsis (one native slot per resolved param, the pass-1 pull counting) |
+| `tests/Kernel_Api_Test.cpp` (PrintkRendersFormatWithArgs) | the printk flow | Ported | the handler invoked directly with the format pointer; rsi/rdx carry the varargs; the level-tagged render captured through the swapped stdout stream (QlFile over a temp file) |
+
+### Findings
+
+- **the format walk is single-pass** (the upstream translates to the python %-operator form and re-applies it in a second stage); the port formats each conversion inline - the same output, one pass (the documented structural deviation).
+- **the %s args cannot ride the C snprintf**: the guest strings are read through read_cstring and padded manually (the '-' left-align, the precision truncate).
+- **the upstream `format[2:]` quirk**: a "<4>msg" format renders as "KERN_WARNING >msg" - the '>' survives the two-char strip. The port keeps it verbatim; the test asserts the quirk.
+- **the ellipsis slot count**: the upstream readEllipsis counts the RESOLVED param values (each defaulting to the PARAM_INTN accessor); the port passes one PARAM_INTN slot per param and pulls the rest; the pull count comes from a first format walk (the conversions + the * widths).
+- **the stdout capture seam**: set_stdout(shared_ptr<QlFile>) swaps the stream the printf engine writes to; the test drains a temp file after close().
+
 ## Deferred (tracked, not built)
 
 `os/freebsd/`, `os/qnx/`, `os/macos/`, `os/uefi/`, `os/dos/`, `qiling/hw/`,
