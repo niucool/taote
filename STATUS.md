@@ -638,10 +638,38 @@ minimal in-memory MH_EXECUTE blobs with hand-encoded command records.
   bytes; the x86_64 entry is the rip at the state index 16 (after the 16
   GPRs rax..r15, before rflags/cs/fs/gs).
 
+## Phase 8 - the os/macos dialect skeleton (the QlOsMacos surface)
+
+The macos dialect over the posix base (the freebsd precedent: a thin
+dialect riding the completed Phase 5 POSIX surface), on top of the Phase 7
+container parser. The upstream's `QlOsMacos(QlOsPosix)` ctor shape ported:
+the fcall re-created as the `macosx64` convention (the first 6 args in
+regs — the same regs as the posix amd64; the distinct class keeps the
+upstream's explicit intent) and the X8664 load() (the GDT/segment
+setup_cs_ds_ss_es(0, 4<<30) shape + the SYSCALL INSN hook). The MACOS
+x8664 syscall table (349 entries) rides the map_syscall override with the
+LIBSYSTEM fixup (0x2000000 <= n < 0x3000000 maps to n - 0x2000000).
+
+| the piece | the port file | the state | the notes |
+|---|---|---|---|
+| the dialect skeleton (the ctor + the load() + the fcall) | `qiling/os/macos/macos.hpp/.cpp` | ✅ 8670000 | the GDT shape mirrors the freebsd load() (the upstream repeats it per dialect) |
+| the MACOS x8664 syscall table | `qiling/os/macos/map_syscall.hpp` | ✅ 8670000 | generated verbatim (349 entries) + the 0x2000000 fixup in the override |
+| the factory wiring (select_os/select_loader) | `qiling/utils.cpp` | ✅ 8670000 | the macos shellcode path shares the QlLoaderELF (the documented deviation: the real QlLoaderMachO lands as its own slice) |
+| the profile | `qiling/profiles/macos.ql` | ✅ 8670000 | the upstream verbatim + the CODE load_address port deviation (the freebsd/qnx precedent) |
+| the syscall handlers (syscall.py, ~35) | — | next slice | the fgetattrlist/poll/mach-trap family, the getattrlist/getrlimit/sysctl paths, the bsdthread shapes |
+| the kernel_api fncc surface (kernel_api.py, 1404) | — | defer | the mach-port/kernel-func trap dispatch needs the fncc-style hook surface; its own slice after the syscall handlers |
+| the events/policy managers (events/, mach_port, task) | — | defer | the kext/driver machinery + the Mach-O kernel-loader port first |
+| the kext/driver path (load_kext, run's savedrip) | — | defer | blocked on the QlLoaderMachO port |
+
+Fixture-driven (`tests/Macos_Test.cpp`): the exit smoke through the plain
+number 1 and through the fixup'd 0x2000000+1 (both terminate with the code
+42), plus the positive factory tests.
+
 ## Deferred (tracked, not built)
 
-`os/macos/` (the OS dialect — the Mach-O container parser is done as of
-Phase 7), `qiling/hw/`,
+`os/macos/` (the remaining surface: the syscall handlers, the kernel_api
+fncc surface, the events/policy managers, the kext path — the dialect
+skeleton + the container parser are done as of Phases 7-8), `qiling/hw/`,
 `qiling/extensions/mcu/` — resume criteria in PORT_PLAN.md §10 (OQ 9); the
 remaining profile files (macos `.ql`) defer with them. The uefi phase is
 complete as of the RT slice (the ST/BS/RT surface; the two multi-call-blob
@@ -689,9 +717,9 @@ Priority order adopted: **freebsd → qnx → dos → uefi → macos** (the dial
 first: the marginal cost per dialect shrinks as the POSIX base stabilises).
 Status: freebsd ✅ (Phase 5.5), qnx ✅ (Phase 5.6), dos ✅ (Phase 6), uefi ✅
 (the loader + the service-table + the RT slices; the two multi-call anomalies
-stay DISABLED_ + documented) — **os/macos is the next major item**: the
-Mach-O container parser landed (Phase 7), the QlOsDarwin surface + the
-macos.ql profile remain. The dos carry-overs into later slices: the posix
+stay DISABLED_ + documented) — **os/macos is in progress** (Phase 7 the
+container parser ✅, Phase 8 the dialect skeleton ✅; the syscall handlers
+next, then the kernel_api fncc surface). The dos carry-overs into later slices: the posix
 `pack_stat_struct` family (unchanged) and the connect_client_info
 full-body-vs-stub upstream oddity (unchanged). The dos deferrals: the
 int10/int16 curses surface is console-detached (the resolution map and the
