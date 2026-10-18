@@ -1195,6 +1195,95 @@ static void probe16_intr_hook(uc_engine* uc, std::uint32_t intno, void* user_dat
     }
 }
 
+// P18: the P16 shape with ONLY the code hook's registration range changed -
+// the port's test tracer rides UC_HOOK_CODE as a RANGED hook (begin=0,
+// end=0xffffffffffff, the facade hook_code(cb, 0, huge) shape) while every
+// raw probe used the global sentinel (begin=1, end=0). Unicorn generates
+// different TB instrumentation for ranged vs global code hooks; if the
+// ranged registration reproduces the port's taken-entry size-lag (the store
+// event firing with the jz's size and the pc walking into the store), the
+// port-side fix is the facade's default hook range.
+static uc_context* p18_child_ctx = nullptr;
+static void p18_syscall_hook(uc_engine* uc, void* user_data) {
+    auto* self = static_cast<Probe*>(user_data);
+    std::uint64_t pc = 0;
+    uc_reg_read(uc, UC_X86_REG_RIP, &pc);
+    self->syscall_fired.push_back(pc);
+    if (pc == kBase) {
+        const std::uint64_t zero = 0;
+        uc_reg_write(uc, UC_X86_REG_RAX, &zero);
+        const std::uint64_t child_pc = kBase + 2;
+        uc_reg_write(uc, UC_X86_REG_RIP, &child_pc);
+        const std::uint64_t child_sp = 0x1203000;
+        uc_reg_write(uc, UC_X86_REG_RSP, &child_sp);
+        const std::uint64_t tid = 0x2a;
+        uc_mem_write(uc, p16_ctid, &tid, sizeof(tid));
+        uc_context_alloc(uc, &p18_child_ctx);
+        uc_context_save(uc, p18_child_ctx);
+        const std::uint64_t parent_rax = 2001;
+        uc_reg_write(uc, UC_X86_REG_RAX, &parent_rax);
+        const std::uint64_t syscall_pc = kBase;
+        uc_reg_write(uc, UC_X86_REG_RIP, &syscall_pc);
+        uc_emu_stop(uc);
+    } else {
+        std::uint64_t v = 0;
+        uc_mem_read(uc, p16_ctid, &v, sizeof(v));
+        uc_emu_stop(uc);
+    }
+}
+
+TEST(TbSemantics, DISABLED_P18RangedCodeHookTakenEntry) {
+    Probe p;
+    uc_open(UC_ARCH_X86, UC_MODE_64, &p.uc);
+    uc_mem_map(p.uc, kBase, 0x1000, UC_PROT_ALL);
+
+    std::string body{
+        '\x0F', '\x05',
+        '\x48', '\x85', '\xC0',
+        '\x74', '\x07',
+        '\x90', '\x90', '\x90',
+        '\x0F', '\x05',
+        '\x90', '\x90',
+        '\x90',
+        '\xC7', '\x04', '\x25', '\x00', '\x20', '\x00', '\x01', '\x2A', '\x00', '\x00', '\x00',
+        '\xEB', '\xFE'};
+    uc_mem_write(p.uc, kBase, body.data(), body.size());
+    uc_mem_map(p.uc, 0x1002000, 0x1000, UC_PROT_ALL);
+    uc_mem_map(p.uc, 0x1202000, 0x2000, UC_PROT_ALL);
+
+    uc_hook_add(p.uc, &p.insn_hook, UC_HOOK_INSN, reinterpret_cast<void*>(p18_syscall_hook), &p, 1, 0,
+                UC_X86_INS_SYSCALL);
+    // THE P18 DELTA: the code hook registered RANGED (begin=0, end=huge) —
+    // the port's facade hook_code(cb, 0, 0xffffffffffff) shape — not the
+    // global sentinel the earlier probes used
+    uc_hook_add(p.uc, &p.code_hook, UC_HOOK_CODE, reinterpret_cast<void*>(probe_code_hook), &p, 0,
+                0xffffffffffffull);
+
+    // the port's three-slice interleave (the P16 sequence verbatim)
+    const std::uint64_t parent_rax = 2001;
+    uc_reg_write(p.uc, UC_X86_REG_RAX, &parent_rax);
+    uc_emu_start(p.uc, kBase, 0xffffffffffffffffull, 0, 32337);
+
+    uc_context_restore(p.uc, p18_child_ctx);
+    const std::uint64_t parent_rax2 = 2001;
+    uc_reg_write(p.uc, UC_X86_REG_RAX, &parent_rax2);
+    uc_emu_start(p.uc, kBase + 2, 0xffffffffffffffffull, 0, 32337);
+
+    uc_context_restore(p.uc, p18_child_ctx);
+    p.code_trace.clear();
+    p.code_count = 0;
+    const uc_err err = uc_emu_start(p.uc, kBase + 2, 0xffffffffffffffffull, 0, 32337);
+    probe_dump_trace("p18-child", p.code_trace);
+    const auto pc = reg(p.uc, UC_X86_REG_RIP);
+    std::fprintf(stderr, "[p18-end] err=%s pc=0x%llx\n", uc_strerror(err), static_cast<unsigned long long>(pc));
+
+    std::vector<std::uint8_t> got(4, 0);
+    uc_mem_read(p.uc, 0x1002000, got.data(), 4);
+    std::fprintf(stderr, "[p18-store] %u\n", static_cast<unsigned>(got[0]));
+    uc_context_free(p18_child_ctx);
+    p18_child_ctx = nullptr;
+}
+
 TEST(TbSemantics, DISABLED_RealModeIntHookRawProbe) {
     uc_engine* uc = nullptr;
     ASSERT_EQ(uc_open(UC_ARCH_X86, UC_MODE_16, &uc), UC_ERR_OK);
