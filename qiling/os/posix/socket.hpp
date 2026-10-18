@@ -75,6 +75,12 @@ public:
     std::vector<std::uint8_t> recv(std::size_t bufsize, int flags);
     std::int64_t send(const std::vector<std::uint8_t>& data, int flags);
 
+    // getsockopt/setsockopt (the host-level values pass through — the
+    // guest-to-host option-name mapping rides the const-mapping slice; the
+    // SOL_SOCKET/SO_* ABI values match on the supported hosts)
+    std::vector<std::uint8_t> getsockopt(int level, int optname, std::size_t buflen);
+    bool setsockopt(int level, int optname, const std::vector<std::uint8_t>& value);
+
     int family() const noexcept { return family_; }
     int socktype() const noexcept { return socktype_; }
     int protocol() const noexcept { return protocol_; }
@@ -94,6 +100,8 @@ std::optional<std::int64_t> syscall_recv(Qiling& ql, const std::vector<std::uint
 std::optional<std::int64_t> syscall_socketpair(Qiling& ql, const std::vector<std::uint64_t>& params);
 std::optional<std::int64_t> syscall_sendto(Qiling& ql, const std::vector<std::uint64_t>& params);
 std::optional<std::int64_t> syscall_recvfrom(Qiling& ql, const std::vector<std::uint64_t>& params);
+std::optional<std::int64_t> syscall_getsockopt(Qiling& ql, const std::vector<std::uint64_t>& params);
+std::optional<std::int64_t> syscall_setsockopt(Qiling& ql, const std::vector<std::uint64_t>& params);
 std::optional<std::int64_t> syscall_send(Qiling& ql, const std::vector<std::uint64_t>& params);
 std::optional<std::int64_t> syscall_socket(Qiling& ql, const std::vector<std::uint64_t>& params);
 std::optional<std::int64_t> syscall_shutdown(Qiling& ql, const std::vector<std::uint64_t>& params);

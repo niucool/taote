@@ -110,6 +110,60 @@ int host_socket_type(int vsock_type) {
     }
 }
 
+
+// the level/option mapping (the const_mapping.py two-stage shape: the
+// guest value → the name via the linux tables, the name → the host constant
+// via the winsock/POSIX constants). The SOL_SOCKET options carry the full
+// tables; the IPPROTO_IP/TCP option tables land with their slices.
+#ifdef _WIN32
+constexpr int kHostSolSocket = 0xffff;
+#else
+constexpr int kHostSolSocket = SOL_SOCKET;
+#endif
+
+int host_socket_level(int vsock_level) {
+    // the linux_x86_socket_level table: SOL_SOCKET 0x1, IPPROTO_IP 0x0,
+    // IPPROTO_TCP 0x6, IPPROTO_UDP 0x11, IPPROTO_IPV6 0x29, IPPROTO_RAW 0xff
+    switch (vsock_level) {
+        case 0x0000:
+        case 0x0006:
+        case 0x0011:
+        case 0x0029:
+        case 0x00ff:
+            return vsock_level;  // the non-SOL levels pass through (the
+                                 // host protocol constants match)
+        case 0x0001:
+            return kHostSolSocket;
+        default:
+            throw QlErrorBase("Could not convert emulated socket level " +
+                              std::to_string(vsock_level) +
+                              " to a socket level name");
+    }
+}
+
+int host_socket_option(int vsock_level, int vsock_opt) {
+    // the linux_x86_socket_options table → the host constants (the winsock
+    // values differ from the linux ones; the POSIX hosts match verbatim)
+    switch (vsock_opt) {
+        case 0x0001: return SO_DEBUG;
+        case 0x0002: return SO_REUSEADDR;
+        case 0x0003: return SO_TYPE;
+        case 0x0004: return SO_ERROR;
+        case 0x0005: return SO_DONTROUTE;
+        case 0x0006: return SO_BROADCAST;
+        case 0x0007: return SO_SNDBUF;
+        case 0x0008: return SO_RCVBUF;
+        case 0x0009: return SO_KEEPALIVE;
+        case 0x000a: return SO_OOBINLINE;
+        case 0x000d: return SO_LINGER;
+        default:
+            throw QlErrorBase("Could not convert emulated socket option " +
+                              std::to_string(vsock_opt) +
+                              " to a host socket option");
+    }
+}
+
+
 }  // namespace
 
 QlSocket::QlSocket(std::uintptr_t host_handle, int domain, int socktype, int protocol)
@@ -170,6 +224,39 @@ void QlSocket::close() {
         host_socket_close(host_handle_);
         closed_ = true;
     }
+}
+
+std::vector<std::uint8_t> QlSocket::getsockopt(int level, int optname, std::size_t buflen) {
+#ifdef _WIN32
+    std::vector<std::uint8_t> out(buflen, 0);
+    int len = static_cast<int>(buflen);
+    if (::getsockopt(static_cast<SOCKET>(host_handle_), level, optname,
+                     reinterpret_cast<char*>(out.data()), &len) != 0) {
+        throw QlErrorBase("getsockopt failed");
+    }
+    out.resize(static_cast<std::size_t>(len));
+    return out;
+#else
+    std::vector<std::uint8_t> out(buflen, 0);
+    socklen_t len = static_cast<socklen_t>(buflen);
+    if (::getsockopt(static_cast<int>(host_handle_), level, optname,
+                     out.data(), &len) != 0) {
+        throw QlErrorBase("getsockopt failed");
+    }
+    out.resize(static_cast<std::size_t>(len));
+    return out;
+#endif
+}
+
+bool QlSocket::setsockopt(int level, int optname, const std::vector<std::uint8_t>& value) {
+#ifdef _WIN32
+    return ::setsockopt(static_cast<SOCKET>(host_handle_), level, optname,
+                        reinterpret_cast<const char*>(value.data()),
+                        static_cast<int>(value.size())) == 0;
+#else
+    return ::setsockopt(static_cast<int>(host_handle_), level, optname,
+                        value.data(), static_cast<socklen_t>(value.size())) == 0;
+#endif
 }
 
 std::pair<std::shared_ptr<QlSocket>, std::shared_ptr<QlSocket>> QlSocket::socketpair(int domain,
@@ -708,6 +795,73 @@ std::optional<std::int64_t> syscall_recvfrom(Qiling& ql, const std::vector<std::
     }
 
     throw QlErrorBase("recvfrom: the datagram src path lands with its slice");
+}
+
+
+std::optional<std::int64_t> syscall_getsockopt(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    // ql_syscall_getsockopt(sockfd, level, optname, optval_addr, optlen_addr):
+    // the optlen rides the in-out cell (the min-1024 clamp verbatim); the
+    // level/option names ride the two-stage mapping
+    const auto sockfd = static_cast<std::int64_t>(params[0]);
+
+    auto* sock = dynamic_cast<QlSocket*>(fd_get(ql, sockfd).get());
+    if (sock == nullptr) {
+        return -88;  // -ENOTSOCK
+    }
+
+    auto optlen = static_cast<std::int64_t>(ql.mem().read_ptr(params[4], 4));
+    if (optlen > 1024) {
+        optlen = 1024;
+    }
+    if (optlen < 0) {
+        return -22;  // -EINVAL (the verbatim check)
+    }
+
+    try {
+        const auto hlevel = host_socket_level(static_cast<int>(params[1]));
+        const auto hopt = host_socket_option(hlevel, static_cast<int>(params[2]));
+        const auto optval = sock->getsockopt(hlevel, hopt, static_cast<std::size_t>(optlen));
+        if (!optval.empty()) {
+            ql.mem().write(params[3], optval);
+        }
+    } catch (const QlErrorBase&) {
+        return -22;  // the OSError errno shape
+    }
+    return 0;
+}
+
+std::optional<std::int64_t> syscall_setsockopt(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    // ql_syscall_setsockopt(sockfd, level, optname, optval_addr, optlen):
+    // the NULL optval rides the empty-value host call (the verbatim
+    // "value is None" branch); the level/option names ride the mapping
+    const auto sockfd = static_cast<std::int64_t>(params[0]);
+
+    auto* sock = dynamic_cast<QlSocket*>(fd_get(ql, sockfd).get());
+    if (sock == nullptr) {
+        return -88;  // -ENOTSOCK
+    }
+
+    try {
+        const auto hlevel = host_socket_level(static_cast<int>(params[1]));
+        const auto hopt = host_socket_option(hlevel, static_cast<int>(params[2]));
+        if (params[3] == 0) {
+            if (!sock->setsockopt(hlevel, hopt, {})) {
+                return -22;
+            }
+            return 0;
+        }
+        const auto optval = ql.mem().read(params[3], static_cast<std::size_t>(params[4]));
+        if (!sock->setsockopt(hlevel, hopt, optval)) {
+            std::fprintf(stderr, "[sopt] set failed\n");
+            return -22;  // the OSError errno shape
+        }
+        return 0;
+    } catch (const QlErrorBase& e) {
+        std::fprintf(stderr, "[sopt] throw=%s\n", e.what());
+        // the NotImplementedError shapes propagate upstream — the port
+        // degrades onto -EINVAL (the errno-granularity deferral)
+        return -22;
+    }
 }
 
 std::optional<std::int64_t> syscall_socketpair(Qiling& ql, const std::vector<std::uint64_t>& params) {

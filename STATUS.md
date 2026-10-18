@@ -933,6 +933,34 @@ return is the fixture's evidence.
 | socketpair | `syscall/socket.py` + `filestruct.py ql_socket.socketpair` | ✅ | the two next-free fds into the sv pair (the i32 writes at sv+0/sv+4 verbatim); the _WIN32 host lacks socketpair — the loopback accept walk (the listener on 127.0.0.1:0 + the connect off the getsockname addr) backs it; the AF_UNIX host open fails on _WIN32 so the fixture rides AF_INET |
 | recv/send | `syscall/socket.py` | ✅ | the recv (the empty read writes nothing, the count rides the return) and the send (the verbatim IOError → 0 branch) |
 | sendto/recvfrom | `syscall/socket.py` | ✅ core | the STREAM sockets and the NULL addr ride the send/recv bodies verbatim; the datagram dest/src paths throw pending their sub-slice (the upstream's SOCK_STREAM/SOCK_SEQPACKET checks verbatim) |
+
+Findings (re-pinned): the r10-vs-r9 4th-arg gotcha fired again, this time
+as the r10/r8 **pair** (the 4th/5th slots must ride in order — the reversed
+pair produced the failures that looked like handler bugs); and the x8664
+table has NO bare send/recv — the sendto/recvfrom names (44/45) carry the
+NULL-addr delegation (the upstream's recvfrom-with-NULL-addr comment
+verbatim).
+
+### Phase 12 sub-slice 4 — getsockopt/setsockopt (the family core close-out)
+
+| piece | upstream | state | notes |
+|---|---|---|---|
+| getsockopt/setsockopt | `syscall/socket.py` | ✅ | the optlen in-out cell (the min-1024 clamp + the negative -EINVAL verbatim); the NULL optval rides the empty-value host call; the **level/option names ride the two-stage mapping** (the const_mapping.py shape: the guest value → the linux-table name → the host constant) — the winsock host requires it (SOL_SOCKET 1→0xffff, SO_TYPE 3→0x1008, SO_KEEPALIVE 9→8); the IPPROTO_IP/TCP option tables defer with their slices (the SOL_SOCKET table is complete) |
+| the fixture | `tests/Posix_Test.cpp` | ✅ | the SO_KEEPALIVE set + the SO_TYPE get round trip over SOL_SOCKET (the mapping verified live) |
+
+The socket family core is now complete: socket/shutdown, connect/bind/
+listen/accept, socketpair, send/recv/sendto/recvfrom (the STREAM + the
+NULL-addr bodies), getsockopt/setsockopt. The remaining surface: the
+datagram sendto/recvfrom dest/src paths, socketcall (the x86 multiplexer),
+the IPPROTO_IP/TCP option tables — each its own slice.
+
+### Phase 12 sub-slice 3 — socketpair + the send/recv family
+
+| piece | upstream | state | notes |
+|---|---|---|---|
+| socketpair | `syscall/socket.py` + `filestruct.py ql_socket.socketpair` | ✅ | the two next-free fds into the sv pair (the i32 writes at sv+0/sv+4 verbatim); the _WIN32 host lacks socketpair — the loopback accept walk (the listener on 127.0.0.1:0 + the connect off the getsockname addr) backs it; the AF_UNIX host open fails on _WIN32 so the fixture rides AF_INET |
+| recv/send | `syscall/socket.py` | ✅ | the recv (the empty read writes nothing, the count rides the return) and the send (the verbatim IOError → 0 branch) |
+| sendto/recvfrom | `syscall/socket.py` | ✅ core | the STREAM sockets and the NULL addr ride the send/recv bodies verbatim; the datagram dest/src paths throw pending their sub-slice (the upstream's SOCK_STREAM/SOCK_SEQPACKET checks verbatim) |
 | the fixture | `tests/Posix_Test.cpp` | ✅ | the socketpair(AF_INET) + the send('PING')/recv flow over the pair — the pinned r10 gotcha fired a third time (the 4th syscall arg must ride r10, and the x8664 has NO bare send/recv — the sendto/recvfrom names at 44/45 ride the NULL-addr delegation) |
 
 ## Deferred (tracked, not built)
