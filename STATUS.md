@@ -622,7 +622,6 @@ Fixture-driven throughout (`tests/Loader_Macho_Test.cpp`, 7 tests): the
 minimal in-memory MH_EXECUTE blobs with hand-encoded command records.
 
 ### Phase 7 findings (upstream-parity notes)
-
 - **the section_64 stride is 0x50 with a reserved3 tail** — the Apple
   struct memory (80 bytes = 16+16+8+8+7×4) is short one u32; the upstream's
   `LoadSection64` reads 0x50 and parses address/size/offset/alignment/
@@ -656,7 +655,8 @@ LIBSYSTEM fixup (0x2000000 <= n < 0x3000000 maps to n - 0x2000000).
 | the MACOS x8664 syscall table | `qiling/os/macos/map_syscall.hpp` | ✅ 8670000 | generated verbatim (349 entries) + the 0x2000000 fixup in the override |
 | the factory wiring (select_os/select_loader) | `qiling/utils.cpp` | ✅ 8670000 | the macos shellcode path shares the QlLoaderELF (the documented deviation: the real QlLoaderMachO lands as its own slice) |
 | the profile | `qiling/profiles/macos.ql` | ✅ 8670000 | the upstream verbatim + the CODE load_address port deviation (the freebsd/qnx precedent) |
-| the syscall handlers (syscall.py, ~35) | — | next slice | the fgetattrlist/poll/mach-trap family, the getattrlist/getrlimit/sysctl paths, the bsdthread shapes |
+| the syscall handlers — the mach self-trap family + the stubs | `qiling/os/macos/syscall.cpp` | ✅ 67f4ebc | mach_reply_port (2187), thread_self_trap (0x307), task_self_trap (9876), host_self_trap (0x303), csops (the CS_ENFORCEMENT\|CS_GET_TASK_ALLOW flag), getentropy (the KERN_SUCCESS stub); the mach_port/task/thread surfaces ride `mach_port.hpp` (the ctor-seeded deviation until the Mach-O loader lands) |
+| the remaining syscall.py handlers (~29: poll, the mach vm/port traps, mach_msg, access/getattrlist, sigprocmask/fcntl64/pread, getrlimit, sysctl pair, the bsdthread shapes, the nocancel pair, csrctl, the payload aborts…) | — | next slice | the fixture-driven family groups |
 | the kernel_api fncc surface (kernel_api.py, 1404) | — | defer | the mach-port/kernel-func trap dispatch needs the fncc-style hook surface; its own slice after the syscall handlers |
 | the events/policy managers (events/, mach_port, task) | — | defer | the kext/driver machinery + the Mach-O kernel-loader port first |
 | the kext/driver path (load_kext, run's savedrip) | — | defer | blocked on the QlLoaderMachO port |
@@ -664,6 +664,22 @@ LIBSYSTEM fixup (0x2000000 <= n < 0x3000000 maps to n - 0x2000000).
 Fixture-driven (`tests/Macos_Test.cpp`): the exit smoke through the plain
 number 1 and through the fixup'd 0x2000000+1 (both terminate with the code
 42), plus the positive factory tests.
+
+### Phase 8 findings (upstream-parity notes)
+
+- **the generated-table hex-key gotcha**: the upstream's x8664 table carries
+  the mach-trap entries under hex keys (0x100001a mach_reply_port through
+  0x100001d host_self_trap); a decimal-only `\d+` extraction silently drops
+  them (349 vs the true 357 entries) and the traps dispatch to the
+  not-implemented fall-through with rax=0. Extract with `(?:0x)?[0-9a-f]+`.
+- **the MachPortManager aggregate-init trap**: the upstream's
+  `MachPortManager(ql, my_port)` — the my_port is a separate member, NOT the
+  host_port (the fixed 0x303); a positional aggregate init from the seed
+  port assigns it to host_port and the host_self_trap returns the reply
+  port's name. Seed my_port by assignment.
+- **the csops arg order**: (pid, ops, useraddr, usersize) rides rdi/rsi/
+  rdx/rcx — the useraddr is the THIRD arg (rdx); a rdi=useraddr blob faults
+  the handler's write at 0 (uc_err 7).
 
 ## Deferred (tracked, not built)
 
@@ -718,8 +734,9 @@ first: the marginal cost per dialect shrinks as the POSIX base stabilises).
 Status: freebsd ✅ (Phase 5.5), qnx ✅ (Phase 5.6), dos ✅ (Phase 6), uefi ✅
 (the loader + the service-table + the RT slices; the two multi-call anomalies
 stay DISABLED_ + documented) — **os/macos is in progress** (Phase 7 the
-container parser ✅, Phase 8 the dialect skeleton ✅; the syscall handlers
-next, then the kernel_api fncc surface). The dos carry-overs into later slices: the posix
+container parser ✅, Phase 8 the dialect skeleton ✅, the self-trap family ✅;
+the remaining ~29 syscall.py handlers next, then the kernel_api fncc
+surface). The dos carry-overs into later slices: the posix
 `pack_stat_struct` family (unchanged) and the connect_client_info
 full-body-vs-stub upstream oddity (unchanged). The dos deferrals: the
 int10/int16 curses surface is console-detached (the resolution map and the
