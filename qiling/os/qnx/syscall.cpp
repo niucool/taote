@@ -8,6 +8,7 @@
 #include "qiling/os/qnx/const.hpp"
 #include "qiling/os/qnx/qnx.hpp"
 
+#include <array>
 #include <chrono>
 
 namespace qiling {
@@ -113,6 +114,53 @@ std::optional<std::int64_t> syscall_connect_detach(Qiling& ql, const std::vector
     return 0;
 }
 
+// syscall.py ql_syscall_connect_flags: the pid/coid/mask sanity pins (the
+// FD_CLOEXEC shape); the flags change is a no-op
+std::optional<std::int64_t> syscall_connect_flags(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    const auto pid = params[0];
+    const auto coid = static_cast<std::uint32_t>(params[1]);
+    const auto mask = params[2];
+
+    if (pid != 0) {
+        throw QlErrorBase("qnx connect_flags: is it possible to change the flags of another process?");
+    }
+    auto& connections = static_cast<QlOsQnx&>(ql.os()).connections();
+    if (connections.find(coid) == connections.end()) {
+        throw QlErrorBase("qnx connect_flags: the connection id must exist in the connections mapping");
+    }
+    if (mask != 0x1) {
+        throw QlErrorBase("qnx connect_flags: is the mask always FD_CLOEXEC?");
+    }
+    return 0;
+}
+
+// syscall.py ql_syscall_connect_client_info (source: openqnx
+// services/system/ker/ker_connect.c): the scoid -1 means the calling
+// process; the record is <nd, pid, 0, 0> with the zero creds standing for
+// the super-user
+std::optional<std::int64_t> syscall_connect_client_info(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    const auto scoid = params[0];
+    const auto info = params[1];
+
+    if (scoid != 0xffffffff) {
+        throw QlErrorNotImplemented("qnx connect_client_info: other processes are not implemented");
+    }
+
+    auto& os = static_cast<QlOsQnx&>(ql.os());
+    const auto pid32 = static_cast<std::uint32_t>(os.pid());
+    const std::array<std::uint8_t, 16> record = {
+        0x00, 0x00, 0x00, 0x00,  // nd = ND_LOCAL_NODE (u32)
+        static_cast<std::uint8_t>(pid32 & 0xff),
+        static_cast<std::uint8_t>((pid32 >> 8) & 0xff),
+        static_cast<std::uint8_t>((pid32 >> 16) & 0xff),
+        static_cast<std::uint8_t>((pid32 >> 24) & 0xff),  // pid (i32)
+        0x00, 0x00, 0x00, 0x00,  // ruid (i32, the zero creds)
+        0x00, 0x00, 0x00, 0x00,  // the trailing cell (u32)
+    };
+    ql.mem().write(info, std::vector<std::uint8_t>(record.begin(), record.end()));
+    return 0;
+}
+
 // syscall.py ql_syscall_thread_destroy: the (-1, -1, status) request
 // terminates the process with the status as the exit code
 std::optional<std::int64_t> syscall_thread_destroy(Qiling& ql, const std::vector<std::uint64_t>& params) {
@@ -183,6 +231,10 @@ void register_qnx_syscalls() {
                                {PARAM_INTN, PARAM_INTN, PARAM_INTN, PARAM_INTN, PARAM_INTN},
                                syscall_connect_attach});
     registry.register_syscall({"connect_detach", {PARAM_INTN}, syscall_connect_detach});
+    registry.register_syscall({"connect_client_info", {PARAM_INTN, PARAM_PTRX, PARAM_INTN},
+                               syscall_connect_client_info});
+    registry.register_syscall({"connect_flags", {PARAM_INTN, PARAM_INTN, PARAM_INTN, PARAM_INTN},
+                               syscall_connect_flags});
     registry.register_syscall({"thread_destroy", {PARAM_INTN, PARAM_INTN, PARAM_INTN},
                                syscall_thread_destroy});
 }

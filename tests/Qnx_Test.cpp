@@ -290,6 +290,69 @@ TEST(QnxOs, ConnectAttachHandsSideChannelCoidThenDetach) {
     EXPECT_EQ(ql.mem().read_ptr(kConnectRet2, 4), 0u);
 }
 
+// the connect_flags + the connect_client_info flow: the seeded SYSMGR coid
+// passes the flags check (pid 0, the FD_CLOEXEC mask); the client_info for
+// the calling process (scoid = -1) fills the _client_info record — the nd,
+// the KERNEL profile pid and the zeroed creds (the super-user shape)
+//   00: mov r0, #0          ; pid = 0
+//   04: mov r1, #0x40000000 ; coid = SYSMGR_COID
+//   08: mov r2, #1          ; mask = FD_CLOEXEC
+//   0C: mov r3, #1          ; bits
+//   10: mov r12, #43        ; connect_flags
+//   14: swi 0
+//   18: mov r4, #0x2100 ; 1C: add r4, r4, #0x18
+//   20: str r0, [r4]         ; the flags result -> 0x2118
+//   24: mov r1, #0x2100      ; info = 0x2100
+//   28: mvn r0, #0           ; scoid = -1 (the calling process)
+//   2C: mov r2, #0           ; ngroups
+//   30: mov r12, #42         ; connect_client_info
+//   34: swi 0
+//   38: mov r4, #0x2100 ; 3C: add r4, r4, #0x14
+//   40: str r0, [r4]         ; the client_info result -> 0x2114
+//   44: mvn r0, #0 ; 48: mvn r1, #0 ; 4C: mov r2, #42
+//   50: mov r12, #47 ; 54: swi 0
+TEST(QnxOs, ConnectFlagsAndClientInfoOnSeededSysmgrCoid) {
+    const std::vector<std::uint8_t> code = {
+        0x00, 0x00, 0xA0, 0xE3,  // 00: mov r0, #0
+        0x40, 0x14, 0xA0, 0xE3,  // 04: mov r1, #0x40000000
+        0x01, 0x20, 0xA0, 0xE3,  // 08: mov r2, #1
+        0x01, 0x30, 0xA0, 0xE3,  // 0C: mov r3, #1
+        0x2B, 0xC0, 0xA0, 0xE3,  // 10: mov r12, #43
+        0x00, 0x00, 0x00, 0xEF,  // 14: swi 0
+        0x21, 0x4C, 0xA0, 0xE3,  // 18: mov r4, #0x2100
+        0x18, 0x40, 0x84, 0xE2,  // 1C: add r4, r4, #0x18
+        0x00, 0x00, 0x84, 0xE5,  // 20: str r0, [r4]
+        0x21, 0x1C, 0xA0, 0xE3,  // 24: mov r1, #0x2100
+        0x00, 0x00, 0xE0, 0xE3,  // 28: mvn r0, #0
+        0x00, 0x20, 0xA0, 0xE3,  // 2C: mov r2, #0
+        0x2A, 0xC0, 0xA0, 0xE3,  // 30: mov r12, #42
+        0x00, 0x00, 0x00, 0xEF,  // 34: swi 0
+        0x21, 0x4C, 0xA0, 0xE3,  // 38: mov r4, #0x2100
+        0x14, 0x40, 0x84, 0xE2,  // 3C: add r4, r4, #0x14
+        0x00, 0x00, 0x84, 0xE5,  // 40: str r0, [r4]
+        0x00, 0x00, 0xE0, 0xE3,  // 44: mvn r0, #0
+        0x00, 0x10, 0xE0, 0xE3,  // 48: mvn r1, #0
+        0x2A, 0x20, 0xA0, 0xE3,  // 4C: mov r2, #42
+        0x2F, 0xC0, 0xA0, 0xE3,  // 50: mov r12, #47
+        0x00, 0x00, 0x00, 0xEF,  // 54: swi 0
+    };
+    auto ql = make_qnx_qiling(code);
+
+    ql.mem().map(kScratch, 0x1000, UC_PROT_ALL, "[qnx-scratch]");
+
+    ql.run();
+
+    EXPECT_EQ(ql.os().exit_code(), 42);
+    // both kernel calls return EOK
+    EXPECT_EQ(ql.mem().read_ptr(0x2118, 4), 0u);
+    EXPECT_EQ(ql.mem().read_ptr(0x2114, 4), 0u);
+    // the _client_info record: the nd, the profile pid and the zero creds
+    EXPECT_EQ(ql.mem().read_ptr(0x2100, 4), 0u);
+    EXPECT_EQ(ql.mem().read_ptr(0x2104, 4), 1996u);
+    EXPECT_EQ(ql.mem().read_ptr(0x2108, 4), 0u);
+    EXPECT_EQ(ql.mem().read_ptr(0x210C, 4), 0u);
+}
+
 // the clock_cycles flow: the kernel returns the core's free-running counter
 // as the nanosecond wall clock (the upstream's simplification) in R0, which
 // the fixture stores into a second scratch cell — the pre-poisoned marker
