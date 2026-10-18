@@ -616,7 +616,10 @@ std::optional<std::int64_t> syscall_clone(Qiling& ql, const std::vector<std::uin
     // so the parent's resume continues after it (the unicorn's INSN-hook pc
     // still points at the syscall)
     ql.arch().regs().set_arch_pc(after_syscall);
-    const auto parent_ctx = ql.arch().save();
+    // BISECT cycle 3 (b2): the parent's in-hook uc_context save removed for
+    // the deletion bisect — restore together with the matching restore when
+    // the study closes
+    // const auto parent_ctx = ql.arch().save();
 
     // the new tls (sched.py: CLONE_SETTLS)
     if ((flags & 0x00080000) != 0) {
@@ -640,7 +643,9 @@ std::optional<std::int64_t> syscall_clone(Qiling& ql, const std::vector<std::uin
                  static_cast<unsigned long long>(after_syscall));
 
     // the parent's context back (sched.py: ql.restore(ctx))
-    ql.arch().restore(*parent_ctx);
+    // BISECT cycle 3 (b2): the parent's in-hook uc_context restore removed
+    // together with the matching save — restore when the study closes
+    // ql.arch().restore(*parent_ctx);
 
     // the pinned TB semantics (the TbSemantics probe): the unicorn post-hook
     // advance adds the hooked instruction's size onto the live pc, even when
