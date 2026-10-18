@@ -1284,6 +1284,138 @@ TEST(TbSemantics, DISABLED_P18RangedCodeHookTakenEntry) {
     p18_child_ctx = nullptr;
 }
 
+// P19: the port's load_syscall dispatcher in-hook uc-call sequence, verbatim:
+// get_id (the RAX read) -> get_params(6) (the RDI/RSI/RDX/R10/R8/R9 reads) ->
+// the handler body (the ctx dance, the in-hook mem write) -> the RIP
+// compensation -> the handler's ql.emu_stop() -> THE HANDLER RETURNS -> the
+// dispatcher's trailing set_return_value (the RAX write AFTER the RIP comp)
+// + the log_api_call arch_pc() read. The P16 hook's last uc action was the
+// RIP write; the port's tail adds register traffic after it (and after the
+// stop). One hypothesis: the trailing RAX write after the compensation
+// re-latches the hook's size/pc state so the next hook fire reports the
+// stale size.
+static uc_context* p19_child_ctx = nullptr;
+static uc_context* p19_parent_ctx = nullptr;
+static void p19_syscall_hook(uc_engine* uc, void* user_data) {
+    auto* self = static_cast<Probe*>(user_data);
+    // get_id
+    std::uint64_t pc = 0;
+    uc_reg_read(uc, UC_X86_REG_RIP, &pc);
+    self->syscall_fired.push_back(pc);
+    std::uint64_t rax = 0;
+    uc_reg_read(uc, UC_X86_REG_RAX, &rax);
+    // get_params(6): the x8664 syscall ABI arg regs
+    const int arg_regs[6] = {UC_X86_REG_RDI, UC_X86_REG_RSI, UC_X86_REG_RDX,
+                             UC_X86_REG_R10, UC_X86_REG_R8, UC_X86_REG_R9};
+    for (const int r : arg_regs) {
+        std::uint64_t v = 0;
+        uc_reg_read(uc, r, &v);
+    }
+    if (rax == 56) {
+        // the handler: the parent's ctx (the pc pre-set to after), the
+        // child's regs + the child's ctx, the parent's restore, the comp
+        const std::uint64_t after = pc + 2;
+        const std::uint64_t after_pc = after;
+        uc_reg_write(uc, UC_X86_REG_RIP, &after_pc);
+        uc_context_alloc(uc, &p19_parent_ctx);
+        uc_context_save(uc, p19_parent_ctx);
+        uc_reg_write(uc, UC_X86_REG_RIP, &after_pc);
+        const std::uint64_t child_sp = 0x1203000;
+        uc_reg_write(uc, UC_X86_REG_RSP, &child_sp);
+        const std::uint64_t zero = 0;
+        uc_reg_write(uc, UC_X86_REG_RAX, &zero);
+        uc_context_alloc(uc, &p19_child_ctx);
+        uc_context_save(uc, p19_child_ctx);
+        uc_context_restore(uc, p19_parent_ctx);
+        // the in-handler mem write (the CHILD_SETTID emulation)
+        const std::uint64_t tid = 0x2a;
+        uc_mem_write(uc, p16_ctid, &tid, sizeof(tid));
+        // the compensation
+        const std::uint64_t comp = after - 2;
+        uc_reg_write(uc, UC_X86_REG_RIP, &comp);
+        // the handler's ql.emu_stop()
+        uc_emu_stop(uc);
+        // THE HANDLER RETURNS — the dispatcher tail: set_return_value(th_id)
+        // AFTER the comp + the log_api_call arch_pc() read
+        const std::uint64_t th_id = 2001;
+        uc_reg_write(uc, UC_X86_REG_RAX, &th_id);
+        std::uint64_t pc_after = 0;
+        uc_reg_read(uc, UC_X86_REG_RIP, &pc_after);
+        std::fprintf(stderr, "[p19-tail] clone in-hook pc=0x%llx post-return rip=0x%llx\n",
+                     static_cast<unsigned long long>(pc), static_cast<unsigned long long>(pc_after));
+    } else {
+        // the futex park: the in-hook read, the stop, then the dispatcher
+        // tail (set_return_value(0) + the arch_pc read)
+        std::uint64_t v = 0;
+        uc_mem_read(uc, p16_ctid, &v, sizeof(v));
+        uc_emu_stop(uc);
+        const std::uint64_t zero = 0;
+        uc_reg_write(uc, UC_X86_REG_RAX, &zero);
+        std::uint64_t pc_after = 0;
+        uc_reg_read(uc, UC_X86_REG_RIP, &pc_after);
+        std::fprintf(stderr, "[p19-tail] futex post-return rip=0x%llx\n",
+                     static_cast<unsigned long long>(pc_after));
+    }
+}
+
+TEST(TbSemantics, DISABLED_P19DispatcherTailSequence) {
+    Probe p;
+    uc_open(UC_ARCH_X86, UC_MODE_64, &p.uc);
+    uc_mem_map(p.uc, kBase, 0x1000, UC_PROT_ALL);
+
+    std::string body{
+        '\x0F', '\x05',
+        '\x48', '\x85', '\xC0',
+        '\x74', '\x07',
+        '\x90', '\x90', '\x90',
+        '\x0F', '\x05',
+        '\x90', '\x90',
+        '\x90',
+        '\xC7', '\x04', '\x25', '\x00', '\x20', '\x00', '\x01', '\x2A', '\x00', '\x00', '\x00',
+        '\xEB', '\xFE'};
+    uc_mem_write(p.uc, kBase, body.data(), body.size());
+    uc_mem_map(p.uc, 0x1002000, 0x1000, UC_PROT_ALL);
+    uc_mem_map(p.uc, 0x1202000, 0x2000, UC_PROT_ALL);
+
+    uc_hook_add(p.uc, &p.insn_hook, UC_HOOK_INSN, reinterpret_cast<void*>(p19_syscall_hook), &p, 1, 0,
+                UC_X86_INS_SYSCALL);
+    uc_hook_add(p.uc, &p.code_hook, UC_HOOK_CODE, reinterpret_cast<void*>(probe_code_hook), &p, 1, 0);
+
+    // the blob's mov rax,56 (the clone) — the P19 hook dispatches on rax like
+    // the port's dispatcher reads it
+    const std::uint64_t clone_rax = 56;
+    uc_reg_write(p.uc, UC_X86_REG_RAX, &clone_rax);
+
+    // slice 1: the parent — the clone hook fires with the full dispatcher
+    // sequence including the trailing RAX write + the RIP read
+    uc_emu_start(p.uc, kBase, 0xffffffffffffffffull, 0, 32337);
+
+    // slice 2: the parent's resume riding the in-hook-saved parent ctx (the
+    // port's run_slice: restore() then emu_start(arch_pc())) — the not-taken
+    // loop, the futex park with the dispatcher tail
+    uc_context_restore(p.uc, p19_parent_ctx);
+    uc_context_free(p19_parent_ctx);
+    p19_parent_ctx = nullptr;
+    const std::uint64_t parent_rax2 = 2001;
+    uc_reg_write(p.uc, UC_X86_REG_RAX, &parent_rax2);
+    uc_emu_start(p.uc, kBase + 2, 0xffffffffffffffffull, 0, 32337);
+
+    // slice 3: the child — the cached TB, the taken path to the store
+    uc_context_restore(p.uc, p19_child_ctx);
+    p.code_trace.clear();
+    p.code_count = 0;
+    const uc_err err = uc_emu_start(p.uc, kBase + 2, 0xffffffffffffffffull, 0, 32337);
+    probe_dump_trace("p19-child", p.code_trace);
+    const auto pc = reg(p.uc, UC_X86_REG_RIP);
+    std::fprintf(stderr, "[p19-end] err=%s pc=0x%llx\n", uc_strerror(err), static_cast<unsigned long long>(pc));
+
+    std::vector<std::uint8_t> got(4, 0);
+    uc_mem_read(p.uc, 0x1002000, got.data(), 4);
+    std::fprintf(stderr, "[p19-store] %u\n", static_cast<unsigned>(got[0]));
+    uc_context_free(p19_child_ctx);
+    p19_child_ctx = nullptr;
+}
+
 TEST(TbSemantics, DISABLED_RealModeIntHookRawProbe) {
     uc_engine* uc = nullptr;
     ASSERT_EQ(uc_open(UC_ARCH_X86, UC_MODE_16, &uc), UC_ERR_OK);
