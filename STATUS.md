@@ -658,7 +658,10 @@ LIBSYSTEM fixup (0x2000000 <= n < 0x3000000 maps to n - 0x2000000).
 | the syscall handlers — the mach self-trap family + the stubs | `qiling/os/macos/syscall.cpp` | ✅ 67f4ebc | mach_reply_port (2187), thread_self_trap (0x307), task_self_trap (9876), host_self_trap (0x303), csops (the CS_ENFORCEMENT\|CS_GET_TASK_ALLOW flag), getentropy (the KERN_SUCCESS stub); the mach_port/task/thread surfaces ride `mach_port.hpp` (the ctor-seeded deviation until the Mach-O loader lands) |
 | the file/syscall-info family | `qiling/os/macos/syscall.cpp` + `kernel_func.hpp/.cpp` | ✅ 3c9212a | access_macos (the raw ENOENT over the fs isexists), getattrlist (the 24-byte attrlist unpack + the get_common_attr walk — the name-offset cell, the dev/type/ino cells), getrlimit (the verbatim double-write clobber + the 0x1000 mask oddity), sigprocmask (the log-only no-op, no return), fcntl64_macos (the fixed cmd table + the 0xefffffff ADDFILESIGS blob), pread (seek/read through the fd table + the CF clear); the FileSystem helper rides `kernel_func.*` (the vm_to_real_path + the VM-path type-check quirk verbatim) |
 | the mach vm/port trap family | `qiling/os/macos/syscall.cpp` | ✅ 7e5c882 | kernelrpc_mach_vm_allocate_trap (the min_offset bump allocator + the *addr write-back), vm_deallocate (the KERN_SUCCESS stub), vm_map (the vmmap cursor walk from the profile's vmmap_trap_address + the mask alignment verbatim), port_deallocate/mod_refs/construct (the pass stubs); the fixtures ride the 0x1000000-range numbers |
-| the remaining syscall.py handlers (~20: poll, mach_msg, the bsdthread shapes, the nocancel pair, csrctl, the payload aborts, the sysctl pair…) | — | next slice | the fixture-driven family groups |
+| the bsdthread/shims group | `qiling/os/macos/syscall.cpp` | ✅ 94e47fb | bsdthread_register (the CF clear + the fixed 0x400000df pthread magic), thread_selfid (the seeded thread id 123), thread_fast_set_cthread_self64 (the mdep shim: the tsd base into IA32_GS_BASE_MSR 0xC0000101) |
+| the misc tail | `qiling/os/macos/syscall.cpp` | ✅ 47eb5a2 | sysctl/poll (the KERN_SUCCESS stubs), shared_region_check_np (the raw EINVAL "not ready"), csrctl (returns 1), proc_info (the PIDINFO+REGIONPATHINFO branch writes "/usr/lib/dyld" at buff+248, no return otherwise), terminate_with_payload (the emu stop + KERN_SUCCESS), abort_with_payload (no stop), the nocancel pair (write_nocancel carries the upstream's verbatim `return 0` quirk; open_nocancel delegates to the posix open with the fd-slot semantics), shared_region_check_np/proc_info ride the PROC_* consts |
+| mach_msg + the message-path machinery (MachMsg, the port-manager deal_with_msg) | — | defer | needs the MachMsg struct port + the message dispatch tree; deferred with a note (the kext/message surface rides the kernel-loader slices) |
+| shared_region_map_and_slide_np + sysctlbyname | — | defer | absent from the upstream's x8664 table (ARM64-only entries) — the x8664 port surface mirrors the table verbatim |
 | the kernel_api fncc surface (kernel_api.py, 1404) | — | defer | the mach-port/kernel-func trap dispatch needs the fncc-style hook surface; its own slice after the syscall handlers |
 | the events/policy managers (events/, mach_port, task) | — | defer | the kext/driver machinery + the Mach-O kernel-loader port first |
 | the kext/driver path (load_kext, run's savedrip) | — | defer | blocked on the QlLoaderMachO port |
@@ -708,7 +711,13 @@ number 1 and through the fixup'd 0x2000000+1 (both terminate with the code
 - **the mach-trap 6th-arg ABI**: the x8664 syscall ABI rides (rdi, rsi,
   rdx, r10, r8, r9) — the 4th arg is r10 (the kernel ABI's rcx clobber
   work-around), so the vm_map's mask rides r10d and the flags/protect ride
-  r8d/r9d.
+  r8d/r9d; the 6-arg proc_info keeps (callnum, pid, flavor, arg, buff,
+  buffer_size) in that exact slot order — the flavor is the 3rd arg (rdx),
+  NOT r10.
+- **the upstream's own table gaps**: sysctlbyname (274) and
+  shared_region_map_and_slide_np (438) exist only in the ARM64 table — the
+  x8664 surface mirrors the table verbatim and those handlers stay
+  unregistered for x8664 (the fixtures document the absence).
 
 ## Deferred (tracked, not built)
 
@@ -764,9 +773,10 @@ Status: freebsd ✅ (Phase 5.5), qnx ✅ (Phase 5.6), dos ✅ (Phase 6), uefi �
 (the loader + the service-table + the RT slices; the two multi-call anomalies
 stay DISABLED_ + documented) — **os/macos is in progress** (Phase 7 the
 container parser ✅, Phase 8 the dialect skeleton ✅, the self-trap family ✅,
-the file/syscall-info family ✅, the mach vm/port trap family ✅; the
-remaining ~20 handlers (mach_msg, the bsdthread shapes, the misc tail) next,
-then the kernel_api fncc surface). The dos carry-overs into later slices: the posix
+the file/syscall-info family ✅, the mach vm/port trap family ✅, the
+bsdthread/shims group ✅, the misc tail ✅ — the syscall.py surface is done
+except mach_msg; the shared_region_map_and_slide_np/sysctlbyname entries are
+ARM64-only upstream). The dos carry-overs into later slices: the posix
 `pack_stat_struct` family (unchanged) and the connect_client_info
 full-body-vs-stub upstream oddity (unchanged). The dos deferrals: the
 int10/int16 curses surface is console-detached (the resolution map and the
