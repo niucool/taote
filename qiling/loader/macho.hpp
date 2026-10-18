@@ -106,6 +106,18 @@ struct Symbol {
     std::uint64_t n_value = 0;
 };
 
+// mach-o/reloc.h relocation_info (the 8-byte record): r_address at +0, the
+// packed word at +4 (r_symbolnum 24 / r_pcrel / r_length 2 / r_extern /
+// r_type 4)
+struct Reloc {
+    std::uint32_t address = 0;    // r_address (the target byte offset)
+    std::uint32_t symbolnum = 0;  // r_symbolnum (the symtab index or the sect)
+    bool pcrel = false;
+    std::uint8_t length = 0;      // 2 = the 32-bit field, 3 = the 64-bit field
+    bool is_extern = false;
+    std::uint8_t type = 0;
+};
+
 // the dysymtab_command (macho_loader.py LoadDysymbolTable): the local/extern
 // symbol index pairs over the LC_SYMTAB table plus the two relocation lists
 // (the 8-byte relocation_info records: r_address(4) + the packed word with
@@ -197,6 +209,10 @@ public:
     const Symbol* symbol_at(std::uint32_t index) const {
         return index < symbols_.size() ? &symbols_[index] : nullptr;
     }
+
+    // the relocation records at the file offset (the 8-byte stride); the
+    // caller passes the dysymtab's locreloff/nextrel or extreloff/nextrel
+    std::vector<Reloc> relocations_at(std::uint32_t off, std::uint32_t count) const;
 
 };
 

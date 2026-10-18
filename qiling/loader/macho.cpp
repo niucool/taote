@@ -250,6 +250,27 @@ std::string MachoImage::string_at(std::uint32_t strx) const {
     return std::string(end, nul);
 }
 
+std::vector<Reloc> MachoImage::relocations_at(std::uint32_t off, std::uint32_t count) const {
+    std::vector<Reloc> out;
+    out.reserve(count);
+    for (std::uint32_t i = 0; i < count; ++i) {
+        const std::size_t at = static_cast<std::size_t>(off) + i * 8;
+        if (at + 8 > binary_file_.size()) {
+            break;
+        }
+        Reloc r;
+        r.address = get_u32(binary_file_, at);
+        const std::uint32_t word = get_u32(binary_file_, at + 4);
+        r.symbolnum = word & 0xffffffu;
+        r.pcrel = ((word >> 24) & 1) != 0;
+        r.length = static_cast<std::uint8_t>((word >> 25) & 3);
+        r.is_extern = ((word >> 27) & 1) != 0;
+        r.type = static_cast<std::uint8_t>((word >> 28) & 0xf);
+        out.push_back(r);
+    }
+    return out;
+}
+
 // ---- loader/macho.py QlLoaderMACHO ----
 
 QlLoaderMachO::QlLoaderMachO(Qiling* ql, std::string dyld_path)
@@ -442,7 +463,100 @@ void QlLoaderMachO::load_driver(std::uint64_t stack_addr, const MachoImage& imag
         }
     }
 
-    // (the local + external relocation passes ride the relocation slice)
+    // ---- the relocation passes (macho.py: the locreloc walk + the extreloc
+    // walk) ----
+    //
+    // The local relocations: the kext's self-linked pointers slide by the
+    // loadbase (read the 8 bytes at loadbase+r_address, write back
+    // +loadbase). The section walk the upstream does for the log line is
+    // dropped (the port's simplification — the section membership only fed
+    // the debug print)
+    const auto& kdys = image.dysymtab();
+    for (const auto& rel : image.relocations_at(kdys.locreloff, kdys.nlocrel)) {
+        const auto at = loadbase_ + rel.address;
+        const auto cur = ql_->mem().read_ptr(at, 8);
+        ql_->mem().write_ptr(at, cur + loadbase_);
+    }
+
+    // the external relocations: the kext's imports resolve against the
+    // kernel symbol tables. The length==2 + rtype==2 (X86_64_RELOC_BRANCH)
+    // records patch a rel32 with the STATIC-page jmp stub address (the
+    // 20-byte sub rsp,8 / mov dword [rsp],lo / mov dword [rsp+4],hi / ret
+    // trampoline bridging the 32-bit call to the 64-bit kernel address,
+    // deduped via static_symbols_); the length==3 absolute records patch the
+    // 8-byte cell with the kernel symbol's n_value. The resolution ladder is
+    // the upstream's: the kernel local, then the "_"-prefixed extrn (the
+    // ___MALLOC quirk), then the raw extrn; the misses skip (the "Static
+    // symbol not found" log verbatim)
+    std::uint64_t stub_offset = 0;
+    for (const auto& rel : image.relocations_at(kdys.extreloff, kdys.nextrel)) {
+        const auto* sym = image.symbol_at(rel.symbolnum);
+        if (sym == nullptr) {
+            continue;
+        }
+        const auto symname = image.string_at(sym->n_strx);
+        if (rel.length == 2 && rel.type == 2) {
+            std::optional<std::uint64_t> real_addr;
+            if (kernel_local_symbols_.count(symname) != 0) {
+                real_addr = kernel_local_symbols_.at(symname);
+            } else if (kernel_extrn_symbols_.count("_" + symname) != 0) {
+                real_addr = kernel_extrn_symbols_.at("_" + symname);
+            } else if (kernel_extrn_symbols_.count(symname) != 0) {
+                real_addr = kernel_extrn_symbols_.at(symname);
+            }
+            if (!real_addr.has_value()) {
+                continue;  // "Static symbol %s not found"
+            }
+            import_symbols_[*real_addr] = ImportSymbol{*real_addr, symname};
+            std::uint64_t stub_addr = 0;
+            const auto known = static_symbols_.find(symname);
+            if (known == static_symbols_.end()) {
+                // sub rsp,8 ; mov dword [rsp], lo ; mov dword [rsp+4], hi ; ret
+                const auto lo = static_cast<std::uint32_t>(*real_addr & 0xffffffffu);
+                const auto hi = static_cast<std::uint32_t>((*real_addr >> 32) & 0xffffffffu);
+                std::vector<std::uint8_t> jmpcode = {0x48, 0x83, 0xEC, 0x08, 0xC7, 0x04, 0x24};
+                for (int i = 0; i < 4; ++i) {
+                    jmpcode.push_back(static_cast<std::uint8_t>(lo >> (8 * i)));
+                }
+                jmpcode.push_back(0xC7);
+                jmpcode.push_back(0x44);
+                jmpcode.push_back(0x24);
+                jmpcode.push_back(0x04);
+                for (int i = 0; i < 4; ++i) {
+                    jmpcode.push_back(static_cast<std::uint8_t>(hi >> (8 * i)));
+                }
+                jmpcode.push_back(0xC3);
+                stub_addr = static_addr_ + stub_offset;
+                ql_->mem().write(stub_addr, jmpcode);
+                stub_offset += jmpcode.size();
+                static_symbols_[symname] = stub_addr;
+            } else {
+                stub_addr = known->second;
+            }
+            const std::int32_t rel32 = static_cast<std::int32_t>(
+                stub_addr - (loadbase_ + rel.address + 4));
+            std::vector<std::uint8_t> bytes;
+            for (int i = 0; i < 4; ++i) {
+                bytes.push_back(static_cast<std::uint8_t>(static_cast<std::uint32_t>(rel32) >> (8 * i)));
+            }
+            ql_->mem().write(loadbase_ + rel.address, bytes);
+            continue;
+        }
+        if (!rel.is_extern || rel.length != 3) {
+            continue;
+        }
+        // the absolute 8-byte patch: the kernel symbol's n_value
+        std::optional<std::uint64_t> real_addr;
+        if (kernel_local_symbols_.count(symname) != 0) {
+            real_addr = kernel_local_symbols_.at(symname);
+        } else if (kernel_extrn_symbols_.count(symname) != 0) {
+            real_addr = kernel_extrn_symbols_.at(symname);
+        }
+        if (!real_addr.has_value()) {
+            continue;  // "Symbol %s not found!"
+        }
+        ql_->mem().write_ptr(loadbase_ + rel.address, static_cast<std::int64_t>(*real_addr));
+    }
 
     // the entry pass (the run()'s non-driver shape: the LC_UNIXTHREAD rip or
     // the LC_MAIN offset; the segments loaded at the loadbase — the raw rip
@@ -462,7 +576,7 @@ void QlLoaderMachO::load_driver(std::uint64_t stack_addr, const MachoImage& imag
     // the kext's own symbol details (the upstream's kext_local_symbols /
     // kext_extern_symbols dicts, the dysymtab index ranges over the kext's
     // own symtab)
-    const auto& kdys = image.dysymtab();
+    
     for (std::uint32_t i = 0; i < kdys.nlocalsym; ++i) {
         const auto* sym = image.symbol_at(kdys.ilocalsym + i);
         if (sym == nullptr) {
@@ -496,6 +610,9 @@ void QlLoaderMachO::load_driver(std::uint64_t stack_addr, const MachoImage& imag
         const auto at = loadbase_ + antimain->second;
         kext_stop_ = ql_->mem().read_ptr(at, 8);
     }
+    std::fprintf(stderr, "[ld] binary_entry_=0x%llx loadbase=0x%llx static=0x%llx\n",
+                 static_cast<unsigned long long>(binary_entry_),
+                 static_cast<unsigned long long>(loadbase_), static_cast<unsigned long long>(static_addr_));
 }
 
 }  // namespace macho
