@@ -248,11 +248,13 @@ TEST(TbSemantics, MidTbRestartThenAbsoluteStore) {
 // first pass translates/executes the block from the syscall+2 (the parent's
 // path), then the child restarts at the SAME address with a redirected rax
 // and branches to the store. OBSERVED (the raw-unicorn reproduction): the
-// taken-path store after the cached-TB mid-TB restart does not land — the
-// unicorn re-enters the cached TB in a state that mis-executes the branch.
-// DISABLED_: the behavior is the documented open question (STATUS.md); the
-// fix directions are the fresh-TB starts for the spawned threads or the tb
-// cache flush on the spawn.
+// taken-path store after the cached-TB mid-TB restart does not land.
+// THE FIX DIRECTIONS, MEASURED: the uc_ctl tb flush before the restart was
+// attempted here and does NOT cure the mis-execution (the store still
+// skips). The remaining direction (the fresh-TB spawn starts) needs the
+// child's first emu_start to begin on an address unicorn has never used as
+// a begin, which the clone continuation semantics cannot provide. DISABLED_
+// as the documented open question; see STATUS.md.
 TEST(TbSemantics, DISABLED_MidTbRestartOnCachedTb) {
     auto p = make_probe(true);
     ASSERT_NE(p.uc, nullptr);
@@ -278,7 +280,6 @@ TEST(TbSemantics, DISABLED_MidTbRestartOnCachedTb) {
     const std::uint64_t child_tid = 2001;
     uc_reg_write(p.uc, UC_X86_REG_RAX, &child_tid);
     const uc_err err2 = uc_emu_start(p.uc, kSyscall + 2, kBodyEnd, 0, 4096);
-    std::fprintf(stderr, "[P5] phase2 err=%d pc=%llx\n", err2, (unsigned long long)reg(p.uc, UC_X86_REG_RIP));
     (void)err2;
 
     // the child pass: the SAME begin address (the cached TB), the rax=0
@@ -287,8 +288,9 @@ TEST(TbSemantics, DISABLED_MidTbRestartOnCachedTb) {
     uc_mem_map(p.uc, child_sp - 0x1000, 0x1000, UC_PROT_ALL);
     uc_reg_write(p.uc, UC_X86_REG_RAX, &zero);
     uc_reg_write(p.uc, UC_X86_REG_RSP, &child_sp);
+    // the fix: the tb flush before the child's restart (the P5 direction 2)
+    uc_ctl_flush_tb(p.uc);
     const uc_err err = uc_emu_start(p.uc, kSyscall + 2, kBodyEnd, 0, 4096);
-    std::fprintf(stderr, "[P5] phase3 err=%d pc=%llx\n", err, (unsigned long long)reg(p.uc, UC_X86_REG_RIP));
 
     std::vector<std::uint8_t> got(4, 0);
     uc_mem_read(p.uc, 0x1002000, got.data(), 4);
