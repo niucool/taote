@@ -661,8 +661,11 @@ LIBSYSTEM fixup (0x2000000 <= n < 0x3000000 maps to n - 0x2000000).
 | the bsdthread/shims group | `qiling/os/macos/syscall.cpp` | ✅ 94e47fb | bsdthread_register (the CF clear + the fixed 0x400000df pthread magic), thread_selfid (the seeded thread id 123), thread_fast_set_cthread_self64 (the mdep shim: the tsd base into IA32_GS_BASE_MSR 0xC0000101) |
 | the misc tail | `qiling/os/macos/syscall.cpp` | ✅ 47eb5a2 | sysctl/poll (the KERN_SUCCESS stubs), shared_region_check_np (the raw EINVAL "not ready"), csrctl (returns 1), proc_info (the PIDINFO+REGIONPATHINFO branch writes "/usr/lib/dyld" at buff+248, no return otherwise), terminate_with_payload (the emu stop + KERN_SUCCESS), abort_with_payload (no stop), the nocancel pair (write_nocancel carries the upstream's verbatim `return 0` quirk; open_nocancel delegates to the posix open with the fd-slot semantics), shared_region_check_np/proc_info ride the PROC_* consts |
 | the kernel_api fncc surface (kernel_api.py, 111 handlers) | `qiling/os/macos/kernel_api.hpp/.cpp` + `kernel_api_registry.inc` | ✅ d397443 | the registry/builder mirror the posix kernel_api slice (the fluent `KernelApi(name, params, passthru) = handler` shape); the verbatim surface: the passthru stubs (the empty `return` bodies — the guest's own stub code runs), the real-bodied handlers (suulong/fuulong, read_random/erandom with the 0xdeadbeaf stamp, clock_get_calendar_microtime with the verbatim ms-arithmetic oddity, proc_selfpid 0x1337 / selfppid 0x13371337, msleep/kernel_thread_start the 0 stubs, vfs_context_proc the identity); the dispatch rides `QlOsMacos::hook_kernel_api` (inert until the QlLoaderMachO import symbols land) |
+| the QlLoaderMachO loader slice | `qiling/loader/macho.hpp/.cpp` + `select_loader` | ✅ e9ee146 | the container load (the segment mapping with the __PAGEZERO page + the LC_UNIXTHREAD/LC_MAIN entries), the shellcode branch (the ELF-shape map), the LC_SYMTAB symbol/string tables (the nlist_64 walk) feeding import_symbols; the deviation note: the import symbols ride the file's own LC_SYMTAB — the upstream's loadDriver walks the kernel.development symbol tables + the LC_DYSYMTAB relocations + the trampoline code (that path lands with the kernel-loader slice) |
+| the kernel_api dispatch end-to-end | `qiling/os/macos/macos.cpp` `hook_kernel_api` | ✅ e9ee146 | the stub-address dispatch through the import symbols + the user overrides + the registry + the os.call with the passthru; the fixture: the guest calls the _proc_selfpid stub, the hook fires, 0x1337 lands in rax, the pc past the call, exit(42) |
 | the ev_manager-dependent kernel_api handlers | — | defer | proc_name/proc_find/kauth_getuid/getgid/kauth_cred_setuidgid need the events/policy subsystem (the events/macos.py slice); they stay unregistered until then |
 | the mach_msg + the message-path machinery (MachMsg, the port-manager deal_with_msg) | — | defer | needs the MachMsg struct port + the message dispatch tree; deferred with a note (the kext/message surface rides the kernel-loader slices) |
+| the loadDriver path (the kernel.development parse + the LC_DYSYMTAB relocation walk + the static-symbol trampolines) | — | defer | the full kext flow needs the LC_DYSYMTAB/LC_SYMTAB symbol-classification walk over the kernel binary; the container + the symtab pieces exist |
 | shared_region_map_and_slide_np + sysctlbyname | — | defer | absent from the upstream's x8664 table (ARM64-only entries) — the x8664 port surface mirrors the table verbatim |
 | the kernel_api fncc surface (kernel_api.py, 1404) | — | defer | the mach-port/kernel-func trap dispatch needs the fncc-style hook surface; its own slice after the syscall handlers |
 | the events/policy managers (events/, mach_port, task) | — | defer | the kext/driver machinery + the Mach-O kernel-loader port first |
@@ -729,6 +732,22 @@ number 1 and through the fixup'd 0x2000000+1 (both terminate with the code
 - **the K_BOOL alias gap**: the posix kernel_api header defines K_UINT/
   SIZE_T/POINTER/STRING but not K_BOOL (the upstream macos decorators use
   BOOL) — the macos header pins K_BOOL = PARAM_INT32 locally.
+- **the kernel_api dispatch wiring gotchas, in order**: (1) the posix
+  `hook_kernel_api` was non-virtual — the macos override shadowed it and the
+  inherited enable_kernel_api_hooks lambda dispatched the POSIX body (its
+  QlLoaderELF gate no-oped); the virtual makes the override participate.
+  (2) the macho C symbols carry the leading underscore (`_proc_selfpid`) —
+  the port's registry keys are unprefixed, so the dispatch strips one
+  underscore (the upstream's getattr rides the raw symbol name).
+  (3) the fixture's mov-imm64 for the stub address encoded 0x100000300 (the
+  byte-3/byte-4 slip) — the fetch faulted at the unmapped address BEFORE the
+  hook could fire; the call target must land inside the mapped __TEXT.
+  (4) the rip-relative store inside the image resolves against the image
+  base — an absolute 0x2100 target is NOT reachable from the 0x1000000
+  region; the fixture stores into an in-image cell.
+- **the hook_code full-range registration**: the kernel-api hook now passes
+  explicit begin=0/end=MAX bounds (the default begin=1/end=0 registration
+  did not fire on the arm/qnx path — the pinned gotcha).
 
 ## Deferred (tracked, not built)
 
@@ -783,12 +802,11 @@ first: the marginal cost per dialect shrinks as the POSIX base stabilises).
 Status: freebsd ✅ (Phase 5.5), qnx ✅ (Phase 5.6), dos ✅ (Phase 6), uefi ✅
 (the loader + the service-table + the RT slices; the two multi-call anomalies
 stay DISABLED_ + documented) — **os/macos is in progress** (Phase 7 the
-container parser ✅, Phase 8 the dialect skeleton ✅, the self-trap family ✅,
-the file/syscall-info family ✅, the mach vm/port trap family ✅, the
-bsdthread/shims group ✅, the misc tail ✅, the kernel_api fncc surface ✅ —
-the syscall.py surface is done except mach_msg; the remaining kernel_api
-deferrals: the ev_manager-dependent handlers + the QlLoaderMachO dispatch
-wiring). The dos carry-overs into later slices: the posix
+container parser ✅, Phase 8 the dialect skeleton ✅, the syscall.py surface
+✅ (except mach_msg), the kernel_api fncc surface ✅, the QlLoaderMachO
+container load + the end-to-end kernel_api dispatch ✅; the remaining
+deferrals: the loadDriver kernel-symbol walk, the ev_manager handlers, the
+mach_msg machinery). The dos carry-overs into later slices: the posix
 `pack_stat_struct` family (unchanged) and the connect_client_info
 full-body-vs-stub upstream oddity (unchanged). The dos deferrals: the
 int10/int16 curses surface is console-detached (the resolution map and the
