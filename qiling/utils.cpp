@@ -6,6 +6,7 @@
 #include <fstream>
 #include <limits>
 #include <stdexcept>
+#include <tuple>
 
 #include "qiling/arch/x86.hpp"
 #include "qiling/arch/arm.hpp"
@@ -70,8 +71,12 @@ std::string ascii_casefold(std::string_view s) {
 // int(s, 0) analogue. Grammar: [ws] [sign] (0x hex | 0o oct | 0b bin | dec) [ws],
 // with single '_' separators allowed strictly between digits (PEP 515). Decimal
 // with leading zeros is rejected (int('010', 0) -> ValueError; '0' itself is fine).
-std::int64_t parse_int_base0(std::string_view sv) {
-    auto fail = []() -> std::int64_t {
+// The shared scanner returns the magnitude as unsigned long long; the typed
+// wrappers apply the range checks (int64 for the signed analogue, uint64 for
+// the address-domain sibling).
+namespace {
+std::tuple<unsigned long long, bool, bool> parse_int_base0_impl(std::string_view sv) {
+    auto fail = []() -> std::tuple<unsigned long long, bool, bool> {
         throw std::invalid_argument("invalid literal for int() with base 0");
     };
 
@@ -127,18 +132,31 @@ std::int64_t parse_int_base0(std::string_view sv) {
     const auto conv = std::from_chars(first, last, magnitude, base);
     if (conv.ec == std::errc::result_out_of_range || conv.ptr != last) fail();
 
-    constexpr auto umax = std::numeric_limits<unsigned long long>::max();
-    (void)umax;
+    return {magnitude, negative, true};
+}
+}  // namespace
+
+std::int64_t parse_int_base0(std::string_view sv) {
+    const auto [magnitude, negative, ok] = parse_int_base0_impl(sv);
+
     constexpr unsigned long long pos_max = static_cast<unsigned long long>(std::numeric_limits<std::int64_t>::max());
     constexpr unsigned long long neg_max = pos_max + 1ull;  // |INT64_MIN|
 
     if (negative) {
-        if (magnitude > neg_max) fail();
+        if (magnitude > neg_max) throw std::invalid_argument("invalid literal for int() with base 0");
         if (magnitude == neg_max) return std::numeric_limits<std::int64_t>::min();
         return -static_cast<std::int64_t>(magnitude);
     }
-    if (magnitude > pos_max) fail();
+    if (magnitude > pos_max) throw std::invalid_argument("invalid literal for int() with base 0");
     return static_cast<std::int64_t>(magnitude);
+}
+
+std::uint64_t parse_uint_base0(std::string_view sv) {
+    const auto [magnitude, negative, ok] = parse_int_base0_impl(sv);
+    if (negative) {
+        throw std::invalid_argument("invalid literal for int() with base 0");
+    }
+    return magnitude;
 }
 
 // ---- name -> enum conversion (utils.py; case-insensitive, with the same aliases) ----

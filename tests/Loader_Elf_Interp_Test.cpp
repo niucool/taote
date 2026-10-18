@@ -13,6 +13,7 @@
 #include "qiling/exception.hpp"
 #include "qiling/loader/elf.hpp"
 #include "qiling/os/os.hpp"
+#include "qiling/os/posix/posix.hpp"
 
 using namespace qiling;
 
@@ -116,6 +117,86 @@ void write_file(const std::filesystem::path& path, const std::vector<std::uint8_
 }  // namespace
 
 // ---- the interpreter loading (elf.py load_with_ld's PT_INTERP branch) ----
+
+// ---- the vsyscall page (elf.py load_with_ld's x86-64 tail) ----
+
+TEST(LoaderElfInterp, VsyscallPageCarriesAssembledStubs) {
+    // the x86-64 LINUX loader maps the profile vsyscall_address page and
+    // assembles three syscall stubs (gettimeofday/time/getcpu), 1KiB apart,
+    // int3-padded. Executing through the page is not possible on unicorn
+    // 2.1.4 (the fetch at >= 2^63 canonical addresses raises
+    // UC_ERR_FETCH_UNMAPPED even in the raw binding — verified against the
+    // reference Python binding), so the slice asserts the page contents.
+    ensure_rootfs();
+
+    // the main image: exit_group(42) directly
+    const std::vector<std::uint8_t> main_code = {
+        0x48, 0xC7, 0xC0, 0xE7, 0x00, 0x00, 0x00,                    // mov rax, 231 (exit_group)
+        0x48, 0xC7, 0xC7, 0x2A, 0x00, 0x00, 0x00,                    // mov rdi, 42
+        0x0F, 0x05,                                                  // syscall
+    };
+    const auto main_blob = build_elf64(2 /* ET_EXEC */, main_code, 0x400000);
+    const auto exe_path = ensure_rootfs() / "app.elf";
+    write_file(exe_path, main_blob);
+
+    QilingOptions options;
+    options.argv = {exe_path.string()};
+    options.rootfs = ensure_rootfs().string();
+    options.ostype = QL_OS::LINUX;
+    options.archtype = QL_ARCH::X8664;
+
+    Qiling ql{options};
+
+    constexpr std::uint64_t vsyscall_addr = 0xffffffffff600000ULL;
+    constexpr std::uint64_t entry_size = 1024;
+
+    // each stub: mov rax, <id> (up to 7 bytes); syscall (0f 05); ret (c3);
+    // then int3 padding to the next 1KiB slot
+    const auto check_stub = [&](std::uint64_t offset, std::uint32_t imm) {
+        const auto bytes = ql.mem().read(vsyscall_addr + offset, entry_size);
+        bool syscall_ret = false;
+        bool imm_found = false;
+        for (std::size_t i = 0; i + 2 < 16; ++i) {
+            if (bytes[i] == 0x0F && bytes[i + 1] == 0x05 && bytes[i + 2] == 0xC3) {
+                syscall_ret = true;
+                for (std::size_t j = 0; j + 3 < i; ++j) {
+                    const std::uint32_t v = static_cast<std::uint32_t>(bytes[j]) |
+                                            (static_cast<std::uint32_t>(bytes[j + 1]) << 8) |
+                                            (static_cast<std::uint32_t>(bytes[j + 2]) << 16) |
+                                            (static_cast<std::uint32_t>(bytes[j + 3]) << 24);
+                    if (v == imm) {
+                        imm_found = true;
+                    }
+                }
+                break;
+            }
+        }
+        EXPECT_TRUE(syscall_ret) << "no syscall/ret at stub " << offset;
+        EXPECT_TRUE(imm_found) << "imm " << imm << " not found at stub " << offset;
+        // the tail is int3 padding
+        EXPECT_EQ(bytes[entry_size - 1], 0xCC);
+        EXPECT_EQ(bytes[entry_size - 2], 0xCC);
+    };
+
+    check_stub(0, 96);       // SYSCALL_NR.gettimeofday
+    check_stub(1024, 201);   // SYSCALL_NR.time
+    check_stub(2048, 309);   // SYSCALL_NR.getcpu
+
+    // the page registers in the mapinfo under the elf.py label
+    bool labeled = false;
+    for (const auto& [lbound, ubound, perms, label, container] : ql.mem().get_mapinfo()) {
+        (void)perms;
+        (void)container;
+        if (label == "[vsyscall]" && lbound == vsyscall_addr) {
+            labeled = true;
+        }
+    }
+    EXPECT_TRUE(labeled);
+
+    // the fixture itself still exits cleanly
+    ql.run();
+    EXPECT_EQ(ql.os().exit_code(), 42);
+}
 
 TEST(LoaderElfInterp, InterpreterLoadsAndReceivesEntry) {
     // the main image maps at its ET_EXEC base; the "interpreter" (a stub

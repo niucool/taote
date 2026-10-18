@@ -59,6 +59,9 @@ public:
     // A missing option raises QlErrorBase (NoOptionError analogue); a malformed
     // integer raises std::invalid_argument (ValueError analogue).
     std::int64_t get_int(std::string_view section, std::string_view key) const;
+    // the unsigned sibling (address-domain values above 2^63, e.g. the
+    // vsyscall page); parse_uint_base0 backs it
+    std::uint64_t get_uint(std::string_view section, std::string_view key) const;
 
 private:
     // section name (verbatim) -> option map (lowercased key -> value)

@@ -3,11 +3,13 @@
 #include <LIEF/LIEF.hpp>
 
 #include <algorithm>
+#include <cstdio>
 #include <fstream>
 
 #include "qiling/core.hpp"
 #include "qiling/exception.hpp"
 #include "qiling/os/memory.hpp"
+#include "qiling/arch/utils.hpp"
 
 #include "qiling/os/posix/posix.hpp"
 
@@ -397,12 +399,50 @@ void QlLoaderELF::run() {
 
     auxv_address_ = new_stack + bytes_before_auxv;
     stack_address = new_stack;  // QlLoader::stack_address
+
+    // elf.py run tail: sp lands on the auxv stack base (post-load_with_ld);
+    // "No idea why" — the FREEBSD rdi quirk, verbatim
+    ql_->arch().regs().set_arch_sp(stack_address);
+    if (ql_->os().type() == QL_OS::FREEBSD) {
+        ql_->arch().regs().write("rdi", stack_address + 0x40);
+    }
+
     init_sp = ql_->arch().regs().arch_sp();
 
     ql_->os().set_entry_point(entry_point_final);
     entry_point = entry_point_final;
 
-    // the interpreter + vsyscall setup land with their slices
+    // map the vsyscall section for some specific needs (elf.py, verbatim):
+    // x86-64 LINUX only; three 1KiB-apart syscall stubs on a page that is
+    // initialized with int3 padding
+    if (ql_->arch().type() == QL_ARCH::X8664 && ql_->os().type() == QL_OS::LINUX) {
+        const auto vsyscall_addr = profile.get_uint(ossection, "vsyscall_address");
+
+        // SYSCALL_NR.gettimeofday, SYSCALL_NR.time, SYSCALL_NR.getcpu
+        // (os/linux/syscall_nums.py, x86-64 numbers)
+        constexpr std::uint64_t vsyscall_ids[] = {96, 201, 309};
+
+        // each syscall should be 1KiB away
+        constexpr std::uint64_t entry_size = 1024;
+        const auto vsyscall_count = sizeof(vsyscall_ids) / sizeof(vsyscall_ids[0]);
+        const auto vsyscall_size = ql_->mem().align_up(static_cast<std::uint64_t>(vsyscall_count) * entry_size);
+
+        if (ql_->mem().is_available(vsyscall_addr, vsyscall_size)) {
+            ql_->mem().map(vsyscall_addr, vsyscall_size, UC_PROT_ALL, "[vsyscall]");
+
+            auto& assembler = ql_->arch().assembler();
+            for (std::size_t i = 0; i < vsyscall_count; ++i) {
+                char asm_buf[64];
+                std::snprintf(asm_buf, sizeof(asm_buf), "mov rax, %#llx; syscall; ret",
+                              static_cast<unsigned long long>(vsyscall_ids[i]));
+                auto entry = assembler.assemble(asm_buf);
+                // initialize with int3 then insert the syscall entry
+                entry.resize(entry_size, 0xCC);
+                ql_->mem().write(vsyscall_addr + i * entry_size, entry);
+            }
+        }
+    }
+
     mmap_address_ = static_cast<std::uint64_t>(profile.get_int(ossection, "mmap_address"));
 
     skip_exit_check = (elf_entry_ != entry_point_final);

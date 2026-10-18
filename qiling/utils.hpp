@@ -91,6 +91,12 @@ std::string ascii_casefold(std::string_view s);
 // Throws std::invalid_argument on malformed or out-of-range input.
 std::int64_t parse_int_base0(std::string_view s);
 
+// The unsigned sibling for the address-domain profile values above 2^63 (the
+// vsyscall page): the same grammar, positive magnitudes up to 2^64-1; a sign
+// raises std::invalid_argument. profile.py's int is unbounded; C++ splits the
+// signed/unsigned domains -- the documented deviation.
+std::uint64_t parse_uint_base0(std::string_view s);
+
 // ---- name -> enum conversion (utils.py; case-insensitive, with the same aliases) ----
 
 // utils.os_convert; alias: darwin -> macos

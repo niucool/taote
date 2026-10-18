@@ -135,4 +135,12 @@ std::int64_t IniConfig::get_int(std::string_view section, std::string_view key) 
     return parse_int_base0(*value);
 }
 
+std::uint64_t IniConfig::get_uint(std::string_view section, std::string_view key) const {
+    const auto value = get(section, key);
+    if (!value.has_value()) {
+        throw QlErrorBase("No option '" + ascii_casefold(key) + "' in section: '" + std::string(section) + "'");
+    }
+    return parse_uint_base0(*value);
+}
+
 }  // namespace qiling

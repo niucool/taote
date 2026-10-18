@@ -95,3 +95,17 @@ TEST(UtilInt, Base0Parsing) {
     EXPECT_THROW(static_cast<void>(qiling::parse_int_base0("9223372036854775808")), std::invalid_argument);  // INT64_MAX + 1
     EXPECT_EQ(qiling::parse_int_base0("-9223372036854775808"), INT64_MIN);
 }
+
+TEST(UtilInt, Base0UnsignedParsing) {
+    // the address-domain sibling: values above the int64 range (the vsyscall
+    // page lives at 0xffffffffff600000)
+    EXPECT_EQ(qiling::parse_uint_base0("0xffffffffff600000"), 0xffffffffff600000ULL);
+    EXPECT_EQ(qiling::parse_uint_base0("0"), 0ULL);
+    EXPECT_EQ(qiling::parse_uint_base0("42"), 42ULL);
+    EXPECT_EQ(qiling::parse_uint_base0("0x5_0"), 80ULL);
+    EXPECT_EQ(qiling::parse_uint_base0("18446744073709551615"), 0xFFFFFFFFFFFFFFFFULL);  // UINT64_MAX
+    // the unsigned analogue rejects signs and over-range magnitudes
+    EXPECT_THROW(static_cast<void>(qiling::parse_uint_base0("-1")), std::invalid_argument);
+    EXPECT_THROW(static_cast<void>(qiling::parse_uint_base0("0x1ffffffffffffffff")), std::invalid_argument);
+    EXPECT_THROW(static_cast<void>(qiling::parse_uint_base0("zz")), std::invalid_argument);
+}
