@@ -4,12 +4,22 @@
 #include <stdexcept>
 
 #include "qiling/exception.hpp"
+#include <cstring>
 
 namespace qiling {
 namespace os {
 namespace posix {
 
 namespace {
+
+// the glibc makedev splits (the stat.py major/minor helpers verbatim)
+std::uint64_t statx_major(std::uint64_t dev) {
+    return ((dev >> 8) & 0xfff) | ((dev >> 32) & ~0xfffull);
+}
+
+std::uint64_t statx_minor(std::uint64_t dev) {
+    return (dev & 0xff) | ((dev >> 12) & ~0xffull);
+}
 
 // the host snapshot cell as a u64 (the int(info[field]) cast — the value
 // truncates to the cell width at pack time, the two's-complement bytes are
@@ -42,6 +52,16 @@ std::uint64_t source_value(const QlFileStat& info, StatSrc src) {
             return static_cast<std::uint64_t>(info.blksize);
         case StatSrc::Blocks:
             return static_cast<std::uint64_t>(info.blocks);
+        case StatSrc::StatxMask:
+            return 0x07ff;  // STATX_BASIC_STATS (the hardcoded mask verbatim)
+        case StatSrc::RdevMajor:
+            return statx_major(info.rdev);
+        case StatSrc::RdevMinor:
+            return statx_minor(info.rdev);
+        case StatSrc::DevMajor:
+            return statx_major(info.dev);
+        case StatSrc::DevMinor:
+            return statx_minor(info.dev);
         case StatSrc::Zero:
         default:
             return 0;
@@ -165,6 +185,62 @@ const StatLayout& get_stat64_layout(QL_OS os, QL_ARCH arch) {
     return linux_x86_stat64();
 }
 
+// stat.py Statx64 (_pack_=4): the 256-byte statx image — the hardcoded
+// STATX_BASIC_STATS mask, the unset attributes/btime/pads as the zero
+// cells, and the timestamps riding the float32 bit-pattern conversion
+const StatLayout& statx64_layout() {
+    static const StatLayout layout{4, {
+        {StatSrc::StatxMask, 4},                   // stx_mask = 0x7ff
+        {StatSrc::Blksize, 4},                     // stx_blksize
+        {StatSrc::Zero, 8},                        // stx_attributes (unset)
+        {StatSrc::Nlink, 4}, {StatSrc::Uid, 4}, {StatSrc::Gid, 4},
+        {StatSrc::Mode, 2}, {StatSrc::Zero, 2},    // __statx_pad1
+        {StatSrc::Ino, 8}, {StatSrc::Size, 8}, {StatSrc::Blocks, 8},
+        {StatSrc::Zero, 8},                        // stx_attributes_mask
+        {StatSrc::Atime, 8, true}, {StatSrc::Zero, 8},   // stx_atime + the nsec
+        {StatSrc::Zero, 8}, {StatSrc::Zero, 8},    // stx_btime (unset)
+        {StatSrc::Ctime, 8, true}, {StatSrc::Zero, 8},   // stx_ctime + the nsec
+        {StatSrc::Mtime, 8, true}, {StatSrc::Zero, 8},   // stx_mtime + the nsec
+        {StatSrc::RdevMajor, 4}, {StatSrc::RdevMinor, 4},
+        {StatSrc::DevMajor, 4}, {StatSrc::DevMinor, 4},
+        {StatSrc::Zero, 8}, {StatSrc::Zero, 8}, {StatSrc::Zero, 8}, {StatSrc::Zero, 8},
+        {StatSrc::Zero, 8}, {StatSrc::Zero, 8}, {StatSrc::Zero, 8},
+        {StatSrc::Zero, 8}, {StatSrc::Zero, 8}, {StatSrc::Zero, 8},
+        {StatSrc::Zero, 8}, {StatSrc::Zero, 8}, {StatSrc::Zero, 8},
+        {StatSrc::Zero, 8},                        // __statx_pad2 (u64 * 14)
+    }};
+    return layout;
+}
+
+// stat.py Statx32 (_pack_=8): the 32-bit-arch image — the timestamps ride
+// the 12-byte StatxTimestamp32 cells
+const StatLayout& statx32_layout() {
+    static const StatLayout layout{8, {
+        {StatSrc::StatxMask, 4}, {StatSrc::Blksize, 4}, {StatSrc::Zero, 4},
+        {StatSrc::Nlink, 4}, {StatSrc::Uid, 4}, {StatSrc::Gid, 4},
+        {StatSrc::Mode, 2}, {StatSrc::Zero, 2},
+        {StatSrc::Ino, 4}, {StatSrc::Size, 4}, {StatSrc::Blocks, 4},
+        {StatSrc::Zero, 4},
+        {StatSrc::Atime, 4, true}, {StatSrc::Zero, 8},   // atime: sec + nsec + pad
+        {StatSrc::Zero, 12},                             // btime (unset)
+        {StatSrc::Ctime, 4, true}, {StatSrc::Zero, 8},
+        {StatSrc::Mtime, 4, true}, {StatSrc::Zero, 8},
+        {StatSrc::RdevMajor, 4}, {StatSrc::RdevMinor, 4},
+        {StatSrc::DevMajor, 4}, {StatSrc::DevMinor, 4},
+        {StatSrc::Zero, 4}, {StatSrc::Zero, 4}, {StatSrc::Zero, 4}, {StatSrc::Zero, 4},
+        {StatSrc::Zero, 4}, {StatSrc::Zero, 4}, {StatSrc::Zero, 4}, {StatSrc::Zero, 4},
+        {StatSrc::Zero, 4}, {StatSrc::Zero, 4}, {StatSrc::Zero, 4}, {StatSrc::Zero, 4},
+        {StatSrc::Zero, 4}, {StatSrc::Zero, 4},           // __statx_pad2 (u32 * 14)
+    }};
+    return layout;
+}
+
+// stat.py ql_syscall_statx's inline choice: the arch bitness picks the image
+// (the os never enters the decision)
+const StatLayout& get_statx_layout(int bits) {
+    return bits == 32 ? statx32_layout() : statx64_layout();
+}
+
 const StatLayout& get_stat_layout(QL_OS os, QL_ARCH arch) {
     // stat.py get_stat_struct: the verbatim ladder — QNX first (the only
     // dialect with a live consumer so far), then the linux x86 pair, the
@@ -213,9 +289,20 @@ std::vector<std::uint8_t> pack_stat_struct(const QlFileStat& info, const StatLay
             out.push_back(0);
             ++offset;
         }
-        const auto bits = cell.width * 8;
-        const auto mask = bits >= 64 ? ~0ull : ((1ull << bits) - 1);
-        put(source_value(info, cell.src) & mask, cell.width);
+        if (cell.as_statx_time) {
+            // stat.py statx_convert_timestamp: struct.pack('f', x) then
+            // unpack('i') — the IEEE-754 float32 BIT PATTERN of the value
+            // (the verbatim quirk); the int32 view sign-extends into the
+            // wider tv_sec cells (the c_int64 assignment semantics)
+            const float f = static_cast<float>(static_cast<double>(source_value(info, cell.src)));
+            std::int32_t bits = 0;
+            std::memcpy(&bits, &f, 4);
+            put(static_cast<std::uint64_t>(static_cast<std::int64_t>(bits)), cell.width);
+        } else {
+            const auto bits = cell.width * 8;
+            const auto mask = bits >= 64 ? ~0ull : ((1ull << bits) - 1);
+            put(source_value(info, cell.src) & mask, cell.width);
+        }
         offset += cell.width;
     }
     while (offset % max_align != 0) {

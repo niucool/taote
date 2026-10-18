@@ -20,16 +20,22 @@ namespace posix {
 
 // the source cell in the host stat snapshot (filestruct.hpp QlFileStat) —
 // Zero is the ctypes zero-cell for the fields the snapshot never carries
-// (the *_hi cells, the ns cells, the __unused paddings)
+// (the *_hi cells, the ns cells, the __unused paddings); StatxMask is the
+// hardcoded STATX_BASIC_STATS mask; the *Major/*Minor cells apply the
+// glibc makedev splits
 enum class StatSrc {
     Dev, Ino, Mode, Nlink, Uid, Gid, Rdev, Size,
     Atime, Mtime, Ctime, Blksize, Blocks,
+    StatxMask, RdevMajor, RdevMinor, DevMajor, DevMinor,
     Zero,
 };
 
 struct StatCell {
     StatSrc src;
     std::uint32_t width;  // the c_uint16/c_uint32/c_uint64 cell width
+    bool as_statx_time = false;  // the statx timestamp cells (the float32
+                                 // bit-pattern conversion — stat.py
+                                 // statx_convert_timestamp verbatim)
 };
 
 struct StatLayout {
@@ -46,6 +52,12 @@ const StatLayout& get_stat_layout(QL_OS os, QL_ARCH arch);
 // branch — the 64-bit linux falls through to the LinuxX86Stat64 table (the
 // upstream warns; the warning rides the caller with the Qiling logger)
 const StatLayout& get_stat64_layout(QL_OS os, QL_ARCH arch);
+
+// stat.py ql_syscall_statx: the statx buffer layout — the verbatim choice
+// rides the arch bitness (the 64-bit hosts take the Statx64 image, the
+// 32-bit the Statx32); the mask is the hardcoded STATX_BASIC_STATS and the
+// timestamps ride the float32 bit-pattern conversion
+const StatLayout& get_statx_layout(int bits);
 
 // stat.py __common_pack_stat_struct + pack_stat_struct: the host snapshot
 // stamped over the layout, the alignment padding per the ctypes _pack_ rule

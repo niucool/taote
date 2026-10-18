@@ -299,6 +299,35 @@ std::optional<std::int64_t> syscall_fstatat64(Qiling& ql, const std::vector<std:
     return fstatat_family(ql, params[0], params[1], params[2], params[3], /*pack64=*/true);
 }
 
+// stat.py ql_syscall_statx: the (dirfd, path, flags, mask, buf) ABI — the
+// transform rides transform_path, the host stat follows (os.stat), the
+// image rides the Statx tables with the float32-bit timestamps and the
+// hardcoded STATX_BASIC_STATS mask; the catch-all Exception branch answers
+// -1 verbatim (not -errno)
+std::optional<std::int64_t> syscall_statx(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    try {
+        const auto [host_dirfd, host_path] = transform_path(ql, params[0], params[1], params[3]);
+
+        QlFileStat info{};
+        int host_errno = 0;
+        if (!host_statat(host_path, host_dirfd, /*follow_symlinks=*/true, info, &host_errno)) {
+            // the OSError rides the catch-all below (the verbatim -1, NOT
+            // -errno — the statx try wraps the Stat, unlike newfstatat's
+            // -errno branch)
+            throw QlErrorBase("statx: the host stat failed");
+        }
+
+        // the ts cells ride the float32 bit-pattern conversion (the verbatim
+        // struct.pack('f', x) / unpack('i') round trip)
+        const auto data = pack_stat_struct(info, get_statx_layout(ql.arch().bits()));
+        ql.mem().write(params[4], data);
+        return 0;
+    } catch (const std::exception&) {
+        // stat.py: "except Exception as e: regreturn = -1"
+        return -1;
+    }
+}
+
 std::optional<std::int64_t> syscall_uname(Qiling& ql, const std::vector<std::uint64_t>& params) {
     // unistd.py ql_syscall_uname: a fixed utsname buffer
     const auto buf = params[0];
@@ -937,6 +966,8 @@ void register_builtin_syscalls() {
     // fstatat64 rides the x86/arm tables)
     registry.register_syscall({"newfstatat", {PARAM_INTN, PARAM_PTRX, PARAM_PTRX, PARAM_INTN}, syscall_newfstatat});
     registry.register_syscall({"fstatat64", {PARAM_INTN, PARAM_PTRX, PARAM_PTRX, PARAM_INTN}, syscall_fstatat64});
+    // stat.py ql_syscall_statx — the (dirfd, path, flags, mask, buf) ABI
+    registry.register_syscall({"statx", {PARAM_INTN, PARAM_PTRX, PARAM_INTN, PARAM_INTN, PARAM_PTRX}, syscall_statx});
     registry.register_syscall({"write", {PARAM_INTN, PARAM_PTRX, PARAM_INTN}, syscall_write});
     registry.register_syscall({"uname", {PARAM_PTRX}, syscall_uname});
 

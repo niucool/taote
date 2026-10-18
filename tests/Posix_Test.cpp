@@ -333,6 +333,65 @@ TEST(PosixFileDes, NewfstatatRidesTheTransformLadder) {
     EXPECT_EQ(ql.mem().read_ptr(0x1002218, 8), 0xFFFFFFFFFFFFFFFEull);
 }
 
+// the stat.py ql_syscall_statx flow: the absolute path via the transform,
+// the 256-byte Statx64 image (the hardcoded STATX_BASIC_STATS 0x7ff mask,
+// the float32-bit timestamps, the zero btime/pads), the catch-all -1 on the
+// missing path (the verbatim Exception branch — NOT -errno)
+TEST(PosixFileDes, StatxPacksTheBasicStatsImage) {
+    const std::string payload = "hello fd";
+    const std::vector<std::uint8_t> code = {
+        // statx(AT_FDCWD, "/tmpfile", 0, 0, 0x1002500)
+        0x48, 0xC7, 0xC0, 0x4C, 0x01, 0x00, 0x00,  // mov rax, 0x194 (statx = 332)
+        0x48, 0xC7, 0xC7, 0x9C, 0xFF, 0xFF, 0xFF,  // mov rdi, -100 (AT_FDCWD)
+        0x48, 0xC7, 0xC6, 0x00, 0x20, 0x00, 0x01,  // mov rsi, 0x1002000
+        0x48, 0xC7, 0xC2, 0x00, 0x00, 0x00, 0x00,  // mov rdx, 0 (flags)
+        0x41, 0xBA, 0x00, 0x00, 0x00, 0x00,         // mov r10d, 0 (mask)
+        0x49, 0xC7, 0xC0, 0x00, 0x25, 0x00, 0x01,  // mov r8, 0x1002500 (buf)
+        0x0F, 0x05,                                 // syscall
+        0x48, 0x89, 0x04, 0x25, 0x08, 0x22, 0x00, 0x01,  // mov [0x1002208], rax
+        // statx(AT_FDCWD, "/missing", 0, 0, 0x1002700) — the catch-all -1
+        0x48, 0xC7, 0xC0, 0x4C, 0x01, 0x00, 0x00,  // mov rax, 0x194
+        0x48, 0xC7, 0xC7, 0x9C, 0xFF, 0xFF, 0xFF,  // mov rdi, -100
+        0x48, 0xC7, 0xC6, 0x90, 0x20, 0x00, 0x01,  // mov rsi, 0x1002090 ("/missing")
+        0x48, 0xC7, 0xC2, 0x00, 0x00, 0x00, 0x00,  // mov rdx, 0
+        0x41, 0xBA, 0x00, 0x00, 0x00, 0x00,         // mov r10d, 0
+        0x49, 0xC7, 0xC0, 0x00, 0x27, 0x00, 0x01,  // mov r8, 0x1002700
+        0x0F, 0x05,                                 // syscall
+        0x48, 0x89, 0x04, 0x25, 0x10, 0x22, 0x00, 0x01,  // mov [0x1002210], rax
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00,  // mov rax, 60 (exit)
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00,  // mov rdi, 0
+        0x0F, 0x05,                                 // syscall
+    };
+
+    QilingOptions options = posix_options(code);
+    Qiling ql(options);
+
+    ql.mem().write(0x1002000, std::vector<std::uint8_t>{'/', 't', 'm', 'p', 'f', 'i', 'l', 'e', 0});
+    ql.mem().write(0x1002090, std::vector<std::uint8_t>{'/', 'm', 'i', 's', 's', 'i', 'n', 'g', 0});
+    {
+        std::ofstream f(ensure_rootfs() / "tmpfile", std::ios::binary);
+        f << payload;
+    }
+
+    ql.run();
+
+    EXPECT_EQ(ql.os().exit_code(), 0);
+    // the statx returned 0: the 256-byte Statx64 image with the verbatim
+    // STATX_BASIC_STATS mask, the payload size, the mode bits, the zero
+    // attributes/btime/pads
+    EXPECT_EQ(ql.mem().read_ptr(0x1002208, 8), 0u);
+    EXPECT_EQ(ql.mem().read_ptr(0x1002500, 4), 0x7ffu);
+    EXPECT_EQ(ql.mem().read_ptr(0x1002500 + 40, 8), payload.size());
+    EXPECT_EQ((ql.mem().read_ptr(0x1002500 + 28, 4) & 0xF000u), 0x8000u);
+    EXPECT_EQ(ql.mem().read_ptr(0x1002500 + 8, 8), 0u);        // stx_attributes
+    EXPECT_EQ(ql.mem().read_ptr(0x1002500 + 80, 8), 0u);       // stx_btime (unset)
+    EXPECT_EQ(ql.mem().read_ptr(0x1002500 + 144 + 8, 8), 0u);  // the pad2 window
+    EXPECT_NE(ql.mem().read_ptr(0x1002500 + 64, 8), 0u);       // the atime tv_sec (the float32 bits)
+    // the missing path: the catch-all -1 (the verbatim Exception branch —
+    // NOT -errno)
+    EXPECT_EQ(ql.mem().read_ptr(0x1002210, 8), 0xFFFFFFFFFFFFFFFFull);
+}
+
 // the procfs slice (os/linux/procfs.py): the /proc/self pseudo files resolve
 // through the fd flow — open("/proc/self/cmdline") reads the argv bytes; the
 // shellcode run carries the empty placeholder argv, so the read yields the
