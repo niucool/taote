@@ -1479,3 +1479,182 @@ TEST(TbSemantics, DISABLED_HighCanonicalAddressFetchProbe) {
 
     uc_close(uc);
 }
+
+// ---- the kext stub-bridge probes (the driver-path INSN-hook blocker) ----
+//
+// The macos kext fixture (MacosOs.KextDriverRelocationsBridgeCalls) dies at
+// the tail: after the guest bridges through the loader's STATIC-page
+// construct stub (the upstream-verbatim `sub rsp,8 / mov dword [rsp],lo /
+// mov dword [rsp+4],hi / ret`), the syscall at the blob's tail executes
+// WITHOUT the UC_HOOK_INSN firing (the code hooks trace every instruction,
+// rcx=0 rules out a native syscall) and the run dies UC_ERR_WRITE_UNMAPPED.
+// The same INSN hook fires on the shellcode path and on the direct
+// `call rax` driver path. These raw-uc probes bisect the trigger:
+//
+//   DirectCall   the call rel32 goes straight to the body (no stub page)
+//   ConstructStub  the exact failing shape (the construct stub on its own
+//                  mapped page, the stack writes included)
+//   JmpStub      the same two-page hop but the stub is movabs+jmp (no
+//                stack writes) — isolating the sub rsp,8 stack game
+//
+// Each probe: the blob `call rel32 / mov edi,42 / mov eax,1 / syscall` with
+// the syscall at blob+0xf; the INSN hook records the rip and stops.
+
+namespace {
+
+constexpr std::uint64_t kBlobBase = 0x300000;
+constexpr std::uint64_t kStubBase = 0x301000;
+constexpr std::uint64_t kBodyBase = 0x302000;
+constexpr std::uint64_t kStackTop = 0x401000;  // the [0x400000, 0x401000) stack
+constexpr std::uint64_t kBridgeSyscall = kBlobBase + 0xf;
+
+struct BridgeProbe {
+    uc_engine* uc = nullptr;
+    uc_hook insn_hook = 0;
+    std::vector<std::uint64_t> fired;
+    bool with_code_hook = false;
+    uc_hook code_hook = 0;
+
+    ~BridgeProbe() {
+        if (uc) {
+            uc_close(uc);
+        }
+    }
+};
+
+void bridge_insn_hook(uc_engine* uc, void* user_data) {
+    auto* self = static_cast<BridgeProbe*>(user_data);
+    std::uint64_t pc = 0;
+    uc_reg_read(uc, UC_X86_REG_RIP, &pc);
+    self->fired.push_back(pc);
+    uc_emu_stop(uc);
+}
+
+void bridge_code_hook(uc_engine*, std::uint64_t, std::uint32_t, void*) {
+}
+
+// the layout builder: maps the three pages + the stack, writes the code,
+// registers the INSN hook (and optionally a UC_HOOK_CODE like the port's
+// facade stack). `stub` carries the stub bytes (empty = the call disp32
+// aims straight at the body).
+BridgeProbe make_bridge(const std::vector<std::uint8_t>& blob,
+                        const std::vector<std::uint8_t>& stub,
+                        bool with_code_hook) {
+    BridgeProbe p;
+    if (uc_open(UC_ARCH_X86, UC_MODE_64, &p.uc) != UC_ERR_OK) {
+        p.uc = nullptr;
+        return p;
+    }
+    p.with_code_hook = with_code_hook;
+    uc_mem_map(p.uc, kBlobBase, 0x1000, UC_PROT_ALL);
+    uc_mem_map(p.uc, kStubBase, 0x1000, UC_PROT_ALL);
+    uc_mem_map(p.uc, kBodyBase, 0x1000, UC_PROT_ALL);
+    uc_mem_map(p.uc, kStackTop - 0x1000, 0x1000, UC_PROT_ALL);
+    uc_mem_write(p.uc, kBlobBase, blob.data(), blob.size());
+    if (!stub.empty()) {
+        uc_mem_write(p.uc, kStubBase, stub.data(), stub.size());
+    }
+    // the body: mov eax, 0x77 ; ret
+    const std::vector<std::uint8_t> body = {0xB8, 0x77, 0x00, 0x00, 0x00, 0xC3};
+    uc_mem_write(p.uc, kBodyBase, body.data(), body.size());
+    std::uint64_t sp = kStackTop;
+    uc_reg_write(p.uc, UC_X86_REG_RSP, &sp);
+
+    uc_hook_add(p.uc, &p.insn_hook, UC_HOOK_INSN,
+                reinterpret_cast<void*>(bridge_insn_hook), &p, 1, 0, UC_X86_INS_SYSCALL);
+    if (with_code_hook) {
+        uc_hook_add(p.uc, &p.code_hook, UC_HOOK_CODE,
+                    reinterpret_cast<void*>(bridge_code_hook), &p, 1, 0);
+    }
+    return p;
+}
+
+}  // namespace
+
+// Probe A: the direct call rel32 to the body (no stub page) — the baseline.
+TEST(TbSemantics, StubBridgeDirectCallFiresInsnHook) {
+    // call rel32 (the body at 0x302000: rel32 = 0x302000 - (0x300000 + 5))
+    std::vector<std::uint8_t> blob = {0xE8, 0xFB, 0x1F, 0x00, 0x00,
+                                      0xBF, 0x2A, 0x00, 0x00, 0x00,  // mov edi, 42
+                                      0xB8, 0x01, 0x00, 0x00, 0x00,  // mov eax, 1
+                                      0x0F, 0x05};                   // syscall
+    blob.push_back(0x90);
+    BridgeProbe p = make_bridge(blob, {}, false);
+    ASSERT_NE(p.uc, nullptr);
+
+    const uc_err err = uc_emu_start(p.uc, kBlobBase, 0, 100000, 0);
+    EXPECT_EQ(err, UC_ERR_OK) << "uc_strerror: " << uc_strerror(err);
+    ASSERT_EQ(p.fired.size(), 1u);
+    EXPECT_EQ(p.fired[0], kBridgeSyscall);
+}
+
+// Probe B: the EXACT failing kext shape — the call rel32 bridges through the
+// STATIC-page construct stub (sub rsp,8 / mov dword [rsp],lo / mov dword
+// [rsp+4],hi / ret, the upstream macho.py:249 verbatim bytes) on its own
+// mapped page, then the body, then back into the blob for the syscall.
+TEST(TbSemantics, StubBridgeConstructStubFiresInsnHook) {
+    // call rel32 (the stub at 0x301000: rel32 = 0x301000 - (0x300000 + 5))
+    std::vector<std::uint8_t> blob = {0xE8, 0xFB, 0x0F, 0x00, 0x00,
+                                      0xBF, 0x2A, 0x00, 0x00, 0x00,  // mov edi, 42
+                                      0xB8, 0x01, 0x00, 0x00, 0x00,  // mov eax, 1
+                                      0x0F, 0x05};                   // syscall
+    blob.push_back(0x90);
+    // the upstream construct stub: sub rsp,8 / mov dword [rsp],lo / mov
+    // dword [rsp+4],hi / ret — the body 0x302000 rides lo=0x00302000, hi=0
+    const std::vector<std::uint8_t> stub = {
+        0x48, 0x83, 0xEC, 0x08,
+        0xC7, 0x04, 0x24, 0x00, 0x20, 0x30, 0x00,
+        0xC7, 0x44, 0x24, 0x04, 0x00, 0x00, 0x00, 0x00,
+        0xC3};
+    BridgeProbe p = make_bridge(blob, stub, false);
+    ASSERT_NE(p.uc, nullptr);
+
+    const uc_err err = uc_emu_start(p.uc, kBlobBase, 0, 100000, 0);
+    EXPECT_EQ(err, UC_ERR_OK) << "uc_strerror: " << uc_strerror(err);
+    ASSERT_EQ(p.fired.size(), 1u);
+    EXPECT_EQ(p.fired[0], kBridgeSyscall);
+}
+
+// Probe B2: the same shape with a UC_HOOK_CODE registered AFTER the INSN
+// hook (the port registers the kernel-api code hook through the facade after
+// install_syscall_hooks) — bisecting the code-hook interference.
+TEST(TbSemantics, StubBridgeConstructStubWithLateCodeHookFiresInsnHook) {
+    std::vector<std::uint8_t> blob = {0xE8, 0xFB, 0x0F, 0x00, 0x00,
+                                      0xBF, 0x2A, 0x00, 0x00, 0x00,
+                                      0xB8, 0x01, 0x00, 0x00, 0x00,
+                                      0x0F, 0x05};
+    blob.push_back(0x90);
+    const std::vector<std::uint8_t> stub = {
+        0x48, 0x83, 0xEC, 0x08,
+        0xC7, 0x04, 0x24, 0x00, 0x20, 0x30, 0x00,
+        0xC7, 0x44, 0x24, 0x04, 0x00, 0x00, 0x00, 0x00,
+        0xC3};
+    BridgeProbe p = make_bridge(blob, stub, true);
+    ASSERT_NE(p.uc, nullptr);
+
+    const uc_err err = uc_emu_start(p.uc, kBlobBase, 0, 100000, 0);
+    EXPECT_EQ(err, UC_ERR_OK) << "uc_strerror: " << uc_strerror(err);
+    ASSERT_EQ(p.fired.size(), 1u);
+    EXPECT_EQ(p.fired[0], kBridgeSyscall);
+}
+
+// Probe C: the same two-page hop but the stub is movabs+jmp (no stack
+// writes) — isolating the sub rsp,8 stack game as the INSN-hook trigger.
+TEST(TbSemantics, StubBridgeJmpStubFiresInsnHook) {
+    std::vector<std::uint8_t> blob = {0xE8, 0xFB, 0x0F, 0x00, 0x00,
+                                      0xBF, 0x2A, 0x00, 0x00, 0x00,
+                                      0xB8, 0x01, 0x00, 0x00, 0x00,
+                                      0x0F, 0x05};
+    blob.push_back(0x90);
+    // movabs rax, 0x302000 ; jmp rax
+    const std::vector<std::uint8_t> stub = {
+        0x48, 0xB8, 0x00, 0x20, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0xFF, 0xE0};
+    BridgeProbe p = make_bridge(blob, stub, false);
+    ASSERT_NE(p.uc, nullptr);
+
+    const uc_err err = uc_emu_start(p.uc, kBlobBase, 0, 100000, 0);
+    EXPECT_EQ(err, UC_ERR_OK) << "uc_strerror: " << uc_strerror(err);
+    ASSERT_EQ(p.fired.size(), 1u);
+    EXPECT_EQ(p.fired[0], kBridgeSyscall);
+}
