@@ -13,6 +13,7 @@
 #include "qiling/arch/x86.hpp"
 #include "qiling/os/posix/posix.hpp"
 #include "qiling/os/posix/syscall/abi.hpp"
+#include "qiling/os/linux/linux.hpp"
 
 using namespace qiling;
 
@@ -148,6 +149,60 @@ TEST(PosixFileDes, OpenWriteCloseReopenRead) {
     const auto got = ql.mem().read(0x1002300, payload.size());
     const std::string got_str{got.begin(), got.end()};
     EXPECT_EQ(got_str, payload);
+}
+
+// the procfs slice (os/linux/procfs.py): the /proc/self pseudo files resolve
+// through the fd flow — open("/proc/self/cmdline") reads the argv bytes; the
+// shellcode run carries the empty placeholder argv, so the read yields the
+// single NUL terminator
+TEST(PosixProcfs, CmdlineReadsThroughFdFlow) {
+    const std::vector<std::uint8_t> code = {
+        // open("/proc/self/cmdline", O_RDONLY)
+        0x48, 0xC7, 0xC0, 0x02, 0x00, 0x00, 0x00,  // mov rax, 2 (open)
+        0x48, 0xC7, 0xC7, 0x00, 0x20, 0x00, 0x01,  // mov rdi, 0x1002000 (the path)
+        0x48, 0xC7, 0xC6, 0x00, 0x00, 0x00, 0x00,  // mov rsi, 0 (O_RDONLY)
+        0x48, 0xC7, 0xC2, 0x00, 0x00, 0x00, 0x00,  // mov rdx, 0
+        0x0F, 0x05,                                 // syscall
+        0x48, 0x89, 0x04, 0x25, 0x00, 0x22, 0x00, 0x01,  // mov [0x1002200], rax
+        // read(fd, 0x1002300, 64)
+        0x48, 0x8B, 0x3C, 0x25, 0x00, 0x22, 0x00, 0x01,  // mov rdi, [0x1002200]
+        0x48, 0xC7, 0xC0, 0x00, 0x00, 0x00, 0x00,  // mov rax, 0 (read)
+        0x48, 0xC7, 0xC6, 0x00, 0x23, 0x00, 0x01,  // mov rsi, 0x1002300
+        0x48, 0xC7, 0xC2, 0x40, 0x00, 0x00, 0x00,  // mov rdx, 64
+        0x0F, 0x05,                                 // syscall
+        0x48, 0x89, 0x04, 0x25, 0x08, 0x22, 0x00, 0x01,  // mov [0x1002208], rax
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00,  // mov rax, 60 (exit)
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00,  // mov rdi, 0
+        0x0F, 0x05,                                 // syscall
+    };
+
+    QilingOptions options = posix_options(code);
+    Qiling ql(options);
+
+    // upstream runs the procfs setup only for the image loads (linux.py run:
+    // the shellcode skips it); the fixture drives setup_procfs directly to
+    // keep the shellcode harness while exercising the same fd flow
+    ql.os<os::linux::QlOsLinux>().setup_procfs();
+
+    const std::string path_str = "/proc/self/cmdline";
+    std::vector<std::uint8_t> path_bytes(path_str.begin(), path_str.end());
+    path_bytes.push_back(0);
+    ql.mem().write(0x1002000, path_bytes);
+    ql.mem().write(0x1002300, std::vector<std::uint8_t>(64, 0xAA));
+
+    ql.run();
+
+    EXPECT_EQ(ql.os().exit_code(), 0);
+
+    // the open returned a real fd (>= 3)
+    const auto fd = static_cast<int>(ql.mem().read_ptr(0x1002200, 8));
+    EXPECT_GE(fd, 3);
+
+    // the cmdline content: the placeholder argv ("") joined with NULs + the
+    // trailing NUL — a single byte, read through the FsMappedStream
+    const auto nread = static_cast<int>(ql.mem().read_ptr(0x1002208, 8));
+    ASSERT_EQ(nread, 1);
+    EXPECT_EQ(ql.mem().read(0x1002300, 1)[0], 0);
 }
 
 // ---- the abi layer (abi/intel.py) ----

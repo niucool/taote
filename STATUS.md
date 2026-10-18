@@ -272,6 +272,37 @@ The ELF container parsing, the interpreter loading, the vsyscall page, the ET_RE
 - **the open-failure translations collapse onto -ENOENT** in this slice (the typed FileNotFound/IsADirectory/AccessDenied refinements defer with the errno granularity slice).
 - the dup2/dup3 target-slot form shares the handler (the dup3 flags handling — O_CLOEXEC — lands with the fcntl slice).
 
+## Phase 5 - the richer kernel_api handler set + the fd flows (249/249 gtest green)
+
+| File | Python counterpart | Status | Notes |
+|---|---|---|---|
+| `qiling/os/posix/kernel_api.cpp` (the extended registrations) | `os/linux/kernel_api/kernel_api.py` | Ported (expanded) | ~50 handlers in a static-init block: _copy_to_user/_copy_from_user (the unmapped-ubuf check, the count-return verbatim), memset, memcpy, kmalloc, kfree, strlen/strstr/strcmp/strncmp, the __x86_indirect_thunk_rax/r14 passthru thunks, proc_create, prepare_creds, the misc/chrdev/sock/filp/htable/module-notifier zero-returns, simple_strtol, memcmp, sys_read/write/open, make_kgid/make_kuid, commit_creds/abort_creds |
+| `QlOsPosix::heap()` | the kmalloc backing | Ported | the lazy posix heap (HEAP_BASE 0x2000000, 16 MiB) over QlMemoryHeap |
+| `tests/Kernel_Api_Test.cpp` | the handler surface | Ported | the registry surface (the names + the passthru flags), the memset bytes, the _copy_to_user marshalling, the strlen guest-string count |
+
+### Findings
+
+- **upstream bug kept visible**: the Python hook_strncmp reads `params["str"]` (a KeyError away from working); the port resolves str1.
+- **the STRING params arrive as raw pointers** (the resolver machinery defers): the string-touching handlers read the guest cstrings through a helper (read_cstring_helper).
+- **kernel_api.py's handler surface is 64 hook_ functions**; the port carries ~50 (the typed-struct handlers - the cred/filp field accessors - defer with the struct slices).
+
+## Phase 5 - the os/linux tree slice: QlOsLinux + procfs (250/250 gtest green)
+
+| File | Python counterpart | Status | Notes |
+|---|---|---|---|
+| `qiling/os/linux/linux.*` (QlOsLinux) | `os/linux/linux.py` | Ported (core) | the LINUX os family subclass (the type() discriminator, select_os(LINUX) wires it); the per-arch syscall-hook installation lives in the QlOsPosix base (the port absorbed it into the shared run() path); the futexm/thread_class/fh members defer with the futex/thread slices |
+| `qiling/os/linux/procfs.*` | `os/linux/procfs.py` | Ported | FsMappedStream (the buffered pseudo file: the cursor-based read, the read-only write) + QlProcFS (self_auxv: the pair-walk until the AT_NULL pair through the loader auxv_address; self_cmdline: the NUL-joined argv; self_environ: the K=V join; self_exe: the image bytes; self_map: the get_mapinfo rendering with the "p" suffix and the container-or-label last column) |
+| `QlOsLinux::setup_procfs` + `run()` | linux.py load/run | Ported | the five /proc/self factory bindings through add_mapping (the has_mapping precedence, verbatim); the run() guard skips the procfs for the shellcode and the drivers (`if not self.ql.code and not self.ql.loader.is_driver`) |
+| `QlLoader::is_driver` | elf.py self.is_driver | Ported | the base flag; the ELF loader sets it for the ET_REL loads |
+| `tests/Posix_Test.cpp` (CmdlineReadsThroughFdFlow) | the procfs fd flow | Ported | open("/proc/self/cmdline") -> read: the placeholder-argv NUL byte round-trips through the FsMappedStream; the fixture drives setup_procfs directly (the upstream run() skips the procfs for shellcode) |
+
+### Findings
+
+- **the shellcode path never runs setup_procfs upstream** (linux.py run: `not self.ql.code`); the procfs only lives for the image loads. The test harness calls setup_procfs() explicitly.
+- **the CRT `environ` macro collision** (the errno_value() precedent): the local variable named `environ` expands to `__p__environ` under windows.h - renamed to env_data.
+- **the QlOsPosix `final` was dropped** to admit the QlOsLinux subclass (the mirror-layout rule outranks the leaf-class final here; the Python class hierarchy is open).
+- **the auxv pair-walk termination**: the loop breaks after the AT_NULL pair (both words zero) is appended - matching the upstream `endswith(null_entry)` check.
+
 ## Deferred (tracked, not built)
 
 `os/freebsd/`, `os/qnx/`, `os/macos/`, `os/uefi/`, `os/dos/`, `qiling/hw/`,
