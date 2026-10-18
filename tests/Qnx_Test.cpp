@@ -1074,3 +1074,89 @@ TEST(QnxOs, ChannelDestroyIsUnhandledUpstream) {
 // as the nanosecond wall clock (the upstream's simplification) in R0, which
 // the fixture stores into a second scratch cell — the pre-poisoned marker
 // proves the dispatcher wrote the return register
+
+// the io_close flow on the opened connection: the flat _io_close (sparts=-8);
+// the first close rides the OPEN's fd (close -> 0 and the conn's fd clears)
+// and the second finds no fd (the upstream's None-in-range fall through) ->
+// -EBADF. The blob: attach -> OPEN (the coid saved in r5) -> two io_close
+// sweeps; the second store bumps r4 by 4 (0x2304 is not rotimm-encodable)
+TEST(QnxOs, MsgIoCloseClearsConnFd) {
+    const std::vector<std::uint8_t> code = {
+        0x00, 0x00, 0xA0, 0xE3,  // 00: mov r0, #0
+        0x01, 0x10, 0xA0, 0xE3,  // 04: mov r1, #1
+        0x01, 0x20, 0xA0, 0xE3,  // 08: mov r2, #1
+        0x00, 0x30, 0xA0, 0xE3,  // 0C: mov r3, #0
+        0x01, 0x40, 0xA0, 0xE3,  // 10: mov r4, #1
+        0x27, 0xC0, 0xA0, 0xE3,  // 14: mov r12, #39
+        0x00, 0x00, 0x00, 0xEF,  // 18: swi 0
+        0x00, 0x50, 0xA0, 0xE1,  // 1C: mov r5, r0
+        0x21, 0x1C, 0xA0, 0xE3,  // 20: mov r1, #0x2100
+        0x02, 0x20, 0xA0, 0xE3,  // 24: mov r2, #2
+        0x21, 0x3C, 0xA0, 0xE3,  // 28: mov r3, #0x2100
+        0x50, 0x30, 0x83, 0xE2,  // 2C: add r3, r3, #0x50
+        0x02, 0x40, 0xA0, 0xE3,  // 30: mov r4, #2
+        0x0B, 0xC0, 0xA0, 0xE3,  // 34: mov r12, #11
+        0x00, 0x00, 0x00, 0xEF,  // 38: swi 0 (the OPEN)
+        0x05, 0x00, 0xA0, 0xE1,  // 3C: mov r0, r5
+        0x22, 0x1C, 0xA0, 0xE3,  // 40: mov r1, #0x2200
+        0x07, 0x20, 0xE0, 0xE3,  // 44: mvn r2, #7
+        0x00, 0x30, 0xA0, 0xE3,  // 48: mov r3, #0
+        0x00, 0x40, 0xA0, 0xE3,  // 4C: mov r4, #0
+        0x0B, 0xC0, 0xA0, 0xE3,  // 50: mov r12, #11
+        0x00, 0x00, 0x00, 0xEF,  // 54: swi 0 (the first io_close)
+        0x23, 0x4C, 0xA0, 0xE3,  // 58: mov r4, #0x2300
+        0x00, 0x00, 0x84, 0xE5,  // 5C: str r0, [r4]
+        0x05, 0x00, 0xA0, 0xE1,  // 60: mov r0, r5
+        0x22, 0x1C, 0xA0, 0xE3,  // 64: mov r1, #0x2200
+        0x07, 0x20, 0xE0, 0xE3,  // 68: mvn r2, #7
+        0x00, 0x30, 0xA0, 0xE3,  // 6C: mov r3, #0
+        0x00, 0x40, 0xA0, 0xE3,  // 70: mov r4, #0
+        0x0B, 0xC0, 0xA0, 0xE3,  // 74: mov r12, #11
+        0x00, 0x00, 0x00, 0xEF,  // 78: swi 0 (the second io_close)
+        0x23, 0x4C, 0xA0, 0xE3,  // 7C: mov r4, #0x2300
+        0x04, 0x40, 0x84, 0xE2,  // 80: add r4, r4, #4
+        0x00, 0x00, 0x84, 0xE5,  // 84: str r0, [r4]
+        0x00, 0x00, 0xE0, 0xE3,  // 88: mvn r0, #0
+        0x00, 0x10, 0xE0, 0xE3,  // 8C: mvn r1, #0
+        0x2A, 0x20, 0xA0, 0xE3,  // 90: mov r2, #42
+        0x2F, 0xC0, 0xA0, 0xE3,  // 94: mov r12, #47
+        0x00, 0x00, 0x00, 0xEF,  // 98: swi 0
+    };
+    auto ql = make_qnx_qiling(code);
+
+    {
+        std::ofstream f(std::filesystem::temp_directory_path() / "ql_qnx_rootfs" / "hello.txt", std::ios::binary);
+        f << "hello qnx!";
+    }
+
+    ql.mem().map(kScratch, 0x1000, UC_PROT_ALL, "[qnx-scratch]");
+
+    // the io_connect iovs + the header (the OPEN /hello.txt)
+    ql.mem().write_ptr(0x2100, kIoConnectHdr, 4);
+    ql.mem().write_ptr(0x2104, 40, 4);
+    ql.mem().write_ptr(0x2108, 0x2140, 4);
+    ql.mem().write_ptr(0x210C, 11, 4);
+    ql.mem().write_ptr(kIoConnectHdr + 0, 0x100, 2);
+    ql.mem().write_ptr(kIoConnectHdr + 2, 2, 2);
+    ql.mem().write_ptr(kIoConnectHdr + 4, 1, 4);
+    ql.mem().write_ptr(kIoConnectHdr + 8, 0xa18, 2);
+    ql.mem().write_ptr(kIoConnectHdr + 10, 0x10, 2);
+    ql.mem().write_ptr(kIoConnectHdr + 20, 1, 4);
+    ql.mem().write_ptr(kIoConnectHdr + 24, 0x8000 | 0644, 4);
+    ql.mem().write(0x2140, std::vector<std::uint8_t>{'/', 'h', 'e', 'l', 'l', 'o', '.', 't', 'x', 't', 0x00});
+    ql.mem().write_ptr(0x2150, 0x2160, 4);
+    ql.mem().write_ptr(0x2154, 20, 4);
+    ql.mem().write_ptr(0x2158, 0x2190, 4);
+    ql.mem().write_ptr(0x215C, 64, 4);
+
+    // the flat _io_close: type=0x116, combine_len=8 (the handler ignores the
+    // body - only the type dispatch reads it)
+    ql.mem().write_ptr(0x2200, 0x116, 2);
+    ql.mem().write_ptr(0x2202, 8, 2);
+
+    ql.run();
+
+    EXPECT_EQ(ql.os().exit_code(), 42);
+    EXPECT_EQ(ql.mem().read_ptr(0x2300, 4), 0u);
+    EXPECT_EQ(ql.mem().read_ptr(0x2304, 4), static_cast<std::uint32_t>(-9));
+}

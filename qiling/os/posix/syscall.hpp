@@ -64,6 +64,10 @@ void register_builtin_syscalls();
 // (the qnx message.py imports the posix syscall helpers verbatim)
 std::shared_ptr<QlFsMappedObject> fd_get(Qiling& ql, std::int64_t fd);
 
+// the unistd close body (the fd_get + the close + the slot clear) shared
+// with the delegating dialects (the qnx message.py io_close)
+std::optional<std::int64_t> do_close(Qiling& ql, std::int64_t fd);
+
 }  // namespace posix
 }  // namespace os
 }  // namespace qiling

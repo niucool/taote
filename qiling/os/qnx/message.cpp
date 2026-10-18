@@ -51,6 +51,7 @@ const MsgTypeEntry kMsgTypeTable[] = {
     {0x100, ql_qnx_msg_io_connect},    // io_connect
     {0x101, ql_qnx_msg_io_read},       // io_read
     {0x104, ql_qnx_msg_io_stat},       // io_stat
+    {0x116, ql_qnx_msg_io_close},      // io_close
     {0x040, ql_qnx_msg_mem_map},       // mem_map
     {0x109, ql_qnx_msg_io_lseek},      // io_lseek
     {0x102, ql_qnx_msg_io_write},      // io_write
@@ -393,6 +394,26 @@ std::optional<std::int64_t> ql_qnx_msg_io_lseek(Qiling& ql, std::uint64_t coid, 
 // message.py ql_qnx_msg_io_write: the write delegation — the header rides
 // iov[0] and the payload rides iov[1] (the smsg+8 dword); the combine and
 // the xtype paths are not implemented (the upstream raise shape)
+// message.py ql_qnx_msg_io_close (lib/c/1/close.c): the fd rides the
+// connection, the conn's fd clears first (the upstream shape), and the
+// posix close body does the rest; the fd-less conn rides the upstream's
+// None-in-range fall-through to -EBADF
+std::optional<std::int64_t> ql_qnx_msg_io_close(Qiling& ql, std::uint64_t coid, std::uint64_t smsg,
+                                                std::int32_t sparts, std::uint64_t rmsg, std::int32_t rparts) {
+    (void)smsg;
+    (void)sparts;
+    (void)rmsg;
+    (void)rparts;
+
+    auto& conn = static_cast<QlOsQnx&>(ql.os()).connections().at(static_cast<std::uint32_t>(coid));
+    const auto fd = conn.fd;
+    conn.fd = std::nullopt;
+    if (!fd.has_value()) {
+        return -EBADF;
+    }
+    return posix::do_close(ql, *fd);
+}
+
 // message.py ql_qnx_msg_io_connect (_connect_ctrl.c::_connect_io): the
 // OPEN path — the header rides iov[0] and the path rides iov[1]; the fd
 // lands in the connection and the 20-byte link reply at the reply's first

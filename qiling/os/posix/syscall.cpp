@@ -55,6 +55,18 @@ std::shared_ptr<QlFsMappedObject> fd_get(Qiling& ql, std::int64_t fd) {
     return ql.os<posix::QlOsPosix>().fd().at(static_cast<int>(fd));
 }
 
+std::optional<std::int64_t> do_close(Qiling& ql, std::int64_t fd) {
+    // unistd.py ql_syscall_close: close the backing object and clear the slot
+    auto f = fd_get(ql, fd);
+    if (f == nullptr) {
+        return -9;
+    }
+
+    f->close();
+    ql.os<posix::QlOsPosix>().fd().set(static_cast<int>(fd), nullptr);
+    return 0;
+}
+
 namespace {
 
 // posix/const.py: NR_OPEN and the errno spellings used below
@@ -236,17 +248,8 @@ std::optional<std::int64_t> syscall_creat(Qiling& ql, const std::vector<std::uin
 }
 
 std::optional<std::int64_t> syscall_close(Qiling& ql, const std::vector<std::uint64_t>& params) {
-    // unistd.py ql_syscall_close: close the backing object and clear the slot
-    const auto fd = static_cast<std::int64_t>(params[0]);
-
-    auto f = fd_get(ql, fd);
-    if (f == nullptr) {
-        return -kEBADF;
-    }
-
-    f->close();
-    ql.os<posix::QlOsPosix>().fd().set(static_cast<int>(fd), nullptr);
-    return 0;
+    // unistd.py ql_syscall_close
+    return do_close(ql, static_cast<std::int64_t>(params[0]));
 }
 
 std::optional<std::int64_t> syscall_lseek(Qiling& ql, const std::vector<std::uint64_t>& params) {
