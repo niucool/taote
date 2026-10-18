@@ -10,6 +10,7 @@
 #include "qiling/core.hpp"
 #include "qiling/os/os.hpp"
 #include "qiling/os/filestruct.hpp"
+#include "qiling/os/posix/stat.hpp"
 #include "qiling/os/linux/thread.hpp"
 #include "qiling/os/memory.hpp"
 
@@ -73,6 +74,7 @@ namespace {
 // posix/const.py: NR_OPEN and the errno spellings used below
 constexpr int NR_OPEN = 1024;
 constexpr std::int64_t kEBADF = 9;
+constexpr std::int64_t kEIO = 5;
 constexpr std::int64_t kEFAULT = 14;
 constexpr std::int64_t kEMFILE = 24;
 constexpr std::int64_t kENOENT = 2;
@@ -154,6 +156,36 @@ std::optional<std::int64_t> syscall_read(Qiling& ql, const std::vector<std::uint
     const auto data = f->read(count);
     ql.mem().write(buf, data);
     return static_cast<std::int64_t>(data.size());
+}
+
+// stat.py __do_fstat + ql_syscall_fstat: the fd range check, the fd-table
+// lookup, the fstat snapshot, the packing via the stat family (the
+// get_stat_struct dispatch rides the os/arch); the OSError branch maps to
+// -EIO verbatim, and the fstat == -1 branch writes nothing
+std::optional<std::int64_t> syscall_fstat(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    const auto fd = static_cast<std::int64_t>(params[0]);
+    const auto buf = params[1];
+
+    // stat.py: "if fd not in range(NR_OPEN): return -EBADF"
+    if (fd < 0 || fd >= QlFileDes::NR_OPEN) {
+        return -kEBADF;
+    }
+    auto* f = fd_get(ql, fd).get();
+    if (f == nullptr) {
+        return -kEBADF;
+    }
+
+    try {
+        const auto info = host_fstat_fd(f->fileno());
+        if (info.size != static_cast<std::uint64_t>(-1)) {
+            const auto data = pack_stat_struct(info, get_stat_layout(ql.os().type(), ql.arch().type()));
+            ql.mem().write(buf, data);
+        }
+    } catch (const QlErrorBase&) {
+        // the OSError branch verbatim
+        return -kEIO;
+    }
+    return 0;
 }
 
 std::optional<std::int64_t> syscall_uname(Qiling& ql, const std::vector<std::uint64_t>& params) {
@@ -782,6 +814,7 @@ void register_builtin_syscalls() {
     registry.register_syscall({"exit", {PARAM_INTN}, syscall_exit});
     registry.register_syscall({"exit_group", {PARAM_INTN}, syscall_exit_group});
     registry.register_syscall({"read", {PARAM_INTN, PARAM_PTRX, PARAM_INTN}, syscall_read});
+    registry.register_syscall({"fstat", {PARAM_INTN, PARAM_PTRX}, syscall_fstat});
     registry.register_syscall({"write", {PARAM_INTN, PARAM_PTRX, PARAM_INTN}, syscall_write});
     registry.register_syscall({"uname", {PARAM_PTRX}, syscall_uname});
 

@@ -151,6 +151,54 @@ TEST(PosixFileDes, OpenWriteCloseReopenRead) {
     EXPECT_EQ(got_str, payload);
 }
 
+// the stat.py __do_fstat flow: open /tmpfile, fstat(fd, buf) — the syscall 5
+// — the packing rides the posix stat family (the x86-64 144-byte image); the
+// size/mode cells carry the file, the ns/unused cells stay zero
+//   mov rax,2 (open) / mov rdi,the path / mov rsi,0x42 / mov rdx,0644 / syscall
+//   mov [0x1002200], rax
+//   mov rdi,[0x1002200] / mov rax,5 (fstat) / mov rsi,0x1002400 / syscall
+//   mov rax,60 / mov rdi,0 / syscall
+TEST(PosixFileDes, FstatPacksTheX8664Image) {
+    const std::string payload = "hello fd";
+    const std::vector<std::uint8_t> code = {
+        0x48, 0xC7, 0xC0, 0x02, 0x00, 0x00, 0x00,  // mov rax, 2 (open)
+        0x48, 0xC7, 0xC7, 0x00, 0x20, 0x00, 0x01,  // mov rdi, 0x1002000
+        0x48, 0xC7, 0xC6, 0x42, 0x00, 0x00, 0x00,  // mov rsi, 0x42
+        0x48, 0xC7, 0xC2, 0xA4, 0x01, 0x00, 0x00,  // mov rdx, 0o644
+        0x0F, 0x05,                                 // syscall
+        0x48, 0x89, 0x04, 0x25, 0x00, 0x22, 0x00, 0x01,  // mov [0x1002200], rax
+        0x48, 0x8B, 0x3C, 0x25, 0x00, 0x22, 0x00, 0x01,  // mov rdi, [0x1002200]
+        0x48, 0xC7, 0xC0, 0x05, 0x00, 0x00, 0x00,  // mov rax, 5 (fstat)
+        0x48, 0xC7, 0xC6, 0x00, 0x24, 0x00, 0x01,  // mov rsi, 0x1002400
+        0x0F, 0x05,                                 // syscall
+        0x48, 0x89, 0x04, 0x25, 0x18, 0x22, 0x00, 0x01,  // mov [0x1002218], rax
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00,  // mov rax, 60 (exit)
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00,  // mov rdi, 0
+        0x0F, 0x05,                                 // syscall
+    };
+
+    QilingOptions options = posix_options(code);
+    Qiling ql(options);
+
+    ql.mem().write(0x1002000, std::vector<std::uint8_t>{'/', 't', 'm', 'p', 'f', 'i', 'l', 'e', 0});
+    {
+        std::ofstream f(ensure_rootfs() / "tmpfile", std::ios::binary);
+        f << payload;
+    }
+
+    ql.run();
+
+    EXPECT_EQ(ql.os().exit_code(), 0);
+    EXPECT_EQ(ql.mem().read_ptr(0x1002218, 8), 0u);  // the fstat returned 0
+
+    // the LinuxX8664Stat image at 0x1002400: the size cell at +48, the mode
+    // at +24 with the regular-file bits, the ns/unused cells zero
+    EXPECT_EQ(ql.mem().read_ptr(0x1002400 + 48, 8), payload.size());
+    EXPECT_EQ(ql.mem().read_ptr(0x1002400 + 24, 4) & 0xF000u, 0x8000u);
+    EXPECT_EQ(ql.mem().read_ptr(0x1002400 + 80, 8), 0u);   // st_atime_ns
+    EXPECT_EQ(ql.mem().read_ptr(0x1002400 + 120, 8), 0u);  // __unused tail
+}
+
 // the procfs slice (os/linux/procfs.py): the /proc/self pseudo files resolve
 // through the fd flow — open("/proc/self/cmdline") reads the argv bytes; the
 // shellcode run carries the empty placeholder argv, so the read yields the
