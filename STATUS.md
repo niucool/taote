@@ -320,6 +320,39 @@ The ELF container parsing, the interpreter loading, the vsyscall page, the ET_RE
 - **the ellipsis slot count**: the upstream readEllipsis counts the RESOLVED param values (each defaulting to the PARAM_INTN accessor); the port passes one PARAM_INTN slot per param and pulls the rest; the pull count comes from a first format walk (the conversions + the * widths).
 - **the stdout capture seam**: set_stdout(shared_ptr<QlFile>) swaps the stream the printf engine writes to; the test drains a temp file after close().
 
+## Phase 5 - the fd-table leftovers: pipe / fcntl / the typed open errors (254/254 gtest green)
+
+| File | Python counterpart | Status | Notes |
+|---|---|---|---|
+| `qiling/os/filestruct.*` (QlPipe) | `os/posix/filestruct.py ql_pipe` | Ported | the host `_pipe` pair in the mapped-object interface (read/write/fileno/close/ioctl/dup); the fcntl swallows (the python None-returning form degrades to 0); the lseek rides the base NotImplemented (the python ql_pipe has no lseek) |
+| `syscall.cpp` (pipe/pipe2) | `unistd.py ql_syscall_pipe` | Ported | the fd-table walk for the two slots, the 4-byte write_ptr pair into the guest buffer (the MIPS v1 register quirk defers with its arch slice); pipe2 shares the body (the flags handling defers) |
+| `syscall.cpp` (fcntl/fcntl64/flock) | `fcntl.py` | Ported | F_DUPFD (the arg-start slot walk), F_GETFD/F_SETFD over the close_on_exec flag, F_GETFL (the recorded host flags through the virtual fcntl), F_SETFL (the mapping then the record); fcntl64 verbatim (the degraded form: -1 the out-of-range fd, 2 the F_GETFL/F_GETFD, 0 elsewhere); flock (the always-0 comment, verbatim) |
+| `dup3` (O_CLOEXEC) | `unistd.py ql_syscall_dup3` | Ported (completed) | the EINVAL self-dup guard + the O_CLOEXEC (0o2000000) propagation onto the dup'd object |
+| `close_on_exec` | the python dynamic attribute | Ported | a plain member on QlFsMappedObject (the setattr/getattr-default semantics as a member); the execve close-all consumer defers with the execve slice |
+| the typed open errors | `fcntl.py __do_open` | Ported (completed) | QlErrorFileExists / QlErrorIsADirectory / QlErrorAccessDenied join the hierarchy; QlFile::open rewritten over `_open` with the CRT errno -> typed throw mapping (ENOENT/EEXIST/EISDIR/EACCES/EPERM); the do_open catch ladder returns -ENOENT/-EEXIST/-EISDIR/-EACCES (the unclassified errors still collapse onto -ENOENT) |
+| `QlFsMappedObject::fcntl` | the host fcntl call | Ported (deviation) | a virtual no-op on the base (the windows host has no fcntl); QlFile overrides with the F_GETFL/F_SETFL flag tracking |
+
+### Findings
+
+- **the O_EXCL semantics forced the _open rewrite**: the old fopen mode-string form could not fail EEXIST (the "wb" mode truncates silently); `_open(path, host_flags | _O_BINARY, pmode)` carries the create/excl/trunc/append bits exactly as the const-mapped host flags spell them.
+- **the 4-byte pipe slots vs the 8-byte fixture loads**: the pipe syscall writes 4-byte fd slots; a `mov rdi, [addr]` fixture load reads 8 bytes and picks up the neighbour's bytes - the fixtures need `mov edi` (the 32-bit load). The kernel-side write_ptr(size=4) is correct.
+- **the F_GETFL returns the HOST flag spellings** (the upstream fcntl.fcntl returns the host-side flags too - the guest sees the windows-mapped values; the quirk kept verbatim).
+
+## Phase 5 - the futex management slice (257/257 gtest green)
+
+| File | Python counterpart | Status | Notes |
+|---|---|---|---|
+| `qiling/os/linux/futex.*` (QlLinuxFutexManagement) | `os/linux/futex.py` | Ported (core) | futex_wait (the unpack32 value check -> -EAGAIN, the emu stop, the (bitset, thread, event) queue put, the wait sched_cb), get_futex_wake_list (pops up to `number` entries, the bitset matching, the non-matching entries DROP - the upstream behaviour), futex_wake (the emu stop, the notify sched_cb); the FUTEX_BITSET_MATCH_ANY = 0xffffffff constant |
+| `QlFutexEvent` | `gevent.event.Event` | Ported | set/clear/is_set/wait over a mutex+cv pair; the cooperative wait degrades to the host cv wait (the single-threaded emu never blocks in practice) |
+| `qiling/os/linux/thread.*` (QlLinuxThread shell) | `os/linux/thread.py` | Ported (shell) | the thread ids from 2000 (the LINUX_THREAD_ID global), the set_child_tid write (the CLONE_CHILD_SETTID semantics), the sched_cb surface, the status constants, the robust-list bookkeeping; the gevent Greenlet run machinery defers with the thread-management slice |
+| `tests/Futex_Test.cpp` | the futex bookkeeping | Ported | the mismatch -EAGAIN, the queue + the wake-notify pairing (the sched callbacks invoked manually, mirroring the future management run loop), the wake counting + the bitset filtering |
+
+### Findings
+
+- **the futex syscall registration defers**: the upstream ql_syscall_futex reaches `ql.os.thread_management.cur_thread` (the AttributeError without the management); the port registers it with the thread-management slice.
+- **the moved-from bug class**: the wake collects the entries then moves them into the sched_cb lambda - the return count must be computed BEFORE the move (a C++-specific pitfall the python closure semantics do not have).
+- **the gevent dependency boundary**: futex.py imports gevent only for the Event; the port's mutex+cv pair covers the surface. The thread.py machinery (628 lines) imports the greenlets wholesale - the port needs a design decision (std::thread + cv, or cooperative slices) before that slice starts (OQ 10).
+
 ## Deferred (tracked, not built)
 
 `os/freebsd/`, `os/qnx/`, `os/macos/`, `os/uefi/`, `os/dos/`, `qiling/hw/`,
