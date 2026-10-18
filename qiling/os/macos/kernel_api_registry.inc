@@ -260,19 +260,19 @@
     KernelApi("proc_selfpid", {}) = syscall_kapi_proc_selfpid;
 
     // proc_name (passthru=false)
-    KernelApi("proc_name", {{"pid", K_UINT}, {"buf", K_POINTER}, {"size", K_UINT}}, false) = kapi_stub;
+    KernelApi("proc_name", {{"pid", K_UINT}, {"buf", K_POINTER}, {"size", K_UINT}}, false) = syscall_kapi_proc_name;
 
     // proc_selfppid (passthru=false)
     KernelApi("proc_selfppid", {}) = syscall_kapi_proc_selfppid;
 
     // proc_find (passthru=false)
-    KernelApi("proc_find", {{"pid", K_UINT}}, false) = kapi_stub;
+    KernelApi("proc_find", {{"pid", K_UINT}}, false) = syscall_kapi_proc_find;
 
     // vfs_context_proc (passthru=false)
     KernelApi("vfs_context_proc", {{"ctx", K_POINTER}}) = syscall_kapi_vfs_context_proc;
 
     // kauth_cred_setuidgid (passthru=false)
-    KernelApi("kauth_cred_setuidgid", {{"cred", K_POINTER}, {"uid", K_UINT}, {"gid", K_UINT}}, false) = kapi_stub;
+    KernelApi("kauth_cred_setuidgid", {{"cred", K_POINTER}, {"uid", K_UINT}, {"gid", K_UINT}}, false) = syscall_kapi_kauth_cred_setuidgid;
 
     // vn_getpath (passthru=false)
     KernelApi("vn_getpath", {{"vp", K_POINTER}, {"pathbuf", K_POINTER}, {"len", K_POINTER}}, false) = kapi_stub;
@@ -281,10 +281,10 @@
     KernelApi("kernel_thread_start", {{"continuation", K_POINTER}, {"params", K_POINTER}, {"new_thread", K_POINTER}}) = syscall_kapi_kernel_thread_start;
 
     // kauth_getuid (passthru=false)
-    KernelApi("kauth_getuid", {}, false) = kapi_stub;
+    KernelApi("kauth_getuid", {}, false) = syscall_kapi_kauth_getuid;
 
     // kauth_getgid (passthru=false)
-    KernelApi("kauth_getgid", {}, false) = kapi_stub;
+    KernelApi("kauth_getgid", {}, false) = syscall_kapi_kauth_getgid;
 
     // msleep (passthru=false)
     KernelApi("msleep", {}) = syscall_kapi_msleep;

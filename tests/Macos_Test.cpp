@@ -807,6 +807,229 @@ TEST(MacosOs, KernelApiReadRandomAndSelfPid) {
     EXPECT_EQ(*r3, 0x13371337ull);
 }
 
+// ---- the events/policy slice: the ev-manager surface + the re-pointed
+// kernel_api handlers ----
+//
+// add_process builds the 1144-byte proc_t image (the p_list/p_pid/p_ppid/
+// p_pgrpid/p_flag/p_ucred/p_comm/p_name seeds at the upstream offsets),
+// ensure_cred seeds the 501/501/501/15/groups/20/20/501/2 posix cred with
+// the cr_label riding the label cell, and the five re-pointed handlers
+// serve through the registry.
+TEST(MacosOs, EvManagerAddProcessSeedsProcImage) {
+    const auto rootfs = std::filesystem::temp_directory_path() / "ql_macos_rootfs";
+    std::filesystem::create_directories(rootfs);
+    QilingOptions options;
+    options.rootfs = rootfs.string();
+    options.code = {0x90, 0xC3};
+    options.ostype = QL_OS::MACOS;
+    options.archtype = QL_ARCH::X8664;
+    Qiling ql(options);
+
+    auto& ev = dynamic_cast<qiling::os::macos::QlOsMacos&>(ql.os()).ev_manager();
+    ev.set_proc("demigod");
+    ev.add_process(0x1337, "demigod");
+    ev.add_process(0x1337, "dup");  // the duplicate logs and returns
+
+    const auto* proc = ev.proc_find(0x1337);
+    ASSERT_NE(proc, nullptr);
+    EXPECT_EQ(ev.proc_find(1), nullptr);
+
+    const auto img = ql.mem().read(proc->base, 1144);
+    auto rd32 = [&img](std::size_t at) {
+        return static_cast<std::uint32_t>(img[at]) | (static_cast<std::uint32_t>(img[at + 1]) << 8) |
+               (static_cast<std::uint32_t>(img[at + 2]) << 16) | (static_cast<std::uint32_t>(img[at + 3]) << 24);
+    };
+    EXPECT_EQ(rd32(16), 0x1337u);       // p_pid
+    EXPECT_EQ(rd32(40), 1u);            // p_ppid
+    EXPECT_EQ(rd32(44), 0x1337u);       // p_pgrpid
+    EXPECT_EQ(rd32(400), 4u);           // p_flag = 64 bit process
+    EXPECT_NE(rd32(304), 0u);           // p_ucred cell allocated
+    // p_comm: "demigod" + NUL pad to 17
+    EXPECT_EQ(img[728], 'd');
+    EXPECT_EQ(img[728 + 6], 'd');
+    EXPECT_EQ(img[728 + 7], 0);
+    EXPECT_EQ(img[728 + 16], 0);
+    // p_name = p_comm + pad to 33
+    EXPECT_EQ(img[745], 'd');
+    EXPECT_EQ(img[745 + 32], 0);
+}
+
+TEST(MacosOs, EvManagerEnsureCredSeedsUpstreamShape) {
+    const auto rootfs = std::filesystem::temp_directory_path() / "ql_macos_rootfs";
+    std::filesystem::create_directories(rootfs);
+    QilingOptions options;
+    options.rootfs = rootfs.string();
+    options.code = {0x90, 0xC3};
+    options.ostype = QL_OS::MACOS;
+    options.archtype = QL_ARCH::X8664;
+    Qiling ql(options);
+
+    auto& ev = dynamic_cast<qiling::os::macos::QlOsMacos&>(ql.os()).ev_manager();
+    const auto cred = ev.ensure_cred();
+    const auto label = ev.ensure_label();
+    EXPECT_NE(label, 0u);
+
+    const auto img = ql.mem().read(cred, 144);
+    auto rd32 = [&img](std::size_t at) {
+        return static_cast<std::uint32_t>(img[at]) | (static_cast<std::uint32_t>(img[at + 1]) << 8) |
+               (static_cast<std::uint32_t>(img[at + 2]) << 16) | (static_cast<std::uint32_t>(img[at + 3]) << 24);
+    };
+    EXPECT_EQ(rd32(16), 2u);            // cr_ref
+    EXPECT_EQ(rd32(20), 501u);          // cr_posix.cr_uid
+    EXPECT_EQ(rd32(24), 501u);          // cr_ruid
+    EXPECT_EQ(rd32(28), 501u);          // cr_svuid
+    EXPECT_EQ(img[32], 15);             // cr_ngroups (short)
+    EXPECT_EQ(rd32(36), 20u);           // cr_groups[0]
+    EXPECT_EQ(rd32(120 - 20 + 16), 0u); // cr_groups[15] stays zero? (the
+                                        // upstream array is 16 wide — the
+                                        // tail cells zero)
+    EXPECT_EQ(rd32(100), 20u);          // cr_rgid
+    EXPECT_EQ(rd32(104), 20u);          // cr_svgid
+    EXPECT_EQ(rd32(108), 501u);         // cr_gmuid
+    EXPECT_EQ(rd32(112), 2u);           // cr_flags
+
+    // the cr_label cell rides the label address (ucred_t offset 120); the
+    // label's l_flags = 1
+    const std::uint64_t cr_label = [&img] {
+        std::uint64_t v = 0;
+        for (int i = 0; i < 8; ++i) {
+            v |= static_cast<std::uint64_t>(img[120 + i]) << (8 * i);
+        }
+        return v;
+    }();
+    EXPECT_EQ(cr_label, label);
+    const auto label_img = ql.mem().read(label, 8);
+    EXPECT_EQ(label_img[0], 1);  // l_flags
+
+    // the accessors the kauth handlers read
+    EXPECT_EQ(ev.cred_uid(), 501u);
+    EXPECT_EQ(ev.cred_rgid(), 20u);
+}
+
+TEST(MacosOs, KernelApiEvHandlersServeThroughRegistry) {
+    const auto rootfs = std::filesystem::temp_directory_path() / "ql_macos_rootfs";
+    std::filesystem::create_directories(rootfs);
+    QilingOptions options;
+    options.rootfs = rootfs.string();
+    options.code = {0x90, 0xC3};
+    options.ostype = QL_OS::MACOS;
+    options.archtype = QL_ARCH::X8664;
+    Qiling ql(options);
+
+    auto& ev = dynamic_cast<qiling::os::macos::QlOsMacos&>(ql.os()).ev_manager();
+    ev.set_proc("demigod");
+    ev.add_process(0x1337, "demigod");
+    const auto* proc = ev.proc_find(0x1337);
+    ASSERT_NE(proc, nullptr);
+
+    using qiling::os::macos::KernelApiRegistry;
+    using qiling::os::macos::ResolvedParams;
+
+    // proc_find: the proc image address, 0 on the miss
+    const auto* pf = KernelApiRegistry::instance().find("proc_find");
+    ASSERT_NE(pf, nullptr);
+    const auto r1 = pf->handler(ql, 0, ResolvedParams{{"pid", 0x1337ull}});
+    ASSERT_TRUE(r1.has_value());
+    EXPECT_EQ(*r1, proc->base);
+    const auto r2 = pf->handler(ql, 0, ResolvedParams{{"pid", 7ull}});
+    ASSERT_TRUE(r2.has_value());
+    EXPECT_EQ(*r2, 0ull);
+
+    // proc_name: the p_comm image at buf (the upstream ignores size)
+    constexpr std::uint64_t kNameBuf = 0x1003000;
+    const auto* pn = KernelApiRegistry::instance().find("proc_name");
+    ASSERT_NE(pn, nullptr);
+    ql.mem().write(kNameBuf, std::vector<std::uint8_t>(32, 0x41));
+    const auto r3 = pn->handler(ql, 0, ResolvedParams{{"pid", 0x1337ull}, {"buf", kNameBuf}, {"size", 17ull}});
+    EXPECT_FALSE(r3.has_value());  // no return
+    const auto named = ql.mem().read(kNameBuf, 17);
+    EXPECT_EQ(named[0], 'd');
+    EXPECT_EQ(named[6], 'd');
+    EXPECT_EQ(named[7], 0);
+
+    // kauth_getuid / kauth_getgid: the ev-ctx cred cells (501 / 20)
+    const auto* gu = KernelApiRegistry::instance().find("kauth_getuid");
+    ASSERT_NE(gu, nullptr);
+    const auto r4 = gu->handler(ql, 0, {});
+    ASSERT_TRUE(r4.has_value());
+    EXPECT_EQ(*r4, 501ull);
+    const auto* gg = KernelApiRegistry::instance().find("kauth_getgid");
+    ASSERT_NE(gg, nullptr);
+    const auto r5 = gg->handler(ql, 0, {});
+    ASSERT_TRUE(r5.has_value());
+    EXPECT_EQ(*r5, 20ull);
+
+    // kauth_cred_setuidgid: the fresh ucred carrying (uid, uid, uid) / ng 1 /
+    // (gid, gid)
+    const auto* cs = KernelApiRegistry::instance().find("kauth_cred_setuidgid");
+    ASSERT_NE(cs, nullptr);
+    const auto r6 = cs->handler(ql, 0, ResolvedParams{{"cred", 0ull}, {"uid", 1001ull}, {"gid", 1002ull}});
+    ASSERT_TRUE(r6.has_value());
+    const auto cred2 = *r6;
+    const auto img = ql.mem().read(cred2, 144);
+    auto rd32 = [&img](std::size_t at) {
+        return static_cast<std::uint32_t>(img[at]) | (static_cast<std::uint32_t>(img[at + 1]) << 8) |
+               (static_cast<std::uint32_t>(img[at + 2]) << 16) | (static_cast<std::uint32_t>(img[at + 3]) << 24);
+    };
+    EXPECT_EQ(rd32(20), 1001u);
+    EXPECT_EQ(rd32(24), 1001u);
+    EXPECT_EQ(rd32(28), 1001u);
+    EXPECT_EQ(img[32], 1);
+    EXPECT_EQ(rd32(100), 1002u);
+    EXPECT_EQ(rd32(104), 1002u);
+}
+
+TEST(MacosOs, PolicyMpoFileCheckMmapEmitsFileglob) {
+    const auto rootfs = std::filesystem::temp_directory_path() / "ql_macos_rootfs";
+    std::filesystem::create_directories(rootfs);
+    QilingOptions options;
+    options.rootfs = rootfs.string();
+    options.code = {0x90, 0xC3};
+    options.ostype = QL_OS::MACOS;
+    options.archtype = QL_ARCH::X8664;
+    Qiling ql(options);
+
+    auto& macos = dynamic_cast<qiling::os::macos::QlOsMacos&>(ql.os());
+    // the kext listener registers first (the upstream manager.register() on
+    // the EV_MAC_mpo_file_check_mmap type); the emit then queues the job
+    macos.ev_manager().register_cb(0xdead0000, "MAC_POLICY",
+                                   qiling::os::macos::MacOSEventType::EV_MAC_mpo_file_check_mmap);
+    macos.policy_manager().mpo_file_check_mmap(5, 2, 0);
+
+    // the job: the params ride (cred, fg, label, prot, flags, file_pos, 0)
+    const auto& jobs = macos.ev_manager().jobs();
+    ASSERT_EQ(jobs.size(), 1u);
+    EXPECT_EQ(jobs[0].func_addr, 0xdead0000ull);
+    ASSERT_EQ(jobs[0].params.size(), 7u);
+    const auto cred = jobs[0].params[0];
+    const auto fg = jobs[0].params[1];
+    const auto label = jobs[0].params[2];
+    EXPECT_EQ(jobs[0].params[3], 5u);
+    EXPECT_EQ(jobs[0].params[4], 2u);
+    // the fileglob: fg_flag = 1, fg_count = 1, fg_cred = cred, fg_data = vnode
+    const auto fgi = ql.mem().read(fg, 32);
+    EXPECT_EQ(fgi[0], 1);
+    auto rd64 = [&fgi](std::size_t at) {
+        std::uint64_t v = 0;
+        for (int i = 0; i < 8; ++i) {
+            v |= static_cast<std::uint64_t>(fgi[at + i]) << (8 * i);
+        }
+        return v;
+    };
+    EXPECT_EQ(rd64(16), cred);
+    // the fg_data rides the vnode address (the ev-ctx vnode seeded lazily)
+    const auto vnode = rd64(24);
+    const auto vn = ql.mem().read(vnode, 400);
+    // v_name at 344 points at the "demigod"-less current_proc — the default
+    // set_proc is empty, so the name buffer is empty; the pointer is set
+    std::uint64_t vname = 0;
+    for (int i = 0; i < 8; ++i) {
+        vname |= static_cast<std::uint64_t>(vn[344 + i]) << (8 * i);
+    }
+    EXPECT_NE(vname, 0u);
+    (void)label;
+}
+
 // ---- the QlLoaderMachO slice: the container load + the kernel-api
 // dispatch end-to-end ----
 //

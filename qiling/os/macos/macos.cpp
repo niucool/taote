@@ -83,6 +83,13 @@ QlOsMacos::QlOsMacos(Qiling* ql) : QlOsPosix(ql) {
     macho_thread_ = std::make_unique<MachoThread>();
     macho_fs_ = std::make_unique<FileSystem>(*ql);
 
+    // macos.py __init__: self.ev_manager = QlMacOSEvManager(self.ql);
+    // self.policy_manager = QlMacOSPolicy(self.ql, self.ev_manager). The
+    // current_proc = ql.argv[0] seed rides the fixture (the port's Qiling
+    // carries no argv member — set_proc fills it)
+    ev_manager_ = std::make_unique<QlEvManager>(*ql);
+    policy_manager_ = std::make_unique<QlOsPolicy>(*ql, *ev_manager_);
+
     register_macos_syscalls();
     load();
 }

@@ -3,13 +3,16 @@
 // upstream's empty `return` bodies — the guest's own stub code executes for
 // the passthru entries); the real-bodied handlers port explicitly. The
 // ev_manager-dependent handlers (proc_name, proc_find, kauth_getuid/getgid,
-// kauth_cred_setuidgid) defer with the events/policy subsystem slices.
+// kauth_cred_setuidgid) ride the events/policy slice (os/macos/ev.cpp).
 #include "qiling/os/macos/kernel_api.hpp"
 
 #include <chrono>
 
 #include "qiling/core.hpp"
 #include "qiling/os/posix/kernel_api.hpp"
+#include "qiling/os/posix/posix.hpp"
+#include "qiling/os/macos/macos.hpp"
+#include "qiling/os/macos/ev.hpp"
 #include "qiling/os/utils.hpp"
 
 namespace qiling {
@@ -97,6 +100,58 @@ std::optional<std::uint64_t> syscall_kapi_proc_selfpid(Qiling&, std::uint64_t, c
     return 0x1337;
 }
 
+// kernel_api.py hook__proc_name: the p_comm image (17 bytes, NUL padded) at
+// buf — the upstream FIXME note verbatim ("Why p_comm is only 50, but
+// MAXPATHLEN is 1024?"); the size param rides the table but the body never
+// reads it. No return.
+std::optional<std::uint64_t> syscall_kapi_proc_name(Qiling& ql, std::uint64_t, const ResolvedParams& params) {
+    const auto pid = static_cast<std::int32_t>(get_int({"pid", find_param(params, "pid")}));
+    const auto buf = get_int({"buf", find_param(params, "buf")});
+    const auto& ev = dynamic_cast<QlOsMacos&>(ql.os()).ev_manager();
+    const auto* proc = ev.proc_find(pid);
+    if (proc != nullptr) {
+        const auto comm = ql.mem().read(proc->base + 728, 17);  // p_comm c_char*17
+        ql.mem().write(buf, comm);
+    }
+    return std::nullopt;
+}
+
+// kernel_api.py hook__proc_find: the proc image address, 0 on the miss
+std::optional<std::uint64_t> syscall_kapi_proc_find(Qiling& ql, std::uint64_t, const ResolvedParams& params) {
+    const auto pid = static_cast<std::int32_t>(get_int({"pid", find_param(params, "pid")}));
+    const auto& ev = dynamic_cast<QlOsMacos&>(ql.os()).ev_manager();
+    const auto* proc = ev.proc_find(pid);
+    if (proc != nullptr) {
+        return proc->base;
+    }
+    return 0;
+}
+
+// kernel_api.py hook__kauth_cred_setuidgid: the fresh ucred_t image carrying
+// the (uid, uid, uid) / ng 1 / (gid, gid) seeds, the address returned
+std::optional<std::uint64_t> syscall_kapi_kauth_cred_setuidgid(Qiling& ql, std::uint64_t, const ResolvedParams& params) {
+    const auto uid = static_cast<std::uint32_t>(get_int({"uid", find_param(params, "uid")}));
+    const auto gid = static_cast<std::uint32_t>(get_int({"gid", find_param(params, "gid")}));
+    auto& heap = ql.os<posix::QlOsPosix>().heap();
+    const auto addr = heap.alloc(144);  // sizeof(ucred_t)
+    std::vector<std::uint8_t> image(144, 0);
+    const auto put32 = [&image](std::size_t at, std::uint32_t v) {
+        image[at + 0] = static_cast<std::uint8_t>(v);
+        image[at + 1] = static_cast<std::uint8_t>(v >> 8);
+        image[at + 2] = static_cast<std::uint8_t>(v >> 16);
+        image[at + 3] = static_cast<std::uint8_t>(v >> 24);
+    };
+    put32(20 + 0, uid);   // cr_uid
+    put32(20 + 4, uid);   // cr_ruid
+    put32(20 + 8, uid);   // cr_svuid
+    image[20 + 12] = 1;   // cr_ngroups (short)
+    image[20 + 13] = 0;
+    put32(20 + 80, gid);  // cr_rgid
+    put32(20 + 84, gid);  // cr_svgid
+    ql.mem().write(addr, image);
+    return addr;
+}
+
 // kernel_api.py hook__proc_selfppid: the fixed 0x13371337
 std::optional<std::uint64_t> syscall_kapi_proc_selfppid(Qiling&, std::uint64_t, const ResolvedParams&) {
     return 0x13371337;
@@ -120,6 +175,21 @@ std::optional<std::uint64_t> syscall_kapi_vfs_context_proc(Qiling&, std::uint64_
 // own stub code runs for the passthru entries)
 std::optional<std::uint64_t> kapi_stub(Qiling&, std::uint64_t, const ResolvedParams&) {
     return std::nullopt;
+}
+
+// kernel_api.py hook__kauth_getuid: the ev-ctx cred's cr_uid (501 via the
+// upstream seed)
+std::optional<std::uint64_t> syscall_kapi_kauth_getuid(Qiling& ql, std::uint64_t, const ResolvedParams&) {
+    auto& ev = dynamic_cast<QlOsMacos&>(ql.os()).ev_manager();
+    ev.ensure_cred();
+    return ev.cred_uid();
+}
+
+// kernel_api.py hook__kauth_getgid: the ev-ctx cred's cr_rgid (20)
+std::optional<std::uint64_t> syscall_kapi_kauth_getgid(Qiling& ql, std::uint64_t, const ResolvedParams&) {
+    auto& ev = dynamic_cast<QlOsMacos&>(ql.os()).ev_manager();
+    ev.ensure_cred();
+    return ev.cred_rgid();
 }
 
 }  // namespace

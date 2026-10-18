@@ -16,6 +16,7 @@
 #include "qiling/os/posix/posix.hpp"
 #include "qiling/os/macos/mach_port.hpp"
 #include "qiling/os/macos/kernel_func.hpp"
+#include "qiling/os/macos/ev.hpp"
 
 namespace qiling {
 namespace os {
@@ -50,6 +51,12 @@ public:
     // the rootfs); the same ctor-seeded deviation as the mach surfaces
     const FileSystem& macho_fs() const { return *macho_fs_; }
 
+    // events/macos.py: the QlOs seeds the ev/policy managers in its ctor
+    // (macos.py __init__ verbatim shape)
+    QlEvManager& ev_manager() { return *ev_manager_; }
+    const QlEvManager& ev_manager() const { return *ev_manager_; }
+    QlOsPolicy& policy_manager() { return *policy_manager_; }
+
 protected:
     // map_syscall.py get_syscall_mapper: the MACOS per-arch table; the
     // x8664 numbers carry the LIBSYSTEM fixup (0x2000000 <= n < 0x3000000
@@ -70,6 +77,8 @@ private:
     std::unique_ptr<MachoThread> macho_thread_;
     std::unique_ptr<FileSystem> macho_fs_;
     std::uint64_t macho_vmmap_end_ = 0;
+    std::unique_ptr<QlEvManager> ev_manager_;
+    std::unique_ptr<QlOsPolicy> policy_manager_;
 };
 
 }  // namespace macos
