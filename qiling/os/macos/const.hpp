@@ -48,6 +48,11 @@ constexpr std::uint32_t VLNK = 5;
 // const.py PAGE_SIZE
 constexpr std::uint64_t PAGE_SIZE = 0x1000;
 
+// const.py PROC_INFO_CALL_PIDINFO / PROC_PIDREGIONPATHINFO (the proc_info
+// path branch)
+constexpr std::uint32_t PROC_INFO_CALL_PIDINFO = 0x2;
+constexpr std::uint32_t PROC_PIDREGIONPATHINFO = 8;
+
 // x86_const.py IA32_GS_BASE_MSR (the thread_fast_set_cthread_self64 target)
 constexpr std::uint32_t IA32_GS_BASE_MSR = 0xC0000101;
 

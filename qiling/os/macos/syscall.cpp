@@ -145,6 +145,92 @@ std::uint64_t set_eflags_cf(Qiling& ql, std::uint64_t target_cf) {
     return out;
 }
 
+// syscall.py ql_syscall_sysctl / sysctlbyname: the KERN_SUCCESS stubs (the
+// x8664 table carries sysctl=202 only; the sysctlbyname entry is arm64-only
+// in the upstream table)
+std::optional<std::int64_t> syscall_sysctl(Qiling&, const std::vector<std::uint64_t>&) {
+    return KERN_SUCCESS;
+}
+
+// syscall.py ql_syscall_poll: the KERN_SUCCESS stub
+std::optional<std::int64_t> syscall_poll(Qiling&, const std::vector<std::uint64_t>&) {
+    return KERN_SUCCESS;
+}
+
+// syscall.py ql_syscall_shared_region_check_np: the "not ready every time"
+// stub — the raw EINVAL (22)
+std::optional<std::int64_t> syscall_shared_region_check_np(Qiling&, const std::vector<std::uint64_t>&) {
+    return EINVAL;
+}
+
+// syscall.py ql_syscall_proc_info: the PROC_INFO_CALL_PIDINFO +
+// PROC_PIDREGIONPATHINFO path writes the "/usr/lib/dyld" path at buff+248
+// (the kernel_func.py ProcRegionWithPathInfo.write_info verbatim); the
+// other shapes fall through with no return
+std::optional<std::int64_t> syscall_proc_info(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    const auto callnum = params[0];
+    const auto buff = params[4];
+
+    if (callnum == PROC_INFO_CALL_PIDINFO) {
+        const auto flavor = params[2];
+        if (flavor == PROC_PIDREGIONPATHINFO) {
+            const std::string path = "/usr/lib/dyld";
+            std::vector<std::uint8_t> bytes(path.begin(), path.end());
+            ql.mem().write(buff + 248, bytes);
+        }
+    }
+    return std::nullopt;
+}
+
+// syscall.py ql_syscall_csrctl: the stub returning 1
+std::optional<std::int64_t> syscall_csrctl(Qiling&, const std::vector<std::uint64_t>&) {
+    return 1;
+}
+
+// syscall.py ql_syscall_terminate_with_payload: the emu stops and
+// KERN_SUCCESS rides rax (the upstream calls emu_stop then returns)
+std::optional<std::int64_t> syscall_terminate_with_payload(Qiling& ql, const std::vector<std::uint64_t>&) {
+    ql.emu_stop();
+    return KERN_SUCCESS;
+}
+
+// syscall.py ql_syscall_abort_with_payload: the KERN_SUCCESS stub (no stop)
+std::optional<std::int64_t> syscall_abort_with_payload(Qiling&, const std::vector<std::uint64_t>&) {
+    return KERN_SUCCESS;
+}
+
+// syscall.py ql_syscall_write_nocancel: the write through the fd table; the
+// verbatim quirk: the body computes regreturn but the final statement is
+// `return 0` — the write lands and the caller always sees 0
+std::optional<std::int64_t> syscall_write_nocancel(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    const auto fd = static_cast<std::int64_t>(params[0]);
+    const auto buf = params[1];
+    const auto count = params[2];
+
+    try {
+        const auto data = ql.mem().read(buf, count);
+        auto* f = ql.os<posix::QlOsPosix>().fd().at(static_cast<int>(fd)).get();
+        if (f != nullptr) {
+            f->write(data);
+        }
+    } catch (...) {
+        // the upstream's bare except (the raise rides the DEBUG verbosity)
+    }
+    return 0;
+}
+
+// syscall.py ql_syscall_open_nocancel: the open machinery (the port
+// delegates to the posix open entry — the path transform matches the
+// upstream's transform_to_relative_path + fs_mapper shape)
+std::optional<std::int64_t> syscall_open_nocancel(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    const auto* open_entry = posix::SyscallRegistry::instance().find("open");
+    if (open_entry == nullptr) {
+        throw QlErrorBase("open_nocancel: the posix open delegate is missing");
+    }
+    return static_cast<std::int64_t>(open_entry->handler(ql, params).value_or(
+        static_cast<std::uint64_t>(-1)));
+}
+
 // syscall.py ql_syscall_bsdthread_register: the CF clears and the fixed
 // pthread magic rides rax (the upstream's 0x00000000400000df verbatim)
 std::optional<std::int64_t> syscall_bsdthread_register(Qiling& ql, const std::vector<std::uint64_t>&) {
@@ -327,6 +413,22 @@ void register_macos_syscalls() {
                                syscall_bsdthread_register});
     registry.register_syscall({"thread_selfid", {}, syscall_thread_selfid});
     registry.register_syscall({"thread_fast_set_cthread_self64", {PARAM_PTRX}, syscall_thread_fast_set_cthread_self64});
+    registry.register_syscall({"sysctl", {PARAM_PTRX, PARAM_INTN, PARAM_PTRX, PARAM_PTRX, PARAM_PTRX, PARAM_INTN},
+                               syscall_sysctl});
+    registry.register_syscall({"poll", {PARAM_INTN, PARAM_PTRX, PARAM_INTN}, syscall_poll});
+    registry.register_syscall({"shared_region_check_np", {PARAM_PTRX, PARAM_PTRX}, syscall_shared_region_check_np});
+    registry.register_syscall({"proc_info",
+                               {PARAM_INTN, PARAM_INTN, PARAM_INTN, PARAM_PTRX, PARAM_PTRX, PARAM_INTN},
+                               syscall_proc_info});
+    registry.register_syscall({"csrctl", {PARAM_INTN, PARAM_PTRX, PARAM_INTN}, syscall_csrctl});
+    registry.register_syscall({"terminate_with_payload",
+                               {PARAM_INTN, PARAM_INTN, PARAM_INTN, PARAM_PTRX, PARAM_INTN, PARAM_PTRX},
+                               syscall_terminate_with_payload});
+    registry.register_syscall({"abort_with_payload",
+                               {PARAM_INTN, PARAM_INTN, PARAM_INTN, PARAM_PTRX, PARAM_PTRX, PARAM_INTN},
+                               syscall_abort_with_payload});
+    registry.register_syscall({"write_nocancel", {PARAM_INTN, PARAM_PTRX, PARAM_INTN}, syscall_write_nocancel});
+    registry.register_syscall({"open_nocancel", {PARAM_PTRX, PARAM_INTN, PARAM_INTN}, syscall_open_nocancel});
     registry.register_syscall({"kernelrpc_mach_port_construct_trap",
                                {PARAM_INTN, PARAM_INTN, PARAM_PTRX, PARAM_PTRX},
                                syscall_kernelrpc_mach_port_construct_trap});

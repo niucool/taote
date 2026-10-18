@@ -564,6 +564,150 @@ TEST(MacosOs, BsdthreadShimsGroup) {
     EXPECT_EQ(dynamic_cast<qiling::QlArchIntel&>(ql.arch()).msr().read(0xC0000101), kTsd);
 }
 
+TEST(MacosOs, MiscTailStubs) {
+    // sysctl (202): KERN_SUCCESS; poll (230): KERN_SUCCESS;
+    // shared_region_check_np (294): the raw EINVAL (22); csrctl (483): 1;
+    // abort_with_payload (521): KERN_SUCCESS
+    std::vector<std::uint8_t> code = {
+        0xBB, 0x00, 0x21, 0x00, 0x00,                // mov ebx, 0x2100
+        0xB8, 0xCA, 0x00, 0x00, 0x00,                // mov eax, 202 (sysctl)
+        0x0F, 0x05,
+    };
+    emit_store_rax(code, 0x00);
+    const auto push = [&code](std::initializer_list<std::uint8_t> bytes) {
+        code.insert(code.end(), bytes);
+    };
+    push({0xB8, 0xE6, 0x00, 0x00, 0x00});            // mov eax, 230 (poll)
+    push({0x0F, 0x05});
+    emit_store_rax(code, 0x08);
+    push({0xB8, 0x26, 0x01, 0x00, 0x00});            // mov eax, 294 (shared_region_check_np)
+    push({0x0F, 0x05});
+    emit_store_rax(code, 0x10);
+    push({0xB8, 0xE3, 0x01, 0x00, 0x00});            // mov eax, 483 (csrctl)
+    push({0x0F, 0x05});
+    emit_store_rax(code, 0x18);
+    push({0xB8, 0x09, 0x02, 0x00, 0x00});            // mov eax, 521 (abort_with_payload)
+    push({0x0F, 0x05});
+    emit_store_rax(code, 0x20);
+    code.insert(code.end(), kBlobExit.begin(), kBlobExit.end());
+
+    auto ql = make_macos_qiling(code);
+    ql.mem().map(0x2000, 0x2000, UC_PROT_ALL, "[macos-scratch]");
+    ql.run();
+
+    EXPECT_EQ(ql.os().exit_code(), 42);
+    EXPECT_EQ(ql.mem().read_ptr(kCellBase, 4), 0u);        // sysctl: KERN_SUCCESS
+    EXPECT_EQ(ql.mem().read_ptr(kCellBase + 8, 4), 0u);    // poll: KERN_SUCCESS
+    EXPECT_EQ(ql.mem().read_ptr(kCellBase + 0x10, 4), 22u);  // check_np: EINVAL
+    EXPECT_EQ(ql.mem().read_ptr(kCellBase + 0x18, 4), 1u);   // csrctl: 1
+    EXPECT_EQ(ql.mem().read_ptr(kCellBase + 0x20, 4), 0u);   // abort: KERN_SUCCESS
+}
+
+TEST(MacosOs, ProcInfoWritesDyldPathAndStopsOnTerminate) {
+    // proc_info (336) with callnum=2 (PROC_INFO_CALL_PIDINFO) and
+    // flavor=8 (PROC_PIDREGIONPATHINFO): the "/usr/lib/dyld" path rides at
+    // buff+248 and rax stays untouched; then terminate_with_payload (520)
+    // stops the emu (the exit body never runs — the emu_stop ends it)
+    const std::uint64_t kBuff = 0x2300;
+    std::vector<std::uint8_t> code = {
+        0xBB, 0x00, 0x21, 0x00, 0x00,                // mov ebx, 0x2100
+        0xBF, 0x02, 0x00, 0x00, 0x00,                // mov edi, 2 (callnum)
+        0xBE, 0x99, 0x07, 0x00, 0x00,                // mov esi, 1965 (pid, arbitrary)
+        0xBA, 0x08, 0x00, 0x00, 0x00,                // mov edx, 8 (flavor, the 3rd arg)
+        0x41, 0xBA, 0x00, 0x00, 0x00, 0x00,          // mov r10d, 0 (arg, the 4th)
+        0x41, 0xB8, 0x00, 0x23, 0x00, 0x00,          // mov r8d, kBuff (buff, the 5th)
+        0x41, 0xB9, 0x00, 0x05, 0x00, 0x00,          // mov r9d, 0x500 (buffer_size)
+        0xB8, 0x50, 0x01, 0x00, 0x00,                // mov eax, 336 (proc_info)
+        0x0F, 0x05,                                  // syscall
+    };
+    emit_store_rax(code, 0x00);
+    const auto push = [&code](std::initializer_list<std::uint8_t> bytes) {
+        code.insert(code.end(), bytes);
+    };
+    // the terminate dispatch: pid=42 (rdi is already the arg cell), the rest
+    // zeros; the KERN_SUCCESS return lands but the emu stops right after
+    push({0xBF, 0x2A, 0x00, 0x00, 0x00});            // mov edi, 42 (pid)
+    push({0xB8, 0x08, 0x02, 0x00, 0x00});            // mov eax, 520
+    push({0x0F, 0x05});                              // syscall — the emu stops
+    // (the store + exit never execute)
+
+    auto ql = make_macos_qiling(code);
+    ql.mem().map(0x2000, 0x2000, UC_PROT_ALL, "[macos-scratch]");
+    ql.run();
+
+    // the run stopped at the terminate (no exit dispatch ran — the exit code
+    // stays unset, the default 0)
+    const auto path = ql.mem().read(kBuff + 248, 13);
+    EXPECT_EQ(path[0], '/');
+    EXPECT_EQ(path[1], 'u');
+    EXPECT_EQ(path[12], 'd');
+    EXPECT_EQ(ql.mem().read_ptr(kCellBase, 4), 336u);   // rax: the no-return proc_info
+                                                        // leaves the mov eax value
+}
+
+TEST(MacosOs, WriteNocancelWritesAndReturnsZero) {
+    // write_nocancel (397): the fd writes land through the fd table but the
+    // verbatim `return 0` quirk means the caller always sees 0
+    ensure_macos_file("nocancel.txt", "seed");
+
+    std::vector<std::uint8_t> code = {
+        0xBB, 0x00, 0x21, 0x00, 0x00,                // mov ebx, 0x2100
+        0xBF, 0x03, 0x00, 0x00, 0x00,                // mov edi, 3 (fd)
+        0xBE, 0x00, 0x23, 0x00, 0x00,                // mov esi, kBuffer
+        0xBA, 0x05, 0x00, 0x00, 0x00,                // mov edx, 5 (count)
+        0xB8, 0x8D, 0x01, 0x00, 0x00,                // mov eax, 397
+        0x0F, 0x05,                                  // syscall
+    };
+    emit_store_rax(code, 0x00);
+    code.insert(code.end(), kBlobExit.begin(), kBlobExit.end());
+
+    auto ql = make_macos_qiling(code);
+    ql.mem().map(0x2000, 0x2000, UC_PROT_ALL, "[macos-scratch]");
+    const auto rootfs = std::filesystem::temp_directory_path() / "ql_macos_rootfs";
+    auto f = qiling::QlFile::open_mode((rootfs / "nocancel.txt").string(), "r+");
+    ql.os<qiling::os::posix::QlOsPosix>().fd().set(3, f);
+    ql.mem().write(kBuffer, std::vector<std::uint8_t>{'W', 'R', 'I', 'T', 'E'});
+    ql.run();
+
+    EXPECT_EQ(ql.os().exit_code(), 42);
+    EXPECT_EQ(ql.mem().read_ptr(kCellBase, 4), 0u);    // the verbatim `return 0`
+    // the write landed through the fd (the host file carries it after close)
+    f->close();
+    std::ifstream check(rootfs / "nocancel.txt", std::ios::binary);
+    std::string content((std::istreambuf_iterator<char>(check)), std::istreambuf_iterator<char>());
+    EXPECT_EQ(content.substr(0, 5), "WRITE");
+}
+
+TEST(MacosOs, OpenNocancelOpensThroughPosixOpen) {
+    // open_nocancel (398): the first free fd slot opens the path (the posix
+    // open delegate)
+    ensure_macos_file("nocancel2.txt", "data");
+
+    std::vector<std::uint8_t> code = {
+        0xBB, 0x00, 0x21, 0x00, 0x00,                // mov ebx, 0x2100
+        0xBF, 0x80, 0x22, 0x00, 0x00,                // mov edi, kPathAttr (0x2280)
+        0xBE, 0x00, 0x00, 0x00, 0x00,                // mov esi, 0 (O_RDONLY)
+        0x31, 0xD2,                                  // xor edx, edx (mode)
+        0xB8, 0x8E, 0x01, 0x00, 0x00,                // mov eax, 398
+        0x0F, 0x05,                                  // syscall
+    };
+    emit_store_rax(code, 0x00);
+    code.insert(code.end(), kBlobExit.begin(), kBlobExit.end());
+
+    auto ql = make_macos_qiling(code);
+    ql.mem().map(0x2000, 0x2000, UC_PROT_ALL, "[macos-scratch]");
+    const auto seed = [&ql](std::uint64_t at, const std::string& str) {
+        ql.mem().write(at, std::vector<std::uint8_t>(str.begin(), str.end()));
+        ql.mem().write(at + str.size(), std::vector<std::uint8_t>{0});
+    };
+    seed(kPathAttr, "/nocancel2.txt");
+    ql.run();
+
+    EXPECT_EQ(ql.os().exit_code(), 42);
+    // the fd lands at the first free slot (3 — the std streams take 0..2)
+    EXPECT_EQ(ql.mem().read_ptr(kCellBase, 4), 3u);
+}
+
 TEST(MacosOs, GetentropyReturnsSuccess) {
     auto ql = make_macos_qiling(getentropy_body());
     ql.mem().map(0x2000, 0x1000, UC_PROT_ALL, "[macos-scratch]");  // the page-aligned base (the 0x2100 cells ride inside)
