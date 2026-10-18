@@ -18,6 +18,20 @@ inline const std::pair<unsigned, std::string_view> clock_types[] = {
     {4, "CLOCK_THREAD_CPUTIME_ID"},
 };
 
+// types.py pathconf_names (the upstream table verbatim - the values are the
+// _PC_* name ids from lib/c/public/unistd.h)
+inline const std::pair<unsigned, std::string_view> pathconf_names[] = {
+    {1, "_PC_LINK_MAX"},
+    {2, "_PC_MAX_CANON"},
+    {3, "_PC_MAX_INPUT"},
+    {4, "_PC_NAME_MAX"},
+    {5, "_PC_PATH_MAX"},
+    {6, "_PC_PIPE_BUF"},
+    {7, "_PC_NO_TRUNC"},
+    {8, "_PC_VDISABLE"},
+    {9, "_PC_CHOWN_RESTRICTED"},
+};
+
 // types.py lseek_whence (lib/c/public/unistd.h)
 inline const std::pair<unsigned, std::string_view> lseek_whence[] = {
     {0, "SEEK_SET"},  // relative to start of file

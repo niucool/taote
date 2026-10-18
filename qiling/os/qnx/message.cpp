@@ -515,9 +515,41 @@ std::optional<std::int64_t> ql_qnx_msg_io_connect(Qiling& ql, std::uint64_t coid
     ioflag -= 1;
     const auto real_mode = mode & ~static_cast<std::uint32_t>(S_IFMT);
 
-    if (subtype == 0 || subtype == 1) {
-        // _IO_CONNECT_COMBINE: the extra-iov walk for _IO_STAT/_IO_PATHCONF
-        throw QlErrorNotImplemented("qnx io_connect: the COMBINE path is not implemented");
+    if (subtype == 0 || subtype == 1) {  // == _IO_CONNECT_COMBINE / _COMBINE_CLOSE
+        // the third iov_t is the alignment slot (read and discarded when
+        // present); the fourth iov_t carries the combined message
+        if (sparts > 2) {
+            (void)ql.mem().read_ptr(smsg + 16, 4);
+            (void)ql.mem().read_ptr(smsg + 20, 4);
+        }
+        if (sparts > 3) {
+            const auto x_base = ql.mem().read_ptr(smsg + 24, 4);
+            const auto x_len = static_cast<std::uint32_t>(ql.mem().read_ptr(smsg + 28, 4));
+            const auto iov_msg = ql.mem().read(x_base, x_len);
+            const auto x_type = static_cast<std::uint16_t>(iov_msg[0] | (iov_msg[1] << 8));
+
+            if (x_type == 0x104) {  // == _IO_STAT
+                // the combine + fstat ride the posix ql_syscall_fstat
+                // packing (the pack_stat_struct family) - not yet ported;
+                // deferred with that slice
+                throw QlErrorNotImplemented("qnx io_connect: the COMBINE _IO_STAT path is not implemented");
+            } else if (x_type == 0x108) {  // == _IO_PATHCONF
+                // struct _io_pathconf: (type, combine_len, name, zero) =
+                // unpack("<HHhH", iov_msg)
+                const auto x_name = static_cast<std::int16_t>(iov_msg[4] | (iov_msg[5] << 8));
+                if (!table_contains(pathconf_names, static_cast<unsigned>(x_name))) {
+                    throw QlErrorNotImplemented("qnx io_connect: the unknown path_conf name");
+                }
+                // the upstream's name==5 early return (the comment says
+                // _PC_NAME_MAX while the table pins 5=_PC_PATH_MAX - the
+                // verbatim quirk)
+                if (x_name == 5) {
+                    return 1024;
+                }
+            }
+            // the other combined types: the upstream warns and continues to
+            // the reply-iov#1 write
+        }
     }
 
     if (subtype == 2) {  // == _IO_CONNECT_OPEN

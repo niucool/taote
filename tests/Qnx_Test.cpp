@@ -1235,3 +1235,83 @@ TEST(QnxOs, MemCtrlUnknownSubtypeThrows) {
 
     EXPECT_THROW(ql.run(), QlErrorNotImplemented);
 }
+
+// the io_connect COMBINE walk: subtype=0 (COMBINE) with four send iovs - the
+// third is the alignment slot (discarded), the fourth carries the combined
+// _io_pathconf (type=0x108, combine_len=8, name=5, zero=0); the name==5
+// early return (the upstream's _PC_NAME_MAX comment over the
+// 5=_PC_PATH_MAX table entry - the verbatim quirk) yields 1024 in R0 and
+// skips the reply-iov#1 write
+//   00: mov r0, #1          ; coid = 1 (the seeded conn)
+//   04: mov r1, #0x2100     ; smsg = the 4 send iovs
+//   08: mov r2, #4          ; sparts = 4
+//   0C: mov r3, #0x2150     ; rmsg = the 2 reply iovs (untouched)
+//   10: mov r4, #2          ; rparts = 2
+//   14: mov r12, #11 ; 18: swi 0
+//   1C: mov r4, #0x2300 ; 20: str r0, [r4]
+//   24: mvn r0, #0 ; 28: mvn r1, #0 ; 2C: mov r2, #42
+//   30: mov r12, #47 ; 34: swi 0
+TEST(QnxOs, MsgIoConnectCombinePathconfReturns1024) {
+    const std::vector<std::uint8_t> code = {
+        0x01, 0x00, 0xA0, 0xE3,  // 00: mov r0, #1
+        0x21, 0x1C, 0xA0, 0xE3,  // 04: mov r1, #0x2100
+        0x04, 0x20, 0xA0, 0xE3,  // 08: mov r2, #4
+        0x25, 0x3C, 0xA0, 0xE3,  // 0C: mov r3, #0x2150
+        0x02, 0x40, 0xA0, 0xE3,  // 10: mov r4, #2
+        0x0B, 0xC0, 0xA0, 0xE3,  // 14: mov r12, #11
+        0x00, 0x00, 0x00, 0xEF,  // 18: swi 0
+        0x23, 0x4C, 0xA0, 0xE3,  // 1C: mov r4, #0x2300
+        0x00, 0x00, 0x84, 0xE5,  // 20: str r0, [r4]
+        0x00, 0x00, 0xE0, 0xE3,  // 24: mvn r0, #0
+        0x00, 0x10, 0xE0, 0xE3,  // 28: mvn r1, #0
+        0x2A, 0x20, 0xA0, 0xE3,  // 2C: mov r2, #42
+        0x2F, 0xC0, 0xA0, 0xE3,  // 30: mov r12, #47
+        0x00, 0x00, 0x00, 0xEF,  // 34: swi 0
+    };
+    auto ql = make_qnx_qiling(code);
+
+    ql.mem().map(kScratch, 0x1000, UC_PROT_ALL, "[qnx-scratch]");
+
+    // the 4 send iovs: [0] the hdr (at 0x2180 - the 4-entry iov array would
+    // collide with the shared kIoConnectHdr scratch), [1] the path, [2] the
+    // align slot, [3] the combined _io_pathconf
+    constexpr std::uint64_t kCombineHdr = 0x2180;
+    ql.mem().write_ptr(0x2100, kCombineHdr, 4);
+    ql.mem().write_ptr(0x2104, 40, 4);
+    ql.mem().write_ptr(0x2108, 0x2140, 4);
+    ql.mem().write_ptr(0x210C, 11, 4);
+    ql.mem().write_ptr(0x2110, 0x2200, 4);   // the align slot (discarded)
+    ql.mem().write_ptr(0x2114, 40, 4);
+    ql.mem().write_ptr(0x2118, 0x2260, 4);   // the 4th iov: the pathconf msg
+    ql.mem().write_ptr(0x211C, 8, 4);
+
+    // the _io_connect hdr: subtype=0 (COMBINE), ioflag=1, mode=0x8000,
+    // sflag=1, the pinned cells
+    ql.mem().write_ptr(kCombineHdr + 0, 0x100, 2);
+    ql.mem().write_ptr(kCombineHdr + 2, 0, 2);
+    ql.mem().write_ptr(kCombineHdr + 4, 1, 4);
+    ql.mem().write_ptr(kCombineHdr + 8, 0xa18, 2);
+    ql.mem().write_ptr(kCombineHdr + 10, 0x10, 2);
+    ql.mem().write_ptr(kCombineHdr + 20, 1, 4);
+    ql.mem().write_ptr(kCombineHdr + 24, 0x8000, 4);
+    ql.mem().write_ptr(kCombineHdr + 28, 0, 2);
+    ql.mem().write_ptr(kCombineHdr + 30, 0, 2);
+    ql.mem().write(0x2140, std::vector<std::uint8_t>{'/', 'h', 'e', 'l', 'l', 'o', '.', 't', 'x', 't', 0x00});
+
+    // the combined _io_pathconf: type=0x108, combine_len=8, name=5, zero=0
+    ql.mem().write_ptr(0x2260, 0x108, 2);
+    ql.mem().write_ptr(0x2262, 8, 2);
+    ql.mem().write_ptr(0x2264, 5, 2);
+    ql.mem().write_ptr(0x2266, 0, 2);
+
+    // the 2 reply iovs (untouched by the early-return path)
+    ql.mem().write_ptr(0x2150, 0, 4);
+    ql.mem().write_ptr(0x2154, 20, 4);
+    ql.mem().write_ptr(0x2158, 0, 4);
+    ql.mem().write_ptr(0x215C, 64, 4);
+
+    ql.run();
+
+    EXPECT_EQ(ql.os().exit_code(), 42);
+    EXPECT_EQ(ql.mem().read_ptr(0x2300, 4), 1024u);
+}
