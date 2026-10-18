@@ -249,6 +249,139 @@ TEST(MacosOs, MachMsgUnknownIdThrows) {
     EXPECT_THROW(ql2.run(), qiling::QlErrorBase);
 }
 
+// the port-name reply fixture helper: crafts an id-N message, runs the
+// trap, returns the emulator (the reply overwrote the request buffer); the
+// flavor/outCnt ride the prefill
+static std::unique_ptr<Qiling> run_mach_msg_id(std::uint32_t msgh_id, std::uint64_t ssize, std::uint32_t flavor) {
+    std::vector<std::uint8_t> msg(ssize, 0);
+    const auto u32 = [&msg](std::size_t at, std::uint32_t v) {
+        msg[at] = static_cast<std::uint8_t>(v);
+        msg[at + 1] = static_cast<std::uint8_t>(v >> 8);
+        msg[at + 2] = static_cast<std::uint8_t>(v >> 16);
+        msg[at + 3] = static_cast<std::uint8_t>(v >> 24);
+    };
+    u32(0x14, msgh_id);
+    if (ssize >= 40) {
+        msg[24] = 1;        // NDR
+        u32(32, flavor);    // the flavor cell
+        u32(36, 6);         // outCnt
+    } else if (flavor != 0) {
+        u32(24, flavor);    // a short content: the flavor rides cell 0
+    }
+    std::vector<std::uint8_t> code = {
+        0xBF, 0x00, 0x21, 0x00, 0x00,  // mov edi, 0x2100
+        0x31, 0xF6,                    // xor esi, esi
+        0xBA, static_cast<std::uint8_t>(ssize), 0x00, 0x00, 0x00,  // mov edx, ssize
+        0xB8, 0x1F, 0x00, 0x00, 0x01,  // mov eax, 0x100001f (mach_msg_trap)
+        0x0F, 0x05,                    // syscall
+        0xBF, 0x2A, 0x00, 0x00, 0x00,  // mov edi, 42
+        0xB8, 0x01, 0x00, 0x00, 0x00,  // mov eax, 1
+        0x0F, 0x05,
+    };
+    QilingOptions options;
+    options.rootfs = (std::filesystem::temp_directory_path() / "ql_macos_rootfs").string();
+    options.code = code;
+    options.ostype = QL_OS::MACOS;
+    options.archtype = QL_ARCH::X8664;
+    // the options move through make_unique (Qiling itself is neither
+    // copyable nor movable — the prvalue path make_macos_qiling uses does
+    // not survive the helper return)
+    auto ql = std::make_unique<Qiling>(std::move(options));
+    ql->mem().map(0x2000, 0x1000, UC_PROT_ALL, "[macos-scratch]");
+    ql->mem().write(0x2100, msg);
+    std::fprintf(stderr, "[m] pre-run\n");
+    ql->run();
+    std::fprintf(stderr, "[m] post-run\n");
+    EXPECT_EQ(ql->os().exit_code(), 42);
+    return ql;
+}
+
+TEST(MacosOs, MachMsgClockServiceAndTaskPorts) {
+    // id 206 (host_get_clock_service): the reply id 306, the retcode 1, the
+    // trailer carrying the clock port 0x803
+    std::fprintf(stderr, "[m] case 206\n");
+    {
+        const auto owned = run_mach_msg_id(206, 28, 0);
+        Qiling& ql = *owned;
+        const auto hdr = ql.mem().read(0x2100, 24);
+        EXPECT_EQ(hdr[4], 0x28);                            // msgh_size
+        EXPECT_EQ(hdr[0], 0x00); EXPECT_EQ(hdr[1], 0x12);   // bits 0x80001200
+        EXPECT_EQ(hdr[3], 0x80);
+        EXPECT_EQ(hdr[20], 0x32); EXPECT_EQ(hdr[21], 0x01); // msgh_id = 306
+        const auto content = ql.mem().read(0x2118, 4);
+        EXPECT_EQ(content[0], 1);                           // the retcode
+        const auto trailer = ql.mem().read(0x211c, 16);
+        EXPECT_EQ(trailer[0], 0x03); EXPECT_EQ(trailer[1], 0x08);  // 0x803 LE
+        EXPECT_EQ(trailer[10], 0x11);                       // the disposition
+    }
+    // id 3418 (semaphore_create): the reply id 3518, the semaphore port 0x903
+    std::fprintf(stderr, "[m] case 3418\n");
+    {
+        const auto owned = run_mach_msg_id(3418, 28, 0);
+        Qiling& ql = *owned;
+        const auto hdr = ql.mem().read(0x2100, 24);
+        EXPECT_EQ(hdr[20], 0xBE); EXPECT_EQ(hdr[21], 0x0D);  // msgh_id = 3518
+        const auto trailer = ql.mem().read(0x211c, 4);
+        EXPECT_EQ(trailer[0], 0x03); EXPECT_EQ(trailer[1], 0x09);  // 0x903 LE
+    }
+    // id 3409 (get_special_port): the reply id 3509, the special port 0x707
+    std::fprintf(stderr, "[m] case 3409\n");
+    {
+        const auto owned = run_mach_msg_id(3409, 28, 0);
+        Qiling& ql = *owned;
+        const auto hdr = ql.mem().read(0x2100, 24);
+        EXPECT_EQ(hdr[20], 0xB5); EXPECT_EQ(hdr[21], 0x0D);  // msgh_id = 3509
+        const auto trailer = ql.mem().read(0x211c, 4);
+        EXPECT_EQ(trailer[0], 0x07); EXPECT_EQ(trailer[1], 0x07);  // 0x707 LE
+    }
+}
+
+TEST(MacosOs, MachMsgHostInfoPriorityFlavor) {
+    // flavor 5 (HOST_PRIORITY_INFO): the fixed priority cells
+    std::vector<std::uint8_t> msg(40, 0);
+    const auto u32 = [&msg](std::size_t at, std::uint32_t v) {
+        msg[at] = static_cast<std::uint8_t>(v);
+        msg[at + 1] = static_cast<std::uint8_t>(v >> 8);
+        msg[at + 2] = static_cast<std::uint8_t>(v >> 16);
+        msg[at + 3] = static_cast<std::uint8_t>(v >> 24);
+    };
+    u32(0x14, 200);
+    msg[24] = 1;
+    u32(32, 5);   // flavor = HOST_PRIORITY_INFO
+    u32(36, 4);   // outCnt
+    std::vector<std::uint8_t> code = {
+        0xBF, 0x00, 0x21, 0x00, 0x00,  // mov edi, 0x2100
+        0x31, 0xF6,                    // xor esi, esi
+        0xBA, 0x28, 0x00, 0x00, 0x00,  // mov edx, 40
+        0xB8, 0x1F, 0x00, 0x00, 0x01,  // mov eax, 0x100001f
+        0x0F, 0x05,                    // syscall
+        0xBF, 0x2A, 0x00, 0x00, 0x00,  // mov edi, 42
+        0xB8, 0x01, 0x00, 0x00, 0x00,  // mov eax, 1
+        0x0F, 0x05,
+    };
+    Qiling ql = make_macos_qiling(code);
+    ql.mem().map(0x2000, 0x1000, UC_PROT_ALL, "[macos-scratch]");
+    ql.mem().write(0x2100, msg);
+    ql.run();
+    EXPECT_EQ(ql.os().exit_code(), 42);
+    EXPECT_EQ(ql.mem().read_ptr(0x2100 + 0x14, 4), 300u);  // msgh_id = 300
+    // the reply size 72 (the priority branch)
+    EXPECT_EQ(ql.mem().read_ptr(0x2104, 4), 72u);
+    const auto content = ql.mem().read(0x2118, 48);
+    EXPECT_EQ(content[16], 0x50);  // kernel_priority = MINPRI_KERNEL
+    EXPECT_EQ(content[20], 0x50);  // system_priority
+    EXPECT_EQ(content[24], 0x40);  // server_priority = MINPRI_RESERVED
+    EXPECT_EQ(content[28], 0x1f);  // user_priority = BASEPRI_DEFAULT
+    EXPECT_EQ(content[44], 0x4f);  // maximum_priority = MAXPRI_RESERVED
+}
+
+TEST(MacosOs, MachMsgHostInfoShortContentAndBadFlavorThrow) {
+    // the content shorter than 16 bytes (ssize 28 = 24 + 4): the parse guard
+    EXPECT_THROW(run_mach_msg_id(200, 28, 1), qiling::QlErrorBase);
+    // the unknown flavor (999): the flavor-not-supported branch
+    EXPECT_THROW(run_mach_msg_id(200, 40, 999), qiling::QlErrorBase);
+}
+
 TEST(MacosOs, CsopsWritesFlagAndReturnsSuccess) {
     auto ql = make_macos_qiling(csops_body());
     ql.mem().map(0x2000, 0x1000, UC_PROT_ALL, "[macos-scratch]");  // the page-aligned base (the 0x2100 cells ride inside)
