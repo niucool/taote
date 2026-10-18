@@ -72,4 +72,41 @@ void QlOsStats::log_string(std::string_view s) {
     }
 }
 
+// os/stats.py QlWinStats — the registry access log + the summary extension
+
+void QlWinStats::clear() {
+    QlOsStats::clear();
+    registry_.clear();
+}
+
+void QlWinStats::log_reg_access(std::string_view key, std::optional<std::string> item,
+                                std::optional<int> type, std::optional<std::string> value) {
+    registry_[std::string(key)].push_back(RegAccessRecord{
+        item.value_or(std::string()), std::move(type), std::move(value), position()});
+    advance_position();
+}
+
+std::vector<std::string> QlWinStats::summary() const {
+    auto out = QlOsStats::summary();
+
+    out.push_back("");
+    out.push_back("registry keys accessed");
+    out.push_back(std::string(24, '-'));
+    for (const auto& [key, values] : registry_) {
+        out.push_back(key + ":");
+        for (const auto& rec : values) {
+            std::string line = "  item=" + rec.item;
+            if (rec.type) {
+                line += " type=" + std::to_string(*rec.type);
+            }
+            if (rec.value) {
+                line += " value=" + *rec.value;
+            }
+            out.push_back(line);
+        }
+    }
+
+    return out;
+}
+
 }  // namespace qiling

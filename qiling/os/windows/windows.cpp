@@ -49,6 +49,16 @@ QlOsWindows::QlOsWindows(Qiling* ql) : QlOs(ql) {
     // the pid from the KERNEL section
     // (posix shares the KERNEL section; windows reads it the same way)
 
+    // the QlWinStats flavour (windows.py: self.stats = QlWinStats())
+    set_stats(std::make_unique<QlWinStats>());
+
+    // the registry manager (windows.py __setup_components): the hive dir is
+    // the real path of windir\registry; the diff store lives under rootfs
+    {
+        const auto hivedir = (std::filesystem::path(ql_->rootfs()) / "Windows" / "registry").string();
+        registry_manager_ = std::make_unique<registry::RegistryManager>(*ql_, hivedir);
+    }
+
     // the handle manager (windows.py __setup_components)
     handle_manager_ = std::make_unique<HandleManager>();
 
@@ -144,7 +154,12 @@ void QlOsWindows::run() {
         throw;
     }
 
-    // the registry/summary surface lands with its slices
+    // windows.py run tail: persist the registry diff + the summary lines
+    registry_manager_->save();
+    for (const auto& entry : stats().summary()) {
+        // windows.py: ql.log.debug(entry)
+        (void)entry;
+    }
 }
 
 }  // namespace windows

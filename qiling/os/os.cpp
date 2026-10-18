@@ -29,6 +29,7 @@ std::FILE* stderr_file() { return stderr; }
 }  // namespace
 
 QlOs::QlOs(Qiling* ql) : ql_(ql) {
+    stats_ = std::make_unique<QlOsStats>();
     // standard streams: the console trio wraps the host C streams (see the
     // header's deviation note); PersistentQlFile keeps the host from closing
     stdin_ = std::make_shared<PersistentQlFile>("stdin", stdin_file());
@@ -166,7 +167,7 @@ std::optional<std::uint64_t> QlOs::call(std::uint64_t pc, const std::string& nam
     const auto pargs = process_fcall_params(targs);
     (void)pargs;  // the verbose print_function surface lands with its slice
 
-    stats_.log_api_call(pc, name, result.retval.value_or(0), result.retval.has_value(), result.retaddr);
+    stats_->log_api_call(pc, name, result.retval.value_or(0), result.retval.has_value(), result.retaddr);
 
     // os.py: avoid modifying the pc when the emulation has stopped (unicorn
     // issue #1579)

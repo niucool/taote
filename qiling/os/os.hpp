@@ -96,7 +96,11 @@ public:
     std::uint32_t last_error() const noexcept { return last_error_; }
     void set_last_error(std::uint32_t code) noexcept { last_error_ = code; }
 
-    QlOsStats& stats() noexcept { return stats_; }
+    QlOsStats& stats() noexcept { return *stats_; }
+
+    // the derived os families may specialize the stats type (windows.py:
+    // self.stats = QlWinStats()); call before the emulation starts
+    void set_stats(std::unique_ptr<QlOsStats> stats) { stats_ = std::move(stats); }
 
     // the shellcode entry configuration (os.py ctor: the CODE profile section)
     std::uint64_t load_address() const noexcept { return load_address_; }
@@ -179,7 +183,7 @@ protected:
     std::shared_ptr<QlFile> stderr_;
     std::shared_ptr<QlFsMappedObject> console_out_;
 
-    QlOsStats stats_;
+    std::unique_ptr<QlOsStats> stats_;
     std::unique_ptr<QlFunctionCall> fcall_;
     QlFunctionCall* fcall_nonowning_ = nullptr;
 

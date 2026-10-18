@@ -20,6 +20,9 @@ namespace {
 std::filesystem::path ensure_rootfs() {
     const auto base = std::filesystem::temp_directory_path() / "ql_pe_loader_rootfs";
     std::filesystem::create_directories(base);
+    // the registry hive dir: the windows os ctor demands it for the container
+    // path (registry.py RegistryManager, verbatim)
+    std::filesystem::create_directories(base / "Windows" / "registry");
     return base;
 }
 
