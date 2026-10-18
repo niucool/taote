@@ -25,6 +25,10 @@ add_library(qiling STATIC
     os/stats.cpp
     os/path.cpp
     os/filestruct.cpp
+    os/disk.cpp
+    os/dos/dos.cpp
+    os/dos/utils.cpp
+    os/dos/interrupts.cpp
     os/mapper.cpp
     os/posix/posix.cpp
     os/linux/procfs.cpp
@@ -53,6 +57,7 @@ add_library(qiling STATIC
     loader/blob.cpp
     loader/pe.cpp
     loader/elf.cpp
+    loader/dos.cpp
     snapshot.cpp
     cc/cc.cpp
     cc/arm.cpp

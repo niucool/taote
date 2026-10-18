@@ -11,6 +11,8 @@
 #include "qiling/arch/x86.hpp"
 #include "qiling/os/freebsd/freebsd.hpp"
 #include "qiling/os/qnx/qnx.hpp"
+#include "qiling/os/dos/dos.hpp"
+#include "qiling/loader/dos.hpp"
 #include "qiling/arch/arm.hpp"
 #include "qiling/arch/arm64.hpp"
 #include "qiling/arch/mips.hpp"
@@ -271,6 +273,10 @@ LoaderFactory select_loader(QL_OS ostype, bool libcache) {
             return [](Qiling* ql) -> std::unique_ptr<loader::QlLoader> {
                 return std::make_unique<loader::QlLoaderELF>(ql);
             };
+        case QL_OS::DOS:
+            return [](Qiling* ql) -> std::unique_ptr<loader::QlLoader> {
+                return std::make_unique<loader::QlLoaderDOS>(ql);
+            };
         default:
             // the remaining per-format loaders (ELF/Mach-O/DOS/UEFI/...) land
             // with their phases; until then the module lookup degrades
@@ -299,6 +305,10 @@ OsFactory select_os(QL_OS ostype) {
         case QL_OS::QNX:
             return [](Qiling* ql) -> std::unique_ptr<QlOs> {
                 return std::make_unique<os::qnx::QlOsQnx>(ql);
+            };
+        case QL_OS::DOS:
+            return [](Qiling* ql) -> std::unique_ptr<QlOs> {
+                return std::make_unique<os::dos::QlOsDos>(ql);
             };
         default:
             throw QlErrorNotImplemented("os layer for this os type is not implemented");

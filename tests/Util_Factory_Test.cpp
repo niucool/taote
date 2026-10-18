@@ -78,9 +78,9 @@ TEST(SelectLoader, BlobFactoryAvailable) {
 
 TEST(SelectLoader, NonBlobRaisesNotImplemented) {
     // PE landed with Phase 4; the ELF-backed oses (linux/freebsd/qnx) resolve
-    // the QlLoaderELF; the remaining per-format loaders degrade (PORT_PLAN.md
-    // Phase 5+)
-    for (const auto os : {QL_OS::MACOS, QL_OS::UEFI, QL_OS::DOS}) {
+    // the QlLoaderELF; the DOS loader landed with the Phase 6 slice (the
+    // COM/EXE/MBR branches); the remaining per-format loaders degrade
+    for (const auto os : {QL_OS::MACOS, QL_OS::UEFI}) {
         EXPECT_THROW(select_loader(os, false), QlErrorNotImplemented) << static_cast<int>(os);
     }
 }
@@ -105,8 +105,8 @@ TEST(SelectOs, BlobFactoryAvailable) {
 }
 
 TEST(SelectOs, NonBlobRaisesNotImplemented) {
-    // the qnx dialect landed (this slice); the remaining os trees defer
-    for (const auto os : {QL_OS::MACOS, QL_OS::UEFI, QL_OS::DOS}) {
+    // the qnx and dos dialects landed; the remaining os trees defer
+    for (const auto os : {QL_OS::MACOS, QL_OS::UEFI}) {
         EXPECT_THROW(select_os(os), QlErrorNotImplemented) << static_cast<int>(os);
     }
 }

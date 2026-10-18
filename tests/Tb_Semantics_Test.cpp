@@ -297,3 +297,49 @@ TEST(TbSemantics, DISABLED_MidTbRestartOnCachedTb) {
     EXPECT_EQ(err, UC_ERR_OK);
     EXPECT_EQ(got[0], 42);
 }
+
+// the raw-unicorn 16-bit INTR probe: int 0x21 in real mode with a UC_HOOK_INTR
+// handler — pins whether the 16-bit int + hook combination is emulatable at
+// the raw level (the dos fixture rides the same path)
+static void probe16_intr_hook(uc_engine* uc, std::uint32_t intno, void* user_data) {
+    (void)intno;
+    (void)user_data;
+    // emulate the leaf: read AH, stop when 0x4c
+    std::uint16_t ah = 0;
+    std::uint32_t tmp = 0;
+    uc_reg_read(uc, UC_X86_REG_AH, &tmp);
+    ah = static_cast<std::uint16_t>(tmp);
+    if (ah == 0x4c) {
+        uc_emu_stop(uc);
+    }
+}
+
+TEST(TbSemantics, DISABLED_RealModeIntHookRawProbe) {
+    uc_engine* uc = nullptr;
+    ASSERT_EQ(uc_open(UC_ARCH_X86, UC_MODE_16, &uc), UC_ERR_OK);
+
+    // map the low megabyte; the blob rides at 0x76a0 (the cs=0x75a, ip=0x100
+    // profile entry)
+    ASSERT_EQ(uc_mem_map(uc, 0, 0x100000, UC_PROT_ALL), UC_ERR_OK);
+
+    const std::vector<std::uint8_t> blob = {0xB4, 0x4C, 0xCD, 0x21};  // mov ah,4c | int 21h
+    const std::uint64_t base = 0x76a0;
+    uc_mem_write(uc, base, blob.data(), blob.size());
+
+    std::uint32_t cs = 0x75a, ds = 0x75a, es = 0x75a, ss = 0x75a, ip = 0x100, sp = 0xfffe;
+    uc_reg_write(uc, UC_X86_REG_CS, &cs);
+    uc_reg_write(uc, UC_X86_REG_DS, &ds);
+    uc_reg_write(uc, UC_X86_REG_ES, &es);
+    uc_reg_write(uc, UC_X86_REG_SS, &ss);
+    uc_reg_write(uc, UC_X86_REG_IP, &ip);
+    uc_reg_write(uc, UC_X86_REG_SP, &sp);
+
+    uc_hook intr_hook = 0;
+    ASSERT_EQ(uc_hook_add(uc, &intr_hook, UC_HOOK_INTR, reinterpret_cast<void*>(probe16_intr_hook), nullptr, 1, 0),
+              UC_ERR_OK);
+
+    const uc_err err = uc_emu_start(uc, base, 0, 0, 0);
+    EXPECT_EQ(err, UC_ERR_OK) << "uc_strerror: " << uc_strerror(err);
+
+    uc_close(uc);
+}
