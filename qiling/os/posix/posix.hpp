@@ -5,9 +5,11 @@
 #ifndef QILING_OS_POSIX_POSIX_HPP
 #define QILING_OS_POSIX_POSIX_HPP
 
+#include <array>
 #include <map>
-#include <optional>
 #include <memory>
+#include <optional>
+#include <vector>
 
 #include "qiling/exception.hpp"
 #include "qiling/core_hooks_types.hpp"
@@ -25,6 +27,42 @@ namespace posix {
 
 inline constexpr const char* SYSCALL_PREF = "ql_syscall_";
 
+// posix.py QlFileDes — the file-descriptor table (NR_OPEN slots of the
+// mapped-object refs; the std streams occupy the first three slots)
+class QlFileDes {
+public:
+    static constexpr int NR_OPEN = 1024;
+
+    // get_opened_fd's bounds check: nullptr when out of range or empty
+    std::shared_ptr<QlFsMappedObject> at(int idx) const {
+        if (idx < 0 || idx >= NR_OPEN) {
+            return nullptr;
+        }
+        return fds_[static_cast<std::size_t>(idx)];
+    }
+
+    void set(int idx, std::shared_ptr<QlFsMappedObject> value) {
+        if (idx >= 0 && idx < NR_OPEN) {
+            fds_[static_cast<std::size_t>(idx)] = std::move(value);
+        }
+    }
+
+    std::size_t size() const noexcept { return NR_OPEN; }
+
+    std::vector<std::shared_ptr<QlFsMappedObject>> save() const {
+        return {fds_.begin(), fds_.end()};
+    }
+    void restore(std::vector<std::shared_ptr<QlFsMappedObject>> fds) {
+        if (fds.size() != fds_.size()) {
+            throw QlErrorBase("fd table restore: size mismatch");
+        }
+        std::copy(fds.begin(), fds.end(), fds_.begin());
+    }
+
+private:
+    std::array<std::shared_ptr<QlFsMappedObject>, NR_OPEN> fds_{};
+};
+
 class QlOsPosix final : public QlOs {
 public:
     explicit QlOsPosix(Qiling* ql);
@@ -41,6 +79,10 @@ public:
     void load_syscall();
 
     void shutdown() override;
+
+    // posix.py: the fd table (self._fd, exposed as self.fd) — the std streams
+    // occupy the first three slots (the property setters, verbatim)
+    QlFileDes& fd() noexcept { return fd_; }
 
     // hook.py hook_kernel_api — the code hook dispatching the loader's import
     // stubs through the user overrides and the kernel api registry
@@ -68,6 +110,7 @@ private:
     static std::unique_ptr<cc::QlCC> make_cc_default(QL_ARCH archtype, QlArch& arch);
 
     std::unique_ptr<QlSyscallABI> syscall_abi_;
+    QlFileDes fd_;
     std::map<std::string, SyscallHandler> user_syscalls_;
     std::optional<HookRet> syscall_hook_;
     std::optional<HookRet> kernel_api_hook_;

@@ -27,6 +27,7 @@ add_library(qiling STATIC
     os/mapper.cpp
     os/posix/posix.cpp
     os/posix/kernel_api.cpp
+    os/posix/const_mapping.cpp
     os/posix/syscall.cpp
     os/posix/syscall/abi.cpp
     os/windows/handle.cpp

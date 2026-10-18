@@ -63,39 +63,36 @@ const std::string& QlFsMappedObject::name() const {
 
 // ---- QlFile ----
 
-std::shared_ptr<QlFile> QlFile::open(const std::string& path, int guest_flags, int guest_mode) {
-    // map the guest (POSIX) access flags onto the C stdio modes; the guest
-    // flag vocabulary mirrors os.open: O_RDONLY=0, O_WRONLY=1, O_RDWR=2,
-    // O_APPEND=0o2000, O_CREAT=0o100, O_TRUNC=0o1000
-    constexpr int GUEST_RDONLY = 0;
-    constexpr int GUEST_WRONLY = 1;
-    constexpr int GUEST_RDWR = 2;
-    constexpr int GUEST_CREAT = 0x40;      // 0o100
-    constexpr int GUEST_TRUNC = 0x200;     // 0o1000
-    constexpr int GUEST_APPEND = 0x400;    // 0o2000
+std::shared_ptr<QlFile> QlFile::open(const std::string& path, int host_flags, int guest_mode) {
+    // the flags arrive already mapped through ql_open_flag_mapping (fcntl.py
+    // __do_open maps before the fs_mapper open) — the constants below are the
+    // HOST (windows CRT) spellings: O_RDONLY=0, O_WRONLY=1, O_RDWR=2,
+    // O_CREAT=0x100, O_TRUNC=0x200, O_APPEND=0x8
+    constexpr int HOST_RDONLY = 0;
+    constexpr int HOST_WRONLY = 1;
+    constexpr int HOST_RDWR = 2;
+    constexpr int HOST_CREAT = 0x100;      // _O_CREAT
+    constexpr int HOST_TRUNC = 0x200;      // _O_TRUNC
+    constexpr int HOST_APPEND = 0x8;       // _O_APPEND
 
     const char* mode = nullptr;
-    const int access = guest_flags & 3;
-    if (access == GUEST_RDONLY) {
+    const int access = host_flags & 3;
+    if (access == HOST_RDONLY) {
         mode = "rb";
-    } else if (access == GUEST_WRONLY) {
-        mode = (guest_flags & GUEST_APPEND) ? "ab" : ((guest_flags & GUEST_TRUNC) ? "wb" : "r+b");
-        if (guest_flags & GUEST_CREAT) {
-            mode = (guest_flags & GUEST_APPEND) ? "ab" : "w+b";
-        }
-    } else if (access == GUEST_RDWR) {
-        mode = (guest_flags & GUEST_APPEND) ? "ab+"
-             : ((guest_flags & GUEST_TRUNC) ? "w+b"
-             : ((guest_flags & GUEST_CREAT) ? "w+b" : "r+b"));
+    } else if (access == HOST_WRONLY) {
+        mode = (host_flags & HOST_APPEND) ? "ab" : ((host_flags & (HOST_TRUNC | HOST_CREAT)) ? "wb" : "r+b");
+    } else if (access == HOST_RDWR) {
+        mode = (host_flags & HOST_APPEND) ? "ab+"
+             : ((host_flags & (HOST_TRUNC | HOST_CREAT)) ? "w+b" : "r+b");
     } else {
-        throw QlErrorBase("invalid guest open flags");
+        throw QlErrorBase("invalid host open flags");
     }
+    (void)guest_mode;  // the permission bits only matter for the host create
 
     std::FILE* f = std::fopen(path.c_str(), mode);
     if (f == nullptr) {
         throw QlErrorBase("failed to open: " + path);
     }
-    (void)guest_mode;  // the host umask applies (Python's mode passes to os.open)
 
     return std::shared_ptr<QlFile>(new QlFile(path, f, true));
 }

@@ -3,6 +3,7 @@
 #include <algorithm>
 
 #include "qiling/os/posix/posix.hpp"
+#include "qiling/os/posix/const_mapping.hpp"
 #include "qiling/loader/loader.hpp"
 
 #include "qiling/core.hpp"
@@ -48,11 +49,26 @@ namespace {
 constexpr int NR_OPEN = 1024;
 constexpr std::int64_t kEBADF = 9;
 constexpr std::int64_t kEFAULT = 14;
+constexpr std::int64_t kEMFILE = 24;
+constexpr std::int64_t kENOENT = 2;
+constexpr std::int64_t kEISDIR = 21;
 
 // unistd.py get_opened_fd — the fd bounds check only (the fd table wires the
 // QlFile objects in the posix os layer)
 bool fd_in_range(std::int64_t fd) {
     return fd >= 0 && fd < NR_OPEN;
+}
+
+// unistd.py get_opened_fd — the fd-table entry (nullptr when out of range or
+// empty)
+std::shared_ptr<QlFsMappedObject> fd_get(Qiling& ql, std::int64_t fd);
+std::string read_cstring(Qiling& ql, std::uint64_t addr);
+
+std::shared_ptr<QlFsMappedObject> fd_get(Qiling& ql, std::int64_t fd) {
+    if (!fd_in_range(fd)) {
+        return nullptr;
+    }
+    return ql.os<posix::QlOsPosix>().fd().at(static_cast<int>(fd));
 }
 
 std::optional<std::int64_t> syscall_exit(Qiling& ql, const std::vector<std::uint64_t>& params) {
@@ -71,13 +87,14 @@ std::optional<std::int64_t> syscall_exit_group(Qiling& ql, const std::vector<std
 }
 
 std::optional<std::int64_t> syscall_write(Qiling& ql, const std::vector<std::uint64_t>& params) {
-    // unistd.py ql_syscall_write: EBADF when the fd has no backing file; the
-    // stdin/stdout/stderr handles route through the os streams
+    // unistd.py ql_syscall_write: the fd-table lookup; the std streams (the
+    // fd[0..2] PersistentQlFiles) and the opened files share the path
     const auto fd = static_cast<std::int64_t>(params[0]);
     const auto buf = params[1];
     const auto count = params[2];
 
-    if (!fd_in_range(fd)) {
+    auto* f = fd_get(ql, fd).get();
+    if (f == nullptr) {
         return -kEBADF;
     }
     if (!ql.mem().is_mapped(buf, count)) {
@@ -85,18 +102,7 @@ std::optional<std::int64_t> syscall_write(Qiling& ql, const std::vector<std::uin
     }
 
     const auto data = ql.mem().read(buf, count);
-
-    switch (fd) {
-        case 1:
-            ql.os().stdout_stream().write(data);
-            return static_cast<std::int64_t>(data.size());
-        case 2:
-            ql.os().stderr_stream().write(data);
-            return static_cast<std::int64_t>(data.size());
-        default:
-            // the open-file fd table lands with the file-based syscall slice
-            return -kEBADF;
-    }
+    return static_cast<std::int64_t>(f->write(data));
 }
 
 std::optional<std::int64_t> syscall_read(Qiling& ql, const std::vector<std::uint64_t>& params) {
@@ -104,20 +110,17 @@ std::optional<std::int64_t> syscall_read(Qiling& ql, const std::vector<std::uint
     const auto buf = params[1];
     const auto count = params[2];
 
-    if (!fd_in_range(fd)) {
+    auto* f = fd_get(ql, fd).get();
+    if (f == nullptr) {
         return -kEBADF;
     }
     if (!ql.mem().is_mapped(buf, count)) {
         return -kEFAULT;
     }
 
-    if (fd == 0) {
-        const auto data = ql.os().stdin_stream().read(count);
-        ql.mem().write(buf, data);
-        return static_cast<std::int64_t>(data.size());
-    }
-
-    return -kEBADF;
+    const auto data = f->read(count);
+    ql.mem().write(buf, data);
+    return static_cast<std::int64_t>(data.size());
 }
 
 std::optional<std::int64_t> syscall_uname(Qiling& ql, const std::vector<std::uint64_t>& params) {
@@ -146,6 +149,186 @@ std::optional<std::int64_t> syscall_uname(Qiling& ql, const std::vector<std::uin
     (void)field;
 
     return 0;
+}
+
+// ---- fcntl.py __do_open: the next free fd slot + the mapped open ----
+
+std::optional<std::int64_t> do_open(Qiling& ql, const std::string& absvpath, int flags, int mode) {
+    (void)mode;  // the mode value passes through to the fs layer
+
+    // look for the next available fd slot (fcntl.py, verbatim)
+    auto& fd_table = ql.os<posix::QlOsPosix>().fd();
+    int idx = -1;
+    for (int i = 0; i < static_cast<int>(fd_table.size()); ++i) {
+        if (fd_table.at(i) == nullptr) {
+            idx = i;
+            break;
+        }
+    }
+    if (idx == -1) {
+        return -kEMFILE;
+    }
+
+    // translate the emulated open flags into the host flags (const_mapping.py)
+    const auto mapped = ql_open_flag_mapping(ql.arch().type(), flags);
+
+    try {
+        auto* fs = ql.os<posix::QlOsPosix>().fs_mapper();
+        if (fs == nullptr) {
+            throw QlErrorBase("no fs mapper");
+        }
+        auto file = fs->open_ql_file(absvpath, mapped, mode);
+        fd_table.set(idx, std::move(file));
+    } catch (const QlErrorBase&) {
+        // fcntl.py: the FileNotFoundError/IsADirectoryError/... translations
+        // collapse onto ENOENT in this slice (the typed errors refine them)
+        return -kENOENT;
+    }
+
+    return idx;
+}
+
+std::optional<std::int64_t> syscall_open(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    // fcntl.py ql_syscall_open: the virtual path, the flag mapping, the open
+    const auto filename = params[0];
+    const auto flags = static_cast<int>(params[1]);
+    const auto mode = static_cast<int>(params[2]);
+
+    const auto vpath = read_cstring(ql, filename);
+    return do_open(ql, vpath, flags, mode);
+}
+
+std::optional<std::int64_t> syscall_creat(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    // fcntl.py ql_syscall_creat: O_WRONLY | O_CREAT | O_TRUNC
+    const auto filename = params[0];
+    const auto mode = static_cast<int>(params[1]);
+
+    const auto vpath = read_cstring(ql, filename);
+    const int flags = LinuxX86OpenFlags::O_WRONLY | LinuxX86OpenFlags::O_CREAT | LinuxX86OpenFlags::O_TRUNC;
+    return do_open(ql, vpath, flags, mode);
+}
+
+std::optional<std::int64_t> syscall_close(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    // unistd.py ql_syscall_close: close the backing object and clear the slot
+    const auto fd = static_cast<std::int64_t>(params[0]);
+
+    auto f = fd_get(ql, fd);
+    if (f == nullptr) {
+        return -kEBADF;
+    }
+
+    f->close();
+    ql.os<posix::QlOsPosix>().fd().set(static_cast<int>(fd), nullptr);
+    return 0;
+}
+
+std::optional<std::int64_t> syscall_lseek(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    // unistd.py ql_syscall_lseek: the 32-bit signed offset
+    const auto fd = static_cast<std::int64_t>(params[0]);
+    const auto offset = static_cast<std::int64_t>(static_cast<std::int32_t>(params[1]));
+    const auto origin = static_cast<int>(params[2]);
+
+    auto* f = fd_get(ql, fd).get();
+    if (f == nullptr) {
+        return -kEBADF;
+    }
+
+    return static_cast<std::int64_t>(f->lseek(static_cast<std::uint64_t>(offset), origin));
+}
+
+std::optional<std::int64_t> syscall__llseek(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    // unistd.py ql_syscall__llseek: the high/low offset composition + the
+    // result write
+    const auto fd = static_cast<std::int64_t>(params[0]);
+    const auto off_hi = params[1];
+    const auto off_lo = params[2];
+    const auto result = params[3];
+    const auto whence = static_cast<int>(params[4]);
+
+    auto* f = fd_get(ql, fd).get();
+    if (f == nullptr) {
+        return -kEBADF;
+    }
+
+    const auto offset = static_cast<std::int64_t>((off_hi << 32) | (off_lo & 0xFFFFFFFFu));
+    try {
+        const auto ret = f->lseek(static_cast<std::uint64_t>(offset), whence);
+        ql.mem().write_ptr(result, static_cast<std::int64_t>(ret), 8);
+    } catch (const QlErrorBase&) {
+        return -1;
+    }
+    return 0;
+}
+
+std::optional<std::int64_t> syscall_dup(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    // unistd.py ql_syscall_dup: the first free slot for the duplicated object
+    const auto oldfd = static_cast<std::int64_t>(params[0]);
+
+    auto f = fd_get(ql, oldfd);
+    if (f == nullptr) {
+        return -kEBADF;
+    }
+
+    auto& fd_table = ql.os<posix::QlOsPosix>().fd();
+    for (int i = 0; i < static_cast<int>(fd_table.size()); ++i) {
+        if (fd_table.at(i) == nullptr) {
+            fd_table.set(i, f->dup());
+            return i;
+        }
+    }
+    return -kEMFILE;
+}
+
+std::optional<std::int64_t> syscall_dup2(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    // unistd.py ql_syscall_dup2: the specific target slot (the occupied
+    // target closes silently)
+    const auto oldfd = static_cast<std::int64_t>(params[0]);
+    const auto newfd = static_cast<std::int64_t>(params[1]);
+
+    auto f = fd_get(ql, oldfd);
+    if (f == nullptr) {
+        return -kEBADF;
+    }
+    if (!fd_in_range(newfd)) {
+        return -kEBADF;
+    }
+
+    auto& fd_table = ql.os<posix::QlOsPosix>().fd();
+    fd_table.set(static_cast<int>(newfd), f->dup());
+    return newfd;
+}
+
+std::optional<std::int64_t> syscall_dup3(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    // unistd.py ql_syscall_dup3: the target slot with the flags (the O_CLOEXEC
+    // handling lands with its slice)
+    const auto oldfd = static_cast<std::int64_t>(params[0]);
+    const auto newfd = static_cast<std::int64_t>(params[1]);
+
+    auto f = fd_get(ql, oldfd);
+    if (f == nullptr) {
+        return -kEBADF;
+    }
+    if (!fd_in_range(newfd)) {
+        return -kEBADF;
+    }
+
+    auto& fd_table = ql.os<posix::QlOsPosix>().fd();
+    fd_table.set(static_cast<int>(newfd), f->dup());
+    return newfd;
+}
+
+// unistd.py read_cstring (os/utils.py read_cstring): the char-stepped NUL
+// scan (the log_string record lands with the string-slice)
+std::string read_cstring(Qiling& ql, std::uint64_t addr) {
+    std::string out;
+    for (std::uint64_t cur = addr;; ++cur) {
+        const auto ch = ql.mem().read(cur, 1);
+        if (ch.empty() || ch[0] == 0) {
+            break;
+        }
+        out.push_back(static_cast<char>(ch[0]));
+    }
+    return out;
 }
 
 // ---- the unistd identity/credential set (unistd.py) ----
@@ -208,28 +391,6 @@ std::optional<std::int64_t> syscall_brk(Qiling& ql, const std::vector<std::uint6
     return static_cast<std::int64_t>(loader.brk_address);
 }
 
-std::optional<std::int64_t> syscall_close(Qiling& ql, const std::vector<std::uint64_t>& params) {
-    // unistd.py ql_syscall_close: the fd-table lookup (the fd[0..2] std
-    // streams close through the os streams; the opened-file entries land
-    // with the file-descriptor slice)
-    const auto fd = static_cast<std::int64_t>(params[0]);
-
-    if (!fd_in_range(fd)) {
-        return -kEBADF;
-    }
-    if (fd >= 3) {
-        return -kEBADF;  // no backing entry in this slice
-    }
-
-    switch (fd) {
-        case 0: ql.os().stdin_stream().close(); break;
-        case 1: ql.os().stdout_stream().close(); break;
-        case 2: ql.os().stderr_stream().close(); break;
-        default: break;
-    }
-    return 0;
-}
-
 }  // namespace
 
 void register_builtin_syscalls() {
@@ -270,6 +431,16 @@ void register_builtin_syscalls() {
     registry.register_syscall({"set_tid_address", {PARAM_PTRX}, syscall_getpid});
     registry.register_syscall({"brk", {PARAM_INTN}, syscall_brk});
     registry.register_syscall({"close", {PARAM_INTN}, syscall_close});
+
+    // the fd-table set (fcntl.py + unistd.py)
+    registry.register_syscall({"open", {PARAM_PTRX, PARAM_INTN, PARAM_INTN}, syscall_open});
+    registry.register_syscall({"openat", {PARAM_INTN, PARAM_PTRX, PARAM_INTN, PARAM_INTN}, syscall_open});
+    registry.register_syscall({"creat", {PARAM_PTRX, PARAM_INTN}, syscall_creat});
+    registry.register_syscall({"lseek", {PARAM_INTN, PARAM_INTN, PARAM_INTN}, syscall_lseek});
+    registry.register_syscall({"_llseek", {PARAM_INTN, PARAM_INTN, PARAM_INTN, PARAM_PTRX, PARAM_INTN}, syscall__llseek});
+    registry.register_syscall({"dup", {PARAM_INTN}, syscall_dup});
+    registry.register_syscall({"dup2", {PARAM_INTN, PARAM_INTN}, syscall_dup2});
+    registry.register_syscall({"dup3", {PARAM_INTN, PARAM_INTN, PARAM_INTN}, syscall_dup2});
 }
 
 }  // namespace posix

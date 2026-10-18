@@ -87,6 +87,13 @@ QlOsPosix::QlOsPosix(Qiling* ql) : QlOs(ql) {
     // the os-level fcall remains available for API hooks)
     set_fcall(std::make_unique<QlFunctionCall>(make_cc_default(ql->arch().type(), ql->arch())));
 
+    // posix.py: the std streams occupy fd[0..2] (the property setters, verbatim
+    // — the constructor assigns them through the private members and updates
+    // the table manually)
+    fd_.set(0, stdin_);
+    fd_.set(1, stdout_);
+    fd_.set(2, stderr_);
+
     register_builtin_syscalls();
 }
 
