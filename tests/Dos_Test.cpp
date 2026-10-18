@@ -288,3 +288,35 @@ TEST(DosOs, Int16ReadKeyRidesInjectedStdin) {
     EXPECT_EQ(ql.mem().read_ptr(0x75A0 + 0x132, 1), 0x41u);
     EXPECT_EQ(ql.mem().read_ptr(0x75A0 + 0x130, 1), 0x1Eu);
 }
+
+// the int 10h video surface (the console-detached shape): the mode-set
+// (ah=00, al=0x03 - the 80x25 text mode) passes through the resolution
+// check and the char/attr read (ah=08) keeps the upstream's null-stdscr
+// branch (ax=0x0720)
+//   00: B0 03        mov al, 0x03
+//   02: B4 00        mov ah, 00
+//   04: CD 10        int 10h
+//   06: B4 08        mov ah, 08
+//   08: CD 10        int 10h
+//   0A: A3 40 01     mov [0x0140], ax
+//   0D: B4 4C CD 21  the exit
+TEST(DosOs, Int10VideoModeAndAttrRead) {
+    const std::vector<std::uint8_t> com = {
+        0xB0, 0x03,        // mov al, 0x03
+        0xB4, 0x00,        // mov ah, 00
+        0xCD, 0x10,        // int 10h
+        0xB4, 0x08,        // mov ah, 08
+        0xCD, 0x10,        // int 10h
+        0xA3, 0x40, 0x01,  // mov [0x0140], ax
+        0xB4, 0x4C,        // mov ah, 4c
+        0xCD, 0x21,        // int 21h
+    };
+    auto ql = make_dos_qiling(com);
+
+    ql.run();
+
+    EXPECT_EQ(ql.os().exit_code(), 0);
+    // the attr read: the space glyph with the default attr (the null-stdscr
+    // branch); the cells ride ds=0x75A
+    EXPECT_EQ(ql.mem().read_ptr(0x75A0 + 0x140, 2), 0x0720u);
+}

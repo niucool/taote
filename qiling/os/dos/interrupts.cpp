@@ -684,6 +684,93 @@ void handler(Qiling& ql) {
 
 }  // namespace int16
 
+// ---- int10.py (the BIOS video; the upstream rides curses)
+//
+// The port keeps the terminal detached (the curses setup/surface is not
+// carried): the mode-set resolution map stays verbatim (the unknown mode
+// throws), the cursor/scroll leaves degrade to no-ops, the char/attr read
+// keeps the upstream's null-stdscr branch (ax=0x0720) and the teletype echo
+// writes through the console out.
+
+namespace int10 {
+
+// int10.py resolution map (the BIOS video modes)
+unsigned video_resolution(unsigned al) {
+    switch (al) {
+        case 0x00: case 0x01: return 25 << 8 | 40;
+        case 0x02: case 0x03: return 25 << 8 | 80;
+        case 0x04: case 0x05: return 200 << 8 | 320;
+        case 0x06: return 200 << 8 | 640;
+        case 0x08: return 200 << 8 | 160;
+        case 0x09: return 200 << 8 | 320;
+        case 0x0a: return 200 << 8 | 640;
+        case 0x0d: return 200 << 8 | 320;
+        case 0x0e: return 200 << 8 | 640;
+        case 0x0f: case 0x10: return 350 << 8 | 640;
+        case 0x11: case 0x12: return 480 << 8 | 640;
+        case 0x13: return 200 << 8 | 320;
+        default: return 0;
+    }
+}
+
+// int10.py __leaf_00: the mode set (the curses init skipped - detached)
+void leaf_00(Qiling& ql) {
+    const auto al = ql.arch().regs().read("al");
+
+    if (video_resolution(static_cast<unsigned>(al)) == 0) {
+        throw QlErrorNotImplemented("the video mode resolution is not implemented");
+    }
+}
+
+void leaf_01(Qiling& /*ql*/) {
+    // the cursor shape: the ch&0x20 hides the cursor (the curses curs_set);
+    // detached, nothing to do
+}
+
+void leaf_02(Qiling& /*ql*/) {
+    // the cursor move: detached, nothing to do
+}
+
+void leaf_05(Qiling& ql) {
+    // int10.py __leaf_05: al=0
+    ql.arch().regs().write("al", 0);
+}
+
+void leaf_06(Qiling& /*ql*/) {
+    // the scroll: detached, nothing to do
+}
+
+void leaf_08(Qiling& ql) {
+    // int10.py __leaf_08: the stdscr-null branch (the port's stdscr stays
+    // null) - ax=0x0720 (the space with the default attr)
+    ql.arch().regs().write("ax", 0x0720);
+}
+
+// int10.py __leaf_0e: the teletype echo
+void leaf_0e(Qiling& ql) {
+    const auto al = ql.arch().regs().read("al");
+    auto& out = ql.os().console_out();
+    out.write({static_cast<std::uint8_t>(al & 0xff)});
+}
+
+void handler(Qiling& ql) {
+    const auto ah = ql.arch().regs().read("ah");
+
+    static const std::map<unsigned, std::function<void(Qiling&)>> leaves = {
+        {0x00, leaf_00}, {0x01, leaf_01}, {0x02, leaf_02}, {0x05, leaf_05},
+        {0x06, leaf_06}, {0x08, leaf_08}, {0x0e, leaf_0e},
+    };
+
+    const auto it = leaves.find(static_cast<unsigned>(ah));
+    if (it == leaves.end()) {
+        throw QlErrorNotImplemented("leaf of INT 10h is not implemented");
+    }
+
+    it->second(ql);
+}
+
+}  // namespace int10
+
 }  // namespace
 
 const std::map<unsigned, IntHandler>& handlers() {
@@ -691,6 +778,7 @@ const std::map<unsigned, IntHandler>& handlers() {
         {0x13, int13::handler},
         {0x15, int15::handler},
         {0x16, int16::handler},
+        {0x10, int10::handler},
         {0x1a, int1a::handler},
         {0x19, int19::handler},
         {0x20, int20::handler},
