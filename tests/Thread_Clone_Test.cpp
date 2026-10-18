@@ -161,6 +161,11 @@ TEST(ThreadClone, DISABLED_CloneSpawnsChildAndJoinWakes) {
     // TEMPORARY DIAGNOSTIC: the code tracer riding the x8664 hook_code path;
     // the HookRet stays alive for the run (the RAII handle unregisters on
     // destruction — the pinned facade gotcha)
+    // BISECT cycle 5 (b4): the facade UC_HOOK_CODE tracer removed for the
+    // deletion bisect — with (b1)/(b2)/(b3) done, the port's failing path is
+    // uc-call-for-uc-call identical to the clean P19 probe except this
+    // facade hook plumbing; restore when the study closes
+#if 0
     static thread_local std::vector<std::uint64_t> trace;
     trace.clear();
     const auto tracer = ql.hook_code([](std::uint64_t address, std::uint32_t size) -> int {
@@ -172,6 +177,7 @@ TEST(ThreadClone, DISABLED_CloneSpawnsChildAndJoinWakes) {
         return 0;
     }, 0, 0xffffffffffffull);
     (void)tracer;
+#endif
 
     ql.run();
 
