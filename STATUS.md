@@ -453,3 +453,27 @@ of the gevent hub.
 `os/freebsd/`, `os/qnx/`, `os/macos/`, `os/uefi/`, `os/dos/`, `qiling/hw/`,
 `qiling/extensions/mcu/` — resume criteria in PORT_PLAN.md §10 (OQ 9); the
 remaining five profile files (dos/freebsd/macos/qnx/uefi `.ql`) defer with them.
+
+### Resume-criteria reassessment (post-Phase-5)
+
+- **`os/freebsd/` (~783 lines, `QlOsFreebsd(QlOsPosix)`, 6 syscall handlers)**:
+  the most reachable — a thin dialect riding the completed Phase 5 POSIX base
+  (the fcall layer, the kernel_api registry, the syscall ABI pieces it needs
+  all exist). Slots as the Phase 5.5 dialect slice; TDD against the upstream's
+  `test_freebsd.py` fixture shape.
+- **`os/qnx/` (~1,303 lines)**: the same dialect shape but with its own
+  `types.py` surface; reachable right after freebsd (the shared POSIX base
+  means the second dialect is cheaper than the first).
+- **`os/dos/` (~1,500 + `os/disk.py`, its only consumer)**: the interrupt
+  phase; needs the COM/MBR loader branch on top of the done MZ sniffing.
+  Reachable but self-contained; schedule after the dialects.
+- **`os/uefi/` (~13,300 + `loader/pe_uefi.py`)**: the service-table phase over
+  the done PE path; the largest single slice of the reachable set — plan as
+  its own phase with the loader branch first.
+- **`os/macos/` (~8,300 + `loader/macho_parser/`)**: the biggest lift (a new
+  loader format + the OS); defers until the Mach-O parser is scoped.
+- **`qiling/hw/` + the mcu tree (~23,500)**: the bare-metal phase; orthogonal
+  to the OS families, defer unchanged.
+
+Priority order adopted: **freebsd → qnx → dos → uefi → macos** (the dialects
+first: the marginal cost per dialect shrinks as the POSIX base stabilises).
