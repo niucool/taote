@@ -20,6 +20,7 @@ add_library(qiling STATIC
     host.cpp
     os/memory.cpp
     os/fcall.cpp
+    os/utils.cpp
     os/os.cpp
     os/stats.cpp
     os/path.cpp

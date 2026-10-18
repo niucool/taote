@@ -11,6 +11,9 @@
 #include "qiling/core.hpp"
 #include "qiling/os/posix/kernel_api.hpp"
 #include "qiling/os/posix/posix.hpp"
+#include "qiling/os/filestruct.hpp"
+#include <fstream>
+#include <iterator>
 
 using namespace qiling;
 using qiling::os::posix::KernelApiRegistry;
@@ -136,4 +139,53 @@ TEST(KernelApiHandlers, StrlenHandlerCountsGuestString) {
     const auto result = entry->handler(ql, 0, params);
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(*result, msg_len);
+}
+
+// hook_printk: the level-tagged format renders through the printf engine; the
+// variadic args pull through the fcall ellipsis slots (rsi = the first
+// vararg on the amd64 cc)
+TEST(KernelApiHandlers, PrintkRendersFormatWithArgs) {
+    const auto rootfs = std::filesystem::temp_directory_path() / "ql_kapi_rootfs";
+    std::filesystem::create_directories(rootfs);
+
+    QilingOptions options;
+    options.rootfs = rootfs.string();
+    options.code = {0x90, 0xC3};
+    options.ostype = QL_OS::LINUX;
+    options.archtype = QL_ARCH::X8664;
+    Qiling ql(options);
+
+    // the captured stdout file
+    const auto cap_path = rootfs / "printk_cap.txt";
+    auto captured = qiling::QlFile::open_mode(cap_path.string(), "w+");
+    ql.os().set_stdout(captured);
+
+    constexpr std::uint64_t fmt_addr = 0x1002000;
+    const std::string fmt = "<4>count %d hex %x";
+    ql.mem().write(fmt_addr, std::vector<std::uint8_t>{fmt.begin(), fmt.end()});
+    ql.mem().write(fmt_addr + fmt.size(), std::vector<std::uint8_t>{0});
+
+    // the varargs: rsi = 42 (the %d), rdx = 0xBEEF (the %x)
+    ql.arch().regs().write("rsi", 42);
+    ql.arch().regs().write("rdx", 0xBEEF);
+
+    const auto* entry = KernelApiRegistry::instance().find("printk");
+    ASSERT_NE(entry, nullptr);
+
+    const std::vector<std::pair<std::string, std::uint64_t>> params{
+        {"format", fmt_addr}};
+
+    const auto result = entry->handler(ql, 0, params);
+    ASSERT_TRUE(result.has_value());
+
+    // the return: the rendered length (the upstream count); the upstream
+    // format[2:] strip keeps the '>' (the <4> prefix loses two chars, verbatim)
+    const std::string expected = "KERN_WARNING >count 42 hex beef";
+    EXPECT_EQ(*result, expected.size());
+
+    // the stdout carries the level-tagged rendering
+    captured->close();
+    std::ifstream in(cap_path, std::ios::binary);
+    const std::string got{(std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>()};
+    EXPECT_EQ(got, expected);
 }

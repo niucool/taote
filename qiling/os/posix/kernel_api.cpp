@@ -8,6 +8,8 @@
 #include "qiling/os/posix/posix.hpp"
 #include "qiling/os/memory.hpp"
 #include "qiling/os/os.hpp"
+#include "qiling/os/utils.hpp"
+#include <cctype>
 
 namespace qiling {
 namespace os {
@@ -88,7 +90,104 @@ const bool kernel_api_builtins_registered = [] {
 
 // ---- kernel_api.py: the rest of the handler set ----
 
+// hook_printk: the printk level table (kernel_api.py, verbatim)
+static const char* const kPrintkLevels[] = {
+    "KERN_EMERGE", "KERN_ALERT", "KERN_CRIT", "KERN_ERR", "KERN_WARNING",
+    "KERN_NOTICE", "KERN_INFO", "KERN_DEBUG", "KERN_DEFAULT", "KERN_CONT",
+};
+
 const bool kernel_api_extended_registered = [] {
+    // @linux_kernel_api(params={"format": STRING})
+    KernelApi("printk", {{"format", K_STRING}}) =
+        [](Qiling& ql, std::uint64_t, const auto& params) -> std::optional<std::uint64_t> {
+        // the STRING params arrive raw (the resolver machinery defers): the
+        // format reads from the pointer the fcall layer resolved
+        const auto format_ptr = params[0].second;
+        if (format_ptr == 0) {
+            return std::uint64_t{0};
+        }
+        const auto format = read_cstring_helper(ql, format_ptr);
+
+        // level = int(format[1]) if digit else 4; the printed form drops the
+        // first two chars (the "<n>" prefix) — the upstream substring quirk
+        // kept verbatim; the short-format guard is the port's addition
+        int level = 4;
+        if (format.size() >= 2 && std::isdigit(static_cast<unsigned char>(format[1]))) {
+            level = format[1] - '0';
+        }
+        const std::string body =
+            std::string(kPrintkLevels[level < 0 || level > 9 ? 8 : level]) + " " +
+            (format.size() >= 2 ? format.substr(2) : format);
+
+        // the variadic args: each resolved param counts one native slot (the
+        // upstream readEllipsis walks the resolved values, each defaulting to
+        // the PARAM_INTN accessor); the count comes from the format walk
+        const auto& ptypes = params;
+        std::vector<int> slots;
+        slots.reserve(ptypes.size());
+        for (std::size_t k = 0; k < ptypes.size(); ++k) {
+            slots.push_back(os::PARAM_INTN);
+        }
+
+        // pass 1: count the pulls (each conversion + each * width/precision)
+        std::size_t pulls = 0;
+        for (std::size_t k = 0; k + 1 < body.size(); ++k) {
+            if (body[k] != '%') {
+                continue;
+            }
+            std::size_t j = k + 1;
+            if (j >= body.size()) {
+                break;
+            }
+            if (body[j] == '%') {
+                k = j;
+                continue;
+            }
+            while (j < body.size() && std::string_view("-+0 #").find(body[j]) != std::string_view::npos) {
+                ++j;
+            }
+            if (j < body.size() && body[j] == '*') {
+                ++pulls;
+                ++j;
+            } else {
+                while (j < body.size() && std::isdigit(static_cast<unsigned char>(body[j]))) {
+                    ++j;
+                }
+            }
+            if (j < body.size() && body[j] == '.') {
+                ++j;
+                if (j < body.size() && body[j] == '*') {
+                    ++pulls;
+                    ++j;
+                } else {
+                    while (j < body.size() && std::isdigit(static_cast<unsigned char>(body[j]))) {
+                        ++j;
+                    }
+                }
+            }
+            while (j < body.size() && (std::string_view("hjltwzIL").find(body[j]) != std::string_view::npos ||
+                                       body.compare(j, 2, "hh") == 0 || body.compare(j, 2, "ll") == 0 ||
+                                       body.compare(j, 3, "I32") == 0 || body.compare(j, 3, "I64") == 0)) {
+                j += (body.compare(j, 3, "I32") == 0 || body.compare(j, 3, "I64") == 0) ? 3 : 1;
+            }
+            if (j < body.size()) {
+                ++pulls;
+                k = j;
+            }
+        }
+
+        const auto args = ql.os().fcall().read_ellipsis(slots, pulls);
+        std::size_t cursor = 0;
+        const auto pull = [&args, &cursor]() -> std::uint64_t {
+            return cursor < args.size() ? args[cursor++] : 0;
+        };
+
+        const auto [count, written] = os::QlOsUtils::printf(ql, body, pull);
+        (void)written;
+
+        return static_cast<std::uint64_t>(count);
+    };
+
     // @linux_kernel_api(params={"Ptr": POINTER})
     KernelApi("__fentry__", {{"Ptr", K_POINTER}}) =
         [](Qiling&, std::uint64_t, const auto&) { return std::optional<std::uint64_t>{0}; };
