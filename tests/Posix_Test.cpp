@@ -12,6 +12,7 @@
 #include "qiling/exception.hpp"
 #include "qiling/arch/x86.hpp"
 #include "qiling/os/posix/posix.hpp"
+#include "qiling/os/posix/socket.hpp"
 #include "qiling/os/filestruct.hpp"
 #include "qiling/os/posix/syscall/abi.hpp"
 #include "qiling/os/linux/linux.hpp"
@@ -1160,6 +1161,49 @@ TEST(PosixSignal, SigprocmaskWalksTheMaskWithTheVerbatimQuirks) {
     // the newset cell carries the pre-BLOCK old mask (0) — the verbatim
     // write-to-newset quirk
     EXPECT_EQ(ql.mem().read_ptr(0x1002000, 8), 0u);
+}
+
+// the socket/shutdown core: socket(AF_INET, SOCK_STREAM, 0) takes the next
+// free fd (3), the fd table rides the QlSocket, and shutdown closes the
+// direction (the second shutdown on an already-shut socket still answers 0
+// per the host semantics)
+TEST(PosixSocket, SocketTakesFdAndShutdownRides) {
+    const std::vector<std::uint8_t> code = {
+        // socket(AF_INET=2, SOCK_STREAM=1, 0)
+        0x48, 0xC7, 0xC0, 0x29, 0x00, 0x00, 0x00,  // mov rax, 41 (socket)
+        0x48, 0xC7, 0xC7, 0x02, 0x00, 0x00, 0x00,  // mov rdi, 2 (AF_INET)
+        0x48, 0xC7, 0xC6, 0x01, 0x00, 0x00, 0x00,  // mov rsi, 1 (SOCK_STREAM)
+        0x4D, 0x31, 0xC9,                           // xor r9, r9 → r8d/r9 = 0
+        0x45, 0x31, 0xC0,                           // xor r8d, r8d
+        0x0F, 0x05,
+        0x48, 0x89, 0x04, 0x25, 0x08, 0x22, 0x00, 0x01,  // mov [0x1002208], rax
+        // shutdown(fd, SHUT_RDWR=2)
+        0x48, 0x89, 0xC7,                           // mov rdi, rax (the fd)
+        0x48, 0xC7, 0xC0, 0x30, 0x00, 0x00, 0x00,  // mov rax, 48 (shutdown)
+        0x48, 0xC7, 0xC6, 0x02, 0x00, 0x00, 0x00,  // mov rsi, 2
+        0x0F, 0x05,
+        0x48, 0x89, 0x04, 0x25, 0x10, 0x22, 0x00, 0x01,  // mov [0x1002210], rax
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00,
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00,
+        0x0F, 0x05,
+    };
+
+    QilingOptions options = posix_options(code);
+    Qiling ql(options);
+
+    ql.run();
+
+    EXPECT_EQ(ql.os().exit_code(), 0);
+    const auto fd = ql.mem().read_ptr(0x1002208, 8);
+    EXPECT_EQ(fd, 3u);  // the next free slot after the std streams
+    // the unconnected-socket shutdown: the host answers ENOTCONN — the
+    // upstream would raise the uncaught OSError; the port's shutdown maps
+    // the host failure onto -1 (the documented deviation)
+    EXPECT_EQ(ql.mem().read_ptr(0x1002210, 8), 0xFFFFFFFFFFFFFFFFull);
+    // the fd table rides the socket object with the recorded family/type
+    const auto& sock = static_cast<const os::posix::QlSocket&>(*ql.os<os::posix::QlOsPosix>().fd().at(static_cast<int>(fd)));
+    EXPECT_EQ(sock.family(), 2);
+    EXPECT_EQ(sock.socktype(), 1);
 }
 
 TEST(PosixSyscall, UnhandledSyscallWarnsButDoesNotThrow) {

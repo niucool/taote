@@ -2,6 +2,7 @@
 #include "qiling/os/posix/syscall.hpp"
 #include "qiling/os/posix/mman.hpp"
 #include "qiling/os/posix/signal.hpp"
+#include "qiling/os/posix/socket.hpp"
 
 #include <algorithm>
 #include <filesystem>
@@ -1300,6 +1301,10 @@ void register_builtin_syscalls() {
     registry.register_syscall({"rt_sigaction", {PARAM_INTN, PARAM_PTRX, PARAM_PTRX}, syscall_rt_sigaction});
     registry.register_syscall({"rt_sigprocmask", {PARAM_INTN, PARAM_PTRX, PARAM_PTRX}, syscall_rt_sigprocmask});
     registry.register_syscall({"signal", {PARAM_INTN, PARAM_PTRX}, syscall_signal});
+    // socket.py: the socket/shutdown core (the connect/bind/listen/accept
+    // and the send/recv families land with their sub-slices)
+    registry.register_syscall({"socket", {PARAM_INTN, PARAM_INTN, PARAM_INTN}, syscall_socket});
+    registry.register_syscall({"shutdown", {PARAM_INTN, PARAM_INTN}, syscall_shutdown});
 
     // the futex dispatch (os/posix/syscall/futex.py) + the yield (sched.py)
     registry.register_syscall({"futex", {PARAM_INTN, PARAM_INTN, PARAM_INTN, PARAM_INTN, PARAM_INTN, PARAM_INTN}, syscall_futex});

@@ -39,6 +39,7 @@ add_library(qiling STATIC
     os/posix/const_mapping.cpp
     os/posix/stat.cpp
     os/posix/signal.cpp
+    os/posix/socket.cpp
     os/posix/mman.cpp
     os/posix/syscall.cpp
     os/posix/syscall/abi.cpp
@@ -100,5 +101,10 @@ target_link_libraries(qiling PUBLIC
     keystone::keystone
     LIEF::LIEF
 )
+
+if(WIN32)
+    # the posix socket layer rides winsock (the QlSocket host calls)
+    target_link_libraries(qiling PUBLIC ws2_32)
+endif()
 
 add_library(qiling::qiling ALIAS qiling)

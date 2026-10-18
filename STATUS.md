@@ -900,6 +900,18 @@ rt_sigprocmask/signal)
 The frame machinery (the actual signal delivery + the sigreturn) is its
 own later slice; the delivery hooks hang off the same sig_actions_ table.
 
+## Phase 12 - the socket family (sub-slice 1: the socket/shutdown core)
+
+| piece | upstream | state | notes |
+|---|---|---|---|
+| `qiling/os/posix/socket.hpp/.cpp` | `filestruct.py ql_socket` + `syscall/socket.py` | ✅ core | the `QlSocket` over the host sockets API (winsock on _WIN32 with the one-time WSAStartup — the winsock2.h-before-windows.h ordering gotcha pinned; the POSIX sockets elsewhere); `open` (the host OSError shapes map onto the QlError* translations), `read`/`write` (the recv/send without flags), `close`, `shutdown` (the host failure → false → the caller's -1), `family`/`socktype` |
+| socket / shutdown | `syscall/socket.py` | ✅ | `socket(domain, type, proto)` rides the next-free-fd walk + the fd-table set (the EMFILE when full); the open failure collapses onto -1 (the upstream idx=-1 branch); `shutdown(how)` via the get-opened-socket walk (-ENOTSOCK for the non-socket fd) |
+| the fixture | `tests/Posix_Test.cpp` | ✅ | the socket(AF_INET, SOCK_STREAM, 0) → fd 3 + the fd-table ride (the family/type recorded) + the unconnected-socket shutdown → -1 (the upstream would raise the uncaught OSError on the ENOTCONN host failure — the deviation pinned in the fixture) |
+
+The remaining socket-family sub-slices: socketpair + connect/bind/listen/
+accept; send/recv/sendto/recvfrom; getsockopt/setsockopt. The sockaddr
+parse (the make_sockaddr families) lands with the connect/bind slice.
+
 ## Deferred (tracked, not built)
 
 `os/macos/` (the remaining surface: the syscall handlers, the kernel_api
