@@ -77,10 +77,14 @@ TEST(SelectLoader, BlobFactoryAvailable) {
 }
 
 TEST(SelectLoader, NonBlobRaisesNotImplemented) {
-    // PE landed with Phase 4; the ELF-backed oses (linux/freebsd/qnx) resolve
-    // the QlLoaderELF; the DOS loader landed with the Phase 6 slice (the
-    // COM/EXE/MBR branches); the remaining per-format loaders degrade
-    for (const auto os : {QL_OS::MACOS}) {
+    // PE landed with Phase 4; the ELF-backed oses (linux/freebsd/qnx/macos)
+    // resolve the QlLoaderELF; the DOS loader landed with the Phase 6 slice
+    // (the COM/EXE/MBR branches). Every per-format loader now resolves — the
+    // macos shellcode path shares the ELF loader (the deviation note in
+    // utils.cpp; the real QlLoaderMachO is its own slice) — so the loop is
+    // empty until the next unimplemented loader lands.
+    const std::vector<QL_OS> not_implemented = {};
+    for (const auto os : not_implemented) {
         EXPECT_THROW(select_loader(os, false), QlErrorNotImplemented) << static_cast<int>(os);
     }
 }
@@ -99,16 +103,29 @@ TEST(SelectLoader, QnxResolvesElfLoader) {
     EXPECT_NE(factory, nullptr);
 }
 
+TEST(SelectLoader, MacosResolvesElfLoader) {
+    // the macos dialect shares the ELF loader for the shellcode path (the
+    // real QlLoaderMachO lands with its slice)
+    const auto factory = select_loader(QL_OS::MACOS, false);
+    EXPECT_NE(factory, nullptr);
+}
+
 TEST(SelectOs, BlobFactoryAvailable) {
     const auto factory = select_os(QL_OS::BLOB);
     EXPECT_NE(factory, nullptr);
 }
 
 TEST(SelectOs, NonBlobRaisesNotImplemented) {
-    // the qnx and dos dialects landed; the remaining os trees defer
-    for (const auto os : {QL_OS::MACOS}) {
+    // the macos dialect landed with its skeleton; every dialect now resolves
+    const std::vector<QL_OS> not_implemented = {};
+    for (const auto os : not_implemented) {
         EXPECT_THROW(select_os(os), QlErrorNotImplemented) << static_cast<int>(os);
     }
+}
+
+TEST(SelectOs, MacosResolvesMacosOs) {
+    const auto factory = select_os(QL_OS::MACOS);
+    EXPECT_NE(factory, nullptr);
 }
 
 TEST(SelectOs, FreebsdResolvesFreebsdOs) {
