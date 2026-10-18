@@ -497,14 +497,15 @@ of the gevent hub.
   upstream's r0 write has the same shape; the clock_cycles fixture pins it).
 - **the `QlSyscallABIArm` lost its `final`** to let the QNX ABI derive — the
   upstream models the inheritance (QlAArch32QNX(QlAArch32)) the same way.
-- **the mem-unmapped hook retry semantics (open port deviation)**: the port's
-  `dispatch_mem` returns handled=true whenever a hook is merely registered,
-  regardless of the hook's return — with a UC_HOOK_MEM_* callback returning 0,
-  unicorn then retries the unmapped access forever (the observed infinite
-  retry during the msg fixture debugging). The upstream's `_hook_mem_cb`
-  raises QlErrorCoreHook when the hook does not handle the access. Needs the
-  unhandled-raise (or the block-and-stop) alignment before the mem hooks are
-  used for real.
+- **the mem-unmapped retry semantics (CORRECTED — not a deviation)**: the
+  session probe had flagged the port's `dispatch_mem` as deviating; reading
+  the upstream `core_hooks.py _hook_mem_cb` shows the port is verbatim — a
+  hook whose bound_check matches marks the access handled (whatever it
+  returns; the return only carries QL_HOOK_BLOCK for the loop break) and
+  unicorn then retries the access. The raise fires only when nothing matched
+  the bound check (the upstream raise, ported). The observed infinite retry
+  is the shared unicorn semantics for a mem hook that does not map the
+  memory — a hook-authoring gotcha, not a port defect.
 - **the Qiling-facade UC_HOOK_CODE on ARM did not fire in the session probe**
   (the same blob ran fine — the INTR hook fired, the code hook never did; the
   CoreHooks unit tests pass on the raw path). Open observation, not chased

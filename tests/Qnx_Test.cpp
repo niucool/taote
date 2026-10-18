@@ -7,6 +7,7 @@
 //     the data region + the exit-code/memory assertions)
 #include <gtest/gtest.h>
 
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 
@@ -479,6 +480,117 @@ TEST(QnxOs, MsgSendvIoWriteDelegatesToPosixWrite) {
     EXPECT_EQ(ql.os().exit_code(), 42);
     // io_write returns the written byte count through the dispatcher
     EXPECT_EQ(ql.mem().read_ptr(0x2130, 4), 4u);
+}
+
+// the sys_conf flow (the _CONF_NUM path): the flat _sys_conf struct rides
+// sparts=-24 and asks _SYS_SUB_GET/_CONF_NUM/_SC_PAGESIZE; the kernel writes
+// the 24-byte reply (<IIIiq> with the page size in the value cell) at rmsg
+//   00: mov r0, #1          ; coid = 1 (the stdout conn)
+//   04: mov r1, #0x2100     ; smsg = the flat struct
+//   08: mvn r2, #23         ; sparts = -24
+//   0C: mov r3, #0x2200     ; rmsg = the reply buffer
+//   10: mvn r4, #23         ; rparts = -24
+//   14: mov r12, #11        ; msg_sendv
+//   18: swi 0
+//   1C: mov r4, #0x2300
+//   20: str r0, [r4]
+//   24: mvn r0, #0 ; 28: mvn r1, #0 ; 2C: mov r2, #42
+//   30: mov r12, #47 ; 34: swi 0
+TEST(QnxOs, MsgSysConfNumPagesize) {
+    const std::vector<std::uint8_t> code = {
+        0x01, 0x00, 0xA0, 0xE3,  // 00: mov r0, #1
+        0x21, 0x1C, 0xA0, 0xE3,  // 04: mov r1, #0x2100
+        0x17, 0x20, 0xE0, 0xE3,  // 08: mvn r2, #23
+        0x22, 0x3C, 0xA0, 0xE3,  // 0C: mov r3, #0x2200
+        0x17, 0x40, 0xE0, 0xE3,  // 10: mvn r4, #23
+        0x0B, 0xC0, 0xA0, 0xE3,  // 14: mov r12, #11
+        0x00, 0x00, 0x00, 0xEF,  // 18: swi 0
+        0x23, 0x4C, 0xA0, 0xE3,  // 1C: mov r4, #0x2300
+        0x00, 0x00, 0x84, 0xE5,  // 20: str r0, [r4]
+        0x00, 0x00, 0xE0, 0xE3,  // 24: mvn r0, #0
+        0x00, 0x10, 0xE0, 0xE3,  // 28: mvn r1, #0
+        0x2A, 0x20, 0xA0, 0xE3,  // 2C: mov r2, #42
+        0x2F, 0xC0, 0xA0, 0xE3,  // 30: mov r12, #47
+        0x00, 0x00, 0x00, 0xEF,  // 34: swi 0
+    };
+    auto ql = make_qnx_qiling(code);
+
+    ql.mem().map(kScratch, 0x1000, UC_PROT_ALL, "[qnx-scratch]");
+
+    // the flat _sys_conf: type=0x000, subtype=_SYS_SUB_GET, cmd=_CONF_NUM,
+    // name=_SC_PAGESIZE, spare=0, value=0
+    ql.mem().write_ptr(0x2100, 0x000, 2);
+    ql.mem().write_ptr(0x2102, 0, 2);
+    ql.mem().write_ptr(0x2104, 2 << 20, 4);
+    ql.mem().write_ptr(0x2108, 11, 4);
+    ql.mem().write_ptr(0x210C, 0, 4);
+    ql.mem().write_ptr(0x2110, 0, 8);
+
+    ql.run();
+
+    EXPECT_EQ(ql.os().exit_code(), 42);
+    EXPECT_EQ(ql.mem().read_ptr(0x2300, 4), 0u);
+    // the reply: <IIIiq> — the zeros then the page size in the value cell
+    EXPECT_EQ(ql.mem().read_ptr(0x2208, 4), 0u);
+    EXPECT_EQ(ql.mem().read_ptr(0x2210, 8), 0x1000u);
+}
+
+// the sys_conf _CONF_STR path: the confstr shape — the reply rides two iovs
+// (the <IIIiq> length cell at iov[0].base, the string at iov[1].base); the
+// fixture asks _CS_LIBPATH and expects "/usr/lib\0"
+//   00: mov r0, #1          ; coid = 1
+//   04: mov r1, #0x2100     ; smsg = the flat struct
+//   08: mvn r2, #23         ; sparts = -24
+//   0C: mov r3, #0x2200     ; rmsg = the reply iov array
+//   10: mvn r4, #1          ; rparts = 2
+//   14: mov r12, #11        ; msg_sendv
+//   18: swi 0
+//   1C: mov r4, #0x2300 ; 20: str r0, [r4]
+//   24: mvn r0, #0 ; 28: mvn r1, #0 ; 2C: mov r2, #42
+//   30: mov r12, #47 ; 34: swi 0
+TEST(QnxOs, MsgSysConfStrLibpath) {
+    const std::vector<std::uint8_t> code = {
+        0x01, 0x00, 0xA0, 0xE3,  // 00: mov r0, #1
+        0x21, 0x1C, 0xA0, 0xE3,  // 04: mov r1, #0x2100
+        0x17, 0x20, 0xE0, 0xE3,  // 08: mvn r2, #23
+        0x22, 0x3C, 0xA0, 0xE3,  // 0C: mov r3, #0x2200
+        0x02, 0x40, 0xA0, 0xE3,  // 10: mov r4, #2 (rparts = +2)
+        0x0B, 0xC0, 0xA0, 0xE3,  // 14: mov r12, #11
+        0x00, 0x00, 0x00, 0xEF,  // 18: swi 0
+        0x23, 0x4C, 0xA0, 0xE3,  // 1C: mov r4, #0x2300
+        0x00, 0x00, 0x84, 0xE5,  // 20: str r0, [r4]
+        0x00, 0x00, 0xE0, 0xE3,  // 24: mvn r0, #0
+        0x00, 0x10, 0xE0, 0xE3,  // 28: mvn r1, #0
+        0x2A, 0x20, 0xA0, 0xE3,  // 2C: mov r2, #42
+        0x2F, 0xC0, 0xA0, 0xE3,  // 30: mov r12, #47
+        0x00, 0x00, 0x00, 0xEF,  // 34: swi 0
+    };
+    auto ql = make_qnx_qiling(code);
+
+    ql.mem().map(kScratch, 0x1000, UC_PROT_ALL, "[qnx-scratch]");
+
+    // the flat _sys_conf: type=0x000, subtype=_SYS_SUB_GET, cmd=_CONF_STR,
+    // name=_CS_LIBPATH
+    ql.mem().write_ptr(0x2100, 0x000, 2);
+    ql.mem().write_ptr(0x2102, 0, 2);
+    ql.mem().write_ptr(0x2104, 1 << 20, 4);
+    ql.mem().write_ptr(0x2108, 200, 4);
+    // the reply iov array: iov[0] = (0x2308, the head cell), iov[1] =
+    // (0x2400, the string)
+    ql.mem().write_ptr(0x2200, 0x2308, 4);
+    ql.mem().write_ptr(0x2204, 64, 4);
+    ql.mem().write_ptr(0x2208, 0x2400, 4);
+    ql.mem().write_ptr(0x220C, 64, 4);
+
+    ql.run();
+
+    EXPECT_EQ(ql.os().exit_code(), 42);
+    EXPECT_EQ(ql.mem().read_ptr(0x2300, 4), 0u);
+    // the length cell carries the string length (the NUL included)
+    EXPECT_EQ(ql.mem().read_ptr(0x2318, 8), 9u);
+    // the string at the second reply iov
+    EXPECT_EQ(ql.mem().read(0x2400, 9)[0], std::uint8_t{'/'});
+    EXPECT_EQ(ql.mem().read(0x2400, 9)[8], std::uint8_t{0x00});
 }
 
 // the clock_cycles flow: the kernel returns the core's free-running counter
