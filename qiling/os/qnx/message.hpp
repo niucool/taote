@@ -33,6 +33,11 @@ std::optional<std::int64_t> ql_qnx_msg_io_write(Qiling& ql, std::uint64_t coid, 
 std::optional<std::int64_t> ql_qnx_msg_sys_conf(Qiling& ql, std::uint64_t coid, std::uint64_t smsg,
                                                 std::int32_t sparts, std::uint64_t rmsg, std::int32_t rparts);
 
+// message.py ql_qnx_msg_io_connect (_connect_ctrl.c::_connect_io): the
+// OPEN/MKNOD paths (the COMBINE subtypes raise not-implemented)
+std::optional<std::int64_t> ql_qnx_msg_io_connect(Qiling& ql, std::uint64_t coid, std::uint64_t smsg,
+                                                  std::int32_t sparts, std::uint64_t rmsg, std::int32_t rparts);
+
 }  // namespace qnx
 }  // namespace os
 }  // namespace qiling

@@ -11,6 +11,8 @@
 
 #include <array>
 #include <cstring>
+#include <filesystem>
+#include <string>
 #include <string_view>
 
 namespace qiling {
@@ -30,8 +32,9 @@ struct MsgTypeEntry {
 };
 
 const MsgTypeEntry kMsgTypeTable[] = {
-    {0x000, ql_qnx_msg_sys_conf},  // sys_conf
-    {0x102, ql_qnx_msg_io_write},  // io_write
+    {0x000, ql_qnx_msg_sys_conf},      // sys_conf
+    {0x100, ql_qnx_msg_io_connect},    // io_connect
+    {0x102, ql_qnx_msg_io_write},      // io_write
 };
 
 }  // namespace
@@ -127,6 +130,160 @@ std::optional<std::int64_t> ql_qnx_msg_sys_conf(Qiling& ql, std::uint64_t coid, 
 // message.py ql_qnx_msg_io_write: the write delegation — the header rides
 // iov[0] and the payload rides iov[1] (the smsg+8 dword); the combine and
 // the xtype paths are not implemented (the upstream raise shape)
+// the table membership probe (the `x in table` python idiom over the
+// name/flag tables)
+template <typename Table>
+bool table_contains(const Table& table, unsigned key) {
+    for (const auto& entry : table) {
+        if (entry.first == key) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// message.py ql_qnx_msg_io_connect (_connect_ctrl.c::_connect_io): the
+// OPEN path — the header rides iov[0] and the path rides iov[1]; the fd
+// lands in the connection and the 20-byte link reply at the reply's first
+// iov. The COMBINE subtypes raise not-implemented (the upstream walks the
+// extra iovs for _IO_STAT/_IO_PATHCONF there).
+std::optional<std::int64_t> ql_qnx_msg_io_connect(Qiling& ql, std::uint64_t coid, std::uint64_t smsg,
+                                                  std::int32_t sparts, std::uint64_t rmsg, std::int32_t rparts) {
+    (void)rparts;
+
+    // first iov_t
+    const auto iov0_base = ql.mem().read_ptr(smsg, 4);
+    const auto iov0_len = ql.mem().read_ptr(smsg + 4, 4);
+    if (iov0_len != 40) {
+        throw QlErrorBase("qnx io_connect: wrong size for first first iov_t");
+    }
+    // struct _io_connect in lib/c/public/sys/iomsg.h:
+    // unpack("<HHIHHIIIIHHHHBBH", iov0)
+    const auto hdr = ql.mem().read(iov0_base, 40);
+    const auto rd16 = [&hdr](std::size_t off) {
+        return static_cast<std::uint16_t>(hdr[off] | (hdr[off + 1] << 8));
+    };
+    const auto rd32 = [&hdr](std::size_t off) {
+        return static_cast<std::uint32_t>(hdr[off] | (hdr[off + 1] << 8) | (hdr[off + 2] << 16) |
+                                          (static_cast<std::uint32_t>(hdr[off + 3]) << 24));
+    };
+    const auto type = rd16(0);
+    const auto subtype = rd16(2);
+    const auto file_type = rd32(4);
+    const auto reply_max = rd16(8);
+    const auto entry_max = rd16(10);
+    const auto key = rd32(12);
+    const auto handle = rd32(16);
+    auto ioflag = rd32(20);
+    const auto mode = rd32(24);
+    const auto sflag = rd16(28);
+    const auto access = rd16(30);
+    const auto zero = rd16(32);
+    const auto eflag = hdr[36];
+    const auto extra_type = hdr[37];
+
+    // the second iov_t carries the path
+    const auto iov1_base = ql.mem().read_ptr(smsg + 8, 4);
+    const auto iov1_len = ql.mem().read_ptr(smsg + 12, 4);
+    auto path_bytes = ql.mem().read(iov1_base, iov1_len);
+    while (!path_bytes.empty() && path_bytes.back() == 0x00) {
+        path_bytes.pop_back();
+    }
+    const std::string path(path_bytes.begin(), path_bytes.end());
+    const auto real_path = ql.os().path()->virtual_to_host_path(path);
+
+    // the parameter checks (the upstream assert, verbatim)
+    if (type != 0x100 || reply_max != 0xa18 || entry_max != 0x10 || key != 0 || handle != 0 || zero != 0 ||
+        eflag != 0 || extra_type != 0) {
+        throw QlErrorBase("qnx io_connect: the message is wrong");
+    }
+    if (!table_contains(io_connect_subtypes, subtype)) {
+        throw QlErrorNotImplemented("qnx io_connect: the subtype is not implemented");
+    }
+    if (!table_contains(file_types, file_type)) {
+        throw QlErrorNotImplemented("qnx io_connect: the file_type is not implemented");
+    }
+    if (!table_contains(file_sharing_modes, sflag)) {
+        throw QlErrorNotImplemented("qnx io_connect: the sharing flag is not implemented");
+    }
+    if (access != 0 && !table_contains(file_access, access)) {
+        throw QlErrorNotImplemented("qnx io_connect: the access is not implemented");
+    }
+
+    // convert _IO_FLAG_? to O_? (the upstream's ioflag -= 1, verbatim)
+    ioflag -= 1;
+    const auto real_mode = mode & ~static_cast<std::uint32_t>(S_IFMT);
+
+    if (subtype == 0 || subtype == 1) {
+        // _IO_CONNECT_COMBINE: the extra-iov walk for _IO_STAT/_IO_PATHCONF
+        throw QlErrorNotImplemented("qnx io_connect: the COMBINE path is not implemented");
+    }
+
+    if (subtype == 2) {  // == _IO_CONNECT_OPEN
+        const auto* open_entry = posix::SyscallRegistry::instance().find("open");
+        const std::vector<std::uint64_t> open_args{static_cast<std::uint64_t>(iov1_base),
+                                               static_cast<std::uint64_t>(ioflag),
+                                               static_cast<std::uint64_t>(real_mode)};
+        const auto fd = open_entry->handler(ql, open_args);
+        auto& conn = static_cast<QlOsQnx&>(ql.os()).connections().at(static_cast<std::uint32_t>(coid));
+        conn.fd = static_cast<int>(fd.value_or(-1));
+    } else if (subtype == 5) {  // == _IO_CONNECT_MKNOD
+        std::error_code ec;
+        std::filesystem::create_directory(real_path, ec);
+        if (ec) {
+            throw QlErrorBase("qnx io_connect: the mknod mkdir failed");
+        }
+    } else {
+        throw QlErrorNotImplemented("qnx io_connect: the subtype is not implemented");
+    }
+
+    // reply iov_t no. 1: the link reply (the eflag/umask from the host stat)
+    const auto reply_iov_base = ql.mem().read_ptr(rmsg, 4);
+    const auto reply_iov_len = ql.mem().read_ptr(rmsg + 4, 4);
+    if (reply_iov_len != 20) {
+        throw QlErrorBase("qnx io_connect: the reply iov_t 1 wrong size");
+    }
+    const auto host_path = std::filesystem::path(real_path);
+    std::uint32_t umask = 0;
+    if (std::filesystem::is_symlink(std::filesystem::symlink_status(host_path))) {
+        umask = S_IFLNK;
+    } else if (std::filesystem::is_directory(host_path)) {
+        umask = S_IFDIR;
+    } else if (std::filesystem::is_regular_file(host_path)) {
+        umask = S_IFREG;
+    }
+    std::uint32_t reply_eflag = 0;
+    if (std::filesystem::is_directory(host_path)) {
+        reply_eflag = IO_CONNECT_EFLAG_DIR;
+    } else if (path.size() >= 2 && path.compare(path.size() - 2, 2, "..") == 0) {
+        reply_eflag = IO_CONNECT_EFLAG_DOTDOT;
+    } else if (!path.empty() && path.back() == '.') {
+        reply_eflag = IO_CONNECT_EFLAG_DOT;
+    }
+    // pack("<IIBBHIHH", 0, file_type, eflag, 0, 0, umask, 0, 0)
+    std::array<std::uint8_t, 20> reply{};
+    const auto put32 = [&reply](std::size_t off, std::uint32_t v) {
+        for (int i = 0; i < 4; ++i) {
+            reply[off + i] = static_cast<std::uint8_t>((v >> (8 * i)) & 0xff);
+        }
+    };
+    const auto put16 = [&reply](std::size_t off, std::uint16_t v) {
+        reply[off] = static_cast<std::uint8_t>(v & 0xff);
+        reply[off + 1] = static_cast<std::uint8_t>((v >> 8) & 0xff);
+    };
+    put32(0, 0);
+    put32(4, file_type);
+    reply[8] = static_cast<std::uint8_t>(reply_eflag);
+    reply[9] = 0;
+    put16(10, 0);
+    put32(12, umask);
+    put16(16, 0);
+    put16(18, 0);
+    ql.mem().write(reply_iov_base, std::vector<std::uint8_t>(reply.begin(), reply.end()));
+    return 0;
+}
+
+// message.py ql_qnx_msg_io_write: the write delegation
 std::optional<std::int64_t> ql_qnx_msg_io_write(Qiling& ql, std::uint64_t coid, std::uint64_t smsg,
                                                 std::int32_t sparts, std::uint64_t rmsg, std::int32_t rparts) {
     (void)rmsg;

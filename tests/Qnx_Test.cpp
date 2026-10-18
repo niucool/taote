@@ -593,6 +593,114 @@ TEST(QnxOs, MsgSysConfStrLibpath) {
     EXPECT_EQ(ql.mem().read(0x2400, 9)[8], std::uint8_t{0x00});
 }
 
+// the io_connect OPEN flow over a fresh connection: the blob attaches a
+// connection (the low counter -> coid 0x401) and sends the _io_connect
+// (subtype _IO_CONNECT_OPEN) with the path riding iov[1]; the kernel opens
+// the rootfs file into the connection and writes the 20-byte link reply
+// (the regular-file umask) at the reply's first iov
+constexpr std::uint64_t kIoConnectHdr = 0x2110;
+
+//   00: mov r0, #0          ; nd = ND_LOCAL_NODE
+//   04: mov r1, #1          ; pid = SYSMGR_PID
+//   08: mov r2, #1          ; chid = SYSMGR_CHID
+//   0C: mov r3, #0          ; index (the low counter)
+//   10: mov r4, #1          ; flags = _NTO_COF_CLOEXEC
+//   14: mov r12, #39        ; connect_attach
+//   18: swi 0               ; r0 = coid (0x401)
+//   1C: mov r1, #0x2100     ; smsg = the iov array (r0 keeps the coid)
+//   20: mov r2, #2          ; sparts = 2
+//   24: mov r3, #0x2100
+//   28: add r3, r3, #0x50   ; rmsg = 0x2150 (the reply iov array)
+//   2C: mov r4, #2          ; rparts = 2
+//   30: mov r12, #11        ; msg_sendv
+//   34: swi 0               ; r0 = EOK
+//   38: mov r2, #0x2300
+//   3C: str r0, [r2]
+//   40: mvn r0, #0 ; 44: mvn r1, #0 ; 48: mov r2, #42
+//   4C: mov r12, #47 ; 50: swi 0
+TEST(QnxOs, MsgIoConnectOpenSetsConnFdAndReply) {
+    const std::vector<std::uint8_t> code = {
+        0x00, 0x00, 0xA0, 0xE3,  // 00: mov r0, #0
+        0x01, 0x10, 0xA0, 0xE3,  // 04: mov r1, #1
+        0x01, 0x20, 0xA0, 0xE3,  // 08: mov r2, #1
+        0x00, 0x30, 0xA0, 0xE3,  // 0C: mov r3, #0
+        0x01, 0x40, 0xA0, 0xE3,  // 10: mov r4, #1
+        0x27, 0xC0, 0xA0, 0xE3,  // 14: mov r12, #39
+        0x00, 0x00, 0x00, 0xEF,  // 18: swi 0
+        0x21, 0x1C, 0xA0, 0xE3,  // 1C: mov r1, #0x2100
+        0x02, 0x20, 0xA0, 0xE3,  // 20: mov r2, #2
+        0x21, 0x3C, 0xA0, 0xE3,  // 24: mov r3, #0x2100
+        0x50, 0x30, 0x83, 0xE2,  // 28: add r3, r3, #0x50
+        0x02, 0x40, 0xA0, 0xE3,  // 2C: mov r4, #2
+        0x0B, 0xC0, 0xA0, 0xE3,  // 30: mov r12, #11
+        0x00, 0x00, 0x00, 0xEF,  // 34: swi 0
+        0x23, 0x2C, 0xA0, 0xE3,  // 38: mov r2, #0x2300
+        0x00, 0x00, 0x82, 0xE5,  // 3C: str r0, [r2]
+        0x00, 0x00, 0xE0, 0xE3,  // 40: mvn r0, #0
+        0x00, 0x10, 0xE0, 0xE3,  // 44: mvn r1, #0
+        0x2A, 0x20, 0xA0, 0xE3,  // 48: mov r2, #42
+        0x2F, 0xC0, 0xA0, 0xE3,  // 4C: mov r12, #47
+        0x00, 0x00, 0x00, 0xEF,  // 50: swi 0
+    };
+    auto ql = make_qnx_qiling(code);
+
+    // the file the OPEN targets (the rootfs-relative /hello.txt)
+    {
+        std::ofstream f(std::filesystem::temp_directory_path() / "ql_qnx_rootfs" / "hello.txt", std::ios::binary);
+        f << "hello qnx!";
+    }
+
+    ql.mem().map(kScratch, 0x1000, UC_PROT_ALL, "[qnx-scratch]");
+
+    // the iov array: iov[0] = (the _io_connect header, 40 bytes), iov[1] =
+    // (the path, 11 bytes)
+    ql.mem().write_ptr(0x2100, kIoConnectHdr, 4);
+    ql.mem().write_ptr(0x2104, 40, 4);
+    ql.mem().write_ptr(0x2108, 0x2140, 4);
+    ql.mem().write_ptr(0x210C, 11, 4);
+    // struct _io_connect: type=0x100, subtype=_IO_CONNECT_OPEN, file_type=
+    // _FTYPE_FILE, reply_max=0xa18, entry_max=0x10, key=0, handle=0,
+    // ioflag=_IO_FLAG_RD, mode=S_IFREG|0644, sflag=SH_COMPAT, access=0,
+    // zero=0, path_len=10, eflag=0, extra_type=0, extra_len=0
+    ql.mem().write_ptr(kIoConnectHdr + 0, 0x100, 2);
+    ql.mem().write_ptr(kIoConnectHdr + 2, 2, 2);
+    ql.mem().write_ptr(kIoConnectHdr + 4, 1, 4);
+    ql.mem().write_ptr(kIoConnectHdr + 8, 0xa18, 2);
+    ql.mem().write_ptr(kIoConnectHdr + 10, 0x10, 2);
+    ql.mem().write_ptr(kIoConnectHdr + 12, 0, 4);
+    ql.mem().write_ptr(kIoConnectHdr + 16, 0, 4);
+    ql.mem().write_ptr(kIoConnectHdr + 20, 1, 4);
+    ql.mem().write_ptr(kIoConnectHdr + 24, 0x8000 | 0644, 4);
+    ql.mem().write_ptr(kIoConnectHdr + 28, 0, 2);
+    ql.mem().write_ptr(kIoConnectHdr + 30, 0, 2);
+    ql.mem().write_ptr(kIoConnectHdr + 32, 0, 2);
+    ql.mem().write_ptr(kIoConnectHdr + 34, 10, 2);
+    ql.mem().write(kIoConnectHdr + 36, std::vector<std::uint8_t>{0x00, 0x00, 0x00, 0x00});
+    // the path
+    ql.mem().write(0x2140, std::vector<std::uint8_t>{'/', 'h', 'e', 'l', 'l', 'o', '.', 't', 'x', 't', 0x00});
+    // the reply iovs: iov[0] = (0x2160, 20), iov[1] = (0x2190, 64)
+    ql.mem().write_ptr(0x2150, 0x2160, 4);
+    ql.mem().write_ptr(0x2154, 20, 4);
+    ql.mem().write_ptr(0x2158, 0x2190, 4);
+    ql.mem().write_ptr(0x215C, 64, 4);
+
+    ql.run();
+
+    EXPECT_EQ(ql.os().exit_code(), 42);
+    // the msg_sendv EOK
+    EXPECT_EQ(ql.mem().read_ptr(0x2300, 4), 0u);
+    // the connection now rides the opened file (the first free fd: 3)
+    const auto& conns = static_cast<os::qnx::QlOsQnx&>(ql.os()).connections();
+    ASSERT_TRUE(conns.at(0x401).fd.has_value());
+    EXPECT_EQ(*conns.at(0x401).fd, 3);
+    // the _io_connect_link_reply: pack("<IIBBHIHH", 0, file_type, eflag, 0,
+    // 0, umask, 0, 0) — the regular-file umask
+    EXPECT_EQ(ql.mem().read_ptr(0x2160, 4), 0u);
+    EXPECT_EQ(ql.mem().read_ptr(0x2164, 4), 1u);
+    EXPECT_EQ(ql.mem().read(0x2168, 2)[0], std::uint8_t{0});  // eflag=0, then 0
+    EXPECT_EQ(ql.mem().read_ptr(0x216C, 4), 0x8000u);
+}
+
 // the clock_cycles flow: the kernel returns the core's free-running counter
 // as the nanosecond wall clock (the upstream's simplification) in R0, which
 // the fixture stores into a second scratch cell — the pre-poisoned marker
