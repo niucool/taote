@@ -560,6 +560,8 @@ protocol-handler pairs and closed the loop end to end:
 | the BS protocol pair | `bs.py hook_InstallProtocolInterface` / `hook_HandleProtocol` | Ported | the common.py `InstallProtocolInterface`/`HandleProtocol` verbatim (the handle==0 heap alloc, the per-handle GUID-string dict, the `EFI_UNSUPPORTED` miss) + the `EFI_STATUS` error-bit constants (the const.py shapes) in `services.hpp` |
 | the pool/pages stubs | `bs.py hook_AllocatePages`/`FreePages`/`AllocatePool`/`FreePool` | Ported | the dxe shape verbatim (the AllocateAddress map branch carries the upstream TODO note verbatim; the pool type TODO too) |
 | the fixture | `tests/Uefi_Test.cpp` | Ported | `InstallThenHandleProtocolRoundTrip`: the module installs the GUID at the .data cells and immediately HandleProtocols it back (the blob walks gST->BootServices twice, reading the Install field at `gBS+0x80` and the HandleProtocol field at `gBS+0x88`) |
+| the BS surface completion | `bs.py` (the full descriptor) | Ported | the table corrected to the FULL upstream 44-field order (the compacted Phase-6 list had HandleProtocol at 0x88 — the spec/upstream slot is 0x98 with Reinstall/Uninstall at 0x88/0x90) + the remaining handlers: GetMemoryMap (the SUCCESS stub), CreateEvent/CreateEventEx (the shared body, the event id = len(events) — the id REUSES after a CloseEvent, verbatim), SetTimer/WaitForEvent (the SUCCESS stubs), SignalEvent/CloseEvent/CheckEvent (the utils.signal_event shape: the Set flag + the notify_list append), Reinstall/UninstallProtocolInterface (the common.py NOT_FOUND walk), RegisterProtocolNotify (the event_guids side-map), LocateHandle/LocateHandleBuffer (the LocateHandles helper + the BUFFER_TOO_SMALL flow), LocateDevicePath (SUCCESS), InstallConfigurationTable (the raw-GUID-bytes entry walk over the ST conftable cells), LoadImage/StartImage/UnloadImage/Exit/ExitBootServices (the emu_stop stubs + the upstream TODO notes), GetNextMonotonicCount (the os monotonic_count pre-increment), Stall/SetWatchdogTimer/ConnectController/DisconnectController/CloseProtocol/ProtocolsPerHandle (the SUCCESS stubs), OpenProtocol (the LocateProtocol body over the OpenProtocol layout), OpenProtocolInformation (NOT_FOUND), CopyMem/SetMem (the raw mem ops), CalculateCrc32 (the CRC-32 body) |
+| the event-family fixture | `tests/Uefi_Test.cpp` | DISABLED_ | `DISABLED_EventFamilyCreateSignalCheckClose` — the create/check1/signal dispatches flow but the SECOND call to the same CheckEvent field (0x4000200) faults with a 1-byte UC_MEM_READ_UNMAPPED at [0] while the first call to the same field dispatched cleanly; the second-dispatch-to-a-hooked-field anomaly needs the dispatch-path study (the signature + the instrumentation live in the fixture's comment) |
 
 ### Phase 6.5 findings (upstream-parity notes)
 
@@ -581,6 +583,17 @@ protocol-handler pairs and closed the loop end to end:
   `dic[params["Protocol"]] = params["Interface"]`, no dereference), so the
   round-trip assertion pins the passed-through pointer, not a dereferenced
   interface value.
+- **the REX.B trap struck the r15-base field loads**: `4C 8B 97` decodes as
+  `mov r10, [rdi+disp]` (rdi=0 → the [0x50] fault) — the r15 base needs the
+  `4D` REX.WB prefix; the same class as the freebsd `48 C7 C5` (rbp) trap.
+  The RIP-relative form (`4C 8B 15`) needs no REX.B and avoids the whole
+  class — prefer it for the absolute field loads in the fixture blobs.
+- **the open item: the second dispatch to the same hooked field** — the
+  event-family fixture's check2 (the second call to 0x4000200) faults with
+  a 1-byte read at [0] while the first call to the same field dispatched
+  cleanly; DISABLED_ with the signature. The candidate study: the
+  dispatch-path state after a first pass (the fcall/cc state or the
+  unicorn's re-entry into a translated field address).
 
 ## Deferred (tracked, not built)
 

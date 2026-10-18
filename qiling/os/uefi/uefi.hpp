@@ -50,6 +50,9 @@ public:
     // initial)
     unsigned tpl = 4;
 
+    // bs.py: the GetNextMonotonicCount counter (the pre-increment write)
+    std::uint64_t monotonic_count = 0;
+
     // the installed service-field addresses (the diagnostics)
     std::vector<std::uint64_t> uefi_installed_fields_;
 

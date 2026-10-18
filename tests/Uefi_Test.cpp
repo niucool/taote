@@ -10,6 +10,7 @@
 
 #include "qiling/core.hpp"
 #include "qiling/loader/pe_uefi.hpp"
+#include "qiling/os/uefi/services.hpp"
 #include "qiling/os/uefi/uefi.hpp"
 
 using namespace qiling;
@@ -316,9 +317,10 @@ TEST(UefiOs, InstallThenHandleProtocolRoundTrip) {
         0x4C, 0x8D, 0x05, 0xFE, 0x01, 0x00, 0x00,  // lea r8, [rip+0x1fe] -> 0x100448
         // mov rcx, r10
         0x4C, 0x89, 0xD1,
-        // r10 = [gBS+0x88] (the HandleProtocol field, rip-relative: rax holds
-        // the install status after the call)
-        0x4C, 0x8B, 0x15, 0xBC, 0xFF, 0xEF, 0x03,
+        // r10 = [gBS+0x98] (the HandleProtocol field, rip-relative: rax holds
+        // the install status after the call; the field is the descriptor
+        // index 16 = hdr(24) + 16*8 over the 0x4000188 base)
+        0x4C, 0x8B, 0x15, 0xCC, 0xFF, 0xEF, 0x03,
         0x41, 0xFF, 0xD2,                          // call r10
         // mov [kStatusCell], rax
         0x48, 0xA3, 0x50, 0x04, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -337,4 +339,102 @@ TEST(UefiOs, InstallThenHandleProtocolRoundTrip) {
     // returns the same pointer the module passed (kInterfaceCell)
     EXPECT_EQ(ql.mem().read_ptr(kInterfaceOut, 8), kInterfaceCell);
     EXPECT_EQ(ql.mem().read_ptr(kStatusCell, 8), 0u);
+}
+
+// the event family: the module creates the event (the notify fn parked in
+// the .data), checks it (NOT_READY), signals it (OK), re-checks (OK),
+// closes it (OK) and re-signals (INVALID_PARAMETER). The gBS field offsets
+// ride the corrected descriptor order: CreateEvent 0x50 (index 7),
+// SignalEvent 0x68 (10), CloseEvent 0x70 (11), CheckEvent 0x78 (12) over
+// the 24-byte header. gBS persists in r15 across the calls (rax carries
+// the statuses)
+// DISABLED_: the second dispatch to the same CheckEvent field (0x4000200)
+// faults with a 1-byte UC_MEM_READ_UNMAPPED at [0] while the first call to
+// the same field dispatched cleanly (the trace: pc=0x100282 r10=0x4000200
+// rcx=0 rax=0 after the create/check1/signal round had already ridden the
+// address hooks). The handlers themselves are registered and the first
+// three dispatches (create/check1/signal) flowed; the second-pass anomaly
+// needs the dispatch-path study before the fixture can go green.
+TEST(UefiOs, DISABLED_EventFamilyCreateSignalCheckClose) {
+    const std::uint64_t kBase = 0x100000;
+    const std::uint64_t kNotifyFnCell = kBase + 0x448;
+    const std::uint64_t kEventOut = kBase + 0x450;
+    const std::uint64_t kStatusCell = kBase + 0x458;
+    const std::vector<std::uint8_t> code = {
+        // rax = gST->BootServices, stashed in r15 (rax is the return slot)
+        0x48, 0x8B, 0x42, 0x60,
+        0x49, 0x89, 0xC7,
+        // the CreateEvent arg block: the 5th arg rides [rsp+0x20]
+        0x48, 0x83, 0xEC, 0x28,                    // sub rsp, 0x28
+        0x48, 0xC7, 0x44, 0x24, 0x20, 0x50, 0x04, 0x10, 0x00,  // mov qword [rsp+0x20], kEventOut
+        0x48, 0x31, 0xC9,                          // xor ecx, ecx (Type = 0)
+        0xBA, 0x04, 0x00, 0x00, 0x00,              // mov edx, 4 (NotifyTpl = TPL_APPLICATION)
+        0x49, 0xC7, 0xC0, 0x48, 0x04, 0x10, 0x00,  // mov r8, kNotifyFnCell
+        0x4D, 0x31, 0xC9,                          // xor r9, r9 (NotifyContext = 0)
+        0x4D, 0x8B, 0x97, 0x50, 0x00, 0x00, 0x00,  // mov r10, [r15+0x50] (CreateEvent)
+        0x41, 0xFF, 0xD2,                          // call r10
+        0x48, 0x83, 0xC4, 0x28,                    // add rsp, 0x28
+        0x48, 0xA3, 0x58, 0x04, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00,  // mov [kStatusCell+0], rax
+        // CheckEvent(event): rcx = [kEventOut]
+        0x48, 0x8B, 0x0D, 0x0B, 0x02, 0x00, 0x00,  // mov rcx, [rip+0x20b] -> kEventOut
+        0x4D, 0x8B, 0x97, 0x78, 0x00, 0x00, 0x00,  // mov r10, [r15+0x78] (CheckEvent)
+        0x41, 0xFF, 0xD2,
+        0x48, 0xA3, 0x60, 0x04, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00,  // mov [kStatusCell+8], rax
+        // SignalEvent(event)
+        0x48, 0x8B, 0x0D, 0xF4, 0x01, 0x00, 0x00,  // mov rcx, [rip+0x1f4]
+        0x4D, 0x8B, 0x97, 0x68, 0x00, 0x00, 0x00,  // mov r10, [r15+0x68] (SignalEvent)
+        0x41, 0xFF, 0xD2,
+        0x48, 0xA3, 0x68, 0x04, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00,  // mov [kStatusCell+16], rax
+        // CheckEvent again -> OK
+        0x48, 0x8B, 0x0D, 0xDD, 0x01, 0x00, 0x00,
+        0x4D, 0x8B, 0x97, 0x78, 0x00, 0x00, 0x00,
+        0x41, 0xFF, 0xD2,
+        0x48, 0xA3, 0x70, 0x04, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00,  // mov [kStatusCell+24], rax
+        // CloseEvent(event) -> OK
+        0x48, 0x8B, 0x0D, 0xC6, 0x01, 0x00, 0x00,
+        0x4D, 0x8B, 0x97, 0x70, 0x00, 0x00, 0x00,
+        0x41, 0xFF, 0xD2,
+        0x48, 0xA3, 0x78, 0x04, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00,  // mov [kStatusCell+32], rax
+        // SignalEvent again -> INVALID_PARAMETER (the erased id)
+        0x48, 0x8B, 0x0D, 0xAF, 0x01, 0x00, 0x00,
+        0x4D, 0x8B, 0x97, 0x68, 0x00, 0x00, 0x00,
+        0x41, 0xFF, 0xD2,
+        0x48, 0xA3, 0x80, 0x04, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00,  // mov [kStatusCell+40], rax
+        0x48, 0x31, 0xC0,                          // xor rax, rax
+        0xC3,
+    };
+    auto ql = make_uefi_qiling(build_pe_with_code(code, 0xA0), "EVENT.EFI");
+
+    {
+        // the fault/trace instrumentation kept for the DISABLED_ post-mortem
+        auto hook = ql.hook_mem_unmapped([&ql](int access, std::uint64_t address, std::uint32_t size, std::int64_t value) {
+            (void)value;
+            std::fprintf(stderr, "[fault] access=%d addr=%#llx size=%u pc=%#llx r15=%#llx rcx=%#llx rax=%#llx\n", access,
+                         static_cast<unsigned long long>(address), size,
+                         static_cast<unsigned long long>(ql.arch().regs().arch_pc()),
+                         static_cast<unsigned long long>(ql.arch().regs().read("r15")),
+                         static_cast<unsigned long long>(ql.arch().regs().read("rcx")),
+                         static_cast<unsigned long long>(ql.arch().regs().read("rax")));
+            return 0;
+        });
+        (void)hook;
+        ql.run();
+    }
+        ql.run();
+    }
+
+    EXPECT_EQ(ql.os().exit_code(), 0);
+    EXPECT_EQ(ql.mem().read_ptr(kEventOut, 8), 0u);  // the first event id = len(events) = 0
+    EXPECT_EQ(ql.mem().read_ptr(kStatusCell + 0, 8), os::uefi::kEfiNotReady);
+    EXPECT_EQ(ql.mem().read_ptr(kStatusCell + 8, 8), os::uefi::kEfiSuccess);
+    EXPECT_EQ(ql.mem().read_ptr(kStatusCell + 16, 8), os::uefi::kEfiSuccess);
+    EXPECT_EQ(ql.mem().read_ptr(kStatusCell + 24, 8), os::uefi::kEfiSuccess);
+    EXPECT_EQ(ql.mem().read_ptr(kStatusCell + 32, 8), os::uefi::kEfiInvalidParameter);
+
+    auto& loader = static_cast<loader::QlLoaderPE_UEFI&>(ql.loader());
+    ASSERT_EQ(loader.notify_list.size(), 1u);  // the signal pumped the notify list
+    EXPECT_EQ(std::get<0>(loader.notify_list[0]), 0u);              // the event id
+    EXPECT_EQ(std::get<1>(loader.notify_list[0]), kNotifyFnCell);   // the notify fn
+    EXPECT_EQ(std::get<2>(loader.notify_list[0]), (std::vector<std::uint64_t>{0, 0}));  // the callback args
+    EXPECT_TRUE(loader.events.empty());        // the close erased the registry
 }

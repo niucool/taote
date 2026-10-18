@@ -51,6 +51,9 @@ public:
     // the event registry (the CreateEvent/SetTimer surface lands with the
     // services; the map rides here for the utils.signal_event shape)
     std::map<std::uint64_t, std::map<std::string, std::uint64_t>> events;
+    // the RegisterProtocolNotify-set protocol GUID per event (the upstream
+    // dict value rides a string; the port keys it beside the event map)
+    std::map<std::uint64_t, std::string> event_guids;
     std::vector<std::tuple<std::uint64_t, std::uint64_t, std::vector<std::uint64_t>>> notify_list;
 
     // the TPL level (the RaiseTPL/RestoreTPL surface)

@@ -84,6 +84,8 @@ constexpr std::uint64_t kEfiErrorBit = 1ull << 63;
 constexpr std::uint64_t kEfiSuccess = 0;
 constexpr std::uint64_t kEfiInvalidParameter = kEfiErrorBit | 2;
 constexpr std::uint64_t kEfiUnsupported = kEfiErrorBit | 3;
+constexpr std::uint64_t kEfiBufferTooSmall = kEfiErrorBit | 5;
+constexpr std::uint64_t kEfiNotReady = kEfiErrorBit | 6;
 constexpr std::uint64_t kEfiOutOfResources = kEfiErrorBit | 9;
 constexpr std::uint64_t kEfiNotFound = kEfiErrorBit | 14;
 
