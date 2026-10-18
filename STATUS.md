@@ -656,7 +656,8 @@ LIBSYSTEM fixup (0x2000000 <= n < 0x3000000 maps to n - 0x2000000).
 | the factory wiring (select_os/select_loader) | `qiling/utils.cpp` | ✅ 8670000 | the macos shellcode path shares the QlLoaderELF (the documented deviation: the real QlLoaderMachO lands as its own slice) |
 | the profile | `qiling/profiles/macos.ql` | ✅ 8670000 | the upstream verbatim + the CODE load_address port deviation (the freebsd/qnx precedent) |
 | the syscall handlers — the mach self-trap family + the stubs | `qiling/os/macos/syscall.cpp` | ✅ 67f4ebc | mach_reply_port (2187), thread_self_trap (0x307), task_self_trap (9876), host_self_trap (0x303), csops (the CS_ENFORCEMENT\|CS_GET_TASK_ALLOW flag), getentropy (the KERN_SUCCESS stub); the mach_port/task/thread surfaces ride `mach_port.hpp` (the ctor-seeded deviation until the Mach-O loader lands) |
-| the remaining syscall.py handlers (~29: poll, the mach vm/port traps, mach_msg, access/getattrlist, sigprocmask/fcntl64/pread, getrlimit, sysctl pair, the bsdthread shapes, the nocancel pair, csrctl, the payload aborts…) | — | next slice | the fixture-driven family groups |
+| the file/syscall-info family | `qiling/os/macos/syscall.cpp` + `kernel_func.hpp/.cpp` | ✅ 3c9212a | access_macos (the raw ENOENT over the fs isexists), getattrlist (the 24-byte attrlist unpack + the get_common_attr walk — the name-offset cell, the dev/type/ino cells), getrlimit (the verbatim double-write clobber + the 0x1000 mask oddity), sigprocmask (the log-only no-op, no return), fcntl64_macos (the fixed cmd table + the 0xefffffff ADDFILESIGS blob), pread (seek/read through the fd table + the CF clear); the FileSystem helper rides `kernel_func.*` (the vm_to_real_path + the VM-path type-check quirk verbatim) |
+| the remaining syscall.py handlers (~23: poll, the mach vm/port traps, mach_msg, the bsdthread shapes, the nocancel pair, csrctl, the payload aborts…) | — | next slice | the fixture-driven family groups |
 | the kernel_api fncc surface (kernel_api.py, 1404) | — | defer | the mach-port/kernel-func trap dispatch needs the fncc-style hook surface; its own slice after the syscall handlers |
 | the events/policy managers (events/, mach_port, task) | — | defer | the kext/driver machinery + the Mach-O kernel-loader port first |
 | the kext/driver path (load_kext, run's savedrip) | — | defer | blocked on the QlLoaderMachO port |
@@ -680,6 +681,24 @@ number 1 and through the fixup'd 0x2000000+1 (both terminate with the code
 - **the csops arg order**: (pid, ops, useraddr, usersize) rides rdi/rsi/
   rdx/rcx — the useraddr is the THIRD arg (rdx); a rdi=useraddr blob faults
   the handler's write at 0 (uc_err 7).
+- **the ModRM disp8-vs-disp32 store trap**: `48 89 83` is `[rbx+disp32]`
+  (mod=10) — the disp32 eats the following opcode byte as its high
+  displacement and the store faults at a wild address; the `[rbx+disp8]`
+  form is ModRM `0x43` (mod=01). The register dump (rbx correct at the
+  fault) exonerated the base and pinned the encoding.
+- **the getrlimit which-mask oddity is real**: the upstream masks
+  `which & _RLIMIT_POSIX_FLAG` (0x1000) — a caller passing a plain which
+  (0..8) stays in range, but the fixture's 0x1000 pre-masked which masks to
+  itself (4096 ≥ 9) and rides the EINVAL path; the success path needs a
+  plain which.
+- **the shared-registry overwrite semantics**: the port collapses the
+  upstream's per-os registries into one map where re-registration overwrites
+  — safe because every dialect ctor re-registers its own names at
+  construction, so the last-constructed os's handlers match the running os
+  (the sigprocmask name is shared by the freebsd and macos dialects).
+- **the getrlimit success path carries NO return** (the upstream body ends
+  with `pass`) — rax stays untouched; the same nullopt convention as the
+  macos sigprocmask.
 
 ## Deferred (tracked, not built)
 
