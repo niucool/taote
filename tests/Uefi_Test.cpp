@@ -263,9 +263,14 @@ std::vector<std::uint8_t> build_pe_with_code(const std::vector<std::uint8_t>& co
     put32(0xC4, 16);
 
     v[0x148] = '.'; v[0x149] = 't'; v[0x14A] = 'e'; v[0x14B] = 'x'; v[0x14C] = 't';
-    put32(0x150, 0x80);
+    // the .text sizes must cover the whole code blob (the 0x80 minimum kept
+    // for the short fixtures; the event blob rides ~0x150 bytes and the
+    // original 0x80 truncated its tail — the pinned "second-pass anomaly"
+    // root cause)
+    const std::uint32_t text_size = static_cast<std::uint32_t>(code.size() < 0x80 ? 0x80 : code.size());
+    put32(0x150, text_size);
     put32(0x154, 0x200);
-    put32(0x158, 0x80);
+    put32(0x158, text_size);
     put32(0x15C, 0x200);
     put32(0x168, 0x60000020);
 
@@ -352,19 +357,11 @@ TEST(UefiOs, InstallThenHandleProtocolRoundTrip) {
 // SignalEvent 0x68 (10), CloseEvent 0x70 (11), CheckEvent 0x78 (12) over
 // the 24-byte header. gBS persists in r15 across the calls (rax carries
 // the statuses)
-// DISABLED_: the second dispatch to the same CheckEvent field (0x4000200)
-// mis-fires — the TB-restart study (the 2026-10 session) re-pinned the
-// mechanism: on the SECOND execution through a cached region the
-// UC_HOOK_CODE event at the call carries the PREVIOUS instruction's size
-// (the mov r10's 7) and the pc advances by that wrong size (0x10027b + 7 =
-// 0x100282), so the call r10 falls through and the dispatch never reaches
-// the field's address hook (the first three dispatches — create/check1/
-// signal — flowed cleanly through the same mechanism). The same
-// second-pass size-lag signature as the clone-join blocker (the taken-exit
-// event at the store carrying the jz's size=2). The raw probes (P6-P13)
-// exonerate the cached-TB restart itself, so the trigger is a port-side
-// hook/dispatch interaction — the open item narrows to isolating it.
-TEST(UefiOs, DISABLED_EventFamilyCreateSignalCheckClose) {
+// The blob's rip-relative loads were re-derived for the real layout (the
+// original .text truncation hid the post-check2 flow, so the close/re-signal
+// loads were never validated — the pinned "second-pass anomaly" was this
+// fixture artifact, not a unicorn mechanism).
+TEST(UefiOs, EventFamilyCreateSignalCheckClose) {
     const std::uint64_t kBase = 0x100000;
     const std::uint64_t kNotifyFnCell = kBase + 0x448;
     const std::uint64_t kEventOut = kBase + 0x450;
@@ -390,22 +387,27 @@ TEST(UefiOs, DISABLED_EventFamilyCreateSignalCheckClose) {
         0x41, 0xFF, 0xD2,
         0x48, 0xA3, 0x60, 0x04, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00,  // mov [kStatusCell+8], rax
         // SignalEvent(event)
-        0x48, 0x8B, 0x0D, 0xF4, 0x01, 0x00, 0x00,  // mov rcx, [rip+0x1f4]
+        0x48, 0x8B, 0x0D, 0xF0, 0x01, 0x00, 0x00,  // mov rcx, [rip+0x1f0] -> kEventOut
         0x4D, 0x8B, 0x97, 0x68, 0x00, 0x00, 0x00,  // mov r10, [r15+0x68] (SignalEvent)
         0x41, 0xFF, 0xD2,
         0x48, 0xA3, 0x68, 0x04, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00,  // mov [kStatusCell+16], rax
         // CheckEvent again -> OK
-        0x48, 0x8B, 0x0D, 0xDD, 0x01, 0x00, 0x00,
+        0x48, 0x8B, 0x0D, 0xD5, 0x01, 0x00, 0x00,  // mov rcx, [rip+0x1d5] -> kEventOut
         0x4D, 0x8B, 0x97, 0x78, 0x00, 0x00, 0x00,
         0x41, 0xFF, 0xD2,
         0x48, 0xA3, 0x70, 0x04, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00,  // mov [kStatusCell+24], rax
         // CloseEvent(event) -> OK
-        0x48, 0x8B, 0x0D, 0xC6, 0x01, 0x00, 0x00,
+        // (the rip-relative loads below were re-derived for the real layout:
+        // the original blob's disps were authored pre-truncation and the
+        // close/re-signal loads pointed at the wrong cells — the pinned
+        // "second-pass anomaly" was this fixture artifact, not a unicorn
+        // mechanism)
+        0x48, 0x8B, 0x0D, 0xBA, 0x01, 0x00, 0x00,  // mov rcx, [rip+0x1ba] -> kEventOut
         0x4D, 0x8B, 0x97, 0x70, 0x00, 0x00, 0x00,
         0x41, 0xFF, 0xD2,
         0x48, 0xA3, 0x78, 0x04, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00,  // mov [kStatusCell+32], rax
         // SignalEvent again -> INVALID_PARAMETER (the erased id)
-        0x48, 0x8B, 0x0D, 0xAF, 0x01, 0x00, 0x00,
+        0x48, 0x8B, 0x0D, 0x9F, 0x01, 0x00, 0x00,  // mov rcx, [rip+0x19f] -> kEventOut
         0x4D, 0x8B, 0x97, 0x68, 0x00, 0x00, 0x00,
         0x41, 0xFF, 0xD2,
         0x48, 0xA3, 0x80, 0x04, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00,  // mov [kStatusCell+40], rax
@@ -414,29 +416,21 @@ TEST(UefiOs, DISABLED_EventFamilyCreateSignalCheckClose) {
     };
     auto ql = make_uefi_qiling(build_pe_with_code(code, 0xA0), "EVENT.EFI");
 
-    {
-        // the fault/trace instrumentation kept for the DISABLED_ post-mortem
-        auto hook = ql.hook_mem_unmapped([&ql](int access, std::uint64_t address, std::uint32_t size, std::int64_t value) {
-            (void)value;
-            std::fprintf(stderr, "[fault] access=%d addr=%#llx size=%u pc=%#llx r15=%#llx rcx=%#llx rax=%#llx\n", access,
-                         static_cast<unsigned long long>(address), size,
-                         static_cast<unsigned long long>(ql.arch().regs().arch_pc()),
-                         static_cast<unsigned long long>(ql.arch().regs().read("r15")),
-                         static_cast<unsigned long long>(ql.arch().regs().read("rcx")),
-                         static_cast<unsigned long long>(ql.arch().regs().read("rax")));
-            return 0;
-        });
-        (void)hook;
-        ql.run();
-    }
+    ql.run();
 
     EXPECT_EQ(ql.os().exit_code(), 0);
     EXPECT_EQ(ql.mem().read_ptr(kEventOut, 8), 0u);  // the first event id = len(events) = 0
-    EXPECT_EQ(ql.mem().read_ptr(kStatusCell + 0, 8), os::uefi::kEfiNotReady);
-    EXPECT_EQ(ql.mem().read_ptr(kStatusCell + 8, 8), os::uefi::kEfiSuccess);
+    // the status cells ride the blob's store map: the create's status at
+    // kStatusCell+0 (SUCCESS), the check1's at +8 (NOT_READY before the
+    // signal), the signal's at +16 (OK), the check2's at +24 (OK — the
+    // event was set), the close's at +32 (OK), the re-signal's at +40
+    // (INVALID — the erased id)
+    EXPECT_EQ(ql.mem().read_ptr(kStatusCell + 0, 8), 0u);
+    EXPECT_EQ(ql.mem().read_ptr(kStatusCell + 8, 8), os::uefi::kEfiNotReady);
     EXPECT_EQ(ql.mem().read_ptr(kStatusCell + 16, 8), os::uefi::kEfiSuccess);
     EXPECT_EQ(ql.mem().read_ptr(kStatusCell + 24, 8), os::uefi::kEfiSuccess);
-    EXPECT_EQ(ql.mem().read_ptr(kStatusCell + 32, 8), os::uefi::kEfiInvalidParameter);
+    EXPECT_EQ(ql.mem().read_ptr(kStatusCell + 32, 8), os::uefi::kEfiSuccess);
+    EXPECT_EQ(ql.mem().read_ptr(kStatusCell + 40, 8), os::uefi::kEfiInvalidParameter);
 
     auto& loader = static_cast<loader::QlLoaderPE_UEFI&>(ql.loader());
     ASSERT_EQ(loader.notify_list.size(), 1u);  // the signal pumped the notify list
@@ -451,15 +445,10 @@ TEST(UefiOs, DISABLED_EventFamilyCreateSignalCheckClose) {
 // back. The gRT lives at the SystemTable+0x58; the GetVariable field is the
 // RT index 6 (gRT+0x48) and SetVariable the index 8 (gRT+0x58) over the
 // 24-byte header. The variable store rides ql.env verbatim (rt.py).
-// DISABLED_: the same second-pass anomaly family as the event fixture.
-// The SetVariable (the first dispatch at blob+0x38) rides the address hook
-// and returns, but the emu then restarts mid-instruction (the fault pc =
-// blob+0x81, inside the second block's mov r10 displacement) and faults
-// with UC_ERR_READ_UNMAPPED before the GetVariable call. The handlers are
-// ported and the store rides ql.env; the second-pass mid-blob restart
-// needs the dispatch-path study (the same open item as
-// DISABLED_EventFamilyCreateSignalCheckClose).
-TEST(UefiOs, DISABLED_SetVariableThenGetVariableRoundTrip) {
+// (The original DISABLED_ note — the blob's tail rode past the 0x80 .text
+// section and the GetVariable call never loaded; the same truncation
+// artifact as the event fixture, not a unicorn mechanism.)
+TEST(UefiOs, SetVariableThenGetVariableRoundTrip) {
     const std::uint64_t kBase = 0x100000;
     const std::uint64_t kNameCell = kBase + 0x400;
     const std::uint64_t kAttrOut = kBase + 0x430;

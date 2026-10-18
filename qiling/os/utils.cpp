@@ -45,7 +45,76 @@ std::string QlOsUtils::read_string(Qiling& ql, std::uint64_t address, int charle
 }
 
 std::string QlOsUtils::read_wstring(Qiling& ql, std::uint64_t address, int maxlen) {
-    return read_string(ql, address, 2, maxlen);
+    // utils.py read_wstring: utf-16le — the walk collects the raw 2-byte
+    // units, then decodes them as utf-16le (the upstream's data.decode):
+    // the plain ranges map 1:1, the surrogate pairs combine, and the lone
+    // surrogates fall back to backslashreplace escapes
+    std::string raw;
+    int strlen = 0;
+
+    while (true) {
+        const auto unit = ql.mem().read(address, 2);
+        bool is_terminator = unit[0] == 0 && unit[1] == 0;
+        if (is_terminator) {
+            break;
+        }
+
+        raw.append(reinterpret_cast<const char*>(unit.data()), 2);
+        ++strlen;
+
+        if (strlen == maxlen) {
+            break;
+        }
+        address += 2;
+    }
+
+    // utf-16le -> utf-8: combine the surrogate pairs, encode the rest as
+    // utf-8 (1-3 bytes); the invalid sequences render backslashreplace-style
+    std::string out;
+    for (std::size_t i = 0; i < raw.size(); i += 2) {
+        const auto lo = static_cast<std::uint16_t>(static_cast<std::uint8_t>(raw[i]));
+        const auto hi = static_cast<std::uint16_t>(static_cast<std::uint8_t>(raw[i + 1]));
+        const auto cu = static_cast<std::uint32_t>(lo | (hi << 8));
+        if (cu < 0x80) {
+            out.push_back(static_cast<char>(cu));
+            continue;
+        }
+        // the surrogate range: the high surrogate takes the next unit as its
+        // low half (the pair -> the astral codepoint); a lone half renders
+        // backslashreplace-style (the upstream's errors='backslashreplace')
+        if (cu >= 0xD800 && cu <= 0xDFFF) {
+            if (cu <= 0xDBFF && i + 3 < raw.size() + 1 && i + 2 < raw.size()) {
+                const auto lo2 = static_cast<std::uint16_t>(static_cast<std::uint8_t>(raw[i + 2]));
+                const auto hi2 = static_cast<std::uint16_t>(static_cast<std::uint8_t>(raw[i + 3]));
+                const auto cu2 = static_cast<std::uint32_t>(lo2 | (hi2 << 8));
+                if (cu2 >= 0xDC00 && cu2 <= 0xDFFF) {
+                    const auto cp = 0x10000 + ((static_cast<std::uint32_t>(cu - 0xD800) << 10) |
+                                               static_cast<std::uint32_t>(cu2 - 0xDC00));
+                    out.push_back(static_cast<char>(0xF0 | (cp >> 18)));
+                    out.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
+                    out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+                    out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+                    i += 2;  // the low surrogate consumed
+                    continue;
+                }
+            }
+            // the lone surrogate: backslashreplace escape (the upstream's
+            // errors='backslashreplace' renders \uXXXX)
+            char buf[8];
+            std::snprintf(buf, sizeof(buf), "\\u%04X", cu);
+            out.append(buf);
+            continue;
+        }
+        if (cu < 0x800) {
+            out.push_back(static_cast<char>(0xC0 | (cu >> 6)));
+            out.push_back(static_cast<char>(0x80 | (cu & 0x3F)));
+            continue;
+        }
+        out.push_back(static_cast<char>(0xE0 | (cu >> 12)));
+        out.push_back(static_cast<char>(0x80 | ((cu >> 6) & 0x3F)));
+        out.push_back(static_cast<char>(0x80 | (cu & 0x3F)));
+    }
+    return out;
 }
 
 std::string QlOsUtils::read_cstring(Qiling& ql, std::uint64_t address, int maxlen) {
