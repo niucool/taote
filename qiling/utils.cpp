@@ -10,6 +10,7 @@
 
 #include "qiling/arch/x86.hpp"
 #include "qiling/os/freebsd/freebsd.hpp"
+#include "qiling/os/macos/macos.hpp"
 #include "qiling/os/qnx/qnx.hpp"
 #include "qiling/os/dos/dos.hpp"
 #include "qiling/loader/dos.hpp"
@@ -268,10 +269,14 @@ LoaderFactory select_loader(QL_OS ostype, bool libcache) {
         case QL_OS::LINUX:
         case QL_OS::FREEBSD:
         case QL_OS::QNX:
+        case QL_OS::MACOS:
             // QlLoaderELF covers both paths: the shellcode branch (the
             // loader/elf.py `if self.ql.code` blob mapping) and the ET_EXEC/
             // ET_DYN container parsing. The freebsd dialect shares it; the
-            // qnx/macos loaders land with their phases.
+            // qnx loaders land with their phases. The macos shellcode path
+            // shares it too (documented deviation: the real QlLoaderMachO —
+            // loader/macho.py — lands as its own slice; the container parser
+            // already lives at loader/macho.hpp)
             return [](Qiling* ql) -> std::unique_ptr<loader::QlLoader> {
                 return std::make_unique<loader::QlLoaderELF>(ql);
             };
@@ -311,6 +316,10 @@ OsFactory select_os(QL_OS ostype) {
         case QL_OS::QNX:
             return [](Qiling* ql) -> std::unique_ptr<QlOs> {
                 return std::make_unique<os::qnx::QlOsQnx>(ql);
+            };
+        case QL_OS::MACOS:
+            return [](Qiling* ql) -> std::unique_ptr<QlOs> {
+                return std::make_unique<os::macos::QlOsMacos>(ql);
             };
         case QL_OS::DOS:
             return [](Qiling* ql) -> std::unique_ptr<QlOs> {
