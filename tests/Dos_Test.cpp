@@ -170,3 +170,59 @@ TEST(DosOs, MbrBootRebootsThroughInt19) {
     EXPECT_EQ(ql.mem().read_ptr(0x130, 1), 0x80u);
     EXPECT_EQ(ql.mem().read_ptr(0x132, 1), 2u);
 }
+
+// the int 13h LBA read (ah=42) over the mapped drive: the MBR sets up the
+// DAP (cnt=1, offset=0x0600, lba=1) and reads the sector 1 of the disk
+// image (the loader maps the .DOS_MBR file itself as drive 0x80) into the
+// 0x0600 buffer; the marker pattern proves the QlDisk ride
+//   MBR: mov si, 0x0500 | mov ah, 0x42 | int 13h | mov [0x0138], ah |
+//        mov ah, 4c | int 21h
+TEST(DosOs, Int13LbaReadRidesQlDisk) {
+    const std::vector<std::uint8_t> mbr_code = {
+        0xBE, 0x00, 0x05,        // mov si, 0x0500 (the DAP)
+        0xB4, 0x42,              // mov ah, 0x42
+        0xCD, 0x13,              // int 13h
+        0x88, 0x26, 0x38, 0x01,  // mov [0x0138], ah
+        0xB4, 0x4C,              // mov ah, 4c
+        0xCD, 0x21,              // int 21h
+    };
+    std::vector<std::uint8_t> mbr(512, 0x90);
+    std::copy(mbr_code.begin(), mbr_code.end(), mbr.begin());
+    mbr[510] = 0x55;
+    mbr[511] = 0xAA;
+
+    std::vector<std::uint8_t> sector1(512, 0x00);
+    const std::string marker = "LBA1-MARKER";
+    std::copy(marker.begin(), marker.end(), sector1.begin());
+
+    const auto rootfs = std::filesystem::temp_directory_path() / kDosRootfs;
+    std::filesystem::create_directories(rootfs);
+    const auto mbr_path = rootfs / "DISK.DOS_MBR";
+    {
+        std::ofstream f(mbr_path, std::ios::binary);
+        f.write(reinterpret_cast<const char*>(mbr.data()), static_cast<std::streamsize>(mbr.size()));
+        f.write(reinterpret_cast<const char*>(sector1.data()), static_cast<std::streamsize>(sector1.size()));
+    }
+
+    QilingOptions options;
+    options.rootfs = rootfs.string();
+    options.argv = {mbr_path.string()};
+    options.ostype = QL_OS::DOS;
+    options.archtype = QL_ARCH::A8086;
+    Qiling ql{options};
+
+    // the DAP at 0x0500: size=0x10, reserved=0, cnt=1, offset=0x0600,
+    // segment=0, lba=1
+    const std::vector<std::uint8_t> dap = {0x10, 0x00, 0x01, 0x00, 0x00, 0x06, 0x00, 0x00,
+                                           0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    ql.mem().write(0x500, dap);
+
+    ql.run();
+
+    EXPECT_EQ(ql.os().exit_code(), 0);
+    // the read status: ah=0 (the no-error)
+    EXPECT_EQ(ql.mem().read_ptr(0x138, 1), 0u);
+    // the sector-1 marker landed at the 0x0600 buffer
+    const auto got = ql.mem().read(0x600, marker.size());
+    EXPECT_EQ(std::string(got.begin(), got.end()), marker);
+}

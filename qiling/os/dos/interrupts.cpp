@@ -11,6 +11,7 @@
 
 #include "qiling/os/dos/dos.hpp"
 #include "qiling/os/dos/utils.hpp"
+#include "qiling/os/disk.hpp"
 
 namespace qiling {
 namespace os {
@@ -377,10 +378,176 @@ void handler(Qiling& ql) {
 
 }  // namespace int19
 
+// ---- int13.py (the disk services over QlDisk) ----
+
+namespace int13 {
+
+// int13.py DiskError (the int 13h status codes)
+enum class DiskError : std::uint8_t {
+    NoError = 0,
+    BadCommand = 1,
+};
+
+// int13.py parse_dap: unpack("<BBHHHQ", dapbs) -> (size, reserved, cnt,
+// offset, segment, lba)
+struct Dap {
+    unsigned size = 0;
+    unsigned reserved = 0;
+    unsigned cnt = 0;
+    unsigned offset = 0;
+    unsigned segment = 0;
+    std::uint64_t lba = 0;
+};
+
+Dap parse_dap(const std::vector<std::uint8_t>& b) {
+    Dap d;
+    d.size = b[0];
+    d.reserved = b[1];
+    d.cnt = static_cast<unsigned>(b[2] | (b[3] << 8));
+    d.offset = static_cast<unsigned>(b[4] | (b[5] << 8));
+    d.segment = static_cast<unsigned>(b[6] | (b[7] << 8));
+    for (int i = 0; i < 8; ++i) {
+        d.lba |= static_cast<std::uint64_t>(b[8 + i]) << (8 * i);
+    }
+    return d;
+}
+
+// the mapped-disk access: the QlDisk binding rides the fs mapper (the
+// object-instance bindings return as-is)
+os::QlDisk& mapped_disk(Qiling& ql, std::uint64_t dl) {
+    auto& os = static_cast<QlOsDos&>(ql.os());
+    return *std::static_pointer_cast<os::QlDisk>(os.fs_mapper()->open(int19::drive_key(dl), "rb+"));
+}
+
+void leaf_00(Qiling& ql) { static_cast<QlOsDos&>(ql.os()).clear_cf(); }
+
+void leaf_02(Qiling& ql) {
+    const auto idx = ql.arch().regs().read("dl");
+    auto& os = static_cast<QlOsDos&>(ql.os());
+
+    if (os.fs_mapper() == nullptr || !os.fs_mapper()->has_mapping(int19::drive_key(idx))) {
+        ql.arch().regs().write("ah", static_cast<std::uint8_t>(DiskError::BadCommand));
+        os.set_cf();
+        return;
+    }
+
+    const auto cx = ql.arch().regs().read("cx");
+    const auto cylinder = ((cx & 0xff00) >> 8) | ((cx & 0xC0) << 2);
+    const auto head = ql.arch().regs().read("dh");
+    const auto sector = cx & 63;
+    const auto cnt = ql.arch().regs().read("al");
+
+    auto& disk = mapped_disk(ql, idx);
+    const auto content = disk.read_chs(static_cast<int>(cylinder), static_cast<int>(head),
+                                       static_cast<int>(sector), static_cast<int>(cnt));
+
+    ql.mem().write(linaddr(ql.arch().regs().read("es"), ql.arch().regs().read("bx")), content);
+    os.clear_cf();
+    ql.arch().regs().write("ah", 0);
+    ql.arch().regs().write("al", sector);
+}
+
+// int13.py __leaf_08: the drive parameter table
+void leaf_08(Qiling& ql) {
+    const auto idx = ql.arch().regs().read("dl");
+    auto& os = static_cast<QlOsDos&>(ql.os());
+
+    if (os.fs_mapper() == nullptr || !os.fs_mapper()->has_mapping(int19::drive_key(idx))) {
+        ql.arch().regs().write("ah", static_cast<std::uint8_t>(DiskError::BadCommand));
+        os.set_cf();
+        return;
+    }
+
+    auto& disk = mapped_disk(ql, idx);
+    ql.arch().regs().write("dl", os.fs_mapper()->mapping_count());
+    ql.arch().regs().write("dh", static_cast<std::uint64_t>(disk.n_heads() - 1));
+    ql.arch().regs().write("bl", 0x4);
+    ql.arch().regs().write("di", 0);
+    ql.arch().regs().write("ds", 0);
+
+    const auto n_sectors = std::min<std::uint64_t>(disk.n_sectors(), 63);
+    const auto n_cylinders = std::min<std::uint64_t>(disk.n_cylinders(), 1023);
+
+    auto cx = (n_sectors & 0b111111);
+    cx |= ((n_cylinders & 0b11) << 6);
+    cx |= (((n_cylinders & 0b1111111100) >> 2) << 8);
+
+    ql.arch().regs().write("cx", cx);
+    ql.arch().regs().write("ah", 0);
+    os.clear_cf();
+}
+
+// int13.py __leaf_41: the extensions installation check
+void leaf_41(Qiling& ql) {
+    ql.arch().regs().write("ah", 0);
+    // 1 -> the packet-structure access; 2 -> the drive locking/ejecting;
+    // 4 -> the enhanced disk drive support
+    ql.arch().regs().write("bx", 0xaa55);
+    ql.arch().regs().write("cx", 7);
+}
+
+void leaf_42(Qiling& ql) {
+    const auto idx = ql.arch().regs().read("dl");
+    auto& os = static_cast<QlOsDos&>(ql.os());
+
+    if (os.fs_mapper() == nullptr || !os.fs_mapper()->has_mapping(int19::drive_key(idx))) {
+        ql.arch().regs().write("ah", static_cast<std::uint8_t>(DiskError::BadCommand));
+        os.set_cf();
+        return;
+    }
+
+    const auto dapbs = ql.mem().read(linaddr(ql.arch().regs().read("ds"), ql.arch().regs().read("si")), 16);
+    const auto dap = parse_dap(dapbs);
+    auto& disk = mapped_disk(ql, idx);
+    const auto content = disk.read_sectors(dap.lba, static_cast<int>(dap.cnt));
+
+    ql.mem().write(linaddr(dap.segment, dap.offset), content);
+    os.clear_cf();
+    ql.arch().regs().write("ah", 0);
+}
+
+void leaf_43(Qiling& ql) {
+    const auto idx = ql.arch().regs().read("dl");
+    auto& os = static_cast<QlOsDos&>(ql.os());
+
+    if (os.fs_mapper() == nullptr || !os.fs_mapper()->has_mapping(int19::drive_key(idx))) {
+        ql.arch().regs().write("ah", static_cast<std::uint8_t>(DiskError::BadCommand));
+        os.set_cf();
+        return;
+    }
+
+    const auto dapbs = ql.mem().read(linaddr(ql.arch().regs().read("ds"), ql.arch().regs().read("si")), 16);
+    const auto dap = parse_dap(dapbs);
+    auto& disk = mapped_disk(ql, idx);
+    const auto buffer = ql.mem().read(linaddr(dap.segment, dap.offset), dap.cnt * static_cast<unsigned>(disk.sector_size()));
+    disk.write_sectors(dap.lba, static_cast<int>(dap.cnt), buffer);
+
+    os.clear_cf();
+    ql.arch().regs().write("ah", 0);
+}
+
+void handler(Qiling& ql) {
+    const auto ah = ql.arch().regs().read("ah");
+
+    static const std::map<unsigned, std::function<void(Qiling&)>> leaves = {
+        {0x00, leaf_00},  {0x02, leaf_02},  {0x08, leaf_08},  {0x41, leaf_41},  {0x42, leaf_42},  {0x43, leaf_43},
+    };
+
+    const auto it = leaves.find(static_cast<unsigned>(ah));
+    if (it == leaves.end()) {
+        throw QlErrorNotImplemented("leaf of INT 13h is not implemented");
+    }
+
+    it->second(ql);
+}
+
+}  // namespace int13
+
 }  // namespace
 
 const std::map<unsigned, IntHandler>& handlers() {
     static const std::map<unsigned, IntHandler> table = {
+        {0x13, int13::handler},
         {0x1a, int1a::handler},
         {0x19, int19::handler},
         {0x20, int20::handler},
