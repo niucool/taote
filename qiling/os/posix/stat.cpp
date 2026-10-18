@@ -123,7 +123,47 @@ const StatLayout& linux_x86_64_stat() {
     return layout;
 }
 
+// stat.py LinuxX86Stat64 (_pack_=4): the i386 stat64 image — the byte-array
+// pads and the trailing u64 st_ino (the cells answer 0 where the snapshot
+// never carries the field)
+const StatLayout& linux_x86_stat64() {
+    static const StatLayout layout{4, {
+        {StatSrc::Dev, 8},
+        {StatSrc::Zero, 4},                        // __pad0[4]
+        {StatSrc::Ino, 4},                         // __st_ino
+        {StatSrc::Mode, 4}, {StatSrc::Nlink, 4},
+        {StatSrc::Uid, 4}, {StatSrc::Gid, 4},
+        {StatSrc::Rdev, 8},
+        {StatSrc::Zero, 4},                        // __pad3[4]
+        {StatSrc::Size, 8},
+        {StatSrc::Blksize, 4}, {StatSrc::Blocks, 8},
+        {StatSrc::Atime, 4}, {StatSrc::Zero, 4},   // st_atime_ns
+        {StatSrc::Mtime, 4}, {StatSrc::Zero, 4},   // st_mtime_ns
+        {StatSrc::Ctime, 4}, {StatSrc::Zero, 4},   // st_ctime_ns
+        {StatSrc::Ino, 8},                         // st_ino (u64 tail)
+    }};
+    return layout;
+}
+
 }  // namespace
+
+// stat.py get_stat64_struct: the verbatim ladder — the QNX branch rides the
+// same ARM64 stat64 shape for both arm widths; the linux ladder carries
+// only the x86 table and the x8664 falls through it (the upstream's
+// "Unrecognized arch && os" warn rides the caller with the logger)
+const StatLayout& get_stat64_layout(QL_OS os, QL_ARCH arch) {
+    if (os == QL_OS::QNX) {
+        if (arch == QL_ARCH::ARM || arch == QL_ARCH::ARM64) {
+            return qnx_arm64_stat();
+        }
+        throw QlErrorNotImplemented("qnx stat64: the ARM-EB table lands with its slice");
+    }
+    if (os == QL_OS::LINUX && arch == QL_ARCH::X86) {
+        return linux_x86_stat64();
+    }
+    // the verbatim fallback: "Unrecognized arch && os ... Fallback to Linux x86."
+    return linux_x86_stat64();
+}
 
 const StatLayout& get_stat_layout(QL_OS os, QL_ARCH arch) {
     // stat.py get_stat_struct: the verbatim ladder — QNX first (the only

@@ -199,6 +199,69 @@ TEST(PosixFileDes, FstatPacksTheX8664Image) {
     EXPECT_EQ(ql.mem().read_ptr(0x1002400 + 120, 8), 0u);  // __unused tail
 }
 
+// the stat.py statFamily flow: stat("/tmpfile", buf) (the syscall 4) rides
+// the x86-64 image and lstat("/tmpfile", buf) (the syscall 6) rides the
+// pack_stat64_struct family (the LinuxX86Stat64 96-byte image — the verbatim
+// struct_func quirk); the missing path answers -ENOENT
+TEST(PosixFileDes, StatAndLstatRideTheStatFamily) {
+    const std::string payload = "hello fd";
+    const std::vector<std::uint8_t> code = {
+        0x48, 0xC7, 0xC0, 0x02, 0x00, 0x00, 0x00,  // mov rax, 2 (open)
+        0x48, 0xC7, 0xC7, 0x00, 0x20, 0x00, 0x01,  // mov rdi, 0x1002000
+        0x48, 0xC7, 0xC6, 0x42, 0x00, 0x00, 0x00,  // mov rsi, 0x42
+        0x48, 0xC7, 0xC2, 0xA4, 0x01, 0x00, 0x00,  // mov rdx, 0o644
+        0x0F, 0x05,                                 // syscall
+        // stat(0x1002000, 0x1002500)
+        0x48, 0xC7, 0xC0, 0x04, 0x00, 0x00, 0x00,  // mov rax, 4 (stat)
+        0x48, 0xC7, 0xC7, 0x00, 0x20, 0x00, 0x01,  // mov rdi, 0x1002000
+        0x48, 0xC7, 0xC6, 0x00, 0x25, 0x00, 0x01,  // mov rsi, 0x1002500
+        0x0F, 0x05,                                 // syscall
+        0x48, 0x89, 0x04, 0x25, 0x08, 0x22, 0x00, 0x01,  // mov [0x1002208], rax
+        // lstat(0x1002000, 0x1002600)
+        0x48, 0xC7, 0xC0, 0x06, 0x00, 0x00, 0x00,  // mov rax, 6 (lstat)
+        0x48, 0xC7, 0xC7, 0x00, 0x20, 0x00, 0x01,  // mov rdi, 0x1002000
+        0x48, 0xC7, 0xC6, 0x00, 0x26, 0x00, 0x01,  // mov rsi, 0x1002600
+        0x0F, 0x05,                                 // syscall
+        0x48, 0x89, 0x04, 0x25, 0x10, 0x22, 0x00, 0x01,  // mov [0x1002210], rax
+        // stat("/missing", 0x1002700) — the ENOENT branch
+        0x48, 0xC7, 0xC0, 0x04, 0x00, 0x00, 0x00,  // mov rax, 4 (stat)
+        0x48, 0xC7, 0xC7, 0x50, 0x20, 0x00, 0x01,  // mov rdi, 0x1002050
+        0x48, 0xC7, 0xC6, 0x00, 0x27, 0x00, 0x01,  // mov rsi, 0x1002700
+        0x0F, 0x05,                                 // syscall
+        0x48, 0x89, 0x04, 0x25, 0x18, 0x22, 0x00, 0x01,  // mov [0x1002218], rax
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00,  // mov rax, 60 (exit)
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00,  // mov rdi, 0
+        0x0F, 0x05,                                 // syscall
+    };
+
+    QilingOptions options = posix_options(code);
+    Qiling ql(options);
+
+    ql.mem().write(0x1002000, std::vector<std::uint8_t>{'/', 't', 'm', 'p', 'f', 'i', 'l', 'e', 0});
+    ql.mem().write(0x1002050, std::vector<std::uint8_t>{'/', 'm', 'i', 's', 's', 'i', 'n', 'g', 0});
+    {
+        std::ofstream f(ensure_rootfs() / "tmpfile", std::ios::binary);
+        f << payload;
+    }
+
+    ql.run();
+
+    EXPECT_EQ(ql.os().exit_code(), 0);
+    // the stat returned 0 and the image carries the payload size/mode
+    EXPECT_EQ(ql.mem().read_ptr(0x1002208, 8), 0u);
+    EXPECT_EQ(ql.mem().read_ptr(0x1002500 + 48, 8), payload.size());
+    EXPECT_EQ(ql.mem().read_ptr(0x1002500 + 24, 4) & 0xF000u, 0x8000u);
+    // the lstat returned 0; the LinuxX86Stat64 image (the 96-byte i386
+    // stat64 layout — the verbatim pack_stat64_struct quirk): the size at
+    // +44 and the mode at +16
+    EXPECT_EQ(ql.mem().read_ptr(0x1002210, 8), 0u);
+    EXPECT_EQ(ql.mem().read_ptr(0x1002600 + 44, 8), payload.size());
+    EXPECT_EQ(ql.mem().read_ptr(0x1002600 + 16, 4) & 0xF000u, 0x8000u);
+    EXPECT_EQ(ql.mem().read_ptr(0x1002600 + 88, 8), ql.mem().read_ptr(0x1002600 + 12, 4));
+    // the missing path: -ENOENT
+    EXPECT_EQ(ql.mem().read_ptr(0x1002218, 8), 0xFFFFFFFFFFFFFFFEull);
+}
+
 // the procfs slice (os/linux/procfs.py): the /proc/self pseudo files resolve
 // through the fd flow — open("/proc/self/cmdline") reads the argv bytes; the
 // shellcode run carries the empty placeholder argv, so the read yields the

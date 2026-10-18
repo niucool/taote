@@ -207,6 +207,49 @@ QlFileStat host_fstat_fd(int host_fd) {
     return out;
 }
 
+bool host_stat_path(const std::filesystem::path& host_path, bool follow_symlinks,
+                    QlFileStat& out, int* out_errno) {
+    errno = 0;
+#if defined(_WIN32)
+    (void)follow_symlinks;  // the MSVC CRT has no lstat — the deviation note
+    struct _stat64 st{};
+    if (::_wstat64(host_path.wstring().c_str(), &st) != 0) {
+        if (out_errno != nullptr) {
+            *out_errno = errno;
+        }
+        return false;
+    }
+#else
+    struct stat st{};
+    const int rc = follow_symlinks ? ::stat(host_path.c_str(), &st) : ::lstat(host_path.c_str(), &st);
+    if (rc != 0) {
+        if (out_errno != nullptr) {
+            *out_errno = errno;
+        }
+        return false;
+    }
+#endif
+    out.dev = static_cast<std::uint64_t>(st.st_dev);
+    out.ino = static_cast<std::uint64_t>(st.st_ino);
+    out.mode = static_cast<std::uint32_t>(st.st_mode);
+    out.nlink = static_cast<std::uint32_t>(st.st_nlink);
+    out.uid = static_cast<std::uint32_t>(st.st_uid);
+    out.gid = static_cast<std::uint32_t>(st.st_gid);
+    out.rdev = static_cast<std::uint64_t>(st.st_rdev);
+    out.size = static_cast<std::uint64_t>(st.st_size);
+    out.atime = static_cast<std::int64_t>(st.st_atime);
+    out.mtime = static_cast<std::int64_t>(st.st_mtime);
+    out.ctime = static_cast<std::int64_t>(st.st_ctime);
+#ifdef _WIN32
+    out.blksize = 0;
+    out.blocks = 0;
+#else
+    out.blksize = static_cast<std::int64_t>(st.st_blksize);
+    out.blocks = static_cast<std::int64_t>(st.st_blocks);
+#endif
+    return true;
+}
+
 std::uint64_t QlFile::lseek(std::uint64_t lseek_offset, int lseek_origin) {
     if (file_ == nullptr) {
         throw QlErrorBase("lseek on a closed file");

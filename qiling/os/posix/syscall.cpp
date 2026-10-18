@@ -188,6 +188,45 @@ std::optional<std::int64_t> syscall_fstat(Qiling& ql, const std::vector<std::uin
     return 0;
 }
 
+// stat.py statFamily: the cstring path, the transform to the host path, the
+// host stat (Stat) or lstat (Lstat) — the OSError branch answers -errno —
+// and the packing through the stat family (the struct_func choice: the
+// plain stat rides pack_stat_struct, the lstat/stat64 ride the
+// pack_stat64_struct family verbatim)
+std::optional<std::int64_t> stat_family(Qiling& ql, std::uint64_t path_ptr, std::uint64_t buf,
+                                        bool follow_symlinks, bool pack64) {
+    const auto vpath = read_cstring(ql, path_ptr);
+    // stat.py transform_to_real_path: the host resolution + the safety check
+    // (the PermissionError branch propagates, the verbatim shape)
+    const auto hpath = ql.os().path()->virtual_to_host_path(vpath);
+    if (!ql.os().path()->is_safe_host_path(hpath)) {
+        throw QlErrorBase("unsafe path: " + hpath);
+    }
+
+    QlFileStat info{};
+    int host_errno = 0;
+    if (!host_stat_path(hpath, follow_symlinks, info, &host_errno)) {
+        // stat.py: "except OSError as e: return -e.errno"
+        return -host_errno;
+    }
+
+    const auto& layout = pack64 ? get_stat64_layout(ql.os().type(), ql.arch().type())
+                                : get_stat_layout(ql.os().type(), ql.arch().type());
+    ql.mem().write(buf, pack_stat_struct(info, layout));
+    return 0;
+}
+
+// int stat(const char *path, struct stat *buf); — stat.py ql_syscall_stat
+std::optional<std::int64_t> syscall_stat(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    return stat_family(ql, params[0], params[1], /*follow_symlinks=*/true, /*pack64=*/false);
+}
+
+// int lstat(const char *path, struct stat64 *buf); — stat.py ql_syscall_lstat
+// (the pack_stat64_struct choice is the verbatim quirk)
+std::optional<std::int64_t> syscall_lstat(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    return stat_family(ql, params[0], params[1], /*follow_symlinks=*/false, /*pack64=*/true);
+}
+
 std::optional<std::int64_t> syscall_uname(Qiling& ql, const std::vector<std::uint64_t>& params) {
     // unistd.py ql_syscall_uname: a fixed utsname buffer
     const auto buf = params[0];
@@ -815,6 +854,12 @@ void register_builtin_syscalls() {
     registry.register_syscall({"exit_group", {PARAM_INTN}, syscall_exit_group});
     registry.register_syscall({"read", {PARAM_INTN, PARAM_PTRX, PARAM_INTN}, syscall_read});
     registry.register_syscall({"fstat", {PARAM_INTN, PARAM_PTRX}, syscall_fstat});
+    // stat.py ql_syscall_stat / ql_syscall_lstat (+ the *64 variants — the
+    // x86/ARM tables map those ids; the x8664 maps stat/lstat at 4/6)
+    registry.register_syscall({"stat", {PARAM_PTRX, PARAM_PTRX}, syscall_stat});
+    registry.register_syscall({"lstat", {PARAM_PTRX, PARAM_PTRX}, syscall_lstat});
+    registry.register_syscall({"stat64", {PARAM_PTRX, PARAM_PTRX}, syscall_stat});
+    registry.register_syscall({"lstat64", {PARAM_PTRX, PARAM_PTRX}, syscall_lstat});
     registry.register_syscall({"write", {PARAM_INTN, PARAM_PTRX, PARAM_INTN}, syscall_write});
     registry.register_syscall({"uname", {PARAM_PTRX}, syscall_uname});
 

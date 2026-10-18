@@ -10,6 +10,7 @@
 #define QILING_OS_FILESTRUCT_HPP
 
 #include <cstdio>
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <vector>
@@ -146,6 +147,15 @@ struct QlFileStat {
 
 // the host fstat over an already-open descriptor (the caller's QlFile::fileno)
 QlFileStat host_fstat_fd(int host_fd);
+
+// stat.py Stat/Lstat: the host path stat — follow_symlinks selects the
+// following stat (Stat) over the symlink-targeted lstat (Lstat); returns
+// false with *out_errno set on the host failure (the OSError branch);
+// the _WIN32 deviation: the MSVC CRT has no lstat, so the no-follow request
+// collapses onto _wstat64 (the fixture targets are regular files where
+// both behave identically)
+bool host_stat_path(const std::filesystem::path& host_path, bool follow_symlinks,
+                    QlFileStat& out, int* out_errno);
 
 }  // namespace qiling
 
