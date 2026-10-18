@@ -46,6 +46,13 @@ public:
     // the fcall (the ms64 cc for the module entry calls)
     std::unique_ptr<QlFunctionCall> fcall;
 
+    // the TPL level (the RaiseTPL/RestoreTPL surface; the TPL_APPLICATION
+    // initial)
+    unsigned tpl = 4;
+
+    // the installed service-field addresses (the diagnostics)
+    std::vector<std::uint64_t> uefi_installed_fields_;
+
 private:
     std::vector<std::function<bool(const std::string&)>> on_module_enter_;
     std::vector<std::function<bool(int)>> on_module_exit_;

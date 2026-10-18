@@ -8,6 +8,7 @@
 #include <LIEF/LIEF.hpp>
 
 #include "qiling/os/uefi/uefi.hpp"
+#include "qiling/os/uefi/services.hpp"
 #include "qiling/os/const.hpp"
 
 namespace qiling {
@@ -227,6 +228,10 @@ void QlLoaderPE_UEFI::init_dxe_environment() {
     // the end-of-execution trap sits on an address that is not expected to
     // execute (the system table location)
     ctx.end_of_execution_ptr = gST;
+
+    // st.py initialize: the ST/BS/RT/DS layout + the fills (the service
+    // hooks ride the descriptor walk)
+    os::uefi::initialize_system_table(*ql_, ctx, gST);
 }
 
 void QlLoaderPE_UEFI::init_smm_environment() {

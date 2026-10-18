@@ -15,6 +15,8 @@ QlOsUefi::QlOsUefi(Qiling* ql) : QlOs(ql) {
     // lands with a 32-bit uefi slice; the upstream supports only 64-bit
     // modules)
     fcall = std::make_unique<QlFunctionCall>(std::make_unique<cc::ms64>(ql->arch()));
+    // the os.call path rides the base's fcall() accessor (the non-owning rebind)
+    set_fcall_ptr(*fcall);
 }
 
 bool QlOsUefi::notify_before_module_execution(const std::string& module) {
