@@ -126,6 +126,27 @@ public:
     void close() override;
 };
 
+// filestruct.py Fstat(fd): the host fstat snapshot (the port-side helper;
+// the os/arch packings live with their consumers)
+struct QlFileStat {
+    std::uint64_t dev = 0;
+    std::uint64_t ino = 0;
+    std::uint32_t mode = 0;
+    std::uint32_t nlink = 0;
+    std::uint32_t uid = 0;
+    std::uint32_t gid = 0;
+    std::uint64_t rdev = 0;
+    std::uint64_t size = 0;
+    std::int64_t atime = 0;
+    std::int64_t mtime = 0;
+    std::int64_t ctime = 0;
+    std::int64_t blksize = 0;
+    std::int64_t blocks = 0;
+};
+
+// the host fstat over an already-open descriptor (the caller's QlFile::fileno)
+QlFileStat host_fstat_fd(int host_fd);
+
 }  // namespace qiling
 
 #endif  // QILING_OS_FILESTRUCT_HPP

@@ -36,6 +36,11 @@ std::optional<std::int64_t> ql_qnx_msg_io_read(Qiling& ql, std::uint64_t coid, s
 std::optional<std::int64_t> ql_qnx_msg_io_lseek(Qiling& ql, std::uint64_t coid, std::uint64_t smsg,
                                                 std::int32_t sparts, std::uint64_t rmsg, std::int32_t rparts);
 
+// message.py ql_qnx_msg_io_stat (lib/c/1/fstat.c): the fstat delegation
+// (the QNXARMStat packing)
+std::optional<std::int64_t> ql_qnx_msg_io_stat(Qiling& ql, std::uint64_t coid, std::uint64_t smsg,
+                                               std::int32_t sparts, std::uint64_t rmsg, std::int32_t rparts);
+
 // message.py ql_qnx_msg_sys_conf: the confstr/sysconf dispatch
 // (lib/c/1a/confstr.c + lib/c/1/sysconf.c)
 std::optional<std::int64_t> ql_qnx_msg_sys_conf(Qiling& ql, std::uint64_t coid, std::uint64_t smsg,

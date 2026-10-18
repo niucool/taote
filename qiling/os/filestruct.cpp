@@ -173,6 +173,40 @@ int QlFile::fileno() {
     return QL_FILENO(file_);
 }
 
+QlFileStat host_fstat_fd(int host_fd) {
+#if defined(_WIN32)
+    struct _stat64 st{};
+    if (::_fstat64(host_fd, &st) != 0) {
+        throw QlErrorBase("fstat failed");
+    }
+#else
+    struct stat st{};
+    if (::fstat(host_fd, &st) != 0) {
+        throw QlErrorBase("fstat failed");
+    }
+#endif
+    QlFileStat out;
+    out.dev = static_cast<std::uint64_t>(st.st_dev);
+    out.ino = static_cast<std::uint64_t>(st.st_ino);
+    out.mode = static_cast<std::uint32_t>(st.st_mode);
+    out.nlink = static_cast<std::uint32_t>(st.st_nlink);
+    out.uid = static_cast<std::uint32_t>(st.st_uid);
+    out.gid = static_cast<std::uint32_t>(st.st_gid);
+    out.rdev = static_cast<std::uint64_t>(st.st_rdev);
+    out.size = static_cast<std::uint64_t>(st.st_size);
+    out.atime = static_cast<std::int64_t>(st.st_atime);
+    out.mtime = static_cast<std::int64_t>(st.st_mtime);
+    out.ctime = static_cast<std::int64_t>(st.st_ctime);
+#ifdef _WIN32
+    out.blksize = 0;
+    out.blocks = 0;
+#else
+    out.blksize = static_cast<std::int64_t>(st.st_blksize);
+    out.blocks = static_cast<std::int64_t>(st.st_blocks);
+#endif
+    return out;
+}
+
 std::uint64_t QlFile::lseek(std::uint64_t lseek_offset, int lseek_origin) {
     if (file_ == nullptr) {
         throw QlErrorBase("lseek on a closed file");

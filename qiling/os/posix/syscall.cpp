@@ -45,6 +45,16 @@ void SyscallRegistry::clear() {
 
 // ---- the built-in unistd syscalls (os/posix/syscall/unistd.py) ----
 
+// the fd-table lookup over the posix os layer (the unistd.py os.fd[fd] shape;
+// nullptr when out of range or empty) — shared with the delegating dialects
+// (the qnx message.py imports the posix syscall helpers verbatim)
+std::shared_ptr<QlFsMappedObject> fd_get(Qiling& ql, std::int64_t fd) {
+    if (fd < 0 || fd >= posix::QlFileDes::NR_OPEN) {
+        return nullptr;
+    }
+    return ql.os<posix::QlOsPosix>().fd().at(static_cast<int>(fd));
+}
+
 namespace {
 
 // posix/const.py: NR_OPEN and the errno spellings used below
@@ -64,15 +74,7 @@ bool fd_in_range(std::int64_t fd) {
 }
 
 // empty)
-std::shared_ptr<QlFsMappedObject> fd_get(Qiling& ql, std::int64_t fd);
 std::string read_cstring(Qiling& ql, std::uint64_t addr);
-
-std::shared_ptr<QlFsMappedObject> fd_get(Qiling& ql, std::int64_t fd) {
-    if (!fd_in_range(fd)) {
-        return nullptr;
-    }
-    return ql.os<posix::QlOsPosix>().fd().at(static_cast<int>(fd));
-}
 
 std::optional<std::int64_t> syscall_exit(Qiling& ql, const std::vector<std::uint64_t>& params) {
     // unistd.py ql_syscall_exit: the child-process and the multithread

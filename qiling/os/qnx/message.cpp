@@ -9,6 +9,8 @@
 #include "qiling/os/qnx/qnx.hpp"
 #include "qiling/os/qnx/types.hpp"
 
+#include "qiling/os/filestruct.hpp"
+
 #include <array>
 #include <cstring>
 #include <filesystem>
@@ -47,6 +49,7 @@ const MsgTypeEntry kMsgTypeTable[] = {
     {0x000, ql_qnx_msg_sys_conf},      // sys_conf
     {0x100, ql_qnx_msg_io_connect},    // io_connect
     {0x101, ql_qnx_msg_io_read},       // io_read
+    {0x104, ql_qnx_msg_io_stat},       // io_stat
     {0x109, ql_qnx_msg_io_lseek},      // io_lseek
     {0x102, ql_qnx_msg_io_write},      // io_write
 };
@@ -171,6 +174,67 @@ std::optional<std::int64_t> ql_qnx_msg_io_read(Qiling& ql, std::uint64_t coid, s
     const std::vector<std::uint64_t> read_args{static_cast<std::uint64_t>(*conn.fd), rmsg,
                                                static_cast<std::uint64_t>(nbytes)};
     return read_entry->handler(ql, read_args);
+}
+
+// message.py ql_qnx_msg_io_stat (lib/c/1/fstat.c): the flat _io_stat
+// (sparts=-8, rparts=-72); the fd resolves through the connection and the
+// host stat packs the QNXARMStat layout (the _pack_=4 18-cell layout,
+// the hi cells zero) at rmsg
+std::optional<std::int64_t> ql_qnx_msg_io_stat(Qiling& ql, std::uint64_t coid, std::uint64_t smsg,
+                                               std::int32_t sparts, std::uint64_t rmsg, std::int32_t rparts) {
+    // struct _io_stat in lib/c/public/sys/iomsg.h:
+    // (type, combine_len, zero) = unpack("<HHI", smsg, 8)
+    const auto hdr = ql.mem().read(smsg, 8);
+    const auto type = static_cast<std::uint16_t>(hdr[0] | (hdr[1] << 8));
+    const auto combine_len = static_cast<std::uint16_t>(hdr[2] | (hdr[3] << 8));
+    const auto zero = static_cast<std::uint32_t>(hdr[4] | (hdr[5] << 8) | (hdr[6] << 16) |
+                                                 (static_cast<std::uint32_t>(hdr[7]) << 24));
+
+    if (sparts != -8 || rparts != -72) {
+        throw QlErrorBase("qnx io_stat: the input/output sizes are wrong");
+    }
+    if (type != 0x104 || combine_len != 8 || zero != 0) {
+        throw QlErrorBase("qnx io_stat: the message is wrong");
+    }
+
+    const auto fd = static_cast<std::int64_t>(
+        *static_cast<QlOsQnx&>(ql.os()).connections().at(static_cast<std::uint32_t>(coid)).fd);
+    auto* f = posix::fd_get(ql, fd).get();
+    if (f == nullptr) {
+        return -EBADF;
+    }
+    auto st = host_fstat_fd(f->fileno());
+
+    // the QNXARMStat cells (stat.py, the _pack_=4 layout verbatim): ino,
+    // ino_hi, size, size_hi, dev, rdev, uid, gid, mtime, atime, ctime, mode,
+    // nlink, blksize, blocks, blksize, blocks, blocks_hi
+    const auto put32 = [rmsg, &ql](std::size_t off, std::uint64_t v) {
+        std::array<std::uint8_t, 4> cell{};
+        for (int i = 0; i < 4; ++i) {
+            cell[i] = static_cast<std::uint8_t>((v >> (8 * i)) & 0xff);
+        }
+        ql.mem().write(rmsg + off, std::vector<std::uint8_t>(cell.begin(), cell.end()));
+    };
+    put32(0, st.ino);
+    put32(4, 0);  // st_ino_hi
+    put32(8, st.size);
+    put32(12, 0);  // st_size_hi
+    put32(16, st.dev);
+    put32(20, st.rdev);
+    put32(24, st.uid);
+    put32(28, st.gid);
+    put32(32, static_cast<std::uint64_t>(st.mtime));
+    put32(36, static_cast<std::uint64_t>(st.atime));
+    put32(40, static_cast<std::uint64_t>(st.ctime));
+    put32(44, st.mode);
+    put32(48, st.nlink);
+    put32(52, static_cast<std::uint64_t>(st.blksize));
+    put32(56, static_cast<std::uint64_t>(st.blocks));
+    put32(60, static_cast<std::uint64_t>(st.blksize));
+    put32(64, static_cast<std::uint64_t>(st.blocks));
+    put32(68, 0);  // st_blocks_hi
+
+    return 0;
 }
 
 // message.py ql_qnx_msg_io_lseek (lib/c/1/lseek.c): the flat _io_lseek

@@ -886,6 +886,98 @@ TEST(QnxOs, MsgIoLseekDelegatesToPosixLseek) {
     EXPECT_EQ(ql.mem().read_ptr(0x2400, 8), 4u);
 }
 
+// the io_stat flow on the opened connection: the flat _io_stat (sparts=-8,
+// rparts=-72); the kernel resolves the fd through the connection, snapshots
+// the host stat and packs the QNXARMStat layout (the 18 32-bit cells, the
+// _pack_=4 layout verbatim) at rmsg
+//   00-18: the attach
+//   1C: mov r5, r0 ; the OPEN (through 38)
+//   3C: mov r0, r5
+//   40: mov r1, #0x2200     ; smsg = the flat _io_stat
+//   44: mvn r2, #7          ; sparts = -8
+//   48: mov r3, #0x2400     ; rmsg (the 72-byte stat)
+//   4C: mvn r4, #71         ; rparts = -72
+//   50: mov r12, #11 ; 54: swi 0
+//   58: mov r4, #0x2300 ; 5C: str r0, [r4]
+//   60: mvn r0, #0 ; 64: mvn r1, #0 ; 68: mov r2, #42
+//   6C: mov r12, #47 ; 70: swi 0
+TEST(QnxOs, MsgIoStatPacksQnxArmLayout) {
+    const std::vector<std::uint8_t> code = {
+        0x00, 0x00, 0xA0, 0xE3,  // 00: mov r0, #0
+        0x01, 0x10, 0xA0, 0xE3,  // 04: mov r1, #1
+        0x01, 0x20, 0xA0, 0xE3,  // 08: mov r2, #1
+        0x00, 0x30, 0xA0, 0xE3,  // 0C: mov r3, #0
+        0x01, 0x40, 0xA0, 0xE3,  // 10: mov r4, #1
+        0x27, 0xC0, 0xA0, 0xE3,  // 14: mov r12, #39
+        0x00, 0x00, 0x00, 0xEF,  // 18: swi 0
+        0x00, 0x50, 0xA0, 0xE1,  // 1C: mov r5, r0
+        0x21, 0x1C, 0xA0, 0xE3,  // 20: mov r1, #0x2100
+        0x02, 0x20, 0xA0, 0xE3,  // 24: mov r2, #2
+        0x21, 0x3C, 0xA0, 0xE3,  // 28: mov r3, #0x2100
+        0x50, 0x30, 0x83, 0xE2,  // 2C: add r3, r3, #0x50
+        0x02, 0x40, 0xA0, 0xE3,  // 30: mov r4, #2
+        0x0B, 0xC0, 0xA0, 0xE3,  // 34: mov r12, #11
+        0x00, 0x00, 0x00, 0xEF,  // 38: swi 0 (the OPEN)
+        0x05, 0x00, 0xA0, 0xE1,  // 3C: mov r0, r5
+        0x22, 0x1C, 0xA0, 0xE3,  // 40: mov r1, #0x2200
+        0x07, 0x20, 0xE0, 0xE3,  // 44: mvn r2, #7
+        0x24, 0x3C, 0xA0, 0xE3,  // 48: mov r3, #0x2400
+        0x47, 0x40, 0xE0, 0xE3,  // 4C: mvn r4, #71
+        0x0B, 0xC0, 0xA0, 0xE3,  // 50: mov r12, #11
+        0x00, 0x00, 0x00, 0xEF,  // 54: swi 0
+        0x23, 0x4C, 0xA0, 0xE3,  // 58: mov r4, #0x2300
+        0x00, 0x00, 0x84, 0xE5,  // 5C: str r0, [r4]
+        0x00, 0x00, 0xE0, 0xE3,  // 60: mvn r0, #0
+        0x00, 0x10, 0xE0, 0xE3,  // 64: mvn r1, #0
+        0x2A, 0x20, 0xA0, 0xE3,  // 68: mov r2, #42
+        0x2F, 0xC0, 0xA0, 0xE3,  // 6C: mov r12, #47
+        0x00, 0x00, 0x00, 0xEF,  // 70: swi 0
+    };
+    auto ql = make_qnx_qiling(code);
+
+    {
+        std::ofstream f(std::filesystem::temp_directory_path() / "ql_qnx_rootfs" / "hello.txt", std::ios::binary);
+        f << "hello qnx!";
+    }
+
+    ql.mem().map(kScratch, 0x1000, UC_PROT_ALL, "[qnx-scratch]");
+
+    // the io_connect iovs + the header (the OPEN /hello.txt)
+    ql.mem().write_ptr(0x2100, kIoConnectHdr, 4);
+    ql.mem().write_ptr(0x2104, 40, 4);
+    ql.mem().write_ptr(0x2108, 0x2140, 4);
+    ql.mem().write_ptr(0x210C, 11, 4);
+    ql.mem().write_ptr(kIoConnectHdr + 0, 0x100, 2);
+    ql.mem().write_ptr(kIoConnectHdr + 2, 2, 2);
+    ql.mem().write_ptr(kIoConnectHdr + 4, 1, 4);
+    ql.mem().write_ptr(kIoConnectHdr + 8, 0xa18, 2);
+    ql.mem().write_ptr(kIoConnectHdr + 10, 0x10, 2);
+    ql.mem().write_ptr(kIoConnectHdr + 20, 1, 4);
+    ql.mem().write_ptr(kIoConnectHdr + 24, 0x8000 | 0644, 4);
+    ql.mem().write(0x2140, std::vector<std::uint8_t>{'/', 'h', 'e', 'l', 'l', 'o', '.', 't', 'x', 't', 0x00});
+    ql.mem().write_ptr(0x2150, 0x2160, 4);
+    ql.mem().write_ptr(0x2154, 20, 4);
+    ql.mem().write_ptr(0x2158, 0x2190, 4);
+    ql.mem().write_ptr(0x215C, 64, 4);
+
+    // the flat _io_stat: type=0x104, combine_len=8, zero=0
+    ql.mem().write_ptr(0x2200, 0x104, 2);
+    ql.mem().write_ptr(0x2202, 8, 2);
+    ql.mem().write_ptr(0x2204, 0, 4);
+
+    ql.run();
+
+    EXPECT_EQ(ql.os().exit_code(), 42);
+    EXPECT_EQ(ql.mem().read_ptr(0x2300, 4), 0u);
+    // the QNXARMStat: the ino/size hi cells zero (the _pack_=4 layout), the
+    // size matching the file and the regular-file mode bits
+    EXPECT_EQ(ql.mem().read_ptr(0x2404, 4), 0u);
+    EXPECT_EQ(ql.mem().read_ptr(0x2408, 4), 10u);
+    EXPECT_EQ(ql.mem().read_ptr(0x240C, 4), 0u);
+    EXPECT_EQ(ql.mem().read_ptr(0x242C, 4) & 0xF000u, 0x8000u);
+    EXPECT_EQ(ql.mem().read_ptr(0x2444, 4), 0u);
+}
+
 // the clock_cycles flow: the kernel returns the core's free-running counter
 // as the nanosecond wall clock (the upstream's simplification) in R0, which
 // the fixture stores into a second scratch cell — the pre-poisoned marker

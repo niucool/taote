@@ -14,10 +14,12 @@
 
 #include <functional>
 #include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
 #include "qiling/const.hpp"
+#include "qiling/os/filestruct.hpp"
 
 namespace qiling {
 
@@ -56,6 +58,11 @@ private:
 
 // registers the built-in unistd syscalls (called once from the posix os layer)
 void register_builtin_syscalls();
+
+// the fd-table lookup over the posix os layer (the unistd.py os.fd[fd] shape;
+// nullptr when out of range or empty) — shared with the delegating dialects
+// (the qnx message.py imports the posix syscall helpers verbatim)
+std::shared_ptr<QlFsMappedObject> fd_get(Qiling& ql, std::int64_t fd);
 
 }  // namespace posix
 }  // namespace os
