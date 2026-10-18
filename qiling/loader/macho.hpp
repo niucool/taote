@@ -19,6 +19,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -31,6 +32,10 @@ constexpr std::uint32_t MAGIC_64[] = {0xFEEDFACF, 0xCFFAEDFE};
 constexpr std::uint32_t MAGIC_FAT[] = {0xBEBAFECA, 0xCAFEBABE};
 
 constexpr std::uint32_t LC_SEGMENT_64 = 0x19;
+constexpr std::uint32_t LC_UNIXTHREAD = 0x5;
+constexpr std::uint32_t LC_MAIN = 0x80000028;
+
+constexpr std::uint32_t X86_THREAD_STATE64 = 0x00000004;
 
 constexpr std::uint32_t CPU_ARCH_ABI64 = 0x01000000;
 constexpr std::uint32_t CPU_TYPE_X8664 = CPU_ARCH_ABI64 | 7;
@@ -87,6 +92,17 @@ public:
 
     const std::vector<Segment>& segments() const { return segments_; }
 
+    // loadcommand.py LoadUnixThread (the flavor + the state entry; the
+    // X86_THREAD_STATE64 ride: the entry = the rip, the 16th state slot)
+    bool has_unixthread() const { return has_unixthread_; }
+    std::uint32_t thread_flavor() const { return thread_flavor_; }
+    const std::optional<std::uint64_t>& unixthread_entry() const { return unixthread_entry_; }
+
+    // loadcommand.py LoadMain (the entry offset + the stack size)
+    bool has_main() const { return has_main_; }
+    std::uint64_t main_entry_offset() const { return main_entry_offset_; }
+    std::uint64_t main_stack_size() const { return main_stack_size_; }
+
 private:
     bool parse_header();
     bool parse_load_command();
@@ -94,6 +110,14 @@ private:
     std::vector<std::uint8_t> binary_file_;
     Header header_;
     std::vector<Segment> segments_;
+
+    bool has_unixthread_ = false;
+    std::uint32_t thread_flavor_ = 0;
+    std::optional<std::uint64_t> unixthread_entry_;
+
+    bool has_main_ = false;
+    std::uint64_t main_entry_offset_ = 0;
+    std::uint64_t main_stack_size_ = 0;
 };
 
 }  // namespace macho

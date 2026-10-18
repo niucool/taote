@@ -153,6 +153,27 @@ bool MachoImage::parse_load_command() {
                 seg.sections.push_back(std::move(sec));
             }
             segments_.push_back(std::move(seg));
+        } else if (cmd == LC_UNIXTHREAD) {
+            // loadcommand.py LoadUnixThread: the flavor + the count then the
+            // state; the X86_THREAD_STATE64 state rides the rip at the state
+            // index 16 (the 16 GPRs before it), the entry = the rip
+            const std::size_t state_at = cur + 8;
+            if (state_at + 8 > cur + cmd_size) {
+                return false;
+            }
+            thread_flavor_ = get_u32(binary_file_, state_at);
+            has_unixthread_ = true;
+            if (thread_flavor_ == X86_THREAD_STATE64 && state_at + 8 + 21 * 8 <= cur + cmd_size) {
+                unixthread_entry_ = get_u64(binary_file_, state_at + 8 + 16 * 8);
+            }
+        } else if (cmd == LC_MAIN) {
+            // loadcommand.py LoadMain: the entry offset + the stack size
+            if (cur + 24 > cur + cmd_size) {
+                return false;
+            }
+            has_main_ = true;
+            main_entry_offset_ = get_u64(binary_file_, cur + 8);
+            main_stack_size_ = get_u64(binary_file_, cur + 16);
         }
         // the other commands skip by the declared size until their slices
         cur += cmd_size;
