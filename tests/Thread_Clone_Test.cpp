@@ -101,8 +101,10 @@ const std::vector<std::uint8_t>& join_body() {
                                                                     // (both the EAGAIN and the woken
                                                                     //  paths re-check the ctid - the
                                                                     //  glibc join shape)
-        0x90, 0x90,                                         // 52: (the alignment pads)
-        // parent_done (0x56):
+        0x90, 0x90, 0x90,                                   // 52: (the alignment pads; the
+                                                            //  3rd lands parent_done at 0x55
+                                                            //  and the store at 0x67)
+        // parent_done (0x55):
         0x48, 0xC7, 0xC0, 0xE7, 0x00, 0x00, 0x00,          // 56: mov rax, 231 (exit_group)
         0x48, 0xC7, 0xC7, 0x2A, 0x00, 0x00, 0x00,          // 5D: mov rdi, 42
         0x0F, 0x05,                                         // 64: syscall
@@ -131,22 +133,24 @@ const std::vector<std::uint8_t>& join_body() {
 // stores 42, wakes the futex and exits; its _on_stop zeroes the ctid word
 // and wakes the futex waiter (the parent); the parent's join loop observes
 // the zero and exits with 42
-// KNOWN ISSUE (the taken-exit code-hook mis-fire, the TB-restart study): the
-// mid-TB cached-TB-restart theory is RETRACTED - the raw-unicorn probes
-// (P5/P8/P9/P10/P11/P12/P13) all PASS, the cached-TB restart executes
-// correctly in every modeled shape (the original P5 failure was the probe's
-// own runaway code-hook guard: code_count > 64 -> uc_emu_stop, tripped after
-// the phase-2 loop burned the budget). The ACTUAL blocker, re-pinned with the
-// code tracer: the child's taken exit from the cached TB at the test/jz pair
-// fires UC_HOOK_CODE at the taken target (the store at +0x67) with size=2 -
-// the JZ's size, not the store's 11 - and the pc advances +2 INTO the store
-// (the mid-instruction walk into the UC_ERR_READ_UNMAPPED). The raw harness
-// could not reproduce it in 7 probe shapes, so the trigger is a port-side
-// interaction (the full hook set, the handler-in-hook register writes, or
-// the management's slicing) that makes the taken-exit hook fire carry the
-// branch's size. Open item: isolate that interaction; the upstream tolerates
-// this through the gevent scheduling (the child never restarts mid-TB).
-TEST(ThreadClone, DISABLED_CloneSpawnsChildAndJoinWakes) {
+// RESOLVED (the (b13) delta bisect, superseding the whole misfire study): the
+// long-standing "taken-exit code-hook mis-fire" (the taken-entry UC_HOOK_CODE
+// firing size=2 at the store, the pc walking mid-instruction into
+// UC_ERR_READ_UNMAPPED) was NEVER an engine behavior - the join blob's child
+// jz (0x74 0x3f at 0x26) targeted 0x67 while the 11-byte store sat at 0x66
+// (the parent-path instructions were one byte shorter than the comment's
+// claimed offsets), so the child's taken jump landed one byte INTO the store
+// and executed the misaligned bytes; unicorn was faithfully executing what
+// was written. The same arithmetic error had propagated into the (b12)/(b12b)
+// ladder probes (their pad rows fell short of the claimed 0x4d store offset),
+// which manufactured the misleading "C++ misfires / python is clean"
+// divergence and the candidate-upstream-issue trail. With every blob's pad
+// rows mechanically aligned to the jz targets, all the ladder probes (b10,
+// b11, b12, b12b) run CLEAN (the taken-entry fires size=11, the store lands
+// 42) and this test is re-enabled and passes. The lesson (the fixture
+// discipline): every hand-built blob's store offset must be verified
+// mechanically against its jz displacement before a probe run is trusted.
+TEST(ThreadClone, CloneSpawnsChildAndJoinWakes) {
     const auto rootfs = std::filesystem::temp_directory_path() / "ql_clone_rootfs";
     std::filesystem::create_directories(rootfs);
 
@@ -407,11 +411,9 @@ static uc_context* r9b_child_ctx = nullptr;
 static int r9b_count = 0;
 static void r9b_code_cb(uc_engine* uc, std::uint64_t address, std::uint32_t size, void* user_data) {
     (void)user_data;
+    (void)address;
+    (void)size;
     ++r9b_count;
-    std::fprintf(stderr, "[r9be] 0x%llx size=%u\n", static_cast<unsigned long long>(address), size);
-    if (r9b_count > 400) {
-        uc_emu_stop(uc);
-    }
 }
 static void r9b_insn_cb(uc_engine* uc, void* user_data) {
     (void)user_data;
@@ -419,8 +421,6 @@ static void r9b_insn_cb(uc_engine* uc, void* user_data) {
     uc_reg_read(uc, UC_X86_REG_RIP, &pc);
     std::uint64_t rax = 0;
     uc_reg_read(uc, UC_X86_REG_RAX, &rax);
-    std::fprintf(stderr, "[r9be-insn] pc=%llx rax=%llx\n", static_cast<unsigned long long>(pc),
-                 static_cast<unsigned long long>(rax));
     if (rax == 56) {
         const std::uint64_t after = pc + 2;
         const std::uint64_t zero = 0;
@@ -540,10 +540,11 @@ TEST(ThreadClone, DISABLED_BisectRung2LongDisplacement) {
         0xB8, 0xCA, 0x00, 0x00, 0x00,                      // 1b: mov eax, 202
         0x0F, 0x05,                                        // 20: syscall (the park)
         0xEB, 0xFE,                                        // 22: jmp $
-        0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,  // 24..: the pad
+        0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,  // 24..: the pad (the store lands at 0x4d)
         0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
         0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
-        0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,    // 4c
+        0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+        0x90,                                                          // 4c
         0xC7, 0x04, 0x25, 0x00, 0x20, 0x00, 0x01, 0x2A, 0x00, 0x00, 0x00,
                                                            // 4d: mov dword [0x1002000], 42
         0xEB, 0xFE,                                        // 58: jmp $
@@ -596,10 +597,12 @@ TEST(ThreadClone, DISABLED_BisectRung2bNoStubLongDisp) {
         0x74, 0x3F,                                        // 0c: jz +0x3f -> 0x4d (the store)
         0xB8, 0xCA, 0x00, 0x00, 0x00,                      // 0e: mov eax, 202
         0x0F, 0x05,                                        // 13: syscall (the park)
-        0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,  // 15: the pad
+        0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,  // 15: the pad (0x38 wide, the store lands at 0x4d)
         0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
         0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
-        0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,          // 47
+        0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+        0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+        0x90, 0x90, 0x90, 0x90, 0x90, 0x90,                           // 4c
         0xC7, 0x04, 0x25, 0x00, 0x20, 0x00, 0x01, 0x2A, 0x00, 0x00, 0x00,
                                                            // 4d: mov dword [0x1002000], 42
         0xEB, 0xFE,                                        // 58: jmp $
