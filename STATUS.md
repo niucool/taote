@@ -660,7 +660,9 @@ LIBSYSTEM fixup (0x2000000 <= n < 0x3000000 maps to n - 0x2000000).
 | the mach vm/port trap family | `qiling/os/macos/syscall.cpp` | ✅ 7e5c882 | kernelrpc_mach_vm_allocate_trap (the min_offset bump allocator + the *addr write-back), vm_deallocate (the KERN_SUCCESS stub), vm_map (the vmmap cursor walk from the profile's vmmap_trap_address + the mask alignment verbatim), port_deallocate/mod_refs/construct (the pass stubs); the fixtures ride the 0x1000000-range numbers |
 | the bsdthread/shims group | `qiling/os/macos/syscall.cpp` | ✅ 94e47fb | bsdthread_register (the CF clear + the fixed 0x400000df pthread magic), thread_selfid (the seeded thread id 123), thread_fast_set_cthread_self64 (the mdep shim: the tsd base into IA32_GS_BASE_MSR 0xC0000101) |
 | the misc tail | `qiling/os/macos/syscall.cpp` | ✅ 47eb5a2 | sysctl/poll (the KERN_SUCCESS stubs), shared_region_check_np (the raw EINVAL "not ready"), csrctl (returns 1), proc_info (the PIDINFO+REGIONPATHINFO branch writes "/usr/lib/dyld" at buff+248, no return otherwise), terminate_with_payload (the emu stop + KERN_SUCCESS), abort_with_payload (no stop), the nocancel pair (write_nocancel carries the upstream's verbatim `return 0` quirk; open_nocancel delegates to the posix open with the fd-slot semantics), shared_region_check_np/proc_info ride the PROC_* consts |
-| mach_msg + the message-path machinery (MachMsg, the port-manager deal_with_msg) | — | defer | needs the MachMsg struct port + the message dispatch tree; deferred with a note (the kext/message surface rides the kernel-loader slices) |
+| the kernel_api fncc surface (kernel_api.py, 111 handlers) | `qiling/os/macos/kernel_api.hpp/.cpp` + `kernel_api_registry.inc` | ✅ d397443 | the registry/builder mirror the posix kernel_api slice (the fluent `KernelApi(name, params, passthru) = handler` shape); the verbatim surface: the passthru stubs (the empty `return` bodies — the guest's own stub code runs), the real-bodied handlers (suulong/fuulong, read_random/erandom with the 0xdeadbeaf stamp, clock_get_calendar_microtime with the verbatim ms-arithmetic oddity, proc_selfpid 0x1337 / selfppid 0x13371337, msleep/kernel_thread_start the 0 stubs, vfs_context_proc the identity); the dispatch rides `QlOsMacos::hook_kernel_api` (inert until the QlLoaderMachO import symbols land) |
+| the ev_manager-dependent kernel_api handlers | — | defer | proc_name/proc_find/kauth_getuid/getgid/kauth_cred_setuidgid need the events/policy subsystem (the events/macos.py slice); they stay unregistered until then |
+| the mach_msg + the message-path machinery (MachMsg, the port-manager deal_with_msg) | — | defer | needs the MachMsg struct port + the message dispatch tree; deferred with a note (the kext/message surface rides the kernel-loader slices) |
 | shared_region_map_and_slide_np + sysctlbyname | — | defer | absent from the upstream's x8664 table (ARM64-only entries) — the x8664 port surface mirrors the table verbatim |
 | the kernel_api fncc surface (kernel_api.py, 1404) | — | defer | the mach-port/kernel-func trap dispatch needs the fncc-style hook surface; its own slice after the syscall handlers |
 | the events/policy managers (events/, mach_port, task) | — | defer | the kext/driver machinery + the Mach-O kernel-loader port first |
@@ -718,6 +720,15 @@ number 1 and through the fixup'd 0x2000000+1 (both terminate with the code
   shared_region_map_and_slide_np (438) exist only in the ARM64 table — the
   x8664 surface mirrors the table verbatim and those handlers stay
   unregistered for x8664 (the fixtures document the absence).
+- **the fncc passthru semantics**: the upstream's empty `return` bodies with
+  passthru=True mean the guest's own stub code at the import address
+  executes (the hook only resolves the params for the log); the non-passthru
+  stubs (the IOKit/lck family) get the full os.call shape with the pc set to
+  the retaddr. The port's stub bodies return nullopt — the semantics ride
+  the call() passthru flag, not the body.
+- **the K_BOOL alias gap**: the posix kernel_api header defines K_UINT/
+  SIZE_T/POINTER/STRING but not K_BOOL (the upstream macos decorators use
+  BOOL) — the macos header pins K_BOOL = PARAM_INT32 locally.
 
 ## Deferred (tracked, not built)
 
@@ -774,9 +785,10 @@ Status: freebsd ✅ (Phase 5.5), qnx ✅ (Phase 5.6), dos ✅ (Phase 6), uefi �
 stay DISABLED_ + documented) — **os/macos is in progress** (Phase 7 the
 container parser ✅, Phase 8 the dialect skeleton ✅, the self-trap family ✅,
 the file/syscall-info family ✅, the mach vm/port trap family ✅, the
-bsdthread/shims group ✅, the misc tail ✅ — the syscall.py surface is done
-except mach_msg; the shared_region_map_and_slide_np/sysctlbyname entries are
-ARM64-only upstream). The dos carry-overs into later slices: the posix
+bsdthread/shims group ✅, the misc tail ✅, the kernel_api fncc surface ✅ —
+the syscall.py surface is done except mach_msg; the remaining kernel_api
+deferrals: the ev_manager-dependent handlers + the QlLoaderMachO dispatch
+wiring). The dos carry-overs into later slices: the posix
 `pack_stat_struct` family (unchanged) and the connect_client_info
 full-body-vs-stub upstream oddity (unchanged). The dos deferrals: the
 int10/int16 curses surface is console-detached (the resolution map and the
