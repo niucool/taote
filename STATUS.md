@@ -599,11 +599,54 @@ protocol-handler pairs and closed the loop end to end:
   dispatch-driven pc relocation mid-run (the cached-TB restart family from the
   clone-saga pins). Both fixtures DISABLED_ with the signatures.
 
+## Phase 7 - the loader/macho container parser (the macho_parser port)
+
+The Mach-O container parser over the upstream's hand-rolled
+`qiling/loader/macho_parser/` (no parsing dependency upstream — struct.unpack
+over the raw bytes — so the port is hand-rolled too; decision D17's LIEF
+mapping applies only where the upstream itself carries the dependency). The
+parse shape: the ctor runs `parseFile()` (parse_header → parse_load_command
+→ parse_data), the header stage gates validity by the magic dispatch
+(MAGIC_64 → the 32-byte BinaryHeader, the x8664 CPU-type check pinned) and
+the load-command stage walks the cmd_id/cmd_size pairs.
+
+| the piece | the port file | the state | the notes |
+|---|---|---|---|
+| the container skeleton (the header + the magic/CPU checks) | `qiling/loader/macho.hpp/.cpp` | ✅ 5cfb208 | `MachoImage` + `parse_header()`; `valid()` rides the parsed magic |
+| the LC_SEGMENT_64 walk | `qiling/loader/macho.cpp` `parse_load_command()` | ✅ 2320192 | the Segment/Section records with the data.py content slicing; the unknown commands skip by their declared cmd_size |
+| the LC_UNIXTHREAD/LC_MAIN entries | `qiling/loader/macho.hpp/.cpp` | ✅ 119a801 | the X86_THREAD_STATE64 state (the entry = the rip, the 16th state slot after the 16 GPRs) and the LC_MAIN entry_offset/stack_size pair |
+| the remaining commands (LC_UUID, LC_SYMTAB, LC_DYLD_INFO…) | — | defer | the loader slices add them per need |
+| the fat-header branch + parseData | — | defer | the FatHeader slice + the data.py stage |
+
+Fixture-driven throughout (`tests/Loader_Macho_Test.cpp`, 7 tests): the
+minimal in-memory MH_EXECUTE blobs with hand-encoded command records.
+
+### Phase 7 findings (upstream-parity notes)
+
+- **the section_64 stride is 0x50 with a reserved3 tail** — the Apple
+  struct memory (80 bytes = 16+16+8+8+7×4) is short one u32; the upstream's
+  `LoadSection64` reads 0x50 and parses address/size/offset/alignment/
+  relocations_offset/number_of_relocations/flags/reserved1/reserved2/
+  reserved3 after the name/segname prefix.
+- **the fixture blob's extra commands ride between the segment command and
+  the content** — the walk reads commands sequentially from the header end,
+  so a command appended after the segment's file content is never reached;
+  and the extra command must NOT inflate the segment's declared cmd_size
+  (the walk then skips over it as part of the segment). The ncmds/sizeofcmds
+  fixup counts each command separately.
+- **the LC_UNIXTHREAD state layout**: flavor + count then count×8 state
+  bytes; the x86_64 entry is the rip at the state index 16 (after the 16
+  GPRs rax..r15, before rflags/cs/fs/gs).
+
 ## Deferred (tracked, not built)
 
-`os/macos/`, `os/uefi/`, `qiling/hw/`,
+`os/macos/` (the OS dialect — the Mach-O container parser is done as of
+Phase 7), `qiling/hw/`,
 `qiling/extensions/mcu/` — resume criteria in PORT_PLAN.md §10 (OQ 9); the
-remaining profile files (macos/uefi `.ql`) defer with them. The dos dialect is
+remaining profile files (macos `.ql`) defer with them. The uefi phase is
+complete as of the RT slice (the ST/BS/RT surface; the two multi-call-blob
+dispatch anomalies stay documented with their DISABLED_ fixtures in the
+Phase 6.5 findings). The dos dialect is
 complete as of the Phase 6 close-out (the loader branch, the disk dependency
 and all 8 interrupt handlers); the dos deferrals: the curses console surface
 is detached (documented in the Phase 6 findings), and the int16 poll leaf
@@ -644,11 +687,11 @@ dispatcher's not-implemented fall-through (the pinned fixture behavior).
 
 Priority order adopted: **freebsd → qnx → dos → uefi → macos** (the dialects
 first: the marginal cost per dialect shrinks as the POSIX base stabilises).
-Status: freebsd ✅ (Phase 5.5), qnx ✅ (Phase 5.6), dos ✅ (Phase 6) — **os/uefi
-is the next major item** (~13,300 lines + `loader/pe_uefi.py`, the
-service-table phase over the done PE path; the largest single slice of the
-reachable set — plan as its own phase), then macos (the biggest lift: the
-Mach-O parser + the OS). The dos carry-overs into later slices: the posix
+Status: freebsd ✅ (Phase 5.5), qnx ✅ (Phase 5.6), dos ✅ (Phase 6), uefi ✅
+(the loader + the service-table + the RT slices; the two multi-call anomalies
+stay DISABLED_ + documented) — **os/macos is the next major item**: the
+Mach-O container parser landed (Phase 7), the QlOsDarwin surface + the
+macos.ql profile remain. The dos carry-overs into later slices: the posix
 `pack_stat_struct` family (unchanged) and the connect_client_info
 full-body-vs-stub upstream oddity (unchanged). The dos deferrals: the
 int10/int16 curses surface is console-detached (the resolution map and the
