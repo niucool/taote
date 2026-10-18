@@ -16,8 +16,7 @@
       ]
     },
     "keystone",
-    "pe-parse",
-    "elfio",
+    "lief",
     "nlohmann-json",
     "spdlog",
     "cxxopts",

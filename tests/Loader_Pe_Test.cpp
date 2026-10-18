@@ -1,5 +1,5 @@
 // Loader_Pe suite — PORT_PLAN.md §10 Phase 4 (the PE loader core over
-// pe-parse: parse, map, images, entry point; a hand-crafted minimal PE64
+// LIEF-backed PE loading: parse, map, images, entry point; a hand-crafted minimal PE64
 // fixture keeps the test self-contained).
 #include <gtest/gtest.h>
 

@@ -1,5 +1,7 @@
 #include "qiling/loader/elf.hpp"
 
+#include <LIEF/LIEF.hpp>
+
 #include <algorithm>
 #include <fstream>
 
@@ -14,150 +16,78 @@ namespace loader {
 
 namespace {
 
-// the ELF64 container constants
-constexpr std::uint8_t ELFCLASS64 = 2;
+// the ELF container constants (e_type values; the LIEF enum matches them)
 constexpr std::uint16_t ET_REL = 1;
 constexpr std::uint16_t ET_EXEC = 2;
 constexpr std::uint16_t ET_DYN = 3;
 
-constexpr std::uint32_t PT_LOAD = 1;
-constexpr std::uint32_t PT_INTERP = 3;
-
-// the program header fields (elf64_phdr, 56 bytes)
-struct Phdr {
-    std::uint32_t type;
-    std::uint32_t flags;
-    std::uint64_t offset;
-    std::uint64_t vaddr;
-    std::uint64_t paddr;
-    std::uint64_t filesz;
-    std::uint64_t memsz;
-    std::uint64_t align;
-};
-
-// the parsed container (the ELFFile analogue)
+// the parsed container (the ELFFile analogue) — LIEF-backed (decision D17:
+// one parsing dependency for PE/ELF/…; the qiling-specific consolidation and
+// auxv logic stays hand-ported on top of it)
 struct ElfImage {
-    std::uint16_t type = 0;
-    std::uint16_t machine = 0;
-    std::uint64_t entry = 0;
-    std::uint64_t phoff = 0;
-    std::uint16_t phentsize = 0;
-    std::uint16_t phnum = 0;
-    std::vector<Phdr> segments;
-    std::string interpreter;  // the PT_INTERP contents (empty when absent)
+    std::unique_ptr<LIEF::ELF::Binary> binary;
 
-    [[nodiscard]] static ElfImage parse(const std::vector<std::uint8_t>& bytes) {
-        // the robustness tenet: a truncated or foreign container degrades to
-        // QlErrorELFFormat, never a host crash
-        if (bytes.size() < 64 || bytes[0] != 0x7f || bytes[1] != 'E' || bytes[2] != 'L' || bytes[3] != 'F') {
-            throw QlErrorBase("ELF format error: not an ELF container");
+    // ET_REL/ET_EXEC/ET_DYN as the raw e_type value (the LIEF enum matches)
+    std::uint16_t type() const {
+        switch (binary->header().file_type()) {
+            case LIEF::ELF::Header::FILE_TYPE::REL: return ET_REL;
+            case LIEF::ELF::Header::FILE_TYPE::EXEC: return ET_EXEC;
+            case LIEF::ELF::Header::FILE_TYPE::DYN: return ET_DYN;
+            default: return 0;
         }
-
-        ElfImage img;
-        const bool is64 = bytes[4] == ELFCLASS64;
-        if (!is64) {
-            // the 32-bit container parses through the same fields at their
-            // ELF32 offsets; the port covers the x86/arm/mips 32-bit layouts
-            img.type = static_cast<std::uint16_t>(bytes[16] | (bytes[17] << 8));
-            img.machine = static_cast<std::uint16_t>(bytes[18] | (bytes[19] << 8));
-            img.entry = 0;  // resolved below through the 32-bit layout
-            img.phoff = 0;
-            // (the ELF32 auxv/mapping path lands with the 32-bit fixtures)
-            throw QlErrorBase("ELF format error: the ELF32 container path lands with its slice");
-        }
-
-        auto rd16 = [&](std::size_t off) {
-            return static_cast<std::uint16_t>(bytes[off] | (bytes[off + 1] << 8));
-        };
-        auto rd32 = [&](std::size_t off) {
-            return static_cast<std::uint32_t>(bytes[off]) | (static_cast<std::uint32_t>(bytes[off + 1]) << 8) |
-                   (static_cast<std::uint32_t>(bytes[off + 2]) << 16) | (static_cast<std::uint32_t>(bytes[off + 3]) << 24);
-        };
-        auto rd64 = [&](std::size_t off) {
-            std::uint64_t v = 0;
-            for (int i = 0; i < 8; ++i) {
-                v |= static_cast<std::uint64_t>(bytes[off + static_cast<std::size_t>(i)]) << (8 * i);
-            }
-            return v;
-        };
-
-        img.type = rd16(16);
-        img.machine = rd16(18);
-        img.entry = rd64(24);
-        img.phoff = rd64(32);
-        img.phentsize = rd16(54);
-        img.phnum = rd16(56);
-
-        if (img.phnum > 0 && img.phentsize < 56) {
-            throw QlErrorBase("ELF format error: bad e_phentsize");
-        }
-
-        for (std::uint16_t i = 0; i < img.phnum; ++i) {
-            const std::size_t off = img.phoff + static_cast<std::size_t>(i) * img.phentsize;
-            if (off + 56 > bytes.size()) {
-                throw QlErrorBase("ELF format error: truncated program headers");
-            }
-            Phdr ph;
-            ph.type = rd32(off + 0);
-            ph.flags = rd32(off + 4);
-            ph.offset = rd64(off + 8);
-            ph.vaddr = rd64(off + 16);
-            ph.paddr = rd64(off + 24);
-            ph.filesz = rd64(off + 32);
-            ph.memsz = rd64(off + 40);
-            ph.align = rd64(off + 48);
-            img.segments.push_back(ph);
-        }
-
-        // the interpreter: the PT_INTERP segment holds the path string
-        for (const auto& ph : img.segments) {
-            if (ph.type == PT_INTERP) {
-                const auto begin = bytes.begin() + static_cast<std::ptrdiff_t>(ph.offset);
-                const auto end = begin + static_cast<std::ptrdiff_t>(ph.filesz);
-                std::string interp(reinterpret_cast<const char*>(&*begin),
-                                   static_cast<std::size_t>(ph.filesz));
-                const auto nul = interp.find('\0');
-                if (nul != std::string::npos) {
-                    interp.resize(nul);
-                }
-                img.interpreter = std::move(interp);
-                break;
-            }
-        }
-
-        return img;
     }
 
-    std::vector<const Phdr*> load_segments() const {
-        std::vector<const Phdr*> out;
-        for (const auto& ph : segments) {
-            if (ph.type == PT_LOAD) {
-                out.push_back(&ph);
+    std::uint64_t entry() const { return binary->entrypoint(); }
+    std::uint64_t phoff() const { return binary->header().program_headers_offset(); }
+    std::uint16_t phentsize() const { return static_cast<std::uint16_t>(binary->header().program_header_size()); }
+    std::uint16_t phnum() const { return static_cast<std::uint16_t>(binary->header().numberof_segments()); }
+
+    const std::string& interpreter() const {
+        static const std::string empty;
+        return binary->has_interpreter() ? binary->interpreter() : empty;
+    }
+
+    [[nodiscard]] static ElfImage parse(const std::vector<std::uint8_t>& bytes) {
+        // LIEF 0.17 is exception-free: a failed parse surfaces as nullptr
+        // (the robustness tenet: a truncated or foreign container degrades
+        // to QlError*, never a host crash)
+        auto binary = LIEF::ELF::Parser::parse(bytes);
+        if (binary == nullptr) {
+            throw QlErrorBase("ELF format error: parse failed");
+        }
+        return ElfImage{std::move(binary)};
+    }
+
+    std::vector<const LIEF::ELF::Segment*> load_segments() const {
+        std::vector<const LIEF::ELF::Segment*> out;
+        for (const LIEF::ELF::Segment& seg : binary->segments()) {
+            if (seg.is_load()) {
+                out.push_back(&seg);
             }
         }
         // elf.py: the segments are loaded in vaddr order
-        std::sort(out.begin(), out.end(), [](const Phdr* a, const Phdr* b) { return a->vaddr < b->vaddr; });
+        std::sort(out.begin(), out.end(), [](const LIEF::ELF::Segment* a, const LIEF::ELF::Segment* b) {
+            return a->virtual_address() < b->virtual_address();
+        });
         return out;
     }
 };
 
-// the file bytes at the segment's file offset (elf.py seg.data())
-std::vector<std::uint8_t> segment_data(const std::vector<std::uint8_t>& bytes, const Phdr& ph) {
-    if (ph.offset >= bytes.size()) {
-        return {};
-    }
-    const auto avail = std::min<std::uint64_t>(ph.filesz, bytes.size() - ph.offset);
-    return std::vector<std::uint8_t>(bytes.begin() + static_cast<std::ptrdiff_t>(ph.offset),
-                                     bytes.begin() + static_cast<std::ptrdiff_t>(ph.offset + avail));
+// seg_perm_to_uc_prot (elf.py, verbatim); the LIEF FLAGS bit values match
+// the ELF p_flags encodings (X=1, W=2, R=4)
+int seg_perm_to_uc_prot(LIEF::ELF::Segment::FLAGS perm) {
+    const auto p = static_cast<std::uint32_t>(perm);
+    int prot = UC_PROT_NONE;
+    if ((p & 1) != 0) prot |= UC_PROT_EXEC;
+    if ((p & 2) != 0) prot |= UC_PROT_WRITE;
+    if ((p & 4) != 0) prot |= UC_PROT_READ;
+    return prot;
 }
 
-// seg_perm_to_uc_prot (elf.py, verbatim)
-int seg_perm_to_uc_prot(std::uint32_t perm) {
-    int prot = UC_PROT_NONE;
-    if ((perm & 1) != 0) prot |= UC_PROT_EXEC;
-    if ((perm & 2) != 0) prot |= UC_PROT_WRITE;
-    if ((perm & 4) != 0) prot |= UC_PROT_READ;
-    return prot;
+// the segment's file bytes (elf.py seg.data(); LIEF hands back the raw view)
+std::vector<std::uint8_t> segment_data(const LIEF::ELF::Segment& seg) {
+    const auto content = seg.content();
+    return std::vector<std::uint8_t>{content.begin(), content.end()};
 }
 
 }  // namespace
@@ -196,13 +126,13 @@ void QlLoaderELF::run() {
 
     ElfImage elf = ElfImage::parse(bytes);
 
-    if (elf.type == ET_REL) {
+    if (elf.type() == ET_REL) {
         // the LKM driver path lands with the kernel-module slice
         throw QlErrorNotImplemented("the ET_REL driver path lands with the kernel-module slice");
     }
 
-    const bool is_dyn = elf.type == ET_DYN;
-    if (elf.type != ET_EXEC && !is_dyn) {
+    const bool is_dyn = elf.type() == ET_DYN;
+    if (elf.type() != ET_EXEC && !is_dyn) {
         throw QlErrorBase("unexpected elf type value");
     }
 
@@ -224,12 +154,12 @@ void QlLoaderELF::run() {
     const auto load_segments = elf.load_segments();
 
     std::vector<LoadRegion> regions;
-    std::vector<std::pair<const Phdr*, std::uint64_t>> seg_files;  // (segment, load base)
+    std::vector<std::pair<const LIEF::ELF::Segment*, std::uint64_t>> seg_files;  // (segment, load base)
 
     for (const auto* seg : load_segments) {
-        const auto lbound = ql_->mem().align(load_address + seg->vaddr);
-        const auto ubound = ql_->mem().align_up(load_address + seg->vaddr + seg->memsz);
-        const auto perms = seg_perm_to_uc_prot(seg->flags);
+        const auto lbound = ql_->mem().align(load_address + seg->virtual_address());
+        const auto ubound = ql_->mem().align_up(load_address + seg->virtual_address() + seg->virtual_size());
+        const auto perms = seg_perm_to_uc_prot(seg->flags());
 
         if (!regions.empty()) {
             const auto& [prev_lbound, prev_ubound, prev_perms] = regions.back();
@@ -264,12 +194,12 @@ void QlLoaderELF::run() {
     }
 
     for (const auto& [seg, base] : seg_files) {
-        ql_->mem().write(base + seg->vaddr, segment_data(bytes, *seg));
+        ql_->mem().write(base + seg->virtual_address(), segment_data(*seg));
     }
 
     mem_start_ = regions.front().lbound;
     mem_end_ = regions.back().ubound;
-    elf_entry_ = load_address + elf.entry;
+    elf_entry_ = load_address + elf.entry();
 
     images.push_back(Image{mem_start_, mem_end_, ql_->path()});
 
@@ -281,10 +211,10 @@ void QlLoaderELF::run() {
     // branch); the AT_BASE auxv entry points at the interpreter base
     std::uint64_t interp_address = 0;
     std::uint64_t entry_point_final = elf_entry_;
-    if (!elf.interpreter.empty()) {
+    if (!elf.interpreter().empty()) {
         const auto* os_posix = dynamic_cast<const os::posix::QlOsPosix*>(&ql_->os());
         const auto* os_path = (os_posix != nullptr && os_posix->path() != nullptr) ? os_posix->path() : nullptr;
-        const std::string interp_vpath = elf.interpreter;
+        const std::string interp_vpath = elf.interpreter();
         const std::string interp_hpath = os_path != nullptr
             ? os_path->virtual_to_host_path(interp_vpath)
             // the bare-metal fallback: strip the leading slash
@@ -315,7 +245,7 @@ void QlLoaderELF::run() {
         std::uint64_t interp_base = 0;
         std::uint64_t min_vaddr = ~std::uint64_t{0};
         for (const auto* seg : interp.load_segments()) {
-            min_vaddr = std::min(min_vaddr, seg->vaddr);
+            min_vaddr = std::min(min_vaddr, seg->virtual_address());
         }
         if (min_vaddr == 0) {
             interp_base = static_cast<std::uint64_t>(profile.get_int(ossection, "interp_address"));
@@ -325,9 +255,9 @@ void QlLoaderELF::run() {
         const auto interp_segs = interp.load_segments();
         std::vector<LoadRegion> interp_regions;
         for (const auto* seg : interp_segs) {
-            const auto lbound = ql_->mem().align(interp_base + seg->vaddr);
-            const auto ubound = ql_->mem().align_up(interp_base + seg->vaddr + seg->memsz);
-            const auto perms = seg_perm_to_uc_prot(seg->flags);
+            const auto lbound = ql_->mem().align(interp_base + seg->virtual_address());
+            const auto ubound = ql_->mem().align_up(interp_base + seg->virtual_address() + seg->virtual_size());
+            const auto perms = seg_perm_to_uc_prot(seg->flags());
             if (!interp_regions.empty() && lbound == interp_regions.back().ubound &&
                 perms == interp_regions.back().perms) {
                 interp_regions.back().ubound = ubound;
@@ -341,7 +271,7 @@ void QlLoaderELF::run() {
             }
         }
         for (const auto* seg : interp_segs) {
-            ql_->mem().write(interp_base + seg->vaddr, segment_data(interp_bytes, *seg));
+            ql_->mem().write(interp_base + seg->virtual_address(), segment_data(*seg));
         }
 
         const auto interp_start = interp_regions.front().lbound;
@@ -349,7 +279,7 @@ void QlLoaderELF::run() {
         images.push_back(Image{interp_start, interp_end, interp_hpath});
 
         interp_address_ = interp_base;
-        entry_point_final = interp_base + interp.entry;
+        entry_point_final = interp_base + interp.entry();
     }
 
     // ---- the auxv stack (elf.py: argc/argv/envp/auxv) ----
@@ -422,9 +352,9 @@ void QlLoaderELF::run() {
     const int gid = os_posix ? os_posix->gid() : 1000;
 
     const std::pair<AUXV, std::uint64_t> auxv_entries[] = {
-        {AUXV::AT_PHDR, elf.phoff + mem_start_},
-        {AUXV::AT_PHENT, elf.phentsize},
-        {AUXV::AT_PHNUM, elf.phnum},
+        {AUXV::AT_PHDR, elf.phoff() + mem_start_},
+        {AUXV::AT_PHENT, elf.phentsize()},
+        {AUXV::AT_PHNUM, elf.phnum()},
         {AUXV::AT_PAGESZ, 0x1000},
         {AUXV::AT_FLAGS, 0},
         {AUXV::AT_ENTRY, elf_entry_},
@@ -443,7 +373,7 @@ void QlLoaderELF::run() {
     };
 
     // the AT_BASE entry lands only when an interpreter was loaded (elf.py)
-    if (!elf.interpreter.empty()) {
+    if (!elf.interpreter().empty()) {
         auto k = pack_ptr(static_cast<std::uint64_t>(AUXV::AT_BASE));
         auto v = pack_ptr(interp_address_);
         elf_table.insert(elf_table.end(), k.begin(), k.end());

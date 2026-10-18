@@ -1,14 +1,14 @@
 // Ported from qiling/loader/pe.py — QlLoaderPE (the PE loader core over
-// pe-parse; PORT_PLAN.md §10 Phase 4). The pefile-based inspection maps onto
-// the pe-parse builtins API:
+// LIEF; PORT_PLAN.md §10 Phase 4, D17). The pefile-based inspection maps onto
+// the LIEF PE API:
 //
-//   pefile.PE(path)                        -> peparse::parsedPe
-//   OPTIONAL_HEADER.AddressOfEntryPoint    -> pe->peHeader.nt.OptionalHeader.AddressOfEntryPoint
-//   OPTIONAL_HEADER.ImageBase              -> ... .ImageBase
-//   OPTIONAL_HEADER.SizeOfImage            -> ... .SizeOfImage
+//   pefile.PE(path)                        -> LIEF::PE::Parser::parse(path)
+//   OPTIONAL_HEADER.AddressOfEntryPoint    -> Binary::entrypoint()
+//   OPTIONAL_HEADER.ImageBase              -> Binary::imagebase()
+//   OPTIONAL_HEADER.SizeOfImage            -> Binary::virtual_size()
 //   get_memory_mapped_image()              -> the manual section-wise mapping
-//   DIRECTORY_ENTRY_IMPORT                 -> pe->peHeader.nt.OptionalHeader.DataDirectory[IMPORT]
-//                                             walked through the import descriptors
+//                                             (sections() + content())
+//   DIRECTORY_ENTRY_IMPORT                 -> Binary::imports() (Import/ImportEntry)
 //   get_sqlite... / libcache               -> deferred (the QlPeCache pickle layer)
 //
 // The TEB/PEB/LDR structures land with the full Windows stack (their layout

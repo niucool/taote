@@ -56,14 +56,14 @@ target_compile_definitions(qiling PRIVATE QILING_SOURCE_DIR="${PROJECT_SOURCE_DI
 # mirroring the Python package layout (port root = repo root, PORT_PLAN.md D16).
 target_include_directories(qiling PUBLIC ${PROJECT_SOURCE_DIR})
 
-find_package(pe-parse CONFIG REQUIRED)
+find_package(LIEF CONFIG REQUIRED)
 
 target_link_libraries(qiling PUBLIC
     spdlog::spdlog
     unicorn::unicorn
     capstone::capstone
     keystone::keystone
-    pe-parse::pe-parse
+    LIEF::LIEF
 )
 
 add_library(qiling::qiling ALIAS qiling)

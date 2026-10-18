@@ -1,6 +1,6 @@
 #include "qiling/loader/pe.hpp"
 
-#include <pe-parse/parse.h>
+#include <LIEF/LIEF.hpp>
 
 #include "qiling/core.hpp"
 #include "qiling/exception.hpp"
@@ -11,22 +11,6 @@ namespace qiling {
 namespace loader {
 
 namespace {
-
-// the iterVAStr callback adapter: (cbd, VA, module_name, symbol_name)
-struct ImportCollector {
-    std::string dll;  // the importing dll's canonical name
-    std::vector<ImportSymbol> symbols;
-};
-
-int collect_import(void* cbd, const peparse::VA& va, const std::string& module_name, const std::string& symbol_name) {
-    auto* collector = static_cast<ImportCollector*>(cbd);
-    ImportSymbol symbol;
-    symbol.address = va;
-    symbol.dll = collector->dll;
-    symbol.name = symbol_name;
-    collector->symbols.push_back(std::move(symbol));
-    return 0;  // continue iteration
-}
 
 // canonicalizes a dll name (pe.py __get_path_elements: append .dll, casefold)
 std::string canonical_dll_name(std::string name) {
@@ -46,22 +30,19 @@ std::string canonical_dll_name(std::string name) {
 QlLoaderPE::QlLoaderPE(Qiling* ql, bool libcache) : QlLoader(ql), libcache_(libcache) {}
 
 std::uint64_t QlLoaderPE::load_image(const std::string& host_path, const std::string& label) {
-    auto* parsed = peparse::ParsePEFromFile(host_path.c_str());
+    // LIEF 0.17 is exception-free: a failed parse surfaces as nullptr (the
+    // robustness tenet: malformed binaries raise QlError*, never a host crash)
+    auto parsed = LIEF::PE::Parser::parse(host_path);
     if (parsed == nullptr) {
-        // the robustness tenet: malformed binaries raise QlError*, never a
-        // host crash
-        throw QlErrorBase("failed to parse PE: " + host_path + " (" + peparse::GetPEErrString() + ")");
+        throw QlErrorBase("failed to parse PE: " + host_path);
     }
 
     auto& mem = ql_->mem();
-    const bool is64 = parsed->peHeader.nt.OptionalMagic == 0x20b;  // PE32+
+    const bool is64 = parsed->type() == LIEF::PE::PE_TYPE::PE32_PLUS;
 
-    const std::uint64_t image_base = is64 ? parsed->peHeader.nt.OptionalHeader64.ImageBase
-                                          : parsed->peHeader.nt.OptionalHeader.ImageBase;
-    const std::uint64_t size_of_image = is64 ? parsed->peHeader.nt.OptionalHeader64.SizeOfImage
-                                             : parsed->peHeader.nt.OptionalHeader.SizeOfImage;
-    const std::uint64_t entry_rva = is64 ? parsed->peHeader.nt.OptionalHeader64.AddressOfEntryPoint
-                                         : parsed->peHeader.nt.OptionalHeader.AddressOfEntryPoint;
+    const std::uint64_t image_base = parsed->imagebase();
+    const std::uint64_t size_of_image = parsed->virtual_size();
+    const std::uint64_t entry_rva = parsed->entrypoint() - image_base;
 
     // loader/pe.py load: if the default base is taken, fall back to the
     // profile image_address
@@ -75,59 +56,38 @@ std::uint64_t QlLoaderPE::load_image(const std::string& host_path, const std::st
     mem.map(base, mem.align_up(size_of_image), UC_PROT_ALL, label);
     images.push_back(Image{base, base + size_of_image, host_path});
 
-    // stage the sections through the iteration API
+    // stage the sections: each section's raw bytes land at base + RVA
     struct SectionWriter {
         Qiling* ql;
         std::uint64_t base;
     } writer{ql_, base};
 
-    peparse::IterSec(parsed, [](void* cbd, const peparse::VA& va, const std::string&,
-                               const peparse::image_section_header& sect, const peparse::bounded_buffer* buffer) -> int {
-        (void)va;
-        auto* w = static_cast<SectionWriter*>(cbd);
-        if (sect.SizeOfRawData == 0 || buffer == nullptr) {
-            return 0;  // continue
+    for (const LIEF::PE::Section& section : parsed->sections()) {
+        if (section.size() == 0) {
+            continue;
         }
-
-        // the section bytes come through the bounded-buffer read API
-        std::vector<std::uint8_t> data(sect.SizeOfRawData);
-        for (std::uint32_t i = 0; i < sect.SizeOfRawData; ++i) {
-            std::uint8_t byte = 0;
-            if (peparse::readByte(const_cast<peparse::bounded_buffer*>(buffer), i, byte)) {
-                data[i] = byte;
-            }
+        const auto content = section.content();
+        if (content.empty()) {
+            continue;
         }
-        w->ql->mem().write(w->base + sect.VirtualAddress, data);
-        return 0;  // continue
-    }, &writer);
+        ql_->mem().write(writer.base + section.virtual_address(),
+                         std::vector<std::uint8_t>{content.begin(), content.end()});
+    }
 
     // the imports: stub each imported function with a unique address in the
     // stub region (loader/pe.py init_imports); the api dispatcher matches
     // the pc against these stubs
-    ImportCollector collector;
-    peparse::IterImpVAString(parsed, [](void* cbd, const peparse::VA& va, const std::string& module_name,
-                                        const std::string& symbol_name) -> int {
-        auto* c = static_cast<ImportCollector*>(cbd);
-        if (c->dll.empty()) {
-            c->dll = canonical_dll_name(module_name);
-        } else if (canonical_dll_name(module_name) != c->dll) {
-            // a new module began; keep collecting (the per-module boundary is
-            // tracked by the name switch inside the loop below)
-            c->dll = canonical_dll_name(module_name);
+    for (const LIEF::PE::Import& import : parsed->imports()) {
+        const std::string dll = canonical_dll_name(import.name());
+        for (const LIEF::PE::ImportEntry& entry : import.entries()) {
+            ImportSymbol symbol;
+            symbol.address = entry.iat_address();
+            symbol.dll = dll;
+            symbol.name = entry.name();
+            import_symbols_[symbol.address] = std::move(symbol);
         }
-        ImportSymbol symbol;
-        symbol.address = va;
-        symbol.dll = c->dll;
-        symbol.name = symbol_name;
-        c->symbols.push_back(std::move(symbol));
-        return 0;  // continue
-    }, &collector);
-
-    for (const auto& symbol : collector.symbols) {
-        import_symbols_[symbol.address] = symbol;
     }
 
-    peparse::DestructParsedPE(parsed);
     return base;
 }
 

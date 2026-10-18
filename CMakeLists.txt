@@ -19,8 +19,7 @@ endif()
 # unicorn and keystone vcpkg ports ship no CMake config files — engine-deps.cmake
 # locates their headers/libs and defines the imported targets manually.
 find_package(capstone CONFIG REQUIRED)
-find_package(pe-parse CONFIG REQUIRED)
-find_package(ELFIO CONFIG REQUIRED)
+find_package(LIEF CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
 find_package(spdlog CONFIG REQUIRED)
 find_package(cxxopts CONFIG REQUIRED)

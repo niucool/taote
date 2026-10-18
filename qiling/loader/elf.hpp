@@ -1,12 +1,12 @@
 // Ported from qiling/loader/elf.py — QlLoaderELF (PORT_PLAN.md §10 Phase 5).
-// The pyelftools `ELFFile` surface maps onto a lean hand parser over the ELF
-// container headers (the same approach utils.py's __emu_env_from_elf already
-// takes; no ELFIO dependency).
+// The pyelftools `ELFFile` surface maps onto LIEF (decision D17: one parsing
+// dependency for PE/ELF/…; the qiling-specific consolidation and auxv logic
+// stays hand-ported on top of it).
 //
-//   ELFFile(stream)                       -> ElfImage (the parsed container)
-//   elffile['e_type'/'e_entry'/...]       -> ElfImage fields
-//   elffile.iter_segments(type='PT_LOAD') -> ElfImage::segments (filtered)
-//   seg.data()                            -> the file bytes at p_offset
+//   ELFFile(stream)                       -> ElfImage (LIEF::ELF::Binary wrapper)
+//   elffile['e_type'/'e_entry'/...]       -> ElfImage accessors
+//   elffile.iter_segments(type='PT_LOAD') -> ElfImage::load_segments (filtered)
+//   seg.data()                            -> Segment::content()
 //   PT_INTERP.get_interp_name()           -> ElfImage::interpreter
 //
 // The LKM (ET_REL driver) path with its relocation walk, the FunctionHook
