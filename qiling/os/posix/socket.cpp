@@ -12,6 +12,13 @@
 #endif
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <afunix.h>
+#else
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <unistd.h>
 #endif
 
 #include "qiling/os/posix/socket.hpp"
@@ -170,6 +177,133 @@ bool QlSocket::shutdown(int how) {
     return host_socket_shutdown(host_handle_, how) == 0;
 }
 
+bool QlSocket::connect_unix(const std::string& hpath) {
+#ifdef _WIN32
+    sockaddr_un addr{};
+    addr.sun_family = AF_UNIX;
+    const auto len = hpath.size() < sizeof(addr.sun_path) - 1 ? hpath.size() : sizeof(addr.sun_path) - 1;
+    std::memcpy(addr.sun_path, hpath.c_str(), len);
+    addr.sun_path[len] = '\0';
+    return ::connect(static_cast<SOCKET>(host_handle_), reinterpret_cast<sockaddr*>(&addr),
+                     static_cast<int>(sizeof(addr))) == 0;
+#else
+    sockaddr_un addr{};
+    addr.sun_family = AF_UNIX;
+    const auto len = hpath.size() < sizeof(addr.sun_path) - 1 ? hpath.size() : sizeof(addr.sun_path) - 1;
+    std::memcpy(addr.sun_path, hpath.c_str(), len);
+    addr.sun_path[len] = '\0';
+    return ::connect(static_cast<int>(host_handle_), reinterpret_cast<sockaddr*>(&addr),
+                     static_cast<socklen_t>(sizeof(addr))) == 0;
+#endif
+}
+
+bool QlSocket::connect_inet(const std::string& host, std::uint16_t port) {
+    // the getaddrinfo walk (the python socket.connect resolves the host
+    // through getaddrinfo as well)
+    addrinfo hints{};
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    addrinfo* res = nullptr;
+    if (::getaddrinfo(host.c_str(), std::to_string(port).c_str(), &hints, &res) != 0 || res == nullptr) {
+        return false;
+    }
+#ifdef _WIN32
+    const int rc = ::connect(static_cast<SOCKET>(host_handle_), res->ai_addr,
+                             static_cast<int>(res->ai_addrlen));
+#else
+    const int rc = ::connect(static_cast<int>(host_handle_), res->ai_addr,
+                             static_cast<socklen_t>(res->ai_addrlen));
+#endif
+    ::freeaddrinfo(res);
+    return rc == 0;
+}
+
+bool QlSocket::bind_unix(const std::string& hpath) {
+    sockaddr_un addr{};
+    addr.sun_family = AF_UNIX;
+    const auto len = hpath.size() < sizeof(addr.sun_path) - 1 ? hpath.size() : sizeof(addr.sun_path) - 1;
+    std::memcpy(addr.sun_path, hpath.c_str(), len);
+    addr.sun_path[len] = '\0';
+#ifdef _WIN32
+    return ::bind(static_cast<SOCKET>(host_handle_), reinterpret_cast<sockaddr*>(&addr),
+                  static_cast<int>(sizeof(addr))) == 0;
+#else
+    return ::bind(static_cast<int>(host_handle_), reinterpret_cast<sockaddr*>(&addr),
+                  static_cast<socklen_t>(sizeof(addr))) == 0;
+#endif
+}
+
+bool QlSocket::bind_inet(const std::string& host, std::uint16_t port) {
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+#ifdef _WIN32
+    addr.sin_port = ::htons(port);
+#else
+    addr.sin_port = ::htons(port);
+#endif
+    addr.sin_addr.s_addr = ::inet_addr(host.c_str());
+#ifdef _WIN32
+    return ::bind(static_cast<SOCKET>(host_handle_), reinterpret_cast<sockaddr*>(&addr),
+                  static_cast<int>(sizeof(addr))) == 0;
+#else
+    return ::bind(static_cast<int>(host_handle_), reinterpret_cast<sockaddr*>(&addr),
+                  static_cast<socklen_t>(sizeof(addr))) == 0;
+#endif
+}
+
+bool QlSocket::listen(int backlog) {
+#ifdef _WIN32
+    return ::listen(static_cast<SOCKET>(host_handle_), backlog) == 0;
+#else
+    return ::listen(static_cast<int>(host_handle_), backlog) == 0;
+#endif
+}
+
+std::shared_ptr<QlSocket> QlSocket::accept(std::string& peer_path, std::string& peer_host,
+                                           std::uint16_t& peer_port) {
+    // the accept walk: the AF_INET peers carry (host, port); the AF_UNIX
+    // peers carry the path; the AF_UNSPEC result rides the accepted socket
+    sockaddr_storage peer{};
+#ifdef _WIN32
+    int peer_len = static_cast<int>(sizeof(peer));
+    const SOCKET conn = ::accept(static_cast<SOCKET>(host_handle_),
+                                 reinterpret_cast<sockaddr*>(&peer), &peer_len);
+    if (conn == INVALID_SOCKET) {
+        return nullptr;
+    }
+    const auto conn_handle = static_cast<std::uintptr_t>(conn);
+#else
+    socklen_t peer_len = static_cast<socklen_t>(sizeof(peer));
+    const int conn = ::accept(static_cast<int>(host_handle_),
+                              reinterpret_cast<sockaddr*>(&peer), &peer_len);
+    if (conn < 0) {
+        return nullptr;
+    }
+    const auto conn_handle = static_cast<std::uintptr_t>(conn);
+#endif
+    peer_path.clear();
+    peer_host.clear();
+    peer_port = 0;
+
+    if (peer.ss_family == AF_INET) {
+        const auto* in = reinterpret_cast<const sockaddr_in*>(&peer);
+        char buf[INET_ADDRSTRLEN] = {0};
+#ifdef _WIN32
+        ::inet_ntop(AF_INET, &in->sin_addr, buf, sizeof(buf));
+#else
+        ::inet_ntop(AF_INET, &in->sin_addr, buf, sizeof(buf));
+#endif
+        peer_host = buf;
+        peer_port = ::ntohs(in->sin_port);
+    } else if (peer.ss_family == AF_UNIX) {
+        const auto* un = reinterpret_cast<const sockaddr_un*>(&peer);
+        peer_path = std::string(un->sun_path);
+    }
+
+    return std::shared_ptr<QlSocket>(new QlSocket(conn_handle, static_cast<int>(peer.ss_family),
+                                                  socktype_, protocol_));
+}
+
 std::optional<std::int64_t> syscall_socket(Qiling& ql, const std::vector<std::uint64_t>& params) {
     // ql_syscall_socket(domain, socktype, protocol): the next free fd slot,
     // the open through the host sockets API, the fd-table ride
@@ -222,6 +356,204 @@ std::optional<std::int64_t> syscall_shutdown(Qiling& ql, const std::vector<std::
         return -1;
     }
     return 0;
+}
+
+// the sockaddr parse: the family word (u16 LE) then the family-specific
+// body — the AF_UNIX path rides the sun_path bytes, the AF_INET the
+// (port BE u16, the 4-byte s_addr)
+struct SockaddrView {
+    int family = 0;
+    std::string unix_path;   // the sun_path partition at the NUL
+    std::string inet_host;   // the dotted-quad
+    std::uint16_t inet_port = 0;
+};
+
+SockaddrView parse_sockaddr(Qiling& ql, std::uint64_t addr, std::uint64_t addrlen) {
+    SockaddrView out;
+    if (addrlen < 2) {
+        return out;
+    }
+    const auto raw = ql.mem().read(addr, addrlen);
+    out.family = static_cast<std::uint16_t>(raw[0] | (raw[1] << 8));
+
+    if (out.family == kAfUnix) {
+        for (std::size_t i = 2; i < raw.size(); ++i) {
+            if (raw[i] == 0) {
+                break;  // the sun_path partitions at the first NUL
+            }
+            out.unix_path.push_back(static_cast<char>(raw[i]));
+        }
+    } else if (out.family == kAfInet && addrlen >= 8) {
+        // the local name avoids the winsock in_addr s_addr macro collision
+        const std::uint32_t raw_addr = static_cast<std::uint32_t>(raw[4]) |
+                                       (static_cast<std::uint32_t>(raw[5]) << 8) |
+                                       (static_cast<std::uint32_t>(raw[6]) << 16) |
+                                       (static_cast<std::uint32_t>(raw[7]) << 24);
+        char buf[16] = {0};
+        std::snprintf(buf, sizeof(buf), "%u.%u.%u.%u",
+                      (raw_addr >> 0) & 0xff, (raw_addr >> 8) & 0xff,
+                      (raw_addr >> 16) & 0xff, (raw_addr >> 24) & 0xff);
+        out.inet_host = buf;
+        out.inet_port = static_cast<std::uint16_t>((raw[2] << 8) | raw[3]);  // the network order
+    }
+    return out;
+}
+
+std::optional<std::int64_t> syscall_connect(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    // ql_syscall_connect(sockfd, addr, addrlen)
+    const auto sockfd = static_cast<std::int64_t>(params[0]);
+
+    auto* sock = dynamic_cast<QlSocket*>(fd_get(ql, sockfd).get());
+    if (sock == nullptr) {
+        return -88;  // -ENOTSOCK
+    }
+
+    const auto sa = parse_sockaddr(ql, params[1], params[2]);
+    if (sa.family != sock->family()) {
+        return -1;  // the family-mismatch branch (the upstream returns -1)
+    }
+
+    bool ok = false;
+    if (sa.family == kAfUnix) {
+        // ql_unix_socket_path: the virtual path rides the rootfs transform
+        // (the abstract namespace rides the raw bytes; the TODO verbatim)
+        std::string dest = sa.unix_path;
+        if (!dest.empty() && dest.front() != char{0}) {
+            dest = ql.os().path()->virtual_to_host_path(dest);
+        }
+        ok = sock->connect_unix(dest);
+    } else if (sa.family == kAfInet) {
+        ok = sock->connect_inet(sa.inet_host, sa.inet_port);
+    } else {
+        return -47;  // -EAFNOSUPPORT
+    }
+
+    if (!ok) {
+        // the (ConnectionError, FileNotFoundError) branch — the errno
+        // granularity rides the typed-translation slice; -1 for now
+        return -1;
+    }
+    return 0;
+}
+
+std::optional<std::int64_t> syscall_bind(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    // ql_syscall_bind(sockfd, addr, addrlen): the bindtolocalhost and the
+    // unprivileged-port shift ride the os flags (the defaults hold here —
+    // bindtolocalhost=false, root=false → the 8000 shift for the <=1024
+    // ports, the verbatim shape)
+    const auto sockfd = static_cast<std::int64_t>(params[0]);
+
+    auto* sock = dynamic_cast<QlSocket*>(fd_get(ql, sockfd).get());
+    if (sock == nullptr) {
+        return -88;  // -ENOTSOCK
+    }
+
+    auto sa = parse_sockaddr(ql, params[1], params[2]);
+    if (sa.family == kAfUnix) {
+        // ql_unix_socket_path: the vpath -> the host path via the rootfs
+        std::string dest = sa.unix_path;
+        if (!dest.empty() && dest.front() != char{0}) {
+            dest = ql.os().path()->virtual_to_host_path(dest);
+        }
+        if (!sock->bind_unix(dest)) {
+            return -13;  // -EACCES (the errno granularity rides its slice)
+        }
+        return 0;
+    }
+    if (sa.family == kAfInet) {
+        if (sa.inet_port != 0 && sa.inet_port <= 1024) {
+            sa.inet_port = static_cast<std::uint16_t>(sa.inet_port + 8000);
+        }
+        if (!sock->bind_inet(sa.inet_host, sa.inet_port)) {
+            return -13;
+        }
+        return 0;
+    }
+    return -47;  // -EAFNOSUPPORT
+}
+
+std::optional<std::int64_t> syscall_listen(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    // ql_syscall_listen(sockfd, backlog)
+    const auto sockfd = static_cast<std::int64_t>(params[0]);
+
+    auto* sock = dynamic_cast<QlSocket*>(fd_get(ql, sockfd).get());
+    if (sock == nullptr) {
+        return -88;  // -ENOTSOCK
+    }
+    if (!sock->listen(static_cast<int>(params[1]))) {
+        return -13;  // the ConnectionError errno shape
+    }
+    return 0;
+}
+
+std::optional<std::int64_t> syscall_accept(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    // ql_syscall_accept(sockfd, addr, addrlenptr): the new connection rides
+    // the next free fd; the peer sockaddr writes back when the addr is set
+    const auto sockfd = static_cast<std::int64_t>(params[0]);
+
+    auto* sock = dynamic_cast<QlSocket*>(fd_get(ql, sockfd).get());
+    if (sock == nullptr) {
+        return -88;  // -ENOTSOCK
+    }
+
+    std::string peer_path;
+    std::string peer_host;
+    std::uint16_t peer_port = 0;
+    std::shared_ptr<QlSocket> conn;
+    try {
+        conn = sock->accept(peer_path, peer_host, peer_port);
+    } catch (const QlErrorBase&) {
+        return -1;  // the ConnectionError branch
+    }
+    if (conn == nullptr) {
+        return -1;  // the BlockingIOError/ConnectionError shape
+    }
+
+    auto& fd_table = ql.os<posix::QlOsPosix>().fd();
+    int idx = -1;
+    for (int i = 0; i < QlFileDes::NR_OPEN; ++i) {
+        if (fd_table.at(i) == nullptr) {
+            idx = i;
+            break;
+        }
+    }
+    if (idx == -1) {
+        return -24;  // -EMFILE
+    }
+    fd_table.set(idx, conn);
+
+    if (params[1] != 0) {
+        // the peer sockaddr write-back: the AF_INET peers carry the
+        // (family, port BE, addr BE) triple
+        if (conn->family() == kAfInet) {
+            std::vector<std::uint8_t> sa(16, 0);
+            sa[0] = 0x02;
+            sa[1] = 0x00;
+            sa[2] = static_cast<std::uint8_t>(peer_port >> 8);
+            sa[3] = static_cast<std::uint8_t>(peer_port & 0xff);
+            // the s_addr fills from the host parse (the inet_aton inverse)
+            unsigned a = 0, b = 0, c = 0, d = 0;
+            std::sscanf(peer_host.c_str(), "%u.%u.%u.%u", &a, &b, &c, &d);
+            sa[4] = static_cast<std::uint8_t>(a);
+            sa[5] = static_cast<std::uint8_t>(b);
+            sa[6] = static_cast<std::uint8_t>(c);
+            sa[7] = static_cast<std::uint8_t>(d);
+            const auto addrlen = ql.mem().read_ptr(params[2]);
+            ql.mem().write(params[1], sa);
+            ql.mem().write_ptr(params[2], 16);
+            (void)addrlen;
+        } else if (conn->family() == kAfUnix) {
+            std::vector<std::uint8_t> sa(110, 0);
+            sa[0] = 0x01;
+            sa[1] = 0x00;
+            const auto bytes = std::vector<std::uint8_t>(peer_path.begin(), peer_path.end());
+            std::memcpy(sa.data() + 2, bytes.data(), std::min<std::size_t>(bytes.size(), 107));
+            ql.mem().write(params[1], sa);
+            ql.mem().write_ptr(params[2], 110);
+        }
+    }
+
+    return idx;
 }
 
 }  // namespace posix

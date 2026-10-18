@@ -1221,3 +1221,52 @@ TEST(PosixSyscall, UnhandledSyscallWarnsButDoesNotThrow) {
     ql.run();
     EXPECT_EQ(ql.os().exit_code(), 7);
 }
+
+// the AF_UNIX bind/listen: the guest sun_path rides the rootfs transform
+// (the upstream's ql_unix_socket_path) and the host bind/listen land
+TEST(PosixSocket, BindUnixRidesRootfsPathAndListens) {
+    const std::vector<std::uint8_t> code = {
+        // socket(AF_UNIX=1, SOCK_STREAM=1, 0)
+        0x48, 0xC7, 0xC0, 0x29, 0x00, 0x00, 0x00,  // mov rax, 41
+        0x48, 0xC7, 0xC7, 0x01, 0x00, 0x00, 0x00,  // mov rdi, 1 (AF_UNIX)
+        0x48, 0xC7, 0xC6, 0x01, 0x00, 0x00, 0x00,  // mov rsi, 1
+        0x45, 0x31, 0xC0,                           // xor r8d, r8d
+        0x0F, 0x05,
+        0x48, 0x89, 0xC7,                           // mov rdi, rax (the fd)
+        // bind(fd, sockaddr_un@0x1002000, 110) — the sun_path "/srv.sock"
+        0x48, 0xC7, 0xC0, 0x31, 0x00, 0x00, 0x00,  // mov rax, 49 (bind)
+        0x48, 0xC7, 0xC6, 0x00, 0x20, 0x00, 0x01,  // mov rsi, 0x1002000
+        0x48, 0xC7, 0xC2, 0x6E, 0x00, 0x00, 0x00,  // mov rdx, 110
+        0x0F, 0x05,
+        0x48, 0x89, 0x04, 0x25, 0x08, 0x22, 0x00, 0x01,  // mov [0x1002208], rax
+        // listen(fd, 1)
+        0x48, 0xC7, 0xC0, 0x32, 0x00, 0x00, 0x00,  // mov rax, 50 (listen)
+        0x48, 0xC7, 0xC6, 0x01, 0x00, 0x00, 0x00,  // mov rsi, 1
+        0x0F, 0x05,
+        0x48, 0x89, 0x04, 0x25, 0x10, 0x22, 0x00, 0x01,  // mov [0x1002210], rax
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00,
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00,
+        0x0F, 0x05,
+    };
+
+    QilingOptions options = posix_options(code);
+    Qiling ql(options);
+
+    // the temp rootfs persists across the runs: the stale socket file
+    // blocks the rebind (EADDRINUSE) — clear it first
+    std::error_code rm_ec;
+    std::filesystem::remove(ensure_rootfs() / "srv.sock", rm_ec);
+
+    // the sockaddr_un: family=1 (LE u16), the sun_path "/srv.sock" + NUL
+    ql.mem().write_ptr(0x1002000, 1, 2);
+    ql.mem().write(0x1002002, std::vector<std::uint8_t>{'/', 's', 'r', 'v', '.', 's', 'o', 'c', 'k', 0});
+
+    ql.run();
+
+    EXPECT_EQ(ql.os().exit_code(), 0);
+    EXPECT_EQ(ql.mem().read_ptr(0x1002208, 8), 0u);  // the bind ok
+    EXPECT_EQ(ql.mem().read_ptr(0x1002210, 8), 0u);  // the listen ok
+    // the host path rode the rootfs transform: the bind created the socket
+    // file under the host rootfs (the Win32 unix-socket file is a reparse
+    // point the plain probes reject — the bind's 0 return is the evidence)
+}

@@ -912,6 +912,20 @@ The remaining socket-family sub-slices: socketpair + connect/bind/listen/
 accept; send/recv/sendto/recvfrom; getsockopt/setsockopt. The sockaddr
 parse (the make_sockaddr families) lands with the connect/bind slice.
 
+### Phase 12 sub-slice 2 — connect/bind/listen/accept
+
+| piece | upstream | state | notes |
+|---|---|---|---|
+| the sockaddr parse | `socket.py make_sockaddr` walk | ✅ | the `SockaddrView` (the LE u16 family word; the sun_path partitioned at the first NUL — the abstract namespace rides the raw bytes; the AF_INET (port BE, the dotted-quad off the LE s_addr)) |
+| connect/bind/listen/accept | `syscall/socket.py` | ✅ | the connect (the family-mismatch -1, the AF_UNIX rootfs transform via the verbatim `ql_unix_socket_path`, the AF_INET getaddrinfo walk, the EAFNOSUPPORT for the other families); the bind (the bindtolocalhost default + the unprivileged 8000 port shift verbatim, the -EACCES shape for the errno granularity); the listen; the accept (the next-free fd, the AF_INET peer (family, port BE, s_addr) write-back with the addrlen update) — the errors collapse onto -1/-13 pending the errno-granularity slice |
+| the fixtures | `tests/Posix_Test.cpp` | ✅ 2 more green | the AF_UNIX bind/listen over the rootfs path (the host bind created the socket file; the stale temp-rootfs socket blocks the rebind — the fixture clears it); the shutdown ride from sub-slice 1 |
+
+Findings: the winsock `in_addr` **s_addr macro** collides with a local
+variable named s_addr (C3927 via the textual `S_un.S_addr` expansion) —
+rename locals; the Win32 unix-socket file is a reparse point the plain
+`std::filesystem::exists` rejects (the ec-form still trips) — the bind's 0
+return is the fixture's evidence.
+
 ## Deferred (tracked, not built)
 
 `os/macos/` (the remaining surface: the syscall handlers, the kernel_api

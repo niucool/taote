@@ -51,6 +51,18 @@ public:
     // (returns false when the host socket errors)
     bool shutdown(int how);
 
+    // connect/bind/listen/accept (the sockaddr variants ride the guest-
+    // parsed tuples — the AF_UNIX path string, the AF_INET (host, port) pair)
+    bool connect_unix(const std::string& hpath);
+    bool connect_inet(const std::string& host, std::uint16_t port);
+    bool bind_unix(const std::string& hpath);
+    bool bind_inet(const std::string& host, std::uint16_t port);
+    bool listen(int backlog);
+    // accept: the new connection socket + the peer (host, port) for the
+    // AF_INET (the empty pair for the unix sockets); nullptr on the failure
+    std::shared_ptr<QlSocket> accept(std::string& peer_path, std::string& peer_host,
+                                     std::uint16_t& peer_port);
+
     int family() const noexcept { return family_; }
     int socktype() const noexcept { return socktype_; }
     int protocol() const noexcept { return protocol_; }
@@ -68,6 +80,10 @@ private:
 
 std::optional<std::int64_t> syscall_socket(Qiling& ql, const std::vector<std::uint64_t>& params);
 std::optional<std::int64_t> syscall_shutdown(Qiling& ql, const std::vector<std::uint64_t>& params);
+std::optional<std::int64_t> syscall_connect(Qiling& ql, const std::vector<std::uint64_t>& params);
+std::optional<std::int64_t> syscall_bind(Qiling& ql, const std::vector<std::uint64_t>& params);
+std::optional<std::int64_t> syscall_listen(Qiling& ql, const std::vector<std::uint64_t>& params);
+std::optional<std::int64_t> syscall_accept(Qiling& ql, const std::vector<std::uint64_t>& params);
 
 }  // namespace posix
 }  // namespace os

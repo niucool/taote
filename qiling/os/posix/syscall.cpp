@@ -1305,6 +1305,12 @@ void register_builtin_syscalls() {
     // and the send/recv families land with their sub-slices)
     registry.register_syscall({"socket", {PARAM_INTN, PARAM_INTN, PARAM_INTN}, syscall_socket});
     registry.register_syscall({"shutdown", {PARAM_INTN, PARAM_INTN}, syscall_shutdown});
+    // the connect/bind/listen/accept family (the sockaddr parse rides the
+    // SockaddrView walk; the unix paths ride the rootfs transform)
+    registry.register_syscall({"connect", {PARAM_INTN, PARAM_PTRX, PARAM_INTN}, syscall_connect});
+    registry.register_syscall({"bind", {PARAM_INTN, PARAM_PTRX, PARAM_INTN}, syscall_bind});
+    registry.register_syscall({"listen", {PARAM_INTN, PARAM_INTN}, syscall_listen});
+    registry.register_syscall({"accept", {PARAM_INTN, PARAM_PTRX, PARAM_PTRX}, syscall_accept});
 
     // the futex dispatch (os/posix/syscall/futex.py) + the yield (sched.py)
     registry.register_syscall({"futex", {PARAM_INTN, PARAM_INTN, PARAM_INTN, PARAM_INTN, PARAM_INTN, PARAM_INTN}, syscall_futex});
