@@ -12,6 +12,7 @@
 #include "qiling/os/macos/macos.hpp"
 #include "qiling/os/macos/kernel_func.hpp"
 #include "qiling/os/posix/syscall.hpp"
+#include "qiling/arch/x86.hpp"
 #include "qiling/os/utils.hpp"
 #include "qiling/os/filestruct.hpp"
 #include "qiling/exception.hpp"
@@ -143,6 +144,29 @@ std::uint64_t set_eflags_cf(Qiling& ql, std::uint64_t target_cf) {
     ql.arch().regs().write("eflags", out);
     return out;
 }
+
+// syscall.py ql_syscall_bsdthread_register: the CF clears and the fixed
+// pthread magic rides rax (the upstream's 0x00000000400000df verbatim)
+std::optional<std::int64_t> syscall_bsdthread_register(Qiling& ql, const std::vector<std::uint64_t>&) {
+    set_eflags_cf(ql, 0x0);
+    return 0x00000000400000df;
+}
+
+// syscall.py ql_syscall_thread_selfid: the seeded macho thread's id
+std::optional<std::int64_t> syscall_thread_selfid(Qiling& ql, const std::vector<std::uint64_t>&) {
+    const auto& os_macos = dynamic_cast<const QlOsMacos&>(ql.os());
+    return static_cast<std::int64_t>(os_macos.macho_thread().id);
+}
+
+// syscall.py ql_syscall_thread_fast_set_cthread_self64: the mdep shim — the
+// tsd base into IA32_GS_BASE_MSR (x86_const.py), KERN_SUCCESS
+std::optional<std::int64_t> syscall_thread_fast_set_cthread_self64(Qiling& ql,
+                                                                   const std::vector<std::uint64_t>& params) {
+    const auto u_info_addr = params[0];
+    dynamic_cast<QlArchIntel&>(ql.arch()).msr().write(IA32_GS_BASE_MSR, u_info_addr);
+    return KERN_SUCCESS;
+}
+
 
 // syscall.py ql_syscall_access_macos: the ENOENT/KERN_SUCCESS over the fs
 // isexists (the raw errno value rides rax — the macos handlers return the
@@ -298,6 +322,11 @@ void register_macos_syscalls() {
     registry.register_syscall({"kernelrpc_mach_port_mod_refs_trap",
                                {PARAM_INTN, PARAM_INTN, PARAM_INTN, PARAM_INTN},
                                syscall_kernelrpc_mach_port_mod_refs_trap});
+    registry.register_syscall({"bsdthread_register",
+                               {PARAM_INTN, PARAM_INTN, PARAM_INTN, PARAM_INTN, PARAM_PTRX, PARAM_INTN},
+                               syscall_bsdthread_register});
+    registry.register_syscall({"thread_selfid", {}, syscall_thread_selfid});
+    registry.register_syscall({"thread_fast_set_cthread_self64", {PARAM_PTRX}, syscall_thread_fast_set_cthread_self64});
     registry.register_syscall({"kernelrpc_mach_port_construct_trap",
                                {PARAM_INTN, PARAM_INTN, PARAM_PTRX, PARAM_PTRX},
                                syscall_kernelrpc_mach_port_construct_trap});

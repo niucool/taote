@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "qiling/core.hpp"
+#include "qiling/arch/x86.hpp"
 #include "qiling/os/filestruct.hpp"
 #include "qiling/os/macos/macos.hpp"
 #include "qiling/os/posix/posix.hpp"
@@ -519,6 +520,48 @@ TEST(MacosOs, PortNoopStubsLeaveRaxUntouched) {
     EXPECT_EQ(ql.mem().read_ptr(kCellBase, 4), 0x1000012u);       // rax untouched
     EXPECT_EQ(ql.mem().read_ptr(kCellBase + 8, 4), 0x1000013u);
     EXPECT_EQ(ql.mem().read_ptr(kCellBase + 0x10, 4), 0x1000018u);
+}
+
+TEST(MacosOs, BsdthreadShimsGroup) {
+    // bsdthread_register (366): the CF clears and the fixed 0x400000df
+    // pthread magic rides rax; thread_selfid (372): the seeded thread id
+    // 123; thread_fast_set_cthread_self64 (0x3000003): the tsd base into
+    // IA32_GS_BASE_MSR, KERN_SUCCESS
+    const std::uint64_t kTsd = 0x1a000;
+    std::vector<std::uint8_t> code = {
+        0xBB, 0x00, 0x21, 0x00, 0x00,                // mov ebx, 0x2100
+        0xB8, 0x6E, 0x01, 0x00, 0x00,                // mov eax, 366
+        0x31, 0xFF,                                  // xor edi, edi
+        0x31, 0xF6,                                  // xor esi, esi
+        0x31, 0xD2,                                  // xor edx, edx
+        0x45, 0x31, 0xD2,                            // xor r10d, r10d
+        0x45, 0x31, 0xC0,                            // xor r8d, r8d
+        0x45, 0x31, 0xC9,                            // xor r9d, r9d
+        0x0F, 0x05,                                  // syscall
+    };
+    emit_store_rax(code, 0x00);
+    const auto push = [&code](std::initializer_list<std::uint8_t> bytes) {
+        code.insert(code.end(), bytes);
+    };
+    push({0xB8, 0x74, 0x01, 0x00, 0x00});            // mov eax, 372
+    push({0x0F, 0x05});                              // syscall
+    emit_store_rax(code, 0x08);
+    push({0xBF, 0x00, 0xA0, 0x01, 0x00});            // mov edi, kTsd
+    push({0xB8, 0x03, 0x00, 0x00, 0x03});            // mov eax, 0x3000003
+    push({0x0F, 0x05});                              // syscall
+    emit_store_rax(code, 0x10);
+    code.insert(code.end(), kBlobExit.begin(), kBlobExit.end());
+
+    auto ql = make_macos_qiling(code);
+    ql.mem().map(0x2000, 0x2000, UC_PROT_ALL, "[macos-scratch]");
+    ql.run();
+
+    EXPECT_EQ(ql.os().exit_code(), 42);
+    EXPECT_EQ(ql.mem().read_ptr(kCellBase, 4), 0x400000dfu);  // the pthread magic (LE)
+    EXPECT_EQ(ql.mem().read_ptr(kCellBase + 8, 4), 123u);     // the thread id
+    EXPECT_EQ(ql.mem().read_ptr(kCellBase + 0x10, 4), 0u);    // KERN_SUCCESS
+    // the msr write landed (the freebsd sysarch-fixture precedent)
+    EXPECT_EQ(dynamic_cast<qiling::QlArchIntel&>(ql.arch()).msr().read(0xC0000101), kTsd);
 }
 
 TEST(MacosOs, GetentropyReturnsSuccess) {
