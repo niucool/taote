@@ -7,6 +7,7 @@
 #include "qiling/os/macos/ev.hpp"
 
 #include <algorithm>
+#include <cstdio>
 
 #include "qiling/core.hpp"
 #include "qiling/os/macos/macos.hpp"
@@ -36,6 +37,28 @@ constexpr std::size_t kPcredUid = 0;
 constexpr std::size_t kPcredRgid = 80;
 constexpr std::size_t kLabelSize = 64;
 constexpr std::size_t kVnodeSize = 400;
+
+// ---- the macos_structs.py socket-emitter sizes (verified against the
+// upstream ctypes: m_hdr 32, pkthdr 136, m_ext 40, mbuf 256, sockaddr_ctl
+// 32, sockaddr_in 16, sockopt 40) ----
+constexpr std::size_t kSockaddrCtlSize = 32;
+constexpr std::size_t kSockaddrInSize = 16;
+constexpr std::size_t kSockoptSize = 40;
+constexpr std::size_t kMbufSize = 256;
+// the mbuf_t field offsets (mbuf base-relative): m_hdr rides the head, the
+// M_dat union at 32 carries MH_pkthdr (pkt_hdr at +8) and MH_dat (MH_ext's
+// ext_buf first)
+constexpr std::size_t kMbufMhData = 16;
+constexpr std::size_t kMbufMhLen = 24;
+constexpr std::size_t kMbufMhType = 28;
+constexpr std::size_t kMbufMhFlags = 30;
+constexpr std::size_t kMbufPktHdr = 40;   // M_dat.MH.MH_pkthdr.pkt_hdr
+constexpr std::size_t kMbufExtBuf = 168;  // M_dat.MH.MH_dat.MH_ext.ext_buf
+
+void write_u16(std::vector<std::uint8_t>& buf, std::size_t at, std::uint16_t v) {
+    buf[at + 0] = static_cast<std::uint8_t>(v);
+    buf[at + 1] = static_cast<std::uint8_t>(v >> 8);
+}
 
 void write_u32(std::vector<std::uint8_t>& buf, std::size_t at, std::uint32_t v) {
     buf[at + 0] = static_cast<std::uint8_t>(v);
@@ -270,7 +293,7 @@ void QlEvManager::emit(const std::string& ev_name, MacOSEventType ev_type, std::
         const auto stub = gen_stub_code(*ql_, resolved, found->func_addr);
         ql_->stack_push(stub);
     } else {
-        jobs_.push_back(EvJob{found->func_addr, std::move(resolved)});
+        jobs_.push_back(EvJob{found->func_addr, std::move(resolved), found->type});
     }
 }
 
@@ -290,7 +313,7 @@ void QlEvManager::emit_by_type(MacOSEventType ev_type, std::vector<std::uint64_t
                 const auto stub = gen_stub_code(*ql_, resolved, cb.func_addr);
                 ql_->stack_push(stub);
             } else {
-                jobs_.push_back(EvJob{cb.func_addr, std::move(resolved)});
+                jobs_.push_back(EvJob{cb.func_addr, std::move(resolved), cb.type});
             }
         }
     }
@@ -304,7 +327,7 @@ void QlEvManager::emit_by_type_and_proto(MacOSEventType ev_type, std::uint64_t p
             const auto stub = gen_stub_code(*ql_, resolved, cb->func_addr);
             ql_->stack_push(stub);
         } else {
-            jobs_.push_back(EvJob{cb->func_addr, std::move(resolved)});
+            jobs_.push_back(EvJob{cb->func_addr, std::move(resolved), cb->type});
         }
     }
 }
@@ -356,6 +379,202 @@ void QlOsPolicy::mpo_file_check_mmap(unsigned prot, unsigned flags, unsigned fil
 
     manager_.emit_by_type(MacOSEventType::EV_MAC_mpo_file_check_mmap,
                           {cred, fg, manager_.ensure_label(), prot, flags, file_pos, 0});
+}
+
+// ---- the socket-networking emitters (macos.py: gen_sock, net_new_socket,
+// the ctl_* and the sflt connect/disconnect/option emitters) ----
+
+// gen_sock: the 16-byte sockaddr_in_t (sin_len=16, sin_family=2 AF_INET,
+// the port in network order, the dotted-quad address bytes); appends the
+// image address to the sockets list
+std::uint64_t QlEvManager::gen_sock(const std::string& host, std::uint16_t port) {
+    auto& heap = ql_->os<posix::QlOsPosix>().heap();
+    const auto addr = heap.alloc(kSockaddrInSize);
+    std::vector<std::uint8_t> image(kSockaddrInSize, 0);
+    image[0] = static_cast<std::uint8_t>(kSockaddrInSize);  // sin_len
+    image[1] = 2;                                            // sin_family = AF_INET
+    // sin_port: network order (the upstream stores socket.htons(port) and
+    // lets the LE write put it on the wire)
+    image[2] = static_cast<std::uint8_t>(port >> 8);
+    image[3] = static_cast<std::uint8_t>(port);
+    // sin_addr: inet_aton bytes verbatim (the upstream unpacks the aton as
+    // a LE u32 and lets the LE write put the bytes back)
+    unsigned a = 0, b = 0, c = 0, d = 0;
+    if (sscanf(host.c_str(), "%u.%u.%u.%u", &a, &b, &c, &d) != 4) {
+        throw QlErrorBase("gen_sock: the host is not a dotted quad");
+    }
+    image[4] = static_cast<std::uint8_t>(a);
+    image[5] = static_cast<std::uint8_t>(b);
+    image[6] = static_cast<std::uint8_t>(c);
+    image[7] = static_cast<std::uint8_t>(d);
+    ql_->mem().write(addr, image);
+    sockets_.push_back(addr);
+    return addr;
+}
+
+// net_new_socket: emit EV_SFLT_ATTACH [holder, 0] (sflt_attach(void**
+// cookie, socket_t socket)), trigger the drain, then read the cookie the
+// guest callback wrote through the holder
+std::uint64_t QlEvManager::net_new_socket(NetworkProtocol protocol, std::uint64_t cookie_holder) {
+    if (cookie_holder == 0) {
+        cookie_holder = ql_->os<posix::QlOsPosix>().heap().alloc(8);
+    }
+    emit_by_type_and_proto(MacOSEventType::EV_SFLT_ATTACH, static_cast<std::uint64_t>(protocol),
+                           {cookie_holder, 0});
+    trigger();
+    const auto data = ql_->mem().read(cookie_holder, 8);
+    std::uint64_t cookie = 0;
+    for (int i = 0; i < 8; ++i) {
+        cookie |= static_cast<std::uint64_t>(data[static_cast<std::size_t>(i)]) << (8 * i);
+    }
+    return cookie;
+}
+
+// ctl_connect: the sockaddr_ctl_t image (sc_len=32, sc_family=32 AF_SYSTEM,
+// ss_sysaddr=2 AF_SYS_CONTROL, sc_id=0x1337, sc_unit=2) + the
+// ctl_connect(kern_ctl_ref, sockaddr_ctl*, void** unitinfo) emit
+void QlEvManager::ctl_connect(const std::string& nke_name, std::uint64_t unitinfo) {
+    const auto nke_addr = ql_->os<posix::QlOsPosix>().heap().alloc(kSockaddrCtlSize);
+    std::vector<std::uint8_t> image(kSockaddrCtlSize, 0);
+    image[0] = static_cast<std::uint8_t>(kSockaddrCtlSize);  // sc_len
+    image[1] = 32;                                           // sc_family = AF_SYSTEM
+    image[2] = 2;                                            // ss_sysaddr = AF_SYS_CONTROL
+    write_u32(image, 4, 0x1337);                             // sc_id
+    write_u32(image, 8, 2);                                  // sc_unit
+    ql_->mem().write(nke_addr, image);
+
+    emit(nke_name, MacOSEventType::EV_CTL_CONNECT, {nke_addr, unitinfo});
+}
+
+// ctl_disconnect: ctl_disconnect(kern_ctl_ref, u_int32_t unit, void* unitinfo)
+void QlEvManager::ctl_disconnect(const std::string& nke_name, std::uint64_t unitinfo) {
+    emit(nke_name, MacOSEventType::EV_CTL_DISCONNECT, {2, unitinfo});
+}
+
+// ctl_send: the mbuf_t with the data buffer + the
+// ctl_send(kern_ctl_ref, unsigned unit, void* userdata, mbuf_t m, int flags)
+// emit
+void QlEvManager::ctl_send(const std::string& nke_name, const std::string& data) {
+    auto& heap = ql_->os<posix::QlOsPosix>().heap();
+    const auto buf = heap.alloc(data.size());
+    ql_->mem().write(buf, std::vector<std::uint8_t>(data.begin(), data.end()));
+    const auto mbuf_addr = heap.alloc(kMbufSize);
+    std::vector<std::uint8_t> image(kMbufSize, 0);
+    write_u32(image, kMbufMhLen, static_cast<std::uint32_t>(data.size()));
+    write_u64(image, kMbufMhData, buf);
+    write_u16(image, kMbufMhFlags, 2);
+    ql_->mem().write(mbuf_addr, image);
+
+    emit(nke_name, MacOSEventType::EV_CTL_SEND, {2, 0, mbuf_addr, 2});
+}
+
+// ctl_setopt/ctl_getopt: the sopt_val buffer + the
+// ctl_setopt(kern_ctl_ref, u_int32_t unit, void* unitinfo, int opt, void* data,
+// size_t len) / ctl_getopt(... void* data, size_t* len) emits
+void QlEvManager::ctl_setopt(const std::string& nke_name, std::uint64_t opt, const std::string& data,
+                             std::uint64_t unitinfo) {
+    const auto sopt_val = ql_->os<posix::QlOsPosix>().heap().alloc(data.size());
+    ql_->mem().write(sopt_val, std::vector<std::uint8_t>(data.begin(), data.end()));
+    emit(nke_name, MacOSEventType::EV_CTL_SETOPT, {2, unitinfo, opt, sopt_val, data.size()});
+}
+
+void QlEvManager::ctl_getopt(const std::string& nke_name, std::uint64_t opt, const std::string& data,
+                             std::uint64_t unitinfo) {
+    const auto sopt_val = ql_->os<posix::QlOsPosix>().heap().alloc(data.size());
+    ql_->mem().write(sopt_val, std::vector<std::uint8_t>(data.begin(), data.end()));
+    emit(nke_name, MacOSEventType::EV_CTL_GETOPT, {2, unitinfo, opt, sopt_val, data.size()});
+}
+
+// net_connect_out: the src/dst socket pair + the
+// sflt_connect_out(void* cookie, socket_t socket, const struct sockaddr* to)
+// emit + the bound/connecting/connected notify cascade (the notify event
+// params carry SocketEvent.value - base_event_socket). The upstream reads
+// an unbound local `cookie` here (a latent NameError — never exercised
+// upstream); the port takes it as the parameter (the documented deviation)
+void QlEvManager::net_connect_out(NetworkProtocol protocol, std::uint64_t cookie) {
+    gen_sock(src_host_, src_port_);
+    const auto from_idx = sockets_.size() - 1;
+    gen_sock(dst_host_, dst_port_);
+    const auto to_idx = sockets_.size() - 1;
+    const auto proto = static_cast<std::uint64_t>(protocol);
+
+    emit_by_type_and_proto(MacOSEventType::EV_SFLT_CONNECT_OUT, proto,
+                           {cookie, from_idx, sockets_[to_idx]});
+    emit_by_type_and_proto(MacOSEventType::EV_SFLT_NOTIFY_BOUND, proto,
+                           {cookie, from_idx, static_cast<unsigned>(SocketEvent::BOUND) - kBaseEventSocket, 0});
+    emit_by_type_and_proto(MacOSEventType::EV_SFLT_NOTIFY_CONNECTING, proto,
+                           {cookie, from_idx,
+                            static_cast<unsigned>(SocketEvent::CONNECTING) - kBaseEventSocket, 0});
+    emit_by_type_and_proto(MacOSEventType::EV_SFLT_NOTIFY_CONNECTED, proto,
+                           {cookie, to_idx,
+                            static_cast<unsigned>(SocketEvent::CONNECTED) - kBaseEventSocket, 0});
+}
+
+// net_connect_in: the src/dst socket pair + the bind/listen/connect_in
+// emits + the bound/connecting notify cascade (the connected notify rides
+// the to socket — the upstream shape verbatim)
+void QlEvManager::net_connect_in(std::uint64_t cookie, NetworkProtocol protocol) {
+    gen_sock(src_host_, src_port_);
+    const auto from_idx = sockets_.size() - 1;
+    gen_sock(dst_host_, dst_port_);
+    const auto to_idx = sockets_.size() - 1;
+    const auto proto = static_cast<std::uint64_t>(protocol);
+
+    emit_by_type_and_proto(MacOSEventType::EV_SFLT_BIND, proto, {cookie, from_idx, sockets_[from_idx]});
+    emit_by_type_and_proto(MacOSEventType::EV_SFLT_NOTIFY_BOUND, proto,
+                           {cookie, from_idx, static_cast<unsigned>(SocketEvent::BOUND) - kBaseEventSocket, 0});
+    emit_by_type_and_proto(MacOSEventType::EV_SFLT_LISTEN, proto, {cookie, from_idx});
+    emit_by_type_and_proto(MacOSEventType::EV_SFLT_CONNECT_IN, proto,
+                           {cookie, from_idx, sockets_[to_idx]});
+    emit_by_type_and_proto(MacOSEventType::EV_SFLT_NOTIFY_CONNECTED, proto,
+                           {cookie, to_idx,
+                            static_cast<unsigned>(SocketEvent::CONNECTING) - kBaseEventSocket, 0});
+}
+
+// net_disconnect: the detach pair + the closing/disconnecting/disconnected
+// notify cascade (sflt_detach(void* cookie, socket_t socket) +
+// ipf_detach(void* cookie))
+void QlEvManager::net_disconnect(std::uint64_t cookie, std::uint64_t so, NetworkProtocol protocol) {
+    const auto proto = static_cast<std::uint64_t>(protocol);
+    emit_by_type_and_proto(MacOSEventType::EV_SFLT_DETACH, proto, {cookie, 0});
+    emit_by_type(MacOSEventType::EV_IPF_DETACH, {cookie});
+    emit_by_type_and_proto(MacOSEventType::EV_SFLT_NOTIFY_CLOSING, proto,
+                           {cookie, so, static_cast<unsigned>(SocketEvent::CLOSING) - kBaseEventSocket, 0});
+    emit_by_type_and_proto(MacOSEventType::EV_SFLT_NOTIFY_DISCONNECTING, proto,
+                           {cookie, so,
+                            static_cast<unsigned>(SocketEvent::DISCONNECTING) - kBaseEventSocket, 0});
+    emit_by_type_and_proto(MacOSEventType::EV_SFLT_NOTIFY_DISCONNECTED, proto,
+                           {cookie, so,
+                            static_cast<unsigned>(SocketEvent::DISCONNECTED) - kBaseEventSocket, 0});
+}
+
+// net_set_option/net_get_option: the sopt_val buffer + the sockopt_t image
+// (sopt_dir/level/name/val/valsize/p) + the
+// sflt_set_option(void* cookie, socket_t socket, sockopt_t option) emit
+void QlEvManager::net_set_option(std::uint64_t cookie, std::uint64_t so, const std::string& data,
+                                 NetworkProtocol protocol) {
+    auto& heap = ql_->os<posix::QlOsPosix>().heap();
+    const auto sopt_val = heap.alloc(data.size());
+    ql_->mem().write(sopt_val, std::vector<std::uint8_t>(data.begin(), data.end()));
+    const auto sopt_addr = heap.alloc(kSockoptSize);
+    std::vector<std::uint8_t> image(kSockoptSize, 0);
+    write_u64(image, 16, sopt_val);  // sopt_val
+    ql_->mem().write(sopt_addr, image);
+    emit_by_type_and_proto(MacOSEventType::EV_SFLT_SETOPTION, static_cast<std::uint64_t>(protocol),
+                           {cookie, so, sopt_addr});
+}
+
+void QlEvManager::net_get_option(std::uint64_t cookie, std::uint64_t so, const std::string& data,
+                                 NetworkProtocol protocol) {
+    auto& heap = ql_->os<posix::QlOsPosix>().heap();
+    const auto sopt_val = heap.alloc(data.size());
+    ql_->mem().write(sopt_val, std::vector<std::uint8_t>(data.begin(), data.end()));
+    const auto sopt_addr = heap.alloc(kSockoptSize);
+    std::vector<std::uint8_t> image(kSockoptSize, 0);
+    write_u64(image, 16, sopt_val);  // sopt_val
+    ql_->mem().write(sopt_addr, image);
+    emit_by_type_and_proto(MacOSEventType::EV_SFLT_GETOPTION, static_cast<std::uint64_t>(protocol),
+                           {cookie, so, sopt_addr});
 }
 
 }  // namespace macos

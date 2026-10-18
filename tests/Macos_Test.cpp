@@ -29,6 +29,12 @@ using namespace qiling;
 
 namespace {
 
+// the winsock IPPROTO_TCP/UDP macros (via unicorn's winsock2.h) collide with
+// the verbatim NetworkProtocol enumerator names below; the test TU uses no
+// winsock
+#undef IPPROTO_TCP
+#undef IPPROTO_UDP
+
 constexpr std::uint64_t kScratch = 0x2100;
 
 Qiling make_macos_qiling(const std::vector<std::uint8_t>& code) {
@@ -1346,6 +1352,194 @@ TEST(MacosOs, EvEmitByTypeAndProtoFiltersRegistrations) {
     ASSERT_EQ(ev.jobs().size(), 1u);
     EXPECT_EQ(ev.jobs()[0].func_addr, 0xdead0000ull);
     EXPECT_EQ(ev.jobs()[0].params[0], 0x1111ull);
+}
+
+// ---- the socket/ipf emitters (the ctl_*/net_* slice) ----
+
+TEST(MacosOs, GenSockBuildsSockaddrIn) {
+    auto ql = make_macos_qiling(ev_stub_body());
+    auto& macos = dynamic_cast<qiling::os::macos::QlOsMacos&>(ql.os());
+    auto& ev = macos.ev_manager();
+    const auto addr = ev.gen_sock("192.168.13.37", 1337);
+    ASSERT_NE(addr, 0u);
+    ASSERT_EQ(ev.sockets_count(), 1u);
+    EXPECT_EQ(ev.socket_base(0), addr);
+    const auto image = ql.mem().read(addr, 16);
+    EXPECT_EQ(image[0], 16);            // sin_len
+    EXPECT_EQ(image[1], 2);             // sin_family = AF_INET
+    EXPECT_EQ(image[2], 0x05);          // sin_port = 1337 network order
+    EXPECT_EQ(image[3], 0x39);
+    EXPECT_EQ(image[4], 192);           // sin_addr = the aton bytes
+    EXPECT_EQ(image[5], 168);
+    EXPECT_EQ(image[6], 13);
+    EXPECT_EQ(image[7], 37);
+    // the tail zeros (sin_zero)
+    for (int i = 8; i < 16; ++i) {
+        EXPECT_EQ(image[static_cast<std::size_t>(i)], 0) << "byte " << i;
+    }
+    // the second gen_sock appends (the upstream's sockets list shape)
+    const auto dst = ev.gen_sock("10.2.13.38", 1338);
+    ASSERT_EQ(ev.sockets_count(), 2u);
+    const auto image2 = ql.mem().read(dst, 16);
+    EXPECT_EQ(image2[4], 10);
+    EXPECT_EQ(image2[7], 38);
+    ev.clear_socks();
+    EXPECT_EQ(ev.sockets_count(), 0u);
+}
+
+TEST(MacosOs, CtlConnectEmitsSockaddrCtl) {
+    auto ql = make_macos_qiling(ev_stub_body(true));
+    ql.mem().map(0x2000, 0x1000, UC_PROT_ALL, "[ev-cells]");
+    auto& macos = dynamic_cast<qiling::os::macos::QlOsMacos&>(ql.os());
+    auto& ev = macos.ev_manager();
+    const auto base = ql.loader().entry_point;
+    ev.register_cb(base + kEvCbOff, "NKE_A", qiling::os::macos::MacOSEventType::EV_CTL_CONNECT);
+    macos.RUN = false;  // the post-run shape: the emit queues for the trigger
+
+    ev.ctl_connect("NKE_A", 0x42);
+    ASSERT_EQ(ev.jobs().size(), 1u);
+
+    // the trigger runs the cb (which stores rdi->0x2000, rsi->0x2008) and
+    // the park stop-hook ends the slice
+    ql.arch().regs().write(UC_X86_REG_RSP, kEvStack + 0x800);
+    ql.stack_push(base + kEvParkOff);
+    HookRet stopper = ql.hook_address([&]() {
+        ql.emu_stop();
+        return 0;
+    }, base + kEvParkOff);
+    (void)stopper;
+    ev.trigger();
+
+    // rdi carried the sockaddr_ctl_t image; rsi the unitinfo
+    const auto nke_addr = ql.mem().read_ptr(0x2000, 8);
+    EXPECT_EQ(ql.mem().read_ptr(0x2008, 8), 0x42ull);
+    const auto image = ql.mem().read(nke_addr, 32);
+    EXPECT_EQ(image[0], 32);            // sc_len
+    EXPECT_EQ(image[1], 32);            // sc_family = AF_SYSTEM
+    EXPECT_EQ(image[2], 2);             // ss_sysaddr = AF_SYS_CONTROL
+    EXPECT_EQ(image[3], 0);
+    EXPECT_EQ(image[4], 0x37);          // sc_id = 0x1337
+    EXPECT_EQ(image[5], 0x13);
+    EXPECT_EQ(image[8], 2);             // sc_unit = 2
+}
+
+TEST(MacosOs, CtlSendBuildsMbuf) {
+    auto ql = make_macos_qiling(ev_stub_body());
+    auto& macos = dynamic_cast<qiling::os::macos::QlOsMacos&>(ql.os());
+    auto& ev = macos.ev_manager();
+    macos.RUN = false;
+    // the emit filters by the registered (name, type) pair — register the
+    // listener first (the job still rides the queue path)
+    ev.register_cb(0xdead0020, "NKE_B", qiling::os::macos::MacOSEventType::EV_CTL_SEND);
+
+    ev.ctl_send("NKE_B", "hello");
+    ASSERT_EQ(ev.jobs().size(), 1u);
+    const auto& params = ev.jobs()[0].params;
+    // ctl_send(kern_ctl_ref, unsigned unit, void* userdata, mbuf_t m, int flags)
+    ASSERT_EQ(params.size(), 4u);
+    EXPECT_EQ(params[0], 2u);   // the unit
+    EXPECT_EQ(params[1], 0u);   // the userdata
+    const auto mbuf_addr = params[2];
+    EXPECT_EQ(params[3], 2u);   // the flags
+    const auto image = ql.mem().read(mbuf_addr, 256);
+    EXPECT_EQ(image[24], 5);    // mh_len = strlen(data)
+    EXPECT_EQ(image[25], 0);
+    EXPECT_EQ(image[30], 2);    // mh_flags = 2
+    const std::uint64_t data_addr = image[16] | (std::uint64_t(image[17]) << 8) |
+                                    (std::uint64_t(image[18]) << 16) | (std::uint64_t(image[19]) << 24) |
+                                    (std::uint64_t(image[20]) << 32) | (std::uint64_t(image[21]) << 40) |
+                                    (std::uint64_t(image[22]) << 48) | (std::uint64_t(image[23]) << 56);
+    const auto bytes = ql.mem().read(data_addr, 5);
+    EXPECT_EQ(std::string(bytes.begin(), bytes.end()), "hello");
+}
+
+TEST(MacosOs, NetNewSocketReadsGuestCookie) {
+    // the cb writes 0xCAFE through the holder pointer (rdi) then parks;
+    // net_new_socket reads the cookie back after the trigger drain
+    std::vector<std::uint8_t> code;
+    code.insert(code.end(), {0x90});                               // base+00: nop
+    code.push_back(0xC3);                                          // base+01: ret
+    code.resize(kEvCbOff, 0x90);
+    const std::uint8_t write_cookie[] = {0x48, 0xC7, 0x47, 0x00, 0xFE, 0xCA, 0x00, 0x00};
+    code.insert(code.end(), write_cookie, write_cookie + 8);       // mov qword [rdi], 0xCAFE
+    code.insert(code.end(), {0xEB, static_cast<std::uint8_t>(0x90 - kEvCbOff - 8 - 2)});  // jmp park
+    code.resize(kEvParkOff, 0x90);
+
+    auto ql = make_macos_qiling(code);
+    auto& macos = dynamic_cast<qiling::os::macos::QlOsMacos&>(ql.os());
+    auto& ev = macos.ev_manager();
+    const auto base = ql.loader().entry_point;
+    ev.register_cb(base + kEvCbOff, "sflt", qiling::os::macos::MacOSEventType::EV_SFLT_ATTACH,
+                   0, -1, static_cast<std::uint64_t>(qiling::os::macos::NetworkProtocol::IPPROTO_TCP));
+    macos.RUN = false;  // the post-run shape: the emit queues, the trigger drains
+    HookRet stopper = ql.hook_address([&]() {
+        ql.emu_stop();
+        return 0;
+    }, base + kEvParkOff);
+    (void)stopper;
+
+    const auto cookie = ev.net_new_socket(qiling::os::macos::NetworkProtocol::IPPROTO_TCP);
+    EXPECT_EQ(cookie, 0xCAFEull);
+}
+
+TEST(MacosOs, NetConnectOutCascade) {
+    auto ql = make_macos_qiling(ev_stub_body());
+    auto& macos = dynamic_cast<qiling::os::macos::QlOsMacos&>(ql.os());
+    auto& ev = macos.ev_manager();
+    macos.RUN = false;
+    // the listeners for every emitted sflt type (the protocol filter must
+    // match the connect_out protocol)
+    const auto udp = static_cast<std::uint64_t>(qiling::os::macos::NetworkProtocol::IPPROTO_UDP);
+    using ET = qiling::os::macos::MacOSEventType;
+    ev.register_cb(0xdead0010, "conn_out", ET::EV_SFLT_CONNECT_OUT, 0, -1, udp);
+    ev.register_cb(0xdead0011, "conn_out", ET::EV_SFLT_NOTIFY_BOUND, 0, -1, udp);
+    ev.register_cb(0xdead0012, "conn_out", ET::EV_SFLT_NOTIFY_CONNECTING, 0, -1, udp);
+    ev.register_cb(0xdead0013, "conn_out", ET::EV_SFLT_NOTIFY_CONNECTED, 0, -1, udp);
+
+    ev.net_connect_out(qiling::os::macos::NetworkProtocol::IPPROTO_UDP, 0xBEEF);
+    ASSERT_EQ(ev.jobs().size(), 4u);
+    EXPECT_EQ(ev.jobs()[0].type, ET::EV_SFLT_CONNECT_OUT);
+    EXPECT_EQ(ev.jobs()[0].params[0], 0xBEEFull);
+    EXPECT_EQ(ev.jobs()[0].params[1], 0u);          // from_idx
+    EXPECT_EQ(ev.jobs()[0].params[2], ev.socket_base(1));  // the to sockaddr
+    EXPECT_EQ(ev.jobs()[1].type, ET::EV_SFLT_NOTIFY_BOUND);
+    EXPECT_EQ(ev.jobs()[1].params[2], 0xau);        // BOUND - base_event_socket
+    EXPECT_EQ(ev.jobs()[2].type, ET::EV_SFLT_NOTIFY_CONNECTING);
+    EXPECT_EQ(ev.jobs()[2].params[2], 0x1u);        // CONNECTING - base
+    EXPECT_EQ(ev.jobs()[3].type, ET::EV_SFLT_NOTIFY_CONNECTED);
+    EXPECT_EQ(ev.jobs()[3].params[1], 1u);          // the to_idx
+    EXPECT_EQ(ev.jobs()[3].params[2], 0x2u);        // CONNECTED - base
+    // the socket pair: from 192.168.13.37:1337, to 10.2.13.38:1338
+    const auto from = ql.mem().read(ev.socket_base(0), 16);
+    EXPECT_EQ(from[4], 192);
+    const auto to = ql.mem().read(ev.socket_base(1), 16);
+    EXPECT_EQ(to[4], 10);
+}
+
+TEST(MacosOs, NetSetOptionCarriesSockopt) {
+    auto ql = make_macos_qiling(ev_stub_body());
+    auto& macos = dynamic_cast<qiling::os::macos::QlOsMacos&>(ql.os());
+    auto& ev = macos.ev_manager();
+    macos.RUN = false;
+    const auto tcp = static_cast<std::uint64_t>(qiling::os::macos::NetworkProtocol::IPPROTO_TCP);
+    ev.register_cb(0xdead0030, "opt_nke", qiling::os::macos::MacOSEventType::EV_SFLT_SETOPTION, 0, -1, tcp);
+
+    ev.net_set_option(0xC0FE, 3, "opts", qiling::os::macos::NetworkProtocol::IPPROTO_TCP);
+    ASSERT_EQ(ev.jobs().size(), 1u);
+    EXPECT_EQ(ev.jobs()[0].type, qiling::os::macos::MacOSEventType::EV_SFLT_SETOPTION);
+    const auto& params = ev.jobs()[0].params;
+    ASSERT_EQ(params.size(), 3u);
+    EXPECT_EQ(params[0], 0xC0FEull);  // the cookie
+    EXPECT_EQ(params[1], 3u);         // the socket
+    const auto sopt_addr = params[2];
+    const auto image = ql.mem().read(sopt_addr, 40);
+    // sopt_val @16 carries the "opts" buffer
+    const std::uint64_t val = image[16] | (std::uint64_t(image[17]) << 8) |
+                              (std::uint64_t(image[18]) << 16) | (std::uint64_t(image[19]) << 24) |
+                              (std::uint64_t(image[20]) << 32) | (std::uint64_t(image[21]) << 40) |
+                              (std::uint64_t(image[22]) << 48) | (std::uint64_t(image[23]) << 56);
+    const auto bytes = ql.mem().read(val, 4);
+    EXPECT_EQ(std::string(bytes.begin(), bytes.end()), "opts");
 }
 
 }  // namespace
