@@ -4,6 +4,7 @@
 // bitset-matching entries and installs a notify callback on the waker.
 #include "qiling/os/linux/futex.hpp"
 
+#include <cstdio>
 #include <utility>
 
 #include "qiling/core.hpp"
@@ -44,6 +45,9 @@ int QlLinuxFutexManagement::futex_wait(Qiling& ql, std::uint64_t uaddr, QlLinuxT
         return -kEAGAIN;
     }
 
+    // BISECT: the park point (the in-hook stop placement)
+    std::fprintf(stderr, "[fwait] uaddr=%llx val=%x stop\n",
+                 static_cast<unsigned long long>(uaddr), uaddr_value);
     ql.emu_stop();
 
     auto event = std::make_shared<QlFutexEvent>();

@@ -1,3 +1,4 @@
+#include <cstdio>
 #include "qiling/os/posix/syscall.hpp"
 
 #include <algorithm>
@@ -632,6 +633,11 @@ std::optional<std::int64_t> syscall_clone(Qiling& ql, const std::vector<std::uin
     ql.arch().regs().set_arch_sp(child_stack);
     ql.os<posix::QlOsPosix>().syscall_abi_mut().set_return_value(0);
     th->save();
+
+    // BISECT: the child ctx's pc as saved
+    std::fprintf(stderr, "[clone] child_ctx_pc=%llx parent_after=%llx\n",
+                 static_cast<unsigned long long>(after_syscall),
+                 static_cast<unsigned long long>(after_syscall));
 
     // the parent's context back (sched.py: ql.restore(ctx))
     ql.arch().restore(*parent_ctx);

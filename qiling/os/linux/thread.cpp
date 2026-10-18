@@ -4,6 +4,8 @@
 // the post-slice state instead of blocking the host thread.
 #include "qiling/os/linux/thread.hpp"
 
+#include <cstdio>
+
 #include "qiling/core.hpp"
 #include "qiling/arch/x86.hpp"
 #include "qiling/arch/arm.hpp"
@@ -126,10 +128,16 @@ bool QlLinuxThread::run_slice(std::uint64_t exit_point, std::uint64_t count) {
     // restore the context of the currently executing thread
     restore();
 
+    // BISECT: the per-slice wrapper trace (the raw-probe comparison)
+    const auto rs_begin = ql_->arch().adjust_emu_start(ql_->arch().regs().arch_pc());
+    std::fprintf(stderr, "[rs] begin=%llx exit=%llx count=%llu\n",
+                 static_cast<unsigned long long>(rs_begin),
+                 static_cast<unsigned long long>(exit_point), static_cast<unsigned long long>(count));
+
     // the per-slice begin: the CURRENT pc (the restored stop point - the
     // upstream emu_start reads the arch_pc after the restore, not the
     // original start address)
-    const auto start_address = ql_->arch().adjust_emu_start(ql_->arch().regs().arch_pc());
+    const auto start_address = rs_begin;
     sched_cb_ = nullptr;  // the default sched_cb: give up control (yield)
 
     try {
@@ -140,6 +148,9 @@ bool QlLinuxThread::run_slice(std::uint64_t exit_point, std::uint64_t count) {
         // thread.py: emu_error + rethrow
         throw;
     }
+
+    std::fprintf(stderr, "[rs-end] pc=%llx\n",
+                 static_cast<unsigned long long>(ql_->arch().regs().arch_pc()));
 
     // thread.py save()
     save();
