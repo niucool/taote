@@ -448,11 +448,33 @@ of the gevent hub.
 - **the mid-TB restart on a CACHED TB (the remaining open issue)**: the child thread's restart address (the clone's continuation) can sit inside a TB the parent already executed (the parent's wait-loop slice translated it); the raw-unicorn reproduction (the TbSemantics.MidTbRestartThenAbsoluteStore passes on a fresh TB, DISABLED_MidTbRestartOnCachedTb faults on the cached one) shows the taken-path store after the cached-TB mid-TB restart mis-executes. The fix directions: the fresh-TB start addresses for the spawned threads or the tb flush on the spawn. The clone-join test stays DISABLED_ on this; the round-robin wake flow (the futex interleave without clone) is green.
 - **the mips O32 return convention** inverts the negative returns onto the a3 flag pair - the same shape as the real kernel ABI.
 
+## Phase 5.5 - the os/freebsd dialect (the first deferred-subsystem slice)
+
+| File | Python counterpart | Status | Notes |
+|---|---|---|---|
+| `QlOsFreebsd` | `os/freebsd/freebsd.py` | Ported | the FREEBSD type over the posix base; the amd64 fcall; the load() GDT/segment setup (the x86_utils GDTManager + SegmentManager64 shape, ported compactly); the run() rides the posix |
+| the freebsd x8664 table | `os/freebsd/map_syscall.py` | Ported | the 410-entry table (the freebsd numbers); the posix `__get_syscall_mapper` went virtual (the `map_syscall` method) — the os-specific table resolution, the upstream shape |
+| `const.hpp` | `os/freebsd/const.py` | Ported | the CTL_*/KERN_*/HW_* identifiers + the FREEBSD_OSRELDATE (stable/12, 2021.3.12) |
+| the 6 handler deltas | `os/freebsd/syscall.py` | Ported | __sysctl (the OSRELDATE + the NAME2OID/hw.pagesizes paths), sysarch (the FS BASE MSR, the "wild guess" verbatim), sigprocmask, clock_gettime (the freebsd timespec, the *1e6 nsec arithmetic verbatim), __getcwd (the posix getcwd delegate, added to the posix layer), fstatat (the stat-module defer, surfaced as not-implemented) |
+| `freebsd.ql` | `qiling/profiles/freebsd.ql` | Ported (deviation) | the verbatim copy + the [CODE] load_address added (the upstream's profile lacks it; the port's shellcode fixtures read it — the documented deviation) |
+| `tests/Freebsd_Test.cpp` | the fixture flows | Ported | the sysctl both paths (the OSRELDATE constant write; the NAME2OID hw.pagesizes vec + the length), the clock_gettime (the epoch + the nsec bounds), the sigprocmask, the sysarch (the msr read-back), the getcwd ("/" + the NUL), the fstatat (the not-implemented raise) — 7 fixtures |
+
+### Findings
+
+- **the freebsd dialect is thin where the posix base is thick**: the 783-line
+  module needed only the 6 handler deltas + the table + the GDT; the syscall
+  dispatch, the fd table, the fcall and the ABI ride the Phase 5 base as-is.
+- **the x86-64 imm32 forms**: the `49 C7 C5` (the mov r8, imm32) did not land
+  the value into the ABI's 5th slot in the fixture — the `41 B8` (the mov
+  r8d, imm32) does; the test blobs use the shorter form (the fixture note,
+  not a port defect — the encoding difference is unexplained, the P5-style
+  probe did not chase it).
+
 ## Deferred (tracked, not built)
 
-`os/freebsd/`, `os/qnx/`, `os/macos/`, `os/uefi/`, `os/dos/`, `qiling/hw/`,
+`os/qnx/`, `os/macos/`, `os/uefi/`, `os/dos/`, `qiling/hw/`,
 `qiling/extensions/mcu/` — resume criteria in PORT_PLAN.md §10 (OQ 9); the
-remaining five profile files (dos/freebsd/macos/qnx/uefi `.ql`) defer with them.
+remaining profile files (dos/macos/qnx/uefi `.ql`) defer with them.
 
 ### Resume-criteria reassessment (post-Phase-5)
 
