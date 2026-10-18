@@ -5,11 +5,13 @@
 #ifndef QILING_OS_QNX_QNX_HPP
 #define QILING_OS_QNX_QNX_HPP
 
+#include <map>
 #include <optional>
 
 #include "qiling/arch/arch.hpp"
 #include "qiling/os/posix/posix.hpp"
 #include "qiling/os/qnx/const.hpp"
+#include "qiling/os/qnx/helpers.hpp"
 
 namespace qiling {
 namespace os {
@@ -35,6 +37,14 @@ public:
     std::uint64_t tls_data_addr() const noexcept { return tls_data_addr_; }
     std::uint64_t syspage_addr() const noexcept { return syspage_addr_; }
 
+    // qnx.py __init__: the connections map (the coid → the QnxConn record);
+    // the std streams occupy 0..2 and the sysmgr rides SYSMGR_COID
+    std::map<std::uint32_t, QnxConn>& connections() noexcept { return connections_; }
+
+    // the free connection id off the low or the high (side-channel) counter;
+    // returns the handed-out id and registers the connection
+    std::uint32_t alloc_connection_id(bool side_channel, std::uint32_t pid, std::uint32_t chid);
+
 protected:
     // qnx/map_syscall.py get_syscall_mapper: the ARM kercalls table
     // (trunk/services/system/public/sys/kercalls.h numbers)
@@ -55,6 +65,10 @@ private:
     std::uint64_t cpupage_tls_addr_ = 0;
     std::uint64_t tls_data_addr_ = 0;
     std::uint64_t syspage_addr_ = 0;
+
+    // the connections table (qnx.py __init__ seeds the std streams and the
+    // sysmgr)
+    std::map<std::uint32_t, QnxConn> connections_;
 };
 
 }  // namespace qnx

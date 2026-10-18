@@ -74,6 +74,45 @@ std::optional<std::int64_t> syscall_sys_cpupage_set(Qiling& ql, const std::vecto
     return std::nullopt;
 }
 
+// syscall.py ql_syscall_connect_attach: the nd/flags sanity pins (the
+// ND_LOCAL_NODE + the CLOEXEC shape), then the coid comes off the side-
+// channel or the plain counter
+std::optional<std::int64_t> syscall_connect_attach(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    const auto nd = params[0];
+    const auto pid = params[1];
+    const auto chid = params[2];
+    const auto index = params[3];
+    const auto flags = params[4];
+
+    if (nd != static_cast<std::uint64_t>(ND_LOCAL_NODE) || flags != 0x1) {
+        throw QlErrorBase("qnx connect_attach: the nd/flags parameters are wrong (the ND_LOCAL_NODE + "
+                          "_NTO_COF_CLOEXEC shape is the supported one)");
+    }
+
+    auto& os = static_cast<QlOsQnx&>(ql.os());
+    const auto coid = os.alloc_connection_id((index & NTO_SIDE_CHANNEL) != 0,
+                                             static_cast<std::uint32_t>(pid),
+                                             static_cast<std::uint32_t>(chid));
+    return static_cast<std::int64_t>(coid);
+}
+
+// syscall.py ql_syscall_connect_detach: the connection must exist and ride
+// no file descriptor; the coid is removed
+std::optional<std::int64_t> syscall_connect_detach(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    const auto coid = static_cast<std::uint32_t>(params[0]);
+    auto& connections = static_cast<QlOsQnx&>(ql.os()).connections();
+
+    const auto it = connections.find(coid);
+    if (it == connections.end()) {
+        throw QlErrorBase("qnx connect_detach: the connection id must exist in the connections mapping");
+    }
+    if (it->second.fd.has_value()) {
+        throw QlErrorBase("qnx connect_detach: the file descriptor has to be closed properly");
+    }
+    connections.erase(it);
+    return 0;
+}
+
 // syscall.py ql_syscall_thread_destroy: the (-1, -1, status) request
 // terminates the process with the status as the exit code
 std::optional<std::int64_t> syscall_thread_destroy(Qiling& ql, const std::vector<std::uint64_t>& params) {
@@ -140,6 +179,10 @@ void register_qnx_syscalls() {
     registry.register_syscall({"clock_time", {PARAM_INTN, PARAM_PTRX, PARAM_PTRX}, syscall_clock_time});
     registry.register_syscall({"sys_cpupage_get", {PARAM_INTN}, syscall_sys_cpupage_get});
     registry.register_syscall({"sys_cpupage_set", {PARAM_INTN, PARAM_INTN}, syscall_sys_cpupage_set});
+    registry.register_syscall({"connect_attach",
+                               {PARAM_INTN, PARAM_INTN, PARAM_INTN, PARAM_INTN, PARAM_INTN},
+                               syscall_connect_attach});
+    registry.register_syscall({"connect_detach", {PARAM_INTN}, syscall_connect_detach});
     registry.register_syscall({"thread_destroy", {PARAM_INTN, PARAM_INTN, PARAM_INTN},
                                syscall_thread_destroy});
 }

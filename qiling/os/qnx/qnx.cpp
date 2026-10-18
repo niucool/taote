@@ -29,6 +29,21 @@ QlOsQnx::QlOsQnx(Qiling* ql) : QlOsPosix(ql) {
 
     register_qnx_syscalls();
     load();
+
+    // qnx.py __init__: the std streams and the sysmgr occupy the well-known
+    // coids (0/1/2 carry the fds, SYSMGR_COID rides bare)
+    connections_.emplace(0, QnxConn(SYSMGR_PID, SYSMGR_CHID, 0));
+    connections_.emplace(1, QnxConn(SYSMGR_PID, SYSMGR_CHID, 1));
+    connections_.emplace(2, QnxConn(SYSMGR_PID, SYSMGR_CHID, 2));
+    connections_.emplace(SYSMGR_COID, QnxConn(SYSMGR_PID, SYSMGR_CHID));
+}
+
+std::uint32_t QlOsQnx::alloc_connection_id(bool side_channel, std::uint32_t pid, std::uint32_t chid) {
+    // qnx.py ql_syscall_connect_attach: the side-channel index draws from the
+    // high counter, the plain index from the low one
+    const auto coid = side_channel ? connection_id_hi_++ : connection_id_lo_++;
+    connections_.emplace(static_cast<std::uint32_t>(coid), QnxConn(pid, chid));
+    return static_cast<std::uint32_t>(coid);
 }
 
 void QlOsQnx::load() {

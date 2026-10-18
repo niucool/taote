@@ -11,6 +11,7 @@
 #include <fstream>
 
 #include "qiling/core.hpp"
+#include "qiling/os/qnx/const.hpp"
 #include "qiling/os/qnx/qnx.hpp"
 
 using namespace qiling;
@@ -233,6 +234,60 @@ TEST(QnxOs, SysCpupageSetGetRoundtripsPls) {
     EXPECT_EQ(ql.mem().read_ptr(kCpupageRet, 4), 0xAB0000u);
     // index 2: the syspage address the prelude mapped
     EXPECT_EQ(ql.mem().read_ptr(kCpupageRet2, 4), 0xfc404000u);
+}
+
+// the connect_attach/connect_detach flow: attaching to the sysmgr channel
+// with the side-channel index hands out the first high connection id
+// (NTO_SIDE_CHANNEL + 1, seeded in the ctor); the detach closes it and
+// returns EOK
+constexpr std::uint64_t kConnectRet = 0x2100;
+constexpr std::uint64_t kConnectRet2 = 0x2104;
+
+//   00: mov r0, #0        ; nd = ND_LOCAL_NODE
+//   04: mov r1, #1        ; pid = SYSMGR_PID
+//   08: mov r2, #1        ; chid = SYSMGR_CHID
+//   0C: mov r3, #0x40000000 ; index (the side channel)
+//   10: mov r4, #1        ; flags = _NTO_COF_CLOEXEC
+//   14: mov r12, #39      ; connect_attach
+//   18: swi 0
+//   1C: mov r4, #0x2100   ; the scratch cell
+//   20: str r0, [r4]
+//   24: mov r12, #40      ; connect_detach (coid still in r0)
+//   28: swi 0
+//   2C: str r0, [r4, #4]
+//   30: mvn r0, #0 ; 34: mvn r1, #0 ; 38: mov r2, #42
+//   3C: mov r12, #47 ; 40: swi 0
+TEST(QnxOs, ConnectAttachHandsSideChannelCoidThenDetach) {
+    const std::vector<std::uint8_t> code = {
+        0x00, 0x00, 0xA0, 0xE3,  // 00: mov r0, #0
+        0x01, 0x10, 0xA0, 0xE3,  // 04: mov r1, #1
+        0x01, 0x20, 0xA0, 0xE3,  // 08: mov r2, #1
+        0x40, 0x34, 0xA0, 0xE3,  // 0C: mov r3, #0x40000000
+        0x01, 0x40, 0xA0, 0xE3,  // 10: mov r4, #1
+        0x27, 0xC0, 0xA0, 0xE3,  // 14: mov r12, #39
+        0x00, 0x00, 0x00, 0xEF,  // 18: swi 0
+        0x21, 0x4C, 0xA0, 0xE3,  // 1C: mov r4, #0x2100
+        0x00, 0x00, 0x84, 0xE5,  // 20: str r0, [r4]
+        0x28, 0xC0, 0xA0, 0xE3,  // 24: mov r12, #40
+        0x00, 0x00, 0x00, 0xEF,  // 28: swi 0
+        0x04, 0x00, 0x84, 0xE5,  // 2C: str r0, [r4, #4]
+        0x00, 0x00, 0xE0, 0xE3,  // 30: mvn r0, #0
+        0x00, 0x10, 0xE0, 0xE3,  // 34: mvn r1, #0
+        0x2A, 0x20, 0xA0, 0xE3,  // 38: mov r2, #42
+        0x2F, 0xC0, 0xA0, 0xE3,  // 3C: mov r12, #47
+        0x00, 0x00, 0x00, 0xEF,  // 40: swi 0
+    };
+    auto ql = make_qnx_qiling(code);
+
+    ql.mem().map(kScratch, 0x1000, UC_PROT_ALL, "[qnx-scratch]");
+
+    ql.run();
+
+    EXPECT_EQ(ql.os().exit_code(), 42);
+    // the first side-channel coid (the hi counter seeds at NTO_SIDE_CHANNEL+1)
+    EXPECT_EQ(ql.mem().read_ptr(kConnectRet, 4), os::qnx::NTO_SIDE_CHANNEL + 1u);
+    // the detach returns EOK
+    EXPECT_EQ(ql.mem().read_ptr(kConnectRet2, 4), 0u);
 }
 
 // the clock_cycles flow: the kernel returns the core's free-running counter
