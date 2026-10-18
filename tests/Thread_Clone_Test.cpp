@@ -287,6 +287,56 @@ TEST(ThreadClone, DISABLED_BisectRawEngineInterleave) {
     r9_child_ctx = nullptr;
 }
 
+
+// ---- the (b9) standalone-harness bisect: the P19 harness (a fresh uc_open
+// + the hand mappings) running the PORT'S OWN join blob. If the misfire
+// reproduces here, the trigger is the blob shape itself (the taken-entry
+// into the 11-byte store) — a raw-unicorn behavior the port must handle;
+// if it stays clean, the delta is in the port's engine state (the loader's
+// mappings/permissions) — bisect the mapping details next.
+static void r9b_body(uc_engine* uc) {
+    // slice1: the parent's setup + the clone
+    const std::uint64_t rsp = 0x1203000;
+    uc_reg_write(uc, UC_X86_REG_RSP, &rsp);
+    uc_emu_start(uc, 0x11ff000, 0xffffffffffffffffull, 0, 32337);
+    // slice2: the parent's resume — the not-taken loop, the futex park
+    const std::uint64_t parent_rax2 = 2001;
+    uc_reg_write(uc, UC_X86_REG_RAX, &parent_rax2);
+    uc_emu_start(uc, 0x11ff023, 0xffffffffffffffffull, 0, 32337);
+    // slice3: the child — the cached TB at 0x23, the taken jz, the store
+    r9_count = 0;
+    uc_context_restore(uc, r9_child_ctx);
+    const uc_err err = uc_emu_start(uc, 0x11ff023, 0xffffffffffffffffull, 0, 32337);
+    std::uint64_t pc = 0;
+    uc_reg_read(uc, UC_X86_REG_RIP, &pc);
+    std::fprintf(stderr, "[r9b-end] err=%s pc=0x%llx\n", uc_strerror(err), static_cast<unsigned long long>(pc));
+    std::vector<std::uint8_t> got(4, 0);
+    uc_mem_read(uc, 0x1002000, got.data(), 4);
+    std::fprintf(stderr, "[r9b-store] %u\n", static_cast<unsigned>(got[0]));
+    uc_context_free(r9_child_ctx);
+    r9_child_ctx = nullptr;
+}
+
+TEST(ThreadClone, DISABLED_BisectStandaloneHarnessPortBlob) {
+    uc_engine* uc = nullptr;
+    ASSERT_EQ(uc_open(UC_ARCH_X86, UC_MODE_64, &uc), UC_ERR_OK);
+    uc_mem_map(uc, 0x11ff000, 0x1000, UC_PROT_ALL);
+    uc_mem_write(uc, 0x11ff000, join_body().data(), join_body().size());
+    uc_mem_map(uc, 0x1002000, 0x1000, UC_PROT_ALL);
+    const std::uint32_t sentinel = 0xdeadbeef;
+    uc_mem_write(uc, 0x1002000, &sentinel, sizeof(sentinel));
+    uc_mem_map(uc, 0x1202000, 0x2000, UC_PROT_ALL);
+
+    uc_hook insn_hook = 0;
+    uc_hook code_hook = 0;
+    uc_hook_add(uc, &insn_hook, UC_HOOK_INSN, reinterpret_cast<void*>(r9_insn_cb), nullptr, 1, 0,
+                UC_X86_INS_SYSCALL);
+    uc_hook_add(uc, &code_hook, UC_HOOK_CODE, reinterpret_cast<void*>(r9_code_cb), nullptr, 1, 0);
+
+    r9b_body(uc);
+    uc_close(uc);
+}
+
 // the clone without CLONE_VM (the fork path) is not implemented on this host
 TEST(ThreadClone, ForkPathSurfacesNotImplemented) {
     const auto rootfs = std::filesystem::temp_directory_path() / "ql_clone_rootfs";
