@@ -29,6 +29,8 @@ add_library(qiling STATIC
     os/posix/posix.cpp
     os/linux/procfs.cpp
     os/linux/linux.cpp
+    os/linux/thread.cpp
+    os/linux/futex.cpp
     os/posix/kernel_api.cpp
     os/posix/const_mapping.cpp
     os/posix/syscall.cpp
