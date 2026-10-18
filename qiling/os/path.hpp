@@ -34,6 +34,14 @@ public:
     // virtual_abspath — absolute virtual path (cwd-rebased, parent-ref stripped)
     std::string virtual_abspath(std::string_view virtpath) const;
 
+    // virtual_abspath_at (unistd.py virtual_abspath_at): the same rebase off
+    // an explicit base directory (the dirfd-based resolution) — absolute
+    // virtual paths survive as-is
+    std::string virtual_abspath_from(std::string_view base_dir, std::string_view virtpath) const;
+
+    // path.py cwd setter (the chdir ride)
+    void set_cwd(std::string cwd) { cwd_ = std::move(cwd); }
+
     // virtual_to_host_path — the host path (rootfs-rebased, symlinks resolved)
     std::string virtual_to_host_path(std::string_view virtpath) const;
 

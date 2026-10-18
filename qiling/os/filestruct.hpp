@@ -81,6 +81,13 @@ public:
     // accessors ride the mman family's flush-on-unmap flow
     void set_map_shared(bool shared) { is_map_shared_ = shared; }
     void set_mapped_offset(std::int64_t off) { mapped_offset_ = off; }
+
+    // the getdents scan gate: the upstream gates on the dir fd's tell()
+    // (the seek-to-END marks the scan done); the _WIN32 host cannot seek a
+    // directory FILE*, so the port tracks the scan with this flag alongside
+    // the verbatim seek
+    void set_dir_scan_done(bool done) { dir_scan_done_ = done; }
+    bool dir_scan_done() const { return dir_scan_done_; }
     bool is_map_shared() const { return is_map_shared_; }
     std::int64_t mapped_offset() const { return mapped_offset_; }
 
@@ -93,6 +100,7 @@ private:
     // informational fields for syscall mmap (filestruct.py)
     bool is_map_shared_ = false;
     std::int64_t mapped_offset_ = -1;
+    bool dir_scan_done_ = false;
 
     // the host open flags (fcntl.py F_GETFL: the real host-side flags)
     int open_flags_ = 0;

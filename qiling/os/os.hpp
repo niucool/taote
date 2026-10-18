@@ -148,6 +148,9 @@ public:
     QlFsMapper* fs_mapper() const noexcept { return fs_mapper_.get(); }
     const QlOsPath* path() const noexcept { return path_.get(); }
 
+    // the chdir ride: the cwd mutation rides the same QlOsPath instance
+    QlOsPath* path_mut() noexcept { return path_.get(); }
+
     // core.py add_fs_mapper/remove_fs_mapper (the Qiling delegation targets)
     void map_fs_path(std::string_view ql_path, QlFsBinding binding) {
         if (fs_mapper_ == nullptr) {

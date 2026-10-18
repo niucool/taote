@@ -868,6 +868,24 @@ the first pass put it in rdi/addr and the unaligned-base EINVAL masked the
 dispatch), and the flush-on-unmap verbatim pads the host file with NULs to
 the munmap length (the upstream reads the full length and writes it back).
 
+## Phase 10 - the directory-read surface (the unistd access/readlink/chdir/
+getcwd/getdents slice)
+
+| piece | upstream | state | notes |
+|---|---|---|---|
+| access/getcwd/chdir | `unistd.py` | ✅ | access (the safe-host-path PermissionError propagation + the exists check → 0/-ENOENT); getcwd (the cwd+NUL write, the return = len+1 — the bufsize argument ignored verbatim); chdir (the isdir gate → the QlOsPath::set_cwd ride / -ENOENT) — the QlOs gained `path_mut()` and the QlOsPath the `set_cwd` setter |
+| readlink/readlinkat | `unistd.py __do_readlink` | ✅ | the procfs pseudo files (/proc/self/exe → host_to_virtual_path — raising for a program outside rootfs verbatim; /proc/self/cwd; /proc/self/root) and the FIXME branch verbatim: an existing real path reads as the EMPTY target (0, nothing written); readlinkat rides the `virtual_abspath_at` shape (the as-signed dirfd, the AT_FDCWD → cwd, the real-dirfd → host_to_virtual_path, the -ENOTDIR check) via the new `QlOsPath::virtual_abspath_from(base, vpath)` |
+| getdents/getdents64 | `unistd.py __getdents_common` | ✅ | the tell()==0 gate (the _WIN32 dir FILE* cannot seek — a `dir_scan_done` flag rides alongside the verbatim seek-to-END); the '.'/'..' chain first then the scandir results; the d_ino-alignment reclen math verbatim; the getdents64 layout (the d_type before d_name) vs the legacy linux_dirent (the d_type in the record's last byte, the pad between d_name and d_type); the second call answers 0 |
+| the fixtures | `tests/Posix_Test.cpp` | ✅ 3 green | the getdents64 walk ('.', '..', the two files, the second call 0 — the dir fd pre-seeded as a synthetic QlFile since the _WIN32 CRT cannot open a directory); the chdir/getcwd ride (+ the -ENOENT miss); the readlink pseudo-file + the existing-path empty target |
+
+Findings: the incremental field-walk into guest memory kept tripping the
+fixture until the record composition moved to a local buffer with one
+write (the per-field pointer table dangled through the vector reallocs);
+the getdents64 syscall id gotcha re-pinned (217 = 0xD9 — the first blob
+encoded 0xDD and the stale rax masked the miss); the \b escape in a python
+heredoc mangles exactly as pinned before — the edit tool with the on-disk
+bytes is the only reliable repair.
+
 ## Deferred (tracked, not built)
 
 `os/macos/` (the remaining surface: the syscall handlers, the kernel_api

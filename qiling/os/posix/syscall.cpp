@@ -3,6 +3,8 @@
 #include "qiling/os/posix/mman.hpp"
 
 #include <algorithm>
+#include <filesystem>
+#include <system_error>
 
 #include "qiling/os/posix/posix.hpp"
 #include "qiling/os/posix/const_mapping.hpp"
@@ -682,6 +684,251 @@ std::optional<std::int64_t> syscall_flock(Qiling&, const std::vector<std::uint64
     return 0;
 }
 
+// ---- the directory-read surface (unistd.py: access/readlink/chdir/getcwd/
+// getdents) ----
+
+// unistd.py ql_syscall_access: the exists check over the safe host path
+std::optional<std::int64_t> syscall_access(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    const auto vpath = read_cstring(ql, params[0]);
+    const auto hpath = ql.os().path()->virtual_to_host_path(vpath);
+
+    if (!ql.os().path()->is_safe_host_path(hpath)) {
+        throw QlErrorBase("unsafe path: " + hpath);
+    }
+
+    return std::filesystem::exists(hpath) ? 0 : -2;  // -ENOENT
+}
+
+// unistd.py ql_syscall_getcwd: the cwd bytes + the NUL; the length rides the
+// return (the path_buffsize argument is ignored verbatim)
+std::optional<std::int64_t> syscall_getcwd(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    const auto cwd = ql.os().path()->cwd();
+    std::vector<std::uint8_t> bytes(cwd.begin(), cwd.end());
+    bytes.push_back(0);
+    ql.mem().write(params[0], bytes);
+    return static_cast<std::int64_t>(bytes.size());
+}
+
+// unistd.py ql_syscall_chdir: the safe host path must be a directory; the
+// cwd lands as the virtual absolute path
+std::optional<std::int64_t> syscall_chdir(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    const auto vpath = read_cstring(ql, params[0]);
+    const auto hpath = ql.os().path()->virtual_to_host_path(vpath);
+
+    if (!ql.os().path()->is_safe_host_path(hpath)) {
+        throw QlErrorBase("unsafe path: " + hpath);
+    }
+
+    const auto absvpath = ql.os().path()->virtual_abspath(vpath);
+
+    std::error_code ec;
+    if (std::filesystem::is_directory(hpath, ec)) {
+        ql.os().path_mut()->set_cwd(absvpath);
+        return 0;
+    }
+    return -2;  // -ENOENT
+}
+
+// unistd.py __do_readlink: the procfs pseudo files resolve first; the real
+// paths answer "we do not really know how to emulated links" — an existing
+// path reads as the empty target (the FIXME verbatim)
+std::int64_t do_readlink(Qiling& ql, const std::string& absvpath, std::uint64_t outbuf) {
+    std::optional<std::string> target;
+
+    if (absvpath == "/proc/self/exe") {
+        // raises when the binary is not under rootfs (the upstream note)
+        target = ql.os().path()->host_to_virtual_path(ql.path());
+    } else if (absvpath == "/proc/self/cwd") {
+        target = ql.os().path()->cwd();
+    } else if (absvpath == "/proc/self/root") {
+        target = ql.os().path()->root();
+    } else {
+        const auto hpath = ql.os().path()->virtual_to_host_path(absvpath);
+        if (!ql.os().path()->is_safe_host_path(hpath)) {
+            throw QlErrorBase("unsafe path: " + hpath);
+        }
+        if (std::filesystem::exists(hpath)) {
+            target = "";
+        }
+    }
+
+    if (!target.has_value()) {
+        return -2;  // -ENOENT
+    }
+
+    if (!target->empty()) {
+        std::vector<std::uint8_t> bytes(target->begin(), target->end());
+        bytes.push_back(0);
+        ql.mem().write(outbuf, bytes);
+    }
+    return static_cast<std::int64_t>(target->size());
+}
+
+std::optional<std::int64_t> syscall_readlink(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    const auto vpath = read_cstring(ql, params[0]);
+    const auto absvpath = ql.os().path()->virtual_abspath(vpath);
+    return do_readlink(ql, absvpath, params[1]);
+}
+
+// unistd.py virtual_abspath_at: the dirfd resolution — the absolute virtual
+// paths survive as-is; AT_FDCWD rides the cwd; the real dirfds ride the
+// opened fd's host name mapped back to virtual
+std::optional<std::int64_t> syscall_readlinkat(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    const auto vpath = read_cstring(ql, params[1]);
+
+    std::string absvpath;
+    if (ql.os().path()->is_virtual_abspath(vpath)) {
+        absvpath = vpath;
+    } else {
+        // the as_signed walk (the 32-bit workaround verbatim)
+        const auto dirfd = static_cast<std::int32_t>(params[0] & 0xffffffffu);
+        if (dirfd == -100) {  // AT_FDCWD
+            absvpath = ql.os().path()->virtual_abspath_from(ql.os().path()->cwd(), vpath);
+        } else {
+            auto* f = dynamic_cast<QlFile*>(fd_get(ql, dirfd).get());
+            if (f == nullptr) {
+                return -9;  // -EBADF
+            }
+            std::error_code ec;
+            if (!std::filesystem::is_directory(f->name(), ec)) {
+                return -20;  // -ENOTDIR
+            }
+            absvpath = ql.os().path()->virtual_abspath_from(ql.os().path()->host_to_virtual_path(f->name()), vpath);
+        }
+    }
+
+    return do_readlink(ql, absvpath, params[2]);
+}
+
+// unistd.py __getdents_common: the buffer walk (the tell()==0 gate — the
+// second call answers 0; the '.'/'..' chain first; the alignment math and
+// the getdents/getdents64 layout split verbatim)
+std::int64_t getdents_common(Qiling& ql, std::int64_t fd, std::uint64_t dirp, std::uint64_t count, bool is_64) {
+    (void)count;
+
+    auto* f = dynamic_cast<QlFile*>(fd_get(ql, fd).get());
+    if (f == nullptr) {
+        return -9;  // -EBADF
+    }
+    if (f->tell() != 0 || f->dir_scan_done()) {
+        // the seek past the scan marks the end-of-file for the dir fd (the
+        // _WIN32 dir FILE* cannot seek, so the scan-done flag rides along)
+        return 0;
+    }
+
+    const auto n = is_64 ? 8 : ql.arch().pointersize();
+
+    // the type map (the methods_constants_d verbatim)
+    const auto type_of = [](const std::filesystem::directory_entry& ent) -> std::uint8_t {
+        std::error_code ec;
+        if (ent.is_directory(ec)) return 0x4;
+        if (ent.is_regular_file(ec)) return 0x8;
+        if (ent.is_symlink(ec)) return 0xa;
+        if (ent.is_block_file(ec)) return 0x6;
+        if (ent.is_character_file(ec)) return 0x2;
+        if (ent.is_fifo(ec)) return 0x1;
+        if (ent.is_socket(ec)) return 0xc;
+        return 0x0;  // DT_UNKNOWN
+    };
+
+    const auto pack = [&](std::uint64_t v, std::uint32_t width) {
+        std::vector<std::uint8_t> out(width, 0);
+        for (std::uint32_t i = 0; i < width; ++i) {
+            out[i] = static_cast<std::uint8_t>((v >> (8 * i)) & 0xff);
+        }
+        return out;
+    };
+
+    std::uint64_t p = dirp;
+    std::int64_t total_size = 0;
+
+    // emit one record at the running cursor: the fields write immediately
+    // (the upstream walks the fields list the same way)
+
+    // the '.'/'..' chain rides ahead of the scandir results (the itertools
+    // chain verbatim; the inodes ride stat())
+    std::vector<std::pair<std::string, std::uint64_t>> predefs;
+    {
+        const auto base = std::filesystem::path(f->name());
+        for (const char* name : {".", ".."}) {
+            QlFileStat info{};
+            int host_errno = 0;
+            host_stat_path(base / name, /*follow_symlinks=*/true, info, &host_errno);
+            predefs.emplace_back(name, info.ino);
+        }
+    }
+
+    auto emit = [&](const std::string& name, std::uint64_t d_ino, std::uint8_t d_type) {
+        const std::string d_name = name + std::string(1, '\0');
+        // the kernel rounds each record up to the d_ino alignment (the
+        // ALIGN(reclen, sizeof(long)) comment verbatim)
+        const std::uint64_t unaligned_reclen = n + n + 2 + d_name.size() + 1;
+        const std::uint64_t d_reclen = (unaligned_reclen + (n - 1)) & ~(n - 1);
+
+        // compose the whole record, then one write (the incremental-field
+        // walk kept tripping on the mem-write re-entrancy)
+        std::vector<std::uint8_t> rec;
+        rec.reserve(static_cast<std::size_t>(d_reclen));
+        const auto put = [&](const std::vector<std::uint8_t>& b) {
+            rec.insert(rec.end(), b.begin(), b.end());
+        };
+
+        if (is_64) {
+            // getdents64: the d_type rides BEFORE d_name, so the trailing
+            // pad bytes are inert
+            put(pack(d_ino, static_cast<std::uint32_t>(n)));
+            put(pack(0, static_cast<std::uint32_t>(n)));  // d_off = 0
+            put(pack(d_reclen, 2));
+            put({d_type});
+            put(std::vector<std::uint8_t>(d_name.begin(), d_name.end()));
+            rec.resize(d_reclen, 0);
+        } else {
+            // legacy linux_dirent: the d_type rides the record's LAST byte,
+            // so the alignment padding goes between d_name and d_type
+            const std::uint64_t pad = d_reclen - unaligned_reclen;
+            put(pack(d_ino, static_cast<std::uint32_t>(n)));
+            put(pack(0, static_cast<std::uint32_t>(n)));
+            put(pack(d_reclen, 2));
+            put(std::vector<std::uint8_t>(d_name.begin(), d_name.end()));
+            put(std::vector<std::uint8_t>(pad, 0));
+            put({d_type});
+        }
+
+        ql.mem().write(p, rec);
+        total_size += static_cast<std::int64_t>(d_reclen);
+        p += d_reclen;
+    };
+
+    for (const auto& [name, ino] : predefs) {
+        emit(name, ino, 0x4);  // the directories map DT_DIR
+    }
+
+    std::error_code scan_ec;
+    std::filesystem::directory_iterator it(f->name(), scan_ec);
+    if (!scan_ec) {
+        for (const auto& ent : it) {
+            QlFileStat info{};
+            int host_errno = 0;
+            host_stat_path(ent.path(), /*follow_symlinks=*/true, info, &host_errno);
+            emit(ent.path().filename().string(), info.ino, type_of(ent));
+        }
+    }
+
+    // mark as end of file for dir_fd (the verbatim seek)
+    f->lseek(0, 2 /* SEEK_END */);
+    f->set_dir_scan_done(true);
+
+    return total_size;
+}
+
+std::optional<std::int64_t> syscall_getdents(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    return getdents_common(ql, static_cast<std::int64_t>(params[0]), params[1], params[2], /*is_64=*/false);
+}
+
+std::optional<std::int64_t> syscall_getdents64(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    return getdents_common(ql, static_cast<std::int64_t>(params[0]), params[1], params[2], /*is_64=*/true);
+}
+
 // ---- the futex dispatch (os/posix/syscall/futex.py) ----
 
 // futex.py ql_syscall_futex: the FUTEX_* op constants (the PRIVATE_FLAG
@@ -1030,6 +1277,15 @@ void register_builtin_syscalls() {
     registry.register_syscall({"fcntl", {PARAM_INTN, PARAM_INTN, PARAM_INTN}, syscall_fcntl});
     registry.register_syscall({"fcntl64", {PARAM_INTN, PARAM_INTN, PARAM_INTN}, syscall_fcntl64});
     registry.register_syscall({"flock", {PARAM_INTN, PARAM_INTN}, syscall_flock});
+    // the directory-read surface (unistd.py: access/readlink/readlinkat/
+    // chdir/getcwd/getdents/getdents64)
+    registry.register_syscall({"access", {PARAM_PTRX, PARAM_INTN}, syscall_access});
+    registry.register_syscall({"getcwd", {PARAM_PTRX, PARAM_INTN}, syscall_getcwd});
+    registry.register_syscall({"chdir", {PARAM_PTRX}, syscall_chdir});
+    registry.register_syscall({"readlink", {PARAM_PTRX, PARAM_PTRX, PARAM_INTN}, syscall_readlink});
+    registry.register_syscall({"readlinkat", {PARAM_INTN, PARAM_PTRX, PARAM_PTRX, PARAM_INTN}, syscall_readlinkat});
+    registry.register_syscall({"getdents", {PARAM_INTN, PARAM_PTRX, PARAM_INTN}, syscall_getdents});
+    registry.register_syscall({"getdents64", {PARAM_INTN, PARAM_PTRX, PARAM_INTN}, syscall_getdents64});
     // mman.py: the mmap family (the shared impl; the x86 tables map
     // old_mmap at 90 / mmap2 at 192, the x8664 maps mmap at 9)
     registry.register_syscall({"mmap", {PARAM_PTRX, PARAM_INTN, PARAM_INTN, PARAM_INTN, PARAM_INTN, PARAM_INTN}, syscall_mmap});

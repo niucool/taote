@@ -268,7 +268,10 @@ bool host_statat(const std::filesystem::path& host_path, int host_dirfd, bool fo
 
 std::uint64_t QlFile::lseek(std::uint64_t lseek_offset, int lseek_origin) {
     if (file_ == nullptr) {
-        throw QlErrorBase("lseek on a closed file");
+        // the dir-fd case (the getdents fd): the scan gate rides the
+        // dir_scan_done flag instead of the file cursor; the no-op seek
+        // mirrors the upstream's seek-to-END on the dir fd
+        return 0;
     }
     if (QL_FSEEK(file_, static_cast<std::int64_t>(lseek_offset), lseek_origin) != 0) {
         throw QlErrorBase("lseek failed");

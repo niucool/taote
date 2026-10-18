@@ -173,6 +173,33 @@ std::string QlOsPath::virtual_abspath(std::string_view virtpath) const {
     return cwd_anchor + join_parts(parts);
 }
 
+// unistd.py virtual_abspath_at: the same walk rebasing on an explicit base
+// directory instead of the cwd (the dirfd-based resolution)
+std::string QlOsPath::virtual_abspath_from(std::string_view base_dir, std::string_view virtpath) const {
+    std::string anchor;
+    std::string body;
+    split_virtual(virtpath, anchor, body);
+
+    if (!anchor.empty()) {
+        return virtual_abspath(virtpath);
+    }
+
+    std::string base_anchor;
+    std::string base_body;
+    split_virtual(base_dir, base_anchor, base_body);
+
+    auto parts = path_parts(base_body, virtual_is_nt());
+    for (const auto& part : path_parts(body, virtual_is_nt())) {
+        parts.push_back(part);
+    }
+
+    while (!parts.empty() && parts.front() == "..") {
+        parts.erase(parts.begin());
+    }
+
+    return base_anchor + join_parts(parts);
+}
+
 std::string QlOsPath::virtual_to_host_path(std::string_view virtpath) const {
     // __virtual_resolve: expand ".." against the accumulated host path and
     // follow virtual symlinks (a symlink target that escapes rootfs is an

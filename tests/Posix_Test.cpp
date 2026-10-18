@@ -12,6 +12,7 @@
 #include "qiling/exception.hpp"
 #include "qiling/arch/x86.hpp"
 #include "qiling/os/posix/posix.hpp"
+#include "qiling/os/filestruct.hpp"
 #include "qiling/os/posix/syscall/abi.hpp"
 #include "qiling/os/linux/linux.hpp"
 
@@ -19,6 +20,7 @@ using namespace qiling;
 
 #define NL "\n"
 
+#include <cstdio>
 #include <iostream>
 
 namespace {
@@ -871,6 +873,173 @@ TEST(PosixSyscall, WriteThenExitThroughSyscallInstruction) {
 
     // exit_group(42) landed: the os exit code carries the guest value
     EXPECT_EQ(ql.os().exit_code(), 42);
+}
+
+// ---- the directory-read surface (unistd.py: getdents64/getcwd/chdir/
+// readlink) ----
+
+// getdents64 over an opened directory: '.'/'..' first, then the scan results,
+// the reclen alignment (the d_ino alignment round-up verbatim), the d_type
+// ahead of d_name; the second call answers 0 (the tell gate)
+TEST(PosixDir, Getdents64WalksDotDotDotThenEntries) {
+    const std::vector<std::uint8_t> code = {
+        // the dir fd (3) is pre-seeded in the fixture (the _WIN32 host
+        // cannot _open a directory); rdi = 3
+        0x48, 0xC7, 0xC7, 0x03, 0x00, 0x00, 0x00,  // mov rdi, 3
+        // getdents64(3, 0x1002100, 0x400)
+        0x48, 0xC7, 0xC0, 0xD9, 0x00, 0x00, 0x00,  // mov rax, 217 (getdents64)
+        0x48, 0xC7, 0xC6, 0x00, 0x21, 0x00, 0x01,  // mov rsi, 0x1002100
+        0x48, 0xC7, 0xC2, 0x00, 0x04, 0x00, 0x00,  // mov rdx, 0x400
+        0x0F, 0x05,                                 // syscall
+        0x48, 0x89, 0x04, 0x25, 0x08, 0x22, 0x00, 0x01,  // mov [0x1002208], rax
+        // the second call: 0 (the scan-done gate)
+        0x48, 0xC7, 0xC0, 0xD9, 0x00, 0x00, 0x00,
+        0x48, 0xC7, 0xC7, 0x03, 0x00, 0x00, 0x00,  // mov rdi, 3
+        0x48, 0xC7, 0xC6, 0x00, 0x21, 0x00, 0x01,
+        0x48, 0xC7, 0xC2, 0x00, 0x04, 0x00, 0x00,
+        0x0F, 0x05,
+        0x48, 0x89, 0x04, 0x25, 0x10, 0x22, 0x00, 0x01,  // mov [0x1002210], rax
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00,  // mov rax, 60
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00,  // mov rdi, 0
+        0x0F, 0x05,
+    };
+
+    QilingOptions options = posix_options(code);
+    Qiling ql(options);
+
+    const auto dir = ensure_rootfs() / "somedir";
+    std::filesystem::create_directories(dir);
+    { std::ofstream f(dir / "alpha.txt"); f << "a"; }
+    { std::ofstream f(dir / "beta.bin"); f << "b"; }
+    ql.mem().write(0x1002000, std::vector<std::uint8_t>{'/', 's', 'o', 'm', 'e', 'd', 'i', 'r', 0});
+
+    // the _WIN32 host cannot _open a directory, so the dir fd rides the fd
+    // table directly (the synthetic QlFile carrying the dir path — the scan
+    // reads only the name; the null-file tell/lseek are no-ops gated on the
+    // scan-done flag)
+    auto dir_file = std::make_shared<QlFile>(dir.string(), static_cast<std::FILE*>(nullptr), false);
+    dir_file->set_dir_scan_done(false);
+    ql.os<qiling::os::posix::QlOsPosix>().fd().set(3, dir_file);
+
+    ql.run();
+
+    EXPECT_EQ(ql.os().exit_code(), 0);
+    const auto first = ql.mem().read_ptr(0x1002208, 8);
+    EXPECT_GT(first, 0u);
+    EXPECT_EQ(ql.mem().read_ptr(0x1002210, 8), 0u);  // the second call: 0
+
+    // walk the returned records: '.', '..', then the files
+    std::vector<std::string> names;
+    const auto blob = ql.mem().read(0x1002100, first);
+    std::uint64_t p = 0;
+    while (p < blob.size()) {
+        const std::uint64_t ino = *reinterpret_cast<const std::uint64_t*>(blob.data() + p);
+        const std::uint16_t reclen = *reinterpret_cast<const std::uint16_t*>(blob.data() + p + 16);
+        ASSERT_GT(reclen, 0u);
+        // the d_type rides at reclen-3, the name at reclen-3-type.. — the
+        // getdents64 layout: ino(8) off(8) reclen(2) type(1) name
+        names.emplace_back(reinterpret_cast<const char*>(blob.data() + p + 19));
+        p += reclen;
+    }
+    ASSERT_GE(names.size(), 4u);
+    EXPECT_EQ(names[0], ".");
+    EXPECT_EQ(names[1], "..");
+    EXPECT_EQ(names[2], "alpha.txt");
+    EXPECT_EQ(names[3], "beta.bin");
+}
+
+// the getcwd/chdir ride: chdir into an existing dir answers 0 and flips the
+// cwd; a missing dir answers -ENOENT and keeps the cwd
+TEST(PosixDir, ChdirFlipsCwdAndGetcwdCarriesIt) {
+    const std::vector<std::uint8_t> code = {
+        // chdir("/somedir")
+        0x48, 0xC7, 0xC0, 0x50, 0x00, 0x00, 0x00,  // mov rax, 80 (chdir)
+        0x48, 0xC7, 0xC7, 0x00, 0x20, 0x00, 0x01,  // mov rdi, 0x1002000
+        0x0F, 0x05,
+        0x48, 0x89, 0x04, 0x25, 0x08, 0x22, 0x00, 0x01,  // mov [0x1002208], rax
+        // getcwd(0x1002300, 128)
+        0x48, 0xC7, 0xC0, 0x4F, 0x00, 0x00, 0x00,  // mov rax, 79 (getcwd)
+        0x48, 0xC7, 0xC7, 0x00, 0x23, 0x00, 0x01,  // mov rdi, 0x1002300
+        0x48, 0xC7, 0xC6, 0x80, 0x00, 0x00, 0x00,  // mov rsi, 128
+        0x0F, 0x05,
+        0x48, 0x89, 0x04, 0x25, 0x10, 0x22, 0x00, 0x01,  // mov [0x1002210], rax
+        // chdir("/no-such-dir") — -ENOENT
+        0x48, 0xC7, 0xC0, 0x50, 0x00, 0x00, 0x00,
+        0x48, 0xC7, 0xC7, 0x90, 0x20, 0x00, 0x01,  // mov rdi, 0x1002090
+        0x0F, 0x05,
+        0x48, 0x89, 0x04, 0x25, 0x18, 0x22, 0x00, 0x01,  // mov [0x1002218], rax
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00,
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00,
+        0x0F, 0x05,
+    };
+
+    QilingOptions options = posix_options(code);
+    Qiling ql(options);
+
+    std::filesystem::create_directories(ensure_rootfs() / "somedir");
+    ql.mem().write(0x1002000, std::vector<std::uint8_t>{'/', 's', 'o', 'm', 'e', 'd', 'i', 'r', 0});
+    ql.mem().write(0x1002090, std::vector<std::uint8_t>{'/', 'n', 'o', '-', 's', 'u', 'c', 'h', '-', 'd', 'i', 'r', 0});
+
+    ql.run();
+
+    EXPECT_EQ(ql.os().exit_code(), 0);
+    EXPECT_EQ(ql.mem().read_ptr(0x1002208, 8), 0u);   // the chdir ok
+    // the getcwd return = len(cwd)+1; the buffer carries the virtual cwd
+    const auto got_len = ql.mem().read_ptr(0x1002210, 8);
+    const auto cwd_cell = ql.mem().read(0x1002300, got_len);
+    EXPECT_EQ(std::string(cwd_cell.begin(), cwd_cell.end() - 1), "/somedir");
+    EXPECT_EQ(cwd_cell[got_len - 1], 0u);
+    EXPECT_EQ(ql.mem().read_ptr(0x1002218, 8), 0xFFFFFFFFFFFFFFFEull);  // -ENOENT
+}
+
+// readlink("/proc/self/cwd") rides the pseudo-file branch (the cwd read);
+// the real paths answer the FIXME branch: an existing file reads as the
+// empty target (0) — the upstream does not emulate links
+TEST(PosixDir, ReadlinkPseudoFilesAndExistingPaths) {
+    const std::vector<std::uint8_t> code = {
+        // chdir("/somedir")
+        0x48, 0xC7, 0xC0, 0x50, 0x00, 0x00, 0x00,
+        0x48, 0xC7, 0xC7, 0x00, 0x20, 0x00, 0x01,
+        0x0F, 0x05,
+        // readlink("/proc/self/cwd", 0x1002300, 128)
+        0x48, 0xC7, 0xC0, 0x59, 0x00, 0x00, 0x00,  // mov rax, 89 (readlink)
+        0x48, 0xC7, 0xC7, 0x00, 0x21, 0x00, 0x01,  // mov rdi, 0x1002100
+        0x48, 0xC7, 0xC6, 0x00, 0x23, 0x00, 0x01,  // mov rsi, 0x1002300
+        0x48, 0xC7, 0xC2, 0x80, 0x00, 0x00, 0x00,  // mov rdx, 128
+        0x0F, 0x05,
+        0x48, 0x89, 0x04, 0x25, 0x08, 0x22, 0x00, 0x01,  // mov [0x1002208], rax
+        // readlink("/existing.txt", 0x1002400, 128) — the FIXME empty target
+        0x48, 0xC7, 0xC0, 0x59, 0x00, 0x00, 0x00,
+        0x48, 0xC7, 0xC7, 0xA0, 0x20, 0x00, 0x01,  // mov rdi, 0x10020a0
+        0x48, 0xC7, 0xC6, 0x00, 0x24, 0x00, 0x01,  // mov rsi, 0x1002400
+        0x48, 0xC7, 0xC2, 0x80, 0x00, 0x00, 0x00,
+        0x0F, 0x05,
+        0x48, 0x89, 0x04, 0x25, 0x10, 0x22, 0x00, 0x01,  // mov [0x1002210], rax
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00,
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00,
+        0x0F, 0x05,
+    };
+
+    QilingOptions options = posix_options(code);
+    Qiling ql(options);
+
+    std::filesystem::create_directories(ensure_rootfs() / "somedir");
+    { std::ofstream f(ensure_rootfs() / "existing.txt"); f << "x"; }
+    ql.mem().write(0x1002000, std::vector<std::uint8_t>{'/', 's', 'o', 'm', 'e', 'd', 'i', 'r', 0});
+    ql.mem().write(0x1002100, std::vector<std::uint8_t>{'/', 'p', 'r', 'o', 'c', '/', 's', 'e', 'l', 'f', '/', 'c', 'w', 'd', 0});
+    ql.mem().write(0x10020a0, std::vector<std::uint8_t>{'/', 'e', 'x', 'i', 's', 't', 'i', 'n', 'g', '.', 't', 'x', 't', 0});
+
+    ql.run();
+
+    EXPECT_EQ(ql.os().exit_code(), 0);
+    // the cwd readlink: the virtual cwd after the chdir (the return = the
+    // name length; the NUL rides past it)
+    const auto cwd_len = ql.mem().read_ptr(0x1002208, 8);
+    const auto cwd_cell = ql.mem().read(0x1002300, cwd_len);
+    EXPECT_EQ(std::string(cwd_cell.begin(), cwd_cell.end()), "/somedir");
+    // the existing real path: the empty target, 0 written
+    EXPECT_EQ(ql.mem().read_ptr(0x1002210, 8), 0u);
+    EXPECT_EQ(ql.mem().read(0x1002400, 1)[0], 0u);  // nothing written (the NUL stays)
 }
 
 TEST(PosixSyscall, UnhandledSyscallWarnsButDoesNotThrow) {
