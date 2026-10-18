@@ -164,7 +164,7 @@ keystone linkage (unicorn pinned 2.1.4), `qiling/cc/`, x86/x86-64 first.
 
 ## Phase 5 — posix/linux full stack
 
-The ELF container parsing, the interpreter loading, the vsyscall page, the ET_REL driver path, the windows registry, and the windows subsystems landed (above). Next: the `os/posix/syscall/` module tree (file/mmap/socket/signal/...), `os/linux/` (`linux.py`, `procfs.py`, `thread.py`, `futex.py`), the kernel proxy, the richer kernel_api.py handler set (printk, kmalloc, _copy_to_user, ...), and the real-hive fixture slice. The syscall tables landed with Phase 4 (map_syscall.hpp).
+The ELF container parsing, the interpreter loading, the vsyscall page, the ET_REL driver path, the windows registry, and the windows subsystems landed (above). Next: the `os/posix/syscall/` module tree (file/mmap/socket/signal/... — open/lseek/dup/pipe ride the fd-table slice), `os/linux/` (`linux.py`, `procfs.py`, `thread.py`, `futex.py`), the kernel proxy, the richer kernel_api.py handler set (printk, kmalloc, _copy_to_user, ...), and the real-hive fixture slice. The syscall tables landed with Phase 4 (map_syscall.hpp).
 
 ## Phase 5 — ELF container parsing + windows subsystems (234/234 gtest green)
 
@@ -243,6 +243,19 @@ The ELF container parsing, the interpreter loading, the vsyscall page, the ET_RE
 - **the hive-file reads defer**: the python-registry package parses the binary hive files; the port's RegHive keeps the upstream no-op mutations and a not-found read surface. The diff store carries the full function (registry.py's own precedence: the conf first, the hive fallback).
 - **the container path demands the hive dir**: the windows os ctor's RegistryManager raises QlErrorFileNotFound when `windir/registry` is missing and no shellcode runs (registry.py verbatim) — the PE fixtures create the dir.
 - **the stats member went polymorphic**: `set_stats()` swaps the flavour before the emulation starts; the posix families keep the base QlOsStats.
+
+## Phase 5 — the posix fcall expansion (244/244 gtest green)
+
+| File | Python counterpart | Status | Notes |
+|---|---|---|---|
+| `qiling/os/posix/syscall.cpp` (the unistd expansion) | `os/posix/syscall/unistd.py` | Ported (expanded) | the identity/credential set (getuid/setuid/getgid/setgid + the 32 variants, geteuid/seteuid/getegid, issetugid, setgroups, setresuid/setresgid, capget/capset, getpid 0x512 / getppid 0x1024 verbatim, alarm, nice, setsid, kill (the sig dispatch lands with the signal slice), set_tid_address); `syscall_brk` (the grow/shrink around the loader brk) and `close` (the std streams close through the os streams; the opened-file entries land with the fd-table slice) |
+| `qiling/core.hpp` (os<T>()) | — | Ported | the typed os accessor for the syscall handlers (the posix handlers downcast to QlOsPosix for the identity surface) |
+| `tests/Posix_Test.cpp` (IdentityAndCredentialSet) | the unistd behaviour | Ported | the getuid/getgid/getpid shellcode stores the results to guest memory; the 1000/1000/0x512 identity triple asserts |
+
+### Findings
+
+- **the QlLoader base gained `brk_address`**: the unistd brk reads/writes it through the loader pointer; the ELF loader mirrors its private `brk_address_` into the base member at load time (the accessor + the base member coexist — the in-class assignment collision needs the `QlLoader::` qualification).
+- **getpid returns 0x512 / getppid 0x1024**: the upstream constants kept verbatim (the real-pid identities land with the multithread slices).
 
 ## Deferred (tracked, not built)
 
