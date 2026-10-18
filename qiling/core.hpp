@@ -92,6 +92,10 @@ public:
     QlArch& arch() const noexcept { return *arch_; }
     QlMemoryManager& mem() const noexcept { return *mem_; }
     QlOs& os() const noexcept { return *os_; }
+
+    // the typed os view (the syscall handlers downcast to their family)
+    template <typename OsType>
+    OsType& os() const { return static_cast<OsType&>(*os_); }
     loader::QlLoader& loader() const noexcept { return *loader_; }
 
     // hw is created for baremetal emulations only (core.py `if self.baremetal`)

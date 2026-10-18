@@ -57,8 +57,10 @@ public:
 
     // the KERNEL profile identity (posix.py: uid/euid/gid/egid/pid)
     int uid() const noexcept { return uid_; }
+    void set_uid(int v) noexcept { uid_ = v; }
     int euid() const noexcept { return euid_; }
     int gid() const noexcept { return gid_; }
+    void set_gid(int v) noexcept { gid_ = v; }
     int egid() const noexcept { return egid_; }
     int pid() const noexcept { return pid_; }
 

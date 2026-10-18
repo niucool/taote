@@ -225,6 +225,7 @@ void QlLoaderELF::run() {
 
     // the program break sits 0x2000 past the image (elf.py, verbatim)
     brk_address_ = mem_end_ + 0x2000;
+    QlLoader::brk_address = brk_address_;  // the base-class mirror (unistd.py brk reads it)
 
     // the interpreter (PT_INTERP): resolve through the rootfs, load its
     // segments, and let its entry take over (elf.py load_with_ld's interp
@@ -506,6 +507,7 @@ void QlLoaderELF::load_driver(const ElfImage& elf, const std::vector<std::uint8_
     const std::uint64_t init_module = loadbase + lkm_get_init(elf);
 
     brk_address_ = mem_end;
+    QlLoader::brk_address = brk_address_;  // the base-class mirror
 
     // there is no interpreter so the emulation entry point is also the elf
     // entry (elf.py, verbatim)

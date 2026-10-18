@@ -2,6 +2,9 @@
 
 #include <algorithm>
 
+#include "qiling/os/posix/posix.hpp"
+#include "qiling/loader/loader.hpp"
+
 #include "qiling/core.hpp"
 #include "qiling/os/os.hpp"
 #include "qiling/os/memory.hpp"
@@ -145,6 +148,88 @@ std::optional<std::int64_t> syscall_uname(Qiling& ql, const std::vector<std::uin
     return 0;
 }
 
+// ---- the unistd identity/credential set (unistd.py) ----
+
+// unistd.py __getuid/__setuid and friends: the profile identity, the setters
+// mutate it (the TODO: security checks comment, verbatim)
+std::optional<std::int64_t> syscall_getuid(Qiling& ql, const std::vector<std::uint64_t>&) {
+    return ql.os<posix::QlOsPosix>().uid();
+}
+
+std::optional<std::int64_t> syscall_setuid(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    ql.os<posix::QlOsPosix>().set_uid(static_cast<int>(params[0]));
+    return 0;
+}
+
+std::optional<std::int64_t> syscall_getgid(Qiling& ql, const std::vector<std::uint64_t>&) {
+    return ql.os<posix::QlOsPosix>().gid();
+}
+
+std::optional<std::int64_t> syscall_setgid(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    ql.os<posix::QlOsPosix>().set_gid(static_cast<int>(params[0]));
+    return 0;
+}
+
+// unistd.py: the zero-return stubs (seteuid/setgroups/setresuid/setresgid/
+// capget/capset/alarm/nice/issetugid)
+std::optional<std::int64_t> syscall_return_zero(Qiling&, const std::vector<std::uint64_t>&) {
+    return 0;
+}
+
+// unistd.py: the fixed identity constants (getpid = 0x512, getppid = 0x1024,
+// verbatim)
+std::optional<std::int64_t> syscall_getpid(Qiling&, const std::vector<std::uint64_t>&) {
+    return 0x512;
+}
+
+std::optional<std::int64_t> syscall_getppid(Qiling&, const std::vector<std::uint64_t>&) {
+    return 0x1024;
+}
+
+std::optional<std::int64_t> syscall_brk(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    // unistd.py ql_syscall_brk: grow/shrink the program break around the
+    // loader's brk; the plain path returns the current break
+    const auto inp = params.empty() ? 0 : params[0];
+    auto& loader = ql.loader();
+
+    if (inp != 0) {
+        const auto cur_brk = loader.brk_address;
+        const auto new_brk = ql.mem().align_up(inp);
+
+        if (new_brk > cur_brk) {
+            ql.mem().map(cur_brk, new_brk - cur_brk, UC_PROT_ALL, "[brk]");
+        } else if (new_brk < cur_brk) {
+            ql.mem().unmap(new_brk, cur_brk - new_brk);
+        }
+
+        loader.brk_address = new_brk;
+    }
+
+    return static_cast<std::int64_t>(loader.brk_address);
+}
+
+std::optional<std::int64_t> syscall_close(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    // unistd.py ql_syscall_close: the fd-table lookup (the fd[0..2] std
+    // streams close through the os streams; the opened-file entries land
+    // with the file-descriptor slice)
+    const auto fd = static_cast<std::int64_t>(params[0]);
+
+    if (!fd_in_range(fd)) {
+        return -kEBADF;
+    }
+    if (fd >= 3) {
+        return -kEBADF;  // no backing entry in this slice
+    }
+
+    switch (fd) {
+        case 0: ql.os().stdin_stream().close(); break;
+        case 1: ql.os().stdout_stream().close(); break;
+        case 2: ql.os().stderr_stream().close(); break;
+        default: break;
+    }
+    return 0;
+}
+
 }  // namespace
 
 void register_builtin_syscalls() {
@@ -157,6 +242,34 @@ void register_builtin_syscalls() {
     registry.register_syscall({"read", {PARAM_INTN, PARAM_PTRX, PARAM_INTN}, syscall_read});
     registry.register_syscall({"write", {PARAM_INTN, PARAM_PTRX, PARAM_INTN}, syscall_write});
     registry.register_syscall({"uname", {PARAM_PTRX}, syscall_uname});
+
+    // the unistd identity/credential set (unistd.py)
+    registry.register_syscall({"getuid", {}, syscall_getuid});
+    registry.register_syscall({"setuid", {PARAM_INTN}, syscall_setuid});
+    registry.register_syscall({"getuid32", {}, syscall_getuid});
+    registry.register_syscall({"setuid32", {PARAM_INTN}, syscall_setuid});
+    registry.register_syscall({"getgid", {}, syscall_getgid});
+    registry.register_syscall({"setgid", {PARAM_INTN}, syscall_setgid});
+    registry.register_syscall({"getgid32", {}, syscall_getgid});
+    registry.register_syscall({"setgid32", {PARAM_INTN}, syscall_setgid});
+    registry.register_syscall({"geteuid", {}, syscall_getuid});      // unistd.py: ql.os.euid
+    registry.register_syscall({"seteuid", {}, syscall_return_zero});
+    registry.register_syscall({"getegid", {}, syscall_getgid});      // unistd.py: ql.os.egid
+    registry.register_syscall({"issetugid", {}, syscall_return_zero});
+    registry.register_syscall({"setgroups", {PARAM_INTN, PARAM_PTRX}, syscall_return_zero});
+    registry.register_syscall({"setresuid", {}, syscall_return_zero});
+    registry.register_syscall({"setresgid", {}, syscall_return_zero});
+    registry.register_syscall({"capget", {PARAM_PTRX, PARAM_PTRX}, syscall_return_zero});
+    registry.register_syscall({"capset", {PARAM_PTRX, PARAM_PTRX}, syscall_return_zero});
+    registry.register_syscall({"getpid", {}, syscall_getpid});
+    registry.register_syscall({"getppid", {}, syscall_getppid});
+    registry.register_syscall({"alarm", {PARAM_INTN}, syscall_return_zero});
+    registry.register_syscall({"nice", {PARAM_INTN}, syscall_return_zero});
+    registry.register_syscall({"setsid", {}, syscall_getpid});       // unistd.py: os.getpid()
+    registry.register_syscall({"kill", {PARAM_INTN, PARAM_INTN}, syscall_return_zero});  // the sig dispatch lands with the signal slice
+    registry.register_syscall({"set_tid_address", {PARAM_PTRX}, syscall_getpid});
+    registry.register_syscall({"brk", {PARAM_INTN}, syscall_brk});
+    registry.register_syscall({"close", {PARAM_INTN}, syscall_close});
 }
 
 }  // namespace posix

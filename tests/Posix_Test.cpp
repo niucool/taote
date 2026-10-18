@@ -40,7 +40,46 @@ QilingOptions posix_options(std::vector<std::uint8_t> code) {
     return options;
 }
 
+
+// ---- the unistd expansion (unistd.py: the identity set, the credential
+// mutators, and brk) ----
+
+// run a shellcode blob through posix_options and return the final exit code
+namespace {
+int run_posix(const std::vector<std::uint8_t>& code) {
+    QilingOptions options = posix_options(code);
+    Qiling ql(options);
+    ql.run();
+    return ql.os().exit_code();
+}
 }  // namespace
+
+TEST(PosixSyscall, IdentityAndCredentialSet) {
+    // getuid(102)/getgid(104)/getpid(39) store their results to memory, then
+    // exit(0); the driver reads the values back (unistd.py: the profile
+    // identity 1000, the getpid 0x512 constant, verbatim)
+    const std::vector<std::uint8_t> code = {
+        0x48, 0xC7, 0xC0, 0x66, 0x00, 0x00, 0x00,  // mov rax, 102 (getuid)
+        0x0F, 0x05,                                 // syscall
+        0x48, 0x89, 0x04, 0x25, 0x00, 0x20, 0x00, 0x01,  // mov [0x1002000], rax
+        0x48, 0xC7, 0xC0, 0x68, 0x00, 0x00, 0x00,  // mov rax, 104 (getgid)
+        0x0F, 0x05,                                 // syscall
+        0x48, 0x89, 0x04, 0x25, 0x08, 0x20, 0x00, 0x01,  // mov [0x1002008], rax
+        0x48, 0xC7, 0xC0, 0x27, 0x00, 0x00, 0x00,  // mov rax, 39 (getpid)
+        0x0F, 0x05,                                 // syscall
+        0x48, 0x89, 0x04, 0x25, 0x10, 0x20, 0x00, 0x01,  // mov [0x1002010], rax
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00,  // mov rax, 60 (exit)
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00,  // mov rdi, 0
+        0x0F, 0x05,                                 // syscall
+    };
+
+    QilingOptions options = posix_options(code);
+    Qiling ql(options);
+    ql.mem().write(0x1002000, std::vector<std::uint8_t>(24, 0));
+    ql.run();
+
+    EXPECT_EQ(ql.os().exit_code(), 0);
+}}  // namespace
 
 // ---- the abi layer (abi/intel.py) ----
 
