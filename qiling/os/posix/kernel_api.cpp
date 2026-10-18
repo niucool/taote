@@ -30,6 +30,24 @@ std::string read_cstring_helper(Qiling& ql, std::uint64_t addr) {
     }
     return out;
 }
+
+// the resolved-params accessors: the placeholder-typed entries carry the
+// strings, the plain-int entries the raw values (the string fallback reads
+// the guest cstring at the raw address - the direct-invocation path)
+std::string get_string(Qiling& ql, const std::pair<std::string, FcallValue>& p) {
+    if (const auto* s = std::get_if<std::string>(&p.second)) {
+        return *s;
+    }
+    return read_cstring_helper(ql, std::get<std::uint64_t>(p.second));
+}
+
+std::uint64_t get_int(const std::pair<std::string, FcallValue>& p) {
+    if (const auto* v = std::get_if<std::uint64_t>(&p.second)) {
+        return *v;
+    }
+    return 0;
+}
+
 }  // namespace
 
 KernelApiRegistry& KernelApiRegistry::instance() {
@@ -70,19 +88,19 @@ namespace {
 const bool kernel_api_builtins_registered = [] {
     // @linux_kernel_api(params={"fd": UINT, "buf": STRING, "count": SIZE_T})
     KernelApi("sys_read", {{"fd", K_UINT}, {"buf", K_STRING}, {"count", K_SIZE_T}}) =
-        [](Qiling&, std::uint64_t, const std::vector<std::pair<std::string, std::uint64_t>>&) {
+        [](Qiling&, std::uint64_t, const ResolvedParams&) {
             return std::optional<std::uint64_t>{0};
         };
 
     // @linux_kernel_api(params={"fd": UINT, "buf": STRING, "count": SIZE_T})
     KernelApi("sys_write", {{"fd", K_UINT}, {"buf", K_STRING}, {"count", K_SIZE_T}}) =
-        [](Qiling&, std::uint64_t, const std::vector<std::pair<std::string, std::uint64_t>>&) {
+        [](Qiling&, std::uint64_t, const ResolvedParams&) {
             return std::optional<std::uint64_t>{0};
         };
 
     // @linux_kernel_api(params={"pathname": STRING, "flags": UINT})
     KernelApi("sys_open", {{"pathname", K_STRING}, {"flags", K_UINT}}) =
-        [](Qiling&, std::uint64_t, const std::vector<std::pair<std::string, std::uint64_t>>&) {
+        [](Qiling&, std::uint64_t, const ResolvedParams&) {
             return std::optional<std::uint64_t>{0};
         };
     return true;
@@ -100,13 +118,9 @@ const bool kernel_api_extended_registered = [] {
     // @linux_kernel_api(params={"format": STRING})
     KernelApi("printk", {{"format", K_STRING}}) =
         [](Qiling& ql, std::uint64_t, const auto& params) -> std::optional<std::uint64_t> {
-        // the STRING params arrive raw (the resolver machinery defers): the
-        // format reads from the pointer the fcall layer resolved
-        const auto format_ptr = params[0].second;
-        if (format_ptr == 0) {
-            return std::uint64_t{0};
-        }
-        const auto format = read_cstring_helper(ql, format_ptr);
+        // the STRING params resolve through the resolvers table (the format
+        // arrives as the resolved string)
+        const auto format = get_string(ql, params[0]);
 
         // level = int(format[1]) if digit else 4; the printed form drops the
         // first two chars (the "<n>" prefix) — the upstream substring quirk
@@ -217,7 +231,7 @@ const bool kernel_api_extended_registered = [] {
     // on first use, the linux profile carries no heap fields)
     KernelApi("kmalloc", {{"size", K_SIZE_T}, {"flags", K_UINT}}) =
         [](Qiling& ql, std::uint64_t, const auto& params) {
-            const auto size = params.size() > 0 ? params[0].second : 0;
+            const auto size = params.size() > 0 ? get_int(params[0]) : 0;
             auto& os = ql.os<posix::QlOsPosix>();
             const auto addr = os.heap().alloc(size);
             return std::optional<std::uint64_t>{addr};
@@ -226,9 +240,9 @@ const bool kernel_api_extended_registered = [] {
     // @linux_kernel_api(params={"dest": POINTER, "c": INT, "count": SIZE_T})
     KernelApi("memset", {{"dest", K_POINTER}, {"c", K_UINT}, {"count", K_SIZE_T}}) =
         [](Qiling& ql, std::uint64_t, const auto& params) {
-            const auto dest = params[0].second;
-            const auto c = static_cast<std::uint8_t>(params[1].second);
-            const auto count = static_cast<std::size_t>(params[2].second);
+            const auto dest = get_int(params[0]);
+            const auto c = static_cast<std::uint8_t>(get_int(params[1]));
+            const auto count = static_cast<std::size_t>(get_int(params[2]));
             ql.mem().write(dest, std::vector<std::uint8_t>(count, c));
             return std::optional<std::uint64_t>{dest};
         };
@@ -291,16 +305,22 @@ const bool kernel_api_extended_registered = [] {
 
     // @linux_kernel_api(params={"str1": STRING, "str2": STRING})
     KernelApi("strcmp", {{"str1", K_STRING}, {"str2", K_STRING}}) =
-        [](Qiling&, std::uint64_t, const auto&) { return std::optional<std::uint64_t>{0}; };
+        [](Qiling& ql, std::uint64_t, const auto& params) {
+            const auto s1 = get_string(ql, params[0]);
+            const auto s2 = get_string(ql, params[1]);
+            if (s1 < s2) return std::optional<std::uint64_t>{static_cast<std::uint64_t>(-1)};
+            if (s1 > s2) return std::optional<std::uint64_t>{1};
+            return std::optional<std::uint64_t>{0};
+        };
 
     // @linux_kernel_api(params={"str1": STRING, "str2": STRING, "count": SIZE_T})
     // — the upstream reads params["str"] (a KeyError away from working); the
     // port uses str1 (the documented fix)
     KernelApi("strncmp", {{"str1", K_STRING}, {"str2", K_STRING}, {"count", K_SIZE_T}}) =
         [](Qiling& ql, std::uint64_t, const auto& params) {
-            const auto s1 = read_cstring_helper(ql, params[0].second);
-            const auto s2 = read_cstring_helper(ql, params[1].second);
-            const auto count = static_cast<std::size_t>(params[2].second);
+            const auto s1 = get_string(ql, params[0]);
+            const auto s2 = get_string(ql, params[1]);
+            const auto count = static_cast<std::size_t>(get_int(params[2]));
             const auto sub1 = s1.substr(0, count);
             const auto sub2 = s2.substr(0, count);
             if (sub1 == sub2) return std::optional<std::uint64_t>{0};
@@ -311,8 +331,8 @@ const bool kernel_api_extended_registered = [] {
     // @linux_kernel_api(params={"haystack": STRING, "needle": STRING})
     KernelApi("strstr", {{"haystack", K_STRING}, {"needle", K_STRING}}) =
         [](Qiling& ql, std::uint64_t, const auto& params) {
-            const auto haystack = read_cstring_helper(ql, params[0].second);
-            const auto needle = read_cstring_helper(ql, params[1].second);
+            const auto haystack = get_string(ql, params[0]);
+            const auto needle = get_string(ql, params[1]);
             const auto index = haystack.find(needle);
             if (index == std::string::npos) {
                 return std::optional<std::uint64_t>{0};
@@ -323,16 +343,16 @@ const bool kernel_api_extended_registered = [] {
     // @linux_kernel_api(params={"str": STRING})
     KernelApi("strlen", {{"str", K_STRING}}) =
         [](Qiling& ql, std::uint64_t, const auto& params) {
-            const auto s = read_cstring_helper(ql, params[0].second);
+            const auto s = get_string(ql, params[0]);
             return std::optional<std::uint64_t>{s.size()};
         };
 
     // @linux_kernel_api(params={"s1": POINTER, "s2": POINTER, "size": SIZE_T})
     KernelApi("memcmp", {{"s1", K_POINTER}, {"s2", K_POINTER}, {"size", K_SIZE_T}}) =
         [](Qiling& ql, std::uint64_t, const auto& params) {
-            const auto s1 = params[0].second;
-            const auto s2 = params[1].second;
-            const auto size = static_cast<std::size_t>(params[2].second);
+            const auto s1 = get_int(params[0]);
+            const auto s2 = get_int(params[1]);
+            const auto size = static_cast<std::size_t>(get_int(params[2]));
             const auto a = ql.mem().read(s1, size);
             const auto b = ql.mem().read(s2, size);
             return std::optional<std::uint64_t>{a == b ? 1ull : 0ull};
@@ -440,9 +460,9 @@ const bool kernel_api_extended_registered = [] {
     // @linux_kernel_api(params={"dest": POINTER, "src": POINTER, "size": SIZE_T})
     KernelApi("memcpy", {{"dest", K_POINTER}, {"src", K_POINTER}, {"size", K_SIZE_T}}) =
         [](Qiling& ql, std::uint64_t, const auto& params) {
-            const auto dest = params[0].second;
-            const auto src = params[1].second;
-            const auto size = static_cast<std::size_t>(params[2].second);
+            const auto dest = get_int(params[0]);
+            const auto src = get_int(params[1]);
+            const auto size = static_cast<std::size_t>(get_int(params[2]));
             ql.mem().write(dest, ql.mem().read(src, size));
             return std::optional<std::uint64_t>{dest};
         };
@@ -450,9 +470,9 @@ const bool kernel_api_extended_registered = [] {
     // @linux_kernel_api(params={"dest": POINTER, "c": INT, "count": SIZE_T})
     KernelApi("memset", {{"dest", K_POINTER}, {"c", K_UINT}, {"count", K_SIZE_T}}) =
         [](Qiling& ql, std::uint64_t, const auto& params) {
-            const auto dest = params[0].second;
-            const auto c = static_cast<std::uint8_t>(params[1].second);
-            const auto count = static_cast<std::size_t>(params[2].second);
+            const auto dest = get_int(params[0]);
+            const auto c = static_cast<std::uint8_t>(get_int(params[1]));
+            const auto count = static_cast<std::size_t>(get_int(params[2]));
             ql.mem().write(dest, std::vector<std::uint8_t>(count, c));
             return std::optional<std::uint64_t>{dest};
         };
@@ -460,9 +480,9 @@ const bool kernel_api_extended_registered = [] {
     // @linux_kernel_api(params={"ubuf": POINTER, "kbuf": POINTER, "count": SIZE_T})
     KernelApi("_copy_to_user", {{"ubuf", K_POINTER}, {"kbuf", K_POINTER}, {"count", K_SIZE_T}}) =
         [](Qiling& ql, std::uint64_t, const auto& params) {
-            const auto ubuf = params[0].second;
-            const auto kbuf = params[1].second;
-            const auto count = static_cast<std::size_t>(params[2].second);
+            const auto ubuf = get_int(params[0]);
+            const auto kbuf = get_int(params[1]);
+            const auto count = static_cast<std::size_t>(get_int(params[2]));
 
             // if the user-mode buffer is not available, fail (the verbatim note)
             if (!ql.mem().is_mapped(ubuf, count)) {
@@ -475,9 +495,9 @@ const bool kernel_api_extended_registered = [] {
     // @linux_kernel_api(params={"kbuf": POINTER, "ubuf": POINTER, "count": SIZE_T})
     KernelApi("_copy_from_user", {{"kbuf", K_POINTER}, {"ubuf", K_POINTER}, {"count", K_SIZE_T}}) =
         [](Qiling& ql, std::uint64_t, const auto& params) {
-            const auto kbuf = params[0].second;
-            const auto ubuf = params[1].second;
-            const auto count = static_cast<std::size_t>(params[2].second);
+            const auto kbuf = get_int(params[0]);
+            const auto ubuf = get_int(params[1]);
+            const auto count = static_cast<std::size_t>(get_int(params[2]));
 
             if (!ql.mem().is_mapped(ubuf, count)) {
                 return std::optional<std::uint64_t>{count};

@@ -68,8 +68,8 @@ TEST(KernelApiHandlers, MemsetHandlerWritesBytes) {
     ASSERT_NE(entry, nullptr);
 
     const std::uint64_t pc = 0;
-    const std::vector<std::pair<std::string, std::uint64_t>> params{
-        {"dest", addr}, {"c", 0xAB}, {"count", 8}};
+    const qiling::os::posix::ResolvedParams params{
+        {"dest", addr}, {"c", 0xABull}, {"count", 8ull}};
 
     const auto result = entry->handler(ql, pc, params);
     ASSERT_TRUE(result.has_value());
@@ -101,8 +101,8 @@ TEST(KernelApiHandlers, CopyToUserHandlerMarshals) {
     const auto* entry = KernelApiRegistry::instance().find("_copy_to_user");
     ASSERT_NE(entry, nullptr);
 
-    const std::vector<std::pair<std::string, std::uint64_t>> params{
-        {"ubuf", ubuf}, {"kbuf", kbuf}, {"count", 4}};
+    const qiling::os::posix::ResolvedParams params{
+        {"ubuf", ubuf}, {"kbuf", kbuf}, {"count", 4ull}};
 
     const auto result = entry->handler(ql, 0, params);
     ASSERT_TRUE(result.has_value());
@@ -133,7 +133,7 @@ TEST(KernelApiHandlers, StrlenHandlerCountsGuestString) {
     const auto* entry = KernelApiRegistry::instance().find("strlen");
     ASSERT_NE(entry, nullptr);
 
-    const std::vector<std::pair<std::string, std::uint64_t>> params{
+    const qiling::os::posix::ResolvedParams params{
         {"str", addr}};
 
     const auto result = entry->handler(ql, 0, params);
@@ -172,7 +172,7 @@ TEST(KernelApiHandlers, PrintkRendersFormatWithArgs) {
     const auto* entry = KernelApiRegistry::instance().find("printk");
     ASSERT_NE(entry, nullptr);
 
-    const std::vector<std::pair<std::string, std::uint64_t>> params{
+    const qiling::os::posix::ResolvedParams params{
         {"format", fmt_addr}};
 
     const auto result = entry->handler(ql, 0, params);
@@ -188,4 +188,96 @@ TEST(KernelApiHandlers, PrintkRendersFormatWithArgs) {
     std::ifstream in(cap_path, std::ios::binary);
     const std::string got{(std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>()};
     EXPECT_EQ(got, expected);
+}
+
+// the resolver machinery: the placeholder-typed params (the STRING alias)
+// resolve onto the string readers through the os.py resolvers table; the
+// plain-int entries stay raw and the zero pointer resolves to the raw int
+// (the `ptr and` guard, verbatim)
+TEST(KernelApiResolve, StringPlaceholderResolvesThroughResolvers) {
+    const auto rootfs = std::filesystem::temp_directory_path() / "ql_kapi_rootfs4";
+    std::filesystem::create_directories(rootfs);
+
+    QilingOptions options;
+    options.rootfs = rootfs.string();
+    options.code = {0x90, 0xC3};
+    options.ostype = QL_OS::LINUX;
+    options.archtype = QL_ARCH::X8664;
+    Qiling ql(options);
+
+    constexpr std::uint64_t str_addr = 0x1002000;
+    const std::string guest = "resolved-by-resolver";
+    ql.mem().write(str_addr, std::vector<std::uint8_t>{guest.begin(), guest.end()});
+    ql.mem().write(str_addr + guest.size(), std::vector<std::uint8_t>{0});
+
+    const qiling::os::posix::KernelApiParams proto{{"fmt", qiling::os::posix::K_STRING}, {"count", qiling::os::posix::K_SIZE_T}};
+    const std::vector<std::uint64_t> raw{str_addr, 7};
+
+    const auto resolved = ql.os().resolve_named_params(proto, raw);
+    ASSERT_EQ(resolved.size(), 2u);
+
+    // the STRING entry carries the guest string
+    const auto* str_value = std::get_if<std::string>(&resolved[0].second);
+    ASSERT_NE(str_value, nullptr);
+    EXPECT_EQ(*str_value, guest);
+
+    // the plain-int entry stays raw
+    const auto* int_value = std::get_if<std::uint64_t>(&resolved[1].second);
+    ASSERT_NE(int_value, nullptr);
+    EXPECT_EQ(*int_value, 7u);
+}
+
+TEST(KernelApiResolve, ZeroStringPointerStaysRaw) {
+    const auto rootfs = std::filesystem::temp_directory_path() / "ql_kapi_rootfs5";
+    std::filesystem::create_directories(rootfs);
+
+    QilingOptions options;
+    options.rootfs = rootfs.string();
+    options.code = {0x90, 0xC3};
+    options.ostype = QL_OS::LINUX;
+    options.archtype = QL_ARCH::X8664;
+    Qiling ql(options);
+
+    const qiling::os::posix::KernelApiParams proto{{"fmt", qiling::os::posix::K_STRING}};
+    const std::vector<std::uint64_t> raw{0};
+
+    // os.py: `ptr and read_cstring(ptr)` - the null pointer resolves to the
+    // raw int, no read
+    const auto resolved = ql.os().resolve_named_params(proto, raw);
+    ASSERT_EQ(resolved.size(), 1u);
+    const auto* int_value = std::get_if<std::uint64_t>(&resolved[0].second);
+    ASSERT_NE(int_value, nullptr);
+    EXPECT_EQ(*int_value, 0u);
+}
+
+// the end-to-end dispatch: the string handler receives the RESOLVED string
+// (not the pointer) when invoked through the fcall layer
+TEST(KernelApiResolve, StrlenViaFcallReceivesResolvedString) {
+    const auto rootfs = std::filesystem::temp_directory_path() / "ql_kapi_rootfs6";
+    std::filesystem::create_directories(rootfs);
+
+    QilingOptions options;
+    options.rootfs = rootfs.string();
+    options.code = {0x90, 0xC3};
+    options.ostype = QL_OS::LINUX;
+    options.archtype = QL_ARCH::X8664;
+    Qiling ql(options);
+
+    const char* msg = "dispatch-resolved";
+    const std::string guest{msg};
+    constexpr std::uint64_t addr = 0x1002000;
+    ql.mem().write(addr, std::vector<std::uint8_t>{guest.begin(), guest.end()});
+    ql.mem().write(addr + guest.size(), std::vector<std::uint8_t>{0});
+
+    // the dispatch path: the resolve reads through the fcall layer (the rdi
+    // slot carries the string pointer), the handler sees the string
+    ql.arch().regs().write("rdi", addr);
+    const auto* entry = KernelApiRegistry::instance().find("strlen");
+    ASSERT_NE(entry, nullptr);
+
+    const auto resolved = ql.os().resolve_named_params(entry->params);
+    ASSERT_EQ(resolved.size(), 1u);
+    const auto* str_value = std::get_if<std::string>(&resolved[0].second);
+    ASSERT_NE(str_value, nullptr);
+    EXPECT_EQ(*str_value, guest);
 }

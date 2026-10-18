@@ -10,6 +10,8 @@
 #define QILING_OS_POSIX_KERNEL_API_HPP
 
 #include <cstdint>
+
+#include "qiling/os/os.hpp"
 #include <functional>
 #include <map>
 #include <optional>
@@ -32,9 +34,14 @@ inline constexpr int K_POINTER = 5;       // PARAM_INTN
 inline constexpr int K_STRING = 129;      // PARAM_PTRX + 1
 
 // kernel_api.py: the handler receives (ql, pc, params) with the resolved
-// parameter values; the optional return lands in the arch return register
+// parameter values; the optional return lands in the arch return register.
+// The placeholder-typed params (STRING/WSTRING/GUID) resolve onto their
+// reader's string (the os.py resolvers table); the plain-int entries stay
+// raw. Variant-typed: the handlers read the values they declared.
+using ResolvedParams = std::vector<std::pair<std::string, FcallValue>>;
+
 using KernelApiHandler = std::function<std::optional<std::uint64_t>(
-    Qiling& ql, std::uint64_t pc, const std::vector<std::pair<std::string, std::uint64_t>>& params)>;
+    Qiling& ql, std::uint64_t pc, const ResolvedParams& params)>;
 
 // the name→(type) pairs per api signature (the decorator's params mapping)
 using KernelApiParams = std::vector<std::pair<std::string, int>>;

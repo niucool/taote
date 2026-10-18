@@ -15,6 +15,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <variant>
 #include <vector>
 
 #include "qiling/const.hpp"
@@ -45,6 +46,11 @@ struct FcallArg {
     std::optional<int> type;
     std::uint64_t value;
 };
+
+// the resolved fcall parameter: the ints ride as the raw values, the
+// placeholder-typed params (STRING/WSTRING/GUID) resolve onto their reader's
+// string (os.py resolve_fcall_params applies the resolvers table)
+using FcallValue = std::variant<std::uint64_t, std::string>;
 
 class QlOs {
 public:
@@ -174,6 +180,15 @@ public:
     // layer and the resolvers table; returns the resolved values in order
     std::vector<std::uint64_t> resolve_fcall_params(const std::vector<std::pair<std::string, int>>& params) const;
 
+    // resolve_named_params — the named form: the values carry the resolved
+    // strings for the placeholder-typed params (the os.py resolvers: STRING/
+    // WSTRING/GUID ride the defaults table; the user overrides may replace)
+    std::vector<std::pair<std::string, FcallValue>> resolve_named_params(
+        const std::vector<std::pair<std::string, int>>& params) const;
+    std::vector<std::pair<std::string, FcallValue>> resolve_named_params(
+        const std::vector<std::pair<std::string, int>>& proto,
+        const std::vector<std::uint64_t>& raw) const;
+
     // process_fcall_params — the display strings for the typed args
     std::vector<std::string> process_fcall_params(const std::vector<FcallArg>& targs) const;
 
@@ -216,7 +231,10 @@ protected:
     std::uint64_t entry_point_ = 0;
     std::uint64_t code_ram_size_ = 0;
 
-    std::map<std::string, Resolver> resolvers_;
+    // os.py resolvers: keyed by the fcall param type constants (the STRING/
+    // WSTRING/GUID aliases collide with the windows.h macros on _WIN32, so
+    // the PARAM_PTRX arithmetic is the portable spelling)
+    std::map<int, Resolver> resolvers_;
     std::map<QL_INTERCEPT, std::map<std::string, UserApiHandler>> user_defined_api_;
     std::unique_ptr<QlOsPath> path_;
     std::unique_ptr<QlFsMapper> fs_mapper_;

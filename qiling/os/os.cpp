@@ -9,6 +9,8 @@
 #include "qiling/cc/cc.hpp"
 #include "qiling/core.hpp"
 #include "qiling/os/fcall.hpp"
+#include "qiling/os/const.hpp"
+#include "qiling/os/utils.hpp"
 #include "qiling/profiles/inireader.hpp"
 
 namespace qiling {
@@ -58,8 +60,14 @@ QlOs::QlOs(Qiling* ql) : ql_(ql) {
     user_defined_api_[QL_INTERCEPT::ENTER] = {};
     user_defined_api_[QL_INTERCEPT::EXIT] = {};
 
-    // os.py: default fcall param resolving methods (the STRING/WSTRING/GUID
-    // resolvers land with the syscall glue that defines their placeholders)
+    // os.py: the default fcall parameter resolving methods (the STRING/
+    // WSTRING/GUID placeholders resolve onto the string readers; the zero
+    // pointer resolves to the raw int, the `ptr and` guard verbatim). The
+    // resolvers keys use the PARAM_PTRX arithmetic - the STRING/WSTRING/GUID
+    // aliases collide with the windows.h macros on _WIN32.
+    resolvers_[os::PARAM_PTRX + 1] = [this](std::uint64_t ptr) { return os::QlOsUtils::read_cstring(*ql_, ptr); };
+    resolvers_[os::PARAM_PTRX + 2] = [this](std::uint64_t ptr) { return os::QlOsUtils::read_wstring(*ql_, ptr); };
+    resolvers_[os::PARAM_PTRX + 3] = [this](std::uint64_t ptr) { return os::QlOsUtils::read_guid(*ql_, ptr); };
 }
 
 void QlOs::init_paths_if_managed() {
@@ -138,6 +146,39 @@ std::vector<std::uint64_t> QlOs::resolve_fcall_params(const std::vector<std::pai
     }
 
     const auto out = fcall().read_params(types);
+    return out;
+}
+
+std::vector<std::pair<std::string, FcallValue>> QlOs::resolve_named_params(
+    const std::vector<std::pair<std::string, int>>& proto) const {
+    std::vector<int> types;
+    types.reserve(proto.size());
+    for (const auto& [name, typ] : proto) {
+        (void)name;
+        types.push_back(typ);
+    }
+    return resolve_named_params(proto, fcall().read_params(types));
+}
+
+std::vector<std::pair<std::string, FcallValue>> QlOs::resolve_named_params(
+    const std::vector<std::pair<std::string, int>>& proto,
+    const std::vector<std::uint64_t>& raw) const {
+    // os.py resolve_fcall_params: the values in the proto order; the
+    // placeholder-typed entries resolve through the resolvers table (the
+    // zero pointer resolves to the raw int - the `ptr and` guard, verbatim)
+    std::vector<std::pair<std::string, FcallValue>> out;
+    out.reserve(proto.size());
+
+    for (std::size_t i = 0; i < proto.size(); ++i) {
+        const auto& [name, typ] = proto[i];
+        const auto value = i < raw.size() ? raw[i] : 0;
+        const auto it = resolvers_.find(typ);
+        if (it != resolvers_.end() && value != 0) {
+            out.emplace_back(name, FcallValue{it->second(value)});
+        } else {
+            out.emplace_back(name, FcallValue{value});
+        }
+    }
     return out;
 }
 

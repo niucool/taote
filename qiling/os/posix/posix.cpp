@@ -185,13 +185,20 @@ void QlOsPosix::hook_kernel_api(std::uint64_t address, std::uint32_t size) {
     }
 
     // the @linux_kernel_api wrapper body: os.call(pc, func, params, onenter,
-    // onexit, passthru)
+    // onexit, passthru) - the placeholder-typed params resolve through the
+    // resolvers table (the STRING entries arrive as the resolved strings)
     const auto* entry_ptr = entry;
     auto* self_ql = &ql();
     const auto func = [entry_ptr, self_ql](std::uint64_t pc,
-                                           const std::vector<std::pair<std::string, std::uint64_t>>& params)
+                                           const std::vector<std::pair<std::string, std::uint64_t>>& raw)
         -> std::optional<std::uint64_t> {
-        return entry_ptr->handler(*self_ql, pc, params);
+        std::vector<std::uint64_t> values;
+        values.reserve(raw.size());
+        for (const auto& [name, value] : raw) {
+            (void)name;
+            values.push_back(value);
+        }
+        return entry_ptr->handler(*self_ql, pc, self_ql->os().resolve_named_params(entry_ptr->params, values));
     };
     call(address, api_name, func, entry->params, {}, {}, entry->passthru);
 }
