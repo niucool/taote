@@ -493,6 +493,93 @@ TEST(ThreadClone, DISABLED_BisectRung1LoopTraversal) {
     uc_close(uc);
 }
 
+// ---- the (b12) ladder rung 2: the b11 blob with the jz's displacement
+// STRETCHED to the join blob's 0x3f shape (the taken target far away, the
+// parent's path padded to fill). ONE feature over the clean b11.
+static void r9b_insn_cb2(uc_engine* uc, void* user_data) {
+    (void)user_data;
+    std::uint64_t pc = 0;
+    uc_reg_read(uc, UC_X86_REG_RIP, &pc);
+    std::uint64_t rax = 0;
+    uc_reg_read(uc, UC_X86_REG_RAX, &rax);
+    std::fprintf(stderr, "[r9c-insn] pc=%llx rax=%llx\n", static_cast<unsigned long long>(pc),
+                 static_cast<unsigned long long>(rax));
+    if (rax == 56) {
+        const std::uint64_t after = pc + 2;
+        const std::uint64_t zero = 0;
+        const std::uint64_t child_sp = 0x1203000;
+        uc_reg_write(uc, UC_X86_REG_RAX, &zero);
+        uc_reg_write(uc, UC_X86_REG_RIP, &after);
+        uc_reg_write(uc, UC_X86_REG_RSP, &child_sp);
+        uc_context_alloc(uc, &r9b_child_ctx);
+        uc_context_save(uc, r9b_child_ctx);
+        const std::uint64_t parent_rax = 2001;
+        uc_reg_write(uc, UC_X86_REG_RAX, &parent_rax);
+        uc_reg_write(uc, UC_X86_REG_RIP, &pc);
+        uc_emu_stop(uc);
+    } else {
+        std::uint64_t v = 0;
+        uc_mem_read(uc, 0x1002000, &v, sizeof(v));
+        uc_emu_stop(uc);
+        const std::uint64_t zero = 0;
+        uc_reg_write(uc, UC_X86_REG_RAX, &zero);
+    }
+}
+TEST(ThreadClone, DISABLED_BisectRung2LongDisplacement) {
+    uc_engine* uc = nullptr;
+    ASSERT_EQ(uc_open(UC_ARCH_X86, UC_MODE_64, &uc), UC_ERR_OK);
+    uc_mem_map(uc, 0x11ff000, 0x1000, UC_PROT_ALL);
+    const std::vector<std::uint8_t> blob = {
+        0x48, 0xC7, 0xC0, 0x38, 0x00, 0x00, 0x00,          // 00: mov rax, 56
+        0x0F, 0x05,                                        // 07: syscall (the clone)
+        0x48, 0x85, 0xC0,                                  // 09: test rax, rax
+        0x74, 0x3F,                                        // 0c: jz +0x3f -> 0x4d (the store)
+        0x44, 0x8B, 0x0C, 0x25, 0x00, 0x20, 0x00, 0x01,    // 0e: mov r9d, [0x1002000]
+        0x45, 0x85, 0xC9,                                  // 16: test r9d, r9d
+        0x74, 0x03,                                        // 19: jz +3 -> 0x1e (the syscall)
+        0xB8, 0xCA, 0x00, 0x00, 0x00,                      // 1b: mov eax, 202
+        0x0F, 0x05,                                        // 20: syscall (the park)
+        0xEB, 0xFE,                                        // 22: jmp $
+        0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,  // 24..: the pad
+        0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+        0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+        0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,    // 4c
+        0xC7, 0x04, 0x25, 0x00, 0x20, 0x00, 0x01, 0x2A, 0x00, 0x00, 0x00,
+                                                           // 4d: mov dword [0x1002000], 42
+        0xEB, 0xFE,                                        // 58: jmp $
+    };
+    uc_mem_write(uc, 0x11ff000, blob.data(), blob.size());
+    uc_mem_map(uc, 0x1002000, 0x1000, UC_PROT_ALL);
+    const std::uint32_t sentinel = 0xdeadbeef;
+    uc_mem_write(uc, 0x1002000, &sentinel, sizeof(sentinel));
+    uc_mem_map(uc, 0x1202000, 0x2000, UC_PROT_ALL);
+
+    uc_hook insn_hook = 0;
+    uc_hook code_hook = 0;
+    uc_hook_add(uc, &insn_hook, UC_HOOK_INSN, reinterpret_cast<void*>(r9b_insn_cb2), nullptr, 1, 0,
+                UC_X86_INS_SYSCALL);
+    uc_hook_add(uc, &code_hook, UC_HOOK_CODE, reinterpret_cast<void*>(r9b_code_cb), nullptr, 1, 0);
+
+    const std::uint64_t rsp = 0x1203000;
+    uc_reg_write(uc, UC_X86_REG_RSP, &rsp);
+    uc_emu_start(uc, 0x11ff000, 0xffffffffffffffffull, 0, 32337);
+    const std::uint64_t parent_rax2 = 2001;
+    uc_reg_write(uc, UC_X86_REG_RAX, &parent_rax2);
+    uc_emu_start(uc, 0x11ff009, 0xffffffffffffffffull, 0, 32337);
+    r9b_count = 0;
+    uc_context_restore(uc, r9b_child_ctx);
+    const uc_err err = uc_emu_start(uc, 0x11ff009, 0xffffffffffffffffull, 0, 32337);
+    std::uint64_t pc = 0;
+    uc_reg_read(uc, UC_X86_REG_RIP, &pc);
+    std::fprintf(stderr, "[r9c-end] err=%s pc=0x%llx\n", uc_strerror(err), static_cast<unsigned long long>(pc));
+    std::vector<std::uint8_t> got(4, 0);
+    uc_mem_read(uc, 0x1002000, got.data(), 4);
+    std::fprintf(stderr, "[r9c-store] %u\n", static_cast<unsigned>(got[0]));
+    uc_context_free(r9b_child_ctx);
+    r9b_child_ctx = nullptr;
+    uc_close(uc);
+}
+
 // the clone without CLONE_VM (the fork path) is not implemented on this host
 TEST(ThreadClone, ForkPathSurfacesNotImplemented) {
     const auto rootfs = std::filesystem::temp_directory_path() / "ql_clone_rootfs";
