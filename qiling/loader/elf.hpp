@@ -75,6 +75,7 @@ public:
     std::uint64_t elf_entry() const noexcept { return elf_entry_; }
     std::uint64_t mmap_address() const noexcept { return mmap_address_; }
     std::uint64_t auxv_address() const noexcept { return auxv_address_; }
+    std::uint64_t interp_address() const noexcept { return interp_address_; }
 
 private:
     std::uint64_t mem_start_ = 0;
@@ -83,6 +84,7 @@ private:
     std::uint64_t elf_entry_ = 0;
     std::uint64_t mmap_address_ = 0;
     std::uint64_t auxv_address_ = 0;
+    std::uint64_t interp_address_ = 0;
 };
 
 }  // namespace loader

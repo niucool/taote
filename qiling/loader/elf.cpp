@@ -276,13 +276,81 @@ void QlLoaderELF::run() {
     // the program break sits 0x2000 past the image (elf.py, verbatim)
     brk_address_ = mem_end_ + 0x2000;
 
-    // the interpreter (PT_INTERP): the loader resolves it through the rootfs;
-    // the stub-based fixtures have none
+    // the interpreter (PT_INTERP): resolve through the rootfs, load its
+    // segments, and let its entry take over (elf.py load_with_ld's interp
+    // branch); the AT_BASE auxv entry points at the interpreter base
     std::uint64_t interp_address = 0;
-    std::string interp_path = elf.interpreter;
-    (void)interp_path;
+    std::uint64_t entry_point_final = elf_entry_;
+    if (!elf.interpreter.empty()) {
+        const auto* os_posix = dynamic_cast<const os::posix::QlOsPosix*>(&ql_->os());
+        const auto* os_path = (os_posix != nullptr && os_posix->path() != nullptr) ? os_posix->path() : nullptr;
+        const std::string interp_vpath = elf.interpreter;
+        const std::string interp_hpath = os_path != nullptr
+            ? os_path->virtual_to_host_path(interp_vpath)
+            // the bare-metal fallback: strip the leading slash
+            : (std::filesystem::path(ql_->rootfs()) /
+               (interp_vpath.front() == '/' ? interp_vpath.substr(1) : interp_vpath)).string();
 
-    const auto entry_point_final = elf_entry_;
+        // the safety tenet (elf.py is_safe_host_path): refuse interpreter
+        // paths outside the rootfs
+        if (os_path == nullptr || !os_path->is_safe_host_path(interp_hpath)) {
+            throw QlErrorBase("unsafe path: " + interp_hpath);
+        }
+
+        std::ifstream in(interp_hpath, std::ios::binary);
+        if (!in) {
+            throw QlErrorFileNotFound("interpreter not found: " + interp_hpath);
+        }
+        in.seekg(0, std::ios::end);
+        const auto size = in.tellg();
+        in.seekg(0, std::ios::beg);
+        std::vector<std::uint8_t> interp_bytes(static_cast<std::size_t>(size));
+        in.read(reinterpret_cast<char*>(interp_bytes.data()), size);
+
+        const auto interp = ElfImage::parse(interp_bytes);
+
+        // the interpreter vaddr base: a pre-relocated interpreter (min vaddr
+        // != 0) maps at its own vaddrs, otherwise the profile's interp_address
+        // slot applies (elf.py, verbatim logic)
+        std::uint64_t interp_base = 0;
+        std::uint64_t min_vaddr = ~std::uint64_t{0};
+        for (const auto* seg : interp.load_segments()) {
+            min_vaddr = std::min(min_vaddr, seg->vaddr);
+        }
+        if (min_vaddr == 0) {
+            interp_base = static_cast<std::uint64_t>(profile.get_int(ossection, "interp_address"));
+        }
+
+        // load the interpreter segments (the same region consolidation)
+        const auto interp_segs = interp.load_segments();
+        std::vector<LoadRegion> interp_regions;
+        for (const auto* seg : interp_segs) {
+            const auto lbound = ql_->mem().align(interp_base + seg->vaddr);
+            const auto ubound = ql_->mem().align_up(interp_base + seg->vaddr + seg->memsz);
+            const auto perms = seg_perm_to_uc_prot(seg->flags);
+            if (!interp_regions.empty() && lbound == interp_regions.back().ubound &&
+                perms == interp_regions.back().perms) {
+                interp_regions.back().ubound = ubound;
+            } else {
+                interp_regions.push_back(LoadRegion{lbound, ubound, perms});
+            }
+        }
+        for (const auto& region : interp_regions) {
+            if (region.ubound > region.lbound) {
+                ql_->mem().map(region.lbound, region.ubound - region.lbound, region.perms, "ld");
+            }
+        }
+        for (const auto* seg : interp_segs) {
+            ql_->mem().write(interp_base + seg->vaddr, segment_data(interp_bytes, *seg));
+        }
+
+        const auto interp_start = interp_regions.front().lbound;
+        const auto interp_end = interp_regions.back().ubound;
+        images.push_back(Image{interp_start, interp_end, interp_hpath});
+
+        interp_address_ = interp_base;
+        entry_point_final = interp_base + interp.entry;
+    }
 
     // ---- the auxv stack (elf.py: argc/argv/envp/auxv) ----
     std::vector<std::uint8_t> elf_table;
@@ -374,6 +442,13 @@ void QlLoaderELF::run() {
         {AUXV::AT_NULL, 0},
     };
 
+    // the AT_BASE entry lands only when an interpreter was loaded (elf.py)
+    if (!elf.interpreter.empty()) {
+        auto k = pack_ptr(static_cast<std::uint64_t>(AUXV::AT_BASE));
+        auto v = pack_ptr(interp_address_);
+        elf_table.insert(elf_table.end(), k.begin(), k.end());
+        elf_table.insert(elf_table.end(), v.begin(), v.end());
+    }
     const auto bytes_before_auxv = elf_table.size();
     for (const auto& [key, val] : auxv_entries) {
         auto k = pack_ptr(static_cast<std::uint64_t>(key));
