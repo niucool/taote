@@ -8,6 +8,7 @@
 
 #include "qiling/core.hpp"
 #include "qiling/os/macos/map_syscall.hpp"
+#include "qiling/os/macos/syscall.hpp"
 
 #include "qiling/cc/intel.hpp"
 #include "qiling/os/fcall.hpp"
@@ -67,6 +68,18 @@ QlOsMacos::QlOsMacos(Qiling* ql) : QlOsPosix(ql) {
     // class keeps the upstream's explicit intent)
     set_fcall(std::make_unique<QlFunctionCall>(std::make_unique<cc::macosx64>(ql->arch())));
 
+    // loader/macho.py seeds the mach surfaces on the QlOs (the MachPort(2187)
+    // + the manager + the task + the thread); the port seeds them here until
+    // the Mach-O loader slice lands (the deviation note in mach_port.hpp)
+    macho_mach_port_ = std::make_unique<MachPort>(MachPort{2187});
+    macho_port_manager_ = std::make_unique<MachPortManager>();
+    macho_port_manager_->my_port = *macho_mach_port_;  // the upstream's
+    // MachPortManager(ql, my_port) — the my_port is NOT the host_port (the
+    // host_port stays the fixed 0x303)
+    macho_task_ = std::make_unique<MachoTask>();
+    macho_thread_ = std::make_unique<MachoThread>();
+
+    register_macos_syscalls();
     load();
 }
 

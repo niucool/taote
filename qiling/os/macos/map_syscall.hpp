@@ -1,7 +1,7 @@
 // Ported from qiling/os/macos/map_syscall.py - the MACOS x8664 syscall
 // number-to-name table (the macos numbers, distinct from the linux and
-// freebsd tables). Header-only: the pure constant table (mirror-layout
-// rule 1).
+// freebsd tables; the mach-trap entries carry the 0x1000000-range hex
+// keys). Header-only: the pure constant table (mirror-layout rule 1).
 #ifndef QILING_OS_MACOS_MAP_SYSCALL_HPP
 #define QILING_OS_MACOS_MAP_SYSCALL_HPP
 
@@ -15,7 +15,7 @@ namespace os {
 namespace macos {
 
 // map_syscall.py x8664_syscall_table (the verbatim table)
-inline constexpr std::array<std::pair<unsigned, std::string_view>, 349> x8664_syscall_table{{
+inline constexpr std::array<std::pair<unsigned, std::string_view>, 357> x8664_syscall_table{{
     {1, "exit"},
     {2, "fork"},
     {3, "read"},
@@ -361,10 +361,18 @@ inline constexpr std::array<std::pair<unsigned, std::string_view>, 349> x8664_sy
     {500, "getentropy"},
     {520, "terminate_with_payload"},
     {521, "abort_with_payload"},
-    {1000012, "kernelrpc_mach_port_deallocate_trap"},
-    {1000013, "kernelrpc_mach_port_mod_refs_trap"},
-    {1000018, "kernelrpc_mach_port_construct_trap"},
-    {3000003, "thread_fast_set_cthread_self64"},
+    {0x100000a, "kernelrpc_mach_vm_allocate_trap"},
+    {0x100000c, "kernelrpc_mach_vm_deallocate_trap"},
+    {0x100000f, "kernelrpc_mach_vm_map_trap"},
+    {0x1000012, "kernelrpc_mach_port_deallocate_trap"},
+    {0x1000013, "kernelrpc_mach_port_mod_refs_trap"},
+    {0x1000018, "kernelrpc_mach_port_construct_trap"},
+    {0x100001a, "mach_reply_port"},
+    {0x100001b, "thread_self_trap"},
+    {0x100001c, "task_self_trap"},
+    {0x100001d, "host_self_trap"},
+    {0x100001f, "mach_msg_trap"},
+    {0x3000003, "thread_fast_set_cthread_self64"},
 }};
 
 }  // namespace macos

@@ -42,6 +42,7 @@ add_library(qiling STATIC
     os/freebsd/freebsd.cpp
     os/freebsd/syscall.cpp
     os/macos/macos.cpp
+    os/macos/syscall.cpp
     os/qnx/qnx.cpp
     os/qnx/syscall.cpp
     os/qnx/helpers.cpp

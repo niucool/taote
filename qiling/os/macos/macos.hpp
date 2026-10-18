@@ -10,13 +10,17 @@
 #ifndef QILING_OS_MACOS_MACOS_HPP
 #define QILING_OS_MACOS_MACOS_HPP
 
+#include <memory>
 #include <string_view>
 
 #include "qiling/os/posix/posix.hpp"
+#include "qiling/os/macos/mach_port.hpp"
 
 namespace qiling {
 namespace os {
 namespace macos {
+
+struct MachoThread;
 
 class QlOsMacos : public posix::QlOsPosix {
 public:
@@ -26,6 +30,14 @@ public:
 
     void run() override;
 
+    // the mach-port/task/thread surfaces the self-trap handlers ride (the
+    // upstream's loader/macho.py seeds them on the QlOs; the port seeds them
+    // in the ctor until the Mach-O loader slice lands)
+    const MachPort& macho_mach_port() const { return *macho_mach_port_; }
+    const MachPortManager& macho_port_manager() const { return *macho_port_manager_; }
+    const MachoTask& macho_task() const { return *macho_task_; }
+    const MachoThread& macho_thread() const { return *macho_thread_; }
+
 protected:
     // map_syscall.py get_syscall_mapper: the MACOS per-arch table; the
     // x8664 numbers carry the LIBSYSTEM fixup (0x2000000 <= n < 0x3000000
@@ -34,6 +46,11 @@ protected:
 
 private:
     void load();
+
+    std::unique_ptr<MachPort> macho_mach_port_;
+    std::unique_ptr<MachPortManager> macho_port_manager_;
+    std::unique_ptr<MachoTask> macho_task_;
+    std::unique_ptr<MachoThread> macho_thread_;
 };
 
 }  // namespace macos
