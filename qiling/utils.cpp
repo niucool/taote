@@ -19,6 +19,7 @@
 #include "qiling/os/posix/posix.hpp"
 #include "qiling/os/windows/windows.hpp"
 #include "qiling/loader/pe.hpp"
+#include "qiling/loader/elf.hpp"
 
 namespace qiling {
 
@@ -240,11 +241,11 @@ LoaderFactory select_loader(QL_OS ostype, bool libcache) {
                 return std::make_unique<loader::QlLoaderPE>(ql, libcache);
             };
         case QL_OS::LINUX:
-            // shellcode runs take the blob loader's mapping path (loader/elf.py
-            // pe=None equivalent); the ELF container parsing lands with
-            // Phase 5 (PORT_PLAN.md)
+            // QlLoaderELF covers both paths: the shellcode branch (the
+            // loader/elf.py `if self.ql.code` blob mapping) and the ET_EXEC/
+            // ET_DYN container parsing
             return [](Qiling* ql) -> std::unique_ptr<loader::QlLoader> {
-                return std::make_unique<loader::QlLoaderBLOB>(ql);
+                return std::make_unique<loader::QlLoaderELF>(ql);
             };
         default:
             // the remaining per-format loaders (ELF/Mach-O/DOS/UEFI/...) land

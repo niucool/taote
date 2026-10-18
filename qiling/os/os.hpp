@@ -92,6 +92,10 @@ public:
     int exit_code() const noexcept { return exit_code_; }
     void set_exit_code(int code) noexcept { exit_code_ = code; }
 
+    // os.py last_error (the windows api surface; posix ignores it)
+    std::uint32_t last_error() const noexcept { return last_error_; }
+    void set_last_error(std::uint32_t code) noexcept { last_error_ = code; }
+
     QlOsStats& stats() noexcept { return stats_; }
 
     // the shellcode entry configuration (os.py ctor: the CODE profile section)
@@ -173,6 +177,7 @@ protected:
     void* thread_management_ = nullptr;  // QlThread* (thread management slice)
     IniConfig* profile_ = nullptr;
     int exit_code_ = 0;
+    std::uint32_t last_error_ = 0;
 
     std::uint64_t exit_point_ = 0;
     std::uint64_t load_address_ = 0;

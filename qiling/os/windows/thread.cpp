@@ -1,0 +1,149 @@
+#include "qiling/os/windows/thread.hpp"
+
+#include "qiling/core.hpp"
+#include "qiling/os/windows/windows.hpp"
+
+namespace qiling {
+namespace os {
+namespace windows {
+
+namespace {
+std::uint64_t next_thread_id() {
+    static std::uint64_t counter = 0;
+    return counter++;
+}
+}  // namespace
+
+QlWindowsThread::QlWindowsThread(Qiling* ql, ThreadStatus status)
+    : QlThread(ql), id_(next_thread_id()), status_(status) {}
+
+std::unique_ptr<QlWindowsThread> QlWindowsThread::create(Qiling* ql, std::uint64_t stack_size,
+                                                         std::uint64_t func_addr, std::uint64_t func_params,
+                                                         ThreadStatus status) {
+    auto* os = static_cast<os::windows::QlOsWindows*>(&ql->os());
+    auto thread = std::unique_ptr<QlWindowsThread>(new QlWindowsThread(ql, status));
+
+    // thread.py create: the new stack lives on the os heap; the return
+    // address lands at the top (the thread-ret address comes from the
+    // thread manager once the os wires it)
+    const auto new_stack = os->heap().alloc(stack_size) + stack_size;
+
+    const auto saved = ql->arch().regs().save();
+    std::map<std::string, std::uint64_t> prepared(saved.begin(), saved.end());
+
+    const auto ret_addr = os->thread_manager_ret_addr();
+    if (ret_addr != 0) {
+        ql->mem().write_ptr(new_stack - (ql->arch().bits() / 8), ret_addr);
+    }
+
+    if (ql->arch().type() == QL_ARCH::X86) {
+        ql->mem().write_ptr(new_stack, func_params);
+        prepared["eip"] = func_addr;
+        prepared["ebp"] = new_stack - 4;
+        prepared["esp"] = new_stack - 4;
+    } else if (ql->arch().type() == QL_ARCH::X8664) {
+        prepared["rcx"] = func_params;
+        prepared["rip"] = func_addr;
+        prepared["rbp"] = new_stack - 8;
+        prepared["rsp"] = new_stack - 8;
+    }
+
+    thread->saved_context_ = std::move(prepared);
+    return thread;
+}
+
+void QlWindowsThread::suspend() {
+    // thread.py suspend: snapshot the live register state
+    const auto saved = ql_->arch().regs().save();
+    saved_context_.clear();
+    saved_context_.insert(saved.begin(), saved.end());
+}
+
+void QlWindowsThread::resume() {
+    // thread.py resume: restore the saved context and mark running
+    if (!saved_context_.empty()) {
+        ql_->arch().regs().restore(saved_context_);
+    }
+    status_ = ThreadStatus::Running;
+}
+
+std::optional<std::uint64_t> QlWindowsThread::get_tls(std::uint64_t index) const {
+    const auto it = tls_.find(index);
+    return it == tls_.end() ? std::nullopt : std::optional<std::uint64_t>(it->second);
+}
+
+bool QlWindowsThread::has_waitfor() const {
+    for (const auto* thread : waitfor_) {
+        if (!thread->is_stop()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// ---- QlWindowsThreadManagement ----
+
+QlWindowsThreadManagement::QlWindowsThreadManagement(Qiling* ql, QlWindowsThread* cur_thread)
+    : ql_(ql), cur_thread_(cur_thread) {
+    threads_.push_back(cur_thread);
+}
+
+void QlWindowsThreadManagement::install_hook() {
+    // thread.py: write the nop sled at the thread return address and hook the
+    // code stream with the scheduler
+    if (thread_ret_addr_ != 0) {
+        const std::vector<std::uint8_t> nops(8, 0x90);
+        ql_->mem().write(thread_ret_addr_, nops);
+    }
+
+    auto* self = this;
+    scheduler_hook_ = ql_->hook_code([self](std::uint64_t address, std::uint32_t size) -> int {
+        return self->on_hook(address, size);
+    });
+}
+
+int QlWindowsThreadManagement::on_hook(std::uint64_t address, std::uint32_t size) {
+    (void)size;
+
+    if (address == thread_ret_addr_) {
+        cur_thread_->stop();
+    } else {
+        ++icount_;
+    }
+
+    const bool switched = do_schedule();
+
+    // thread.py: when another thread resumed, skip the remaining hooks of the
+    // current address to avoid running them with the new context
+    return switched ? static_cast<int>(QL_HOOK_BLOCK) : 0;
+}
+
+bool QlWindowsThreadManagement::do_schedule() {
+    // thread.py do_schedule: the round-robin pass over the other threads
+    const bool need_schedule = cur_thread_->is_stop() || (icount_ % TIME_SLICE) == 0;
+    bool switched = false;
+
+    if (need_schedule) {
+        for (std::size_t i = 1; i < threads_.size(); ++i) {
+            const auto next_id = (static_cast<std::size_t>(cur_thread_->get_id()) + i) % threads_.size();
+            auto* next_thread = threads_[next_id];
+
+            if (next_thread->status() == ThreadStatus::Running && !next_thread->has_waitfor()) {
+                if (!cur_thread_->is_stop()) {
+                    cur_thread_->suspend();
+                }
+
+                next_thread->resume();
+                cur_thread_ = next_thread;
+                switched = true;
+                break;
+            }
+        }
+    }
+
+    return switched;
+}
+
+}  // namespace windows
+}  // namespace os
+}  // namespace qiling

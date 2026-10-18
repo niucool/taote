@@ -62,6 +62,13 @@ public:
     QlMemoryHeap& heap() const noexcept { return *heap_; }
     HandleManager& handle_manager() const noexcept { return *handle_manager_; }
 
+    // windows.py thread_management (the QlWindowsThreadManagement instance;
+    // the typed surface lands with the thread-slice wiring)
+    void* thread_management() const noexcept { return thread_management_; }
+    void set_thread_management(void* mgr) noexcept { thread_management_ = mgr; }
+    void set_thread_ret_addr(std::uint64_t addr) noexcept { thread_ret_addr_ = addr; }
+    std::uint64_t thread_manager_ret_addr() const noexcept { return thread_ret_addr_; }
+
 private:
     std::string_view os_section_name() const;
     std::string_view bits_section() const noexcept;
@@ -76,6 +83,7 @@ private:
     std::string userprofile_;
     std::string username_;
     std::uint32_t last_error_ = 0;
+    std::uint64_t thread_ret_addr_ = 0;
     int bits_ = 64;
 };
 

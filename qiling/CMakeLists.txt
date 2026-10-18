@@ -31,10 +31,14 @@ add_library(qiling STATIC
     os/windows/handle.cpp
     os/windows/fncc.cpp
     os/windows/windows.cpp
+    os/windows/clipboard.cpp
+    os/windows/fiber.cpp
+    os/windows/thread.cpp
     os/blob/blob.cpp
     loader/loader.cpp
     loader/blob.cpp
     loader/pe.cpp
+    loader/elf.cpp
     snapshot.cpp
     cc/cc.cpp
     cc/arm.cpp
