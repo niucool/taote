@@ -155,7 +155,14 @@ bool QlLinuxThread::run_slice(std::uint64_t exit_point, std::uint64_t count) {
                  static_cast<unsigned long long>(ql_->arch().regs().arch_pc()));
 
     // thread.py save()
-    save();
+    // BISECT cycle 4 (b3): the between-emu_starts uc_context save removed for
+    // the deletion bisect — restore when the study closes. The parent's
+    // post-park ctx is not needed before the fault (the child faults before
+    // any parent wake), so the bisect run stays functional.
+    if (!saved_context_) {
+        save();
+    }
+    // save();
 
     // note that the callback may be set by the uc callbacks; never give up
     // control during one (the port's switch happens here, after emu_start)
