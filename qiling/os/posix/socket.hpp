@@ -63,6 +63,18 @@ public:
     std::shared_ptr<QlSocket> accept(std::string& peer_path, std::string& peer_host,
                                      std::uint16_t& peer_port);
 
+    // socketpair(domain, socktype, protocol): the connected pair (the
+    // ql_socket.socketpair shape)
+    static std::pair<std::shared_ptr<QlSocket>, std::shared_ptr<QlSocket>> socketpair(int domain,
+                                                                                      int socktype,
+                                                                                      int protocol);
+
+    // recv/send with the flags (the socket.py recv/send delegates); the
+    // recv returns the bytes read (the empty vector on the error), the send
+    // the byte count (-1 on the error)
+    std::vector<std::uint8_t> recv(std::size_t bufsize, int flags);
+    std::int64_t send(const std::vector<std::uint8_t>& data, int flags);
+
     int family() const noexcept { return family_; }
     int socktype() const noexcept { return socktype_; }
     int protocol() const noexcept { return protocol_; }
@@ -78,6 +90,11 @@ private:
     int protocol_ = 0;
 };
 
+std::optional<std::int64_t> syscall_recv(Qiling& ql, const std::vector<std::uint64_t>& params);
+std::optional<std::int64_t> syscall_socketpair(Qiling& ql, const std::vector<std::uint64_t>& params);
+std::optional<std::int64_t> syscall_sendto(Qiling& ql, const std::vector<std::uint64_t>& params);
+std::optional<std::int64_t> syscall_recvfrom(Qiling& ql, const std::vector<std::uint64_t>& params);
+std::optional<std::int64_t> syscall_send(Qiling& ql, const std::vector<std::uint64_t>& params);
 std::optional<std::int64_t> syscall_socket(Qiling& ql, const std::vector<std::uint64_t>& params);
 std::optional<std::int64_t> syscall_shutdown(Qiling& ql, const std::vector<std::uint64_t>& params);
 std::optional<std::int64_t> syscall_connect(Qiling& ql, const std::vector<std::uint64_t>& params);

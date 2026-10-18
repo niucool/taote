@@ -1270,3 +1270,59 @@ TEST(PosixSocket, BindUnixRidesRootfsPathAndListens) {
     // file under the host rootfs (the Win32 unix-socket file is a reparse
     // point the plain probes reject — the bind's 0 return is the evidence)
 }
+
+// the socketpair + the send/recv flow: the connected pair rides the fd
+// table (the sv pair carries the two fd numbers), the guest writes through
+// one end and reads the payload off the other
+TEST(PosixSocket, SocketpairThenSendRecvRidesThePair) {
+    const std::vector<std::uint8_t> code = {
+        // socketpair(AF_INET=2, SOCK_STREAM=1, 0, sv@0x1002100) — the
+        // loopback-pair walk (the AF_UNIX host open fails on _WIN32)
+        0x48, 0xC7, 0xC0, 0x35, 0x00, 0x00, 0x00,  // mov rax, 53 (socketpair)
+        0x48, 0xC7, 0xC7, 0x02, 0x00, 0x00, 0x00,  // mov rdi, 2 (AF_INET)
+        0x48, 0xC7, 0xC6, 0x01, 0x00, 0x00, 0x00,  // mov rsi, 1
+        0x45, 0x31, 0xC0,                           // xor r8d, r8d
+        0x49, 0xBA, 0x00, 0x21, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,  // mov r10, 0x1002100
+        0x0F, 0x05,
+        0x48, 0x89, 0x04, 0x25, 0x08, 0x22, 0x00, 0x01,  // mov [0x1002208], rax
+        // send(fd1, "PING", 4, 0) — the sv cells carry the fds (i32 at
+        // sv+0/sv+4); the guest loads them with the mov r32→r64 ride
+        0x44, 0x8B, 0x04, 0x25, 0x00, 0x21, 0x00, 0x01,  // mov r8d, [0x1002100]
+        0x48, 0xC7, 0xC0, 0x2C, 0x00, 0x00, 0x00,  // mov rax, 44 (sendto, the NULL addr rides send)
+        0x44, 0x89, 0xC7,                           // mov edi, r8d (the fd)
+        0x48, 0xC7, 0xC6, 0x20, 0x22, 0x00, 0x01,  // mov rsi, 0x1002220 ("PING")
+        0x48, 0xC7, 0xC2, 0x04, 0x00, 0x00, 0x00,  // mov rdx, 4
+        0x45, 0x31, 0xD2,                           // xor r10d, r10d (the 4th arg rides r10!)
+        0x0F, 0x05,
+        0x48, 0x89, 0x04, 0x25, 0x10, 0x22, 0x00, 0x01,  // mov [0x1002210], rax
+        // recv(fd2, buf@0x1002240, 16, 0) — the fd from sv+4
+        0x44, 0x8B, 0x04, 0x25, 0x04, 0x21, 0x00, 0x01,  // mov r8d, [0x1002104]
+        0x48, 0xC7, 0xC0, 0x2D, 0x00, 0x00, 0x00,  // mov rax, 45 (recvfrom, the NULL addr rides recv)
+        0x44, 0x89, 0xC7,                           // mov edi, r8d (the fd)
+        0x48, 0xC7, 0xC6, 0x40, 0x22, 0x00, 0x01,  // mov rsi, 0x1002240
+        0x48, 0xC7, 0xC2, 0x10, 0x00, 0x00, 0x00,  // mov rdx, 16
+        0x45, 0x31, 0xD2,                           // xor r10d, r10d (the 4th arg rides r10!)
+        0x0F, 0x05,
+        0x48, 0x89, 0x04, 0x25, 0x18, 0x22, 0x00, 0x01,  // mov [0x1002218], rax
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00,
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00,
+        0x0F, 0x05,
+    };
+
+    QilingOptions options = posix_options(code);
+    Qiling ql(options);
+
+    const std::string ping = "PING";
+    ql.mem().write(0x1002220, std::vector<std::uint8_t>(ping.begin(), ping.end()));
+
+    ql.run();
+
+    EXPECT_EQ(ql.os().exit_code(), 0);
+    EXPECT_EQ(ql.mem().read_ptr(0x1002208, 8), 0u);   // the socketpair ok
+    EXPECT_EQ(ql.mem().read_ptr(0x1002100, 4), 3u);   // fd1 = 3
+    EXPECT_EQ(ql.mem().read_ptr(0x1002104, 4), 4u);   // fd2 = 4
+    EXPECT_EQ(ql.mem().read_ptr(0x1002210, 8), 4u);   // the send rode 4 bytes
+    EXPECT_EQ(ql.mem().read_ptr(0x1002218, 8), 4u);   // the recv rode 4 bytes
+    const auto got = ql.mem().read(0x1002240, 4);
+    EXPECT_EQ(std::string(got.begin(), got.end()), "PING");
+}

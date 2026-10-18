@@ -1311,6 +1311,16 @@ void register_builtin_syscalls() {
     registry.register_syscall({"bind", {PARAM_INTN, PARAM_PTRX, PARAM_INTN}, syscall_bind});
     registry.register_syscall({"listen", {PARAM_INTN, PARAM_INTN}, syscall_listen});
     registry.register_syscall({"accept", {PARAM_INTN, PARAM_PTRX, PARAM_PTRX}, syscall_accept});
+    // the send/recv family (the recv/send/sendto/recvfrom quartet)
+    registry.register_syscall({"recv", {PARAM_INTN, PARAM_PTRX, PARAM_INTN, PARAM_INTN}, syscall_recv});
+    registry.register_syscall({"send", {PARAM_INTN, PARAM_PTRX, PARAM_INTN, PARAM_INTN}, syscall_send});
+    // the sendto/recvfrom quartet: the STREAM sockets and the NULL addr
+    // ride the send/recv bodies verbatim
+    registry.register_syscall({"sendto", {PARAM_INTN, PARAM_PTRX, PARAM_INTN, PARAM_INTN, PARAM_PTRX, PARAM_INTN}, syscall_sendto});
+    registry.register_syscall({"recvfrom", {PARAM_INTN, PARAM_PTRX, PARAM_INTN, PARAM_INTN, PARAM_PTRX, PARAM_INTN}, syscall_recvfrom});
+    // the socketpair ride (the AF_UNIX pairs; the loopback accept walk on
+    // the _WIN32 host)
+    registry.register_syscall({"socketpair", {PARAM_INTN, PARAM_INTN, PARAM_INTN, PARAM_PTRX}, syscall_socketpair});
 
     // the futex dispatch (os/posix/syscall/futex.py) + the yield (sched.py)
     registry.register_syscall({"futex", {PARAM_INTN, PARAM_INTN, PARAM_INTN, PARAM_INTN, PARAM_INTN, PARAM_INTN}, syscall_futex});

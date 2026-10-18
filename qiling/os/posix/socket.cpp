@@ -172,6 +172,89 @@ void QlSocket::close() {
     }
 }
 
+std::pair<std::shared_ptr<QlSocket>, std::shared_ptr<QlSocket>> QlSocket::socketpair(int domain,
+                                                                                     int socktype,
+                                                                                     int protocol) {
+#ifdef _WIN32
+    // the winsock socketpair lacks — the loopback accept walk (the classic
+    // emulation: the listener + the connector on 127.0.0.1:0)
+    const SOCKET listener = ::socket(domain, socktype, protocol);
+    if (listener == INVALID_SOCKET) {
+        throw QlErrorBase("socketpair: listener failed");
+    }
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = ::htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0;
+    if (::bind(listener, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0 ||
+        ::listen(listener, 1) != 0) {
+        ::closesocket(listener);
+        throw QlErrorBase("socketpair: bind/listen failed");
+    }
+    sockaddr_in bound{};
+    int blen = sizeof(bound);
+    ::getsockname(listener, reinterpret_cast<sockaddr*>(&bound), &blen);
+
+    const SOCKET client = ::socket(domain, socktype, protocol);
+    if (client == INVALID_SOCKET) {
+        ::closesocket(listener);
+        throw QlErrorBase("socketpair: client failed");
+    }
+    // the connect rides the BOUND address verbatim (the family, the loopback
+    // addr, the ephemeral port off the getsockname)
+    if (::connect(client, reinterpret_cast<sockaddr*>(&bound), sizeof(bound)) != 0) {
+        ::closesocket(client);
+        ::closesocket(listener);
+        throw QlErrorBase("socketpair: connect failed");
+    }
+    sockaddr_in peer{};
+    int plen = sizeof(peer);
+    const SOCKET server = ::accept(listener, reinterpret_cast<sockaddr*>(&peer), &plen);
+    ::closesocket(listener);
+    if (server == INVALID_SOCKET) {
+        ::closesocket(client);
+        throw QlErrorBase("socketpair: accept failed");
+    }
+    return {std::shared_ptr<QlSocket>(new QlSocket(static_cast<std::uintptr_t>(client), domain, socktype, protocol)),
+            std::shared_ptr<QlSocket>(new QlSocket(static_cast<std::uintptr_t>(server), domain, socktype, protocol))};
+#else
+    int sv[2] = {-1, -1};
+    if (::socketpair(domain, socktype, protocol, sv) != 0) {
+        throw QlErrorBase("socketpair failed");
+    }
+    return {std::shared_ptr<QlSocket>(new QlSocket(static_cast<std::uintptr_t>(sv[0]), domain, socktype, protocol)),
+            std::shared_ptr<QlSocket>(new QlSocket(static_cast<std::uintptr_t>(sv[1]), domain, socktype, protocol))};
+#endif
+}
+
+std::vector<std::uint8_t> QlSocket::recv(std::size_t bufsize, int flags) {
+    // ql_socket.recv: the socket.recv(bufsize, flags)
+    std::vector<std::uint8_t> out(bufsize, 0);
+#ifdef _WIN32
+    const int n = ::recv(static_cast<SOCKET>(host_handle_), reinterpret_cast<char*>(out.data()),
+                         static_cast<int>(bufsize), flags);
+#else
+    const ssize_t n = ::recv(static_cast<int>(host_handle_), out.data(), bufsize, flags);
+#endif
+    if (n < 0) {
+        return {};  // the OSError shapes onto the empty read at the caller
+    }
+    out.resize(static_cast<std::size_t>(n));
+    return out;
+}
+
+std::int64_t QlSocket::send(const std::vector<std::uint8_t>& data, int flags) {
+    // ql_socket.send: the socket.send(data, flags)
+#ifdef _WIN32
+    const int n = ::send(static_cast<SOCKET>(host_handle_),
+                         reinterpret_cast<const char*>(data.data()),
+                         static_cast<int>(data.size()), flags);
+#else
+    const ssize_t n = ::send(static_cast<int>(host_handle_), data.data(), data.size(), flags);
+#endif
+    return n < 0 ? 0 : static_cast<std::int64_t>(n);
+}
+
 bool QlSocket::shutdown(int how) {
     // ql_socket.shutdown: the ConnectionError shapes onto the caller's -1
     return host_socket_shutdown(host_handle_, how) == 0;
@@ -554,6 +637,116 @@ std::optional<std::int64_t> syscall_accept(Qiling& ql, const std::vector<std::ui
     }
 
     return idx;
+}
+
+std::optional<std::int64_t> syscall_recv(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    // ql_syscall_recv(sockfd, buf, length, flags): the recv bytes land at
+    // the buf, the count rides the return (the upstream writes the content
+    // verbatim — the empty read writes nothing)
+    const auto sockfd = static_cast<std::int64_t>(params[0]);
+
+    auto* sock = dynamic_cast<QlSocket*>(fd_get(ql, sockfd).get());
+    if (sock == nullptr) {
+        return -88;  // -ENOTSOCK
+    }
+
+    const auto content = sock->recv(static_cast<std::size_t>(params[2]), static_cast<int>(params[3]));
+    if (!content.empty()) {
+        ql.mem().write(params[1], content);
+    }
+    return static_cast<std::int64_t>(content.size());
+}
+
+std::optional<std::int64_t> syscall_send(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    // ql_syscall_send(sockfd, buf, length, flags): the IOError branch rides
+    // the 0 (the verbatim "regreturn = 0")
+    const auto sockfd = static_cast<std::int64_t>(params[0]);
+
+    auto* sock = dynamic_cast<QlSocket*>(fd_get(ql, sockfd).get());
+    if (sock == nullptr) {
+        return -88;  // -ENOTSOCK
+    }
+
+    const auto content = ql.mem().read(params[1], static_cast<std::size_t>(params[2]));
+    return sock->send(content, static_cast<int>(params[3]));
+}
+
+std::optional<std::int64_t> syscall_sendto(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    // ql_syscall_sendto(sockfd, buf, length, flags, addr, addrlen): the
+    // connection-mode sockets and the NULL addr ride the send body (the
+    // verbatim "calling sendto with NULL addr is equivalent to send")
+    const auto sockfd = static_cast<std::int64_t>(params[0]);
+
+    auto* sock = dynamic_cast<QlSocket*>(fd_get(ql, sockfd).get());
+    if (sock == nullptr) {
+        return -88;  // -ENOTSOCK
+    }
+
+    if (sock->socktype() == kSockStream || sock->socktype() == kSockSeqpacket ||
+        (params[4] == 0 && params[5] == 0)) {
+        return syscall_send(ql, {params[0], params[1], params[2], params[3]});
+    }
+
+    // the datagram sendto rides its sub-slice (the dest parse + the
+    // sendto host call)
+    throw QlErrorBase("sendto: the datagram dest path lands with its slice");
+}
+
+std::optional<std::int64_t> syscall_recvfrom(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    // ql_syscall_recvfrom(sockfd, buf, length, flags, addr, addrlen): the
+    // STREAM sockets and the NULL addr ride the recv body (the verbatim
+    // "calling recvfrom with a NULL addr is identical to calling recv")
+    const auto sockfd = static_cast<std::int64_t>(params[0]);
+
+    auto* sock = dynamic_cast<QlSocket*>(fd_get(ql, sockfd).get());
+    if (sock == nullptr) {
+        return -88;  // -ENOTSOCK
+    }
+
+    if (sock->socktype() == kSockStream || (params[4] == 0 && params[5] == 0)) {
+        return syscall_recv(ql, {params[0], params[1], params[2], params[3]});
+    }
+
+    throw QlErrorBase("recvfrom: the datagram src path lands with its slice");
+}
+
+std::optional<std::int64_t> syscall_socketpair(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    // ql_syscall_socketpair(domain, socktype, protocol, sv): the two fds
+    // into the sv pair (the i32 writes at sv+0/sv+4 — the upstream's
+    // write_ptr(sv+0, idx1) / (sv+4, idx2) verbatim)
+    const auto domain = static_cast<int>(params[0]);
+    const auto socktype = static_cast<int>(params[1]);
+    const auto protocol = static_cast<int>(params[2]);
+    const auto sv = params[3];
+
+    auto& fd_table = ql.os<posix::QlOsPosix>().fd();
+    int idx1 = -1;
+    int idx2 = -1;
+    for (int i = 0; i < QlFileDes::NR_OPEN; ++i) {
+        if (fd_table.at(i) == nullptr) {
+            if (idx1 == -1) {
+                idx1 = i;
+            } else {
+                idx2 = i;
+                break;
+            }
+        }
+    }
+    if (idx1 == -1 || idx2 == -1) {
+        return -24;  // -EMFILE
+    }
+
+    try {
+        auto pair = QlSocket::socketpair(domain, socktype, protocol);
+        fd_table.set(idx1, pair.first);
+        fd_table.set(idx2, pair.second);
+    } catch (const QlErrorBase&) {
+        return -1;  // the OSError branch
+    }
+
+    ql.mem().write_ptr(sv, static_cast<std::uint64_t>(idx1), 4);
+    ql.mem().write_ptr(sv + 4, static_cast<std::uint64_t>(idx2), 4);
+    return 0;
 }
 
 }  // namespace posix

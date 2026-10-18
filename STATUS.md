@@ -926,6 +926,15 @@ rename locals; the Win32 unix-socket file is a reparse point the plain
 `std::filesystem::exists` rejects (the ec-form still trips) — the bind's 0
 return is the fixture's evidence.
 
+### Phase 12 sub-slice 3 — socketpair + the send/recv family
+
+| piece | upstream | state | notes |
+|---|---|---|---|
+| socketpair | `syscall/socket.py` + `filestruct.py ql_socket.socketpair` | ✅ | the two next-free fds into the sv pair (the i32 writes at sv+0/sv+4 verbatim); the _WIN32 host lacks socketpair — the loopback accept walk (the listener on 127.0.0.1:0 + the connect off the getsockname addr) backs it; the AF_UNIX host open fails on _WIN32 so the fixture rides AF_INET |
+| recv/send | `syscall/socket.py` | ✅ | the recv (the empty read writes nothing, the count rides the return) and the send (the verbatim IOError → 0 branch) |
+| sendto/recvfrom | `syscall/socket.py` | ✅ core | the STREAM sockets and the NULL addr ride the send/recv bodies verbatim; the datagram dest/src paths throw pending their sub-slice (the upstream's SOCK_STREAM/SOCK_SEQPACKET checks verbatim) |
+| the fixture | `tests/Posix_Test.cpp` | ✅ | the socketpair(AF_INET) + the send('PING')/recv flow over the pair — the pinned r10 gotcha fired a third time (the 4th syscall arg must ride r10, and the x8664 has NO bare send/recv — the sendto/recvfrom names at 44/45 ride the NULL-addr delegation) |
+
 ## Deferred (tracked, not built)
 
 `os/macos/` (the remaining surface: the syscall handlers, the kernel_api
