@@ -10,6 +10,7 @@
 
 #include "qiling/core.hpp"
 #include "qiling/os/dos/dos.hpp"
+#include "qiling/os/filestruct.hpp"
 
 using namespace qiling;
 
@@ -225,4 +226,65 @@ TEST(DosOs, Int13LbaReadRidesQlDisk) {
     // the sector-1 marker landed at the 0x0600 buffer
     const auto got = ql.mem().read(0x600, marker.size());
     EXPECT_EQ(std::string(got.begin(), got.end()), marker);
+}
+
+// the int 15h APM shutdown request: ah=0x53 al=0x07 bx=1 cx=3 stops the
+// emulation (the upstream "Emulation Stop" shape); the run returns without
+// reaching the trailing self-loop
+//   00: B8 07 53     mov ax, 0x5307
+//   03: BB 01 00     mov bx, 1
+//   06: B9 03 00     mov cx, 3
+//   09: CD 15        int 15h
+//   0B: EB FE        jmp $ (never reached)
+TEST(DosOs, Int15ApmShutdownStops) {
+    const std::vector<std::uint8_t> com = {
+        0xB8, 0x07, 0x53,  // mov ax, 0x5307
+        0xBB, 0x01, 0x00,  // mov bx, 1
+        0xB9, 0x03, 0x00,  // mov cx, 3
+        0xCD, 0x15,        // int 15h
+        0xEB, 0xFE,        // jmp $
+    };
+    auto ql = make_dos_qiling(com);
+
+    ql.run();
+
+    EXPECT_EQ(ql.os().exit_code(), 0);
+}
+
+// the int 16h blocking key read (ah=00) over the injected stdin: the 'A'
+// byte rides al (the ascii range) with the 'A' scancode 0x1e in ah (the
+// SCANCODES table); the poll leaf (ah=01) degrades to the documented
+// NotImplemented (the non-blocking console read is a curses shape)
+//   00: B4 00        mov ah, 00
+//   02: CD 16        int 16h
+//   04: 88 26 30 01  mov [0x0130], ah
+//   08: A2 32 01     mov [0x0132], al
+//   0B: B4 4C CD 21  the exit
+TEST(DosOs, Int16ReadKeyRidesInjectedStdin) {
+    const std::vector<std::uint8_t> com = {
+        0xB4, 0x00,              // mov ah, 00
+        0xCD, 0x16,              // int 16h
+        0x88, 0x26, 0x30, 0x01,  // mov [0x0130], ah
+        0xA2, 0x32, 0x01,        // mov [0x0132], al
+        0xB4, 0x4C,              // mov ah, 4c
+        0xCD, 0x21,              // int 21h
+    };
+    auto ql = make_dos_qiling(com);
+
+    // the injected stdin carries the 'A' keypress
+    const auto rootfs = std::filesystem::temp_directory_path() / kDosRootfs;
+    const auto key_path = rootfs / "keys.txt";
+    {
+        std::ofstream f(key_path, std::ios::binary);
+        f << 'A';
+    }
+    static_cast<os::dos::QlOsDos&>(ql.os()).set_stdin(QlFile::open_mode(key_path.string(), "rb"));
+
+    ql.run();
+
+    EXPECT_EQ(ql.os().exit_code(), 0);
+    // the key: al='A' (0x41), ah=0x1e (the 'A' scancode); the stores ride
+    // ds=0x75A (the COM entry) - the linear cells sit at 0x75A0+0x130
+    EXPECT_EQ(ql.mem().read_ptr(0x75A0 + 0x132, 1), 0x41u);
+    EXPECT_EQ(ql.mem().read_ptr(0x75A0 + 0x130, 1), 0x1Eu);
 }

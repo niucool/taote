@@ -6,6 +6,7 @@
 
 #include <ctime>
 #include <fstream>
+#include <thread>
 #include <filesystem>
 #include <thread>
 
@@ -543,11 +544,153 @@ void handler(Qiling& ql) {
 
 }  // namespace int13
 
+// ---- int15.py (the system services; the APM shape)
+// @see: http://www.oldlinux.org/Linux.old/docs/interrupts/int-html/int-15.htm
+
+namespace int15 {
+
+void leaf_00(Qiling& /*ql*/) {}
+void leaf_01(Qiling& /*ql*/) {}
+
+// int15.py __leaf_53: the APM interface
+void leaf_53(Qiling& ql) {
+    const auto al = ql.arch().regs().read("al");
+
+    if (al == 0x01) {
+        static_cast<QlOsDos&>(ql.os()).clear_cf();
+    } else if (al == 0x0e) {
+        ql.arch().regs().write("ax", 0x0102);
+        static_cast<QlOsDos&>(ql.os()).clear_cf();
+    } else if (al == 0x07) {
+        if ((ql.arch().regs().read("bx") == 1) && (ql.arch().regs().read("cx") == 3)) {
+            // the "Emulation Stop" log
+            ql.os().set_exit_code(0);
+            ql.emu_stop();
+        }
+    } else {
+        throw QlErrorNotImplemented("leaf of INT 15h is not implemented");
+    }
+}
+
+// int15.py __leaf_86: the microsecond wait
+void leaf_86(Qiling& ql) {
+    const auto dx = ql.arch().regs().read("dx");
+    const auto cx = ql.arch().regs().read("cx");
+    const auto full_secs = ((cx << 16) + dx) / 1000000.0;
+
+    std::this_thread::sleep_for(std::chrono::duration<double>(full_secs));
+
+    // the single-thread assumption note (the upstream verbatim)
+    static_cast<QlOsDos&>(ql.os()).clear_cf();
+    ql.arch().regs().write("ah", 0x80);
+}
+
+void handler(Qiling& ql) {
+    const auto ah = ql.arch().regs().read("ah");
+
+    static const std::map<unsigned, std::function<void(Qiling&)>> leaves = {
+        {0x00, leaf_00}, {0x01, leaf_01}, {0x53, leaf_53}, {0x86, leaf_86},
+    };
+
+    const auto it = leaves.find(static_cast<unsigned>(ah));
+    if (it == leaves.end()) {
+        throw QlErrorNotImplemented("leaf of INT 15h is not implemented");
+    }
+
+    it->second(ql);
+}
+
+}  // namespace int15
+
+// ---- int16.py (the keyboard services)
+//
+// The upstream rides the curses stdscr for the input; the port keeps the
+// terminal detached and reads the blocking leaf through the injected stdin
+// stream. The SCANCODES table ports the ASCII-key subset (the curses KEY_*
+// constants have no port counterpart).
+
+namespace int16 {
+
+// int16.py SCANCODES (the ascii-key subset)
+const std::map<unsigned, unsigned>& scancodes() {
+    static const std::map<unsigned, unsigned> table = {
+        {'1', 0x02}, {'!', 0x02}, {'2', 0x03}, {'@', 0x03}, {'3', 0x04}, {'#', 0x04},
+        {'4', 0x05}, {'$', 0x05}, {'5', 0x06}, {'%', 0x06}, {'6', 0x07}, {'^', 0x07},
+        {'7', 0x08}, {'&', 0x07}, {'8', 0x09}, {'*', 0x09}, {'9', 0x0A}, {'(', 0x0A},
+        {'0', 0x0B}, {')', 0x0B}, {'-', 0x0C}, {'_', 0x0C}, {'=', 0x0D}, {'+', 0x0D},
+        {'\b', 0x0E}, {'\t', 0x0F},
+        {'q', 0x10}, {'Q', 0x10}, {'w', 0x11}, {'W', 0x11}, {'e', 0x12}, {'E', 0x12},
+        {'r', 0x13}, {'R', 0x13}, {'t', 0x14}, {'T', 0x14}, {'y', 0x15}, {'Y', 0x15},
+        {'u', 0x16}, {'U', 0x16}, {'i', 0x17}, {'I', 0x17}, {'o', 0x18}, {'O', 0x18},
+        {'p', 0x19}, {'P', 0x19}, {'[', 0x1A}, {'}', 0x1A}, {']', 0x1B}, {'{', 0x1B},
+        {'\r', 0x1C}, {'\n', 0x1C},
+        {'a', 0x1E}, {'A', 0x1E}, {'s', 0x1F}, {'S', 0x1F}, {'d', 0x20}, {'D', 0x20},
+        {'f', 0x21}, {'F', 0x21}, {'g', 0x22}, {'G', 0x22}, {'h', 0x23}, {'H', 0x23},
+        {'j', 0x24}, {'J', 0x24}, {'k', 0x25}, {'K', 0x25}, {'l', 0x26}, {'L', 0x26},
+        {';', 0x27}, {':', 0x27}, {39, 0x28}, {'"', 0x28}, {'`', 0x29}, {'~', 0x29},
+        {92, 0x2B}, {'|', 0x2B},
+        {'z', 0x2C}, {'Z', 0x2C}, {'x', 0x2D}, {'X', 0x2D}, {'c', 0x2E}, {'C', 0x2E},
+        {'v', 0x2F}, {'V', 0x2F}, {'b', 0x30}, {'B', 0x30}, {'n', 0x31}, {'N', 0x31},
+        {'m', 0x32}, {'M', 0x32}, {',', 0x33}, {'<', 0x33}, {'.', 0x34}, {'>', 0x34},
+        {'/', 0x35}, {'?', 0x35},
+        {' ', 0x39},
+    };
+    return table;
+}
+
+unsigned get_scan_code(unsigned ch) {
+    const auto& table = scancodes();
+    const auto it = table.find(ch);
+    return it != table.end() ? it->second : 0;
+}
+
+// int16.py __leaf_00: the blocking read; the ascii rides al and the scan
+// code rides ah
+void leaf_00(Qiling& ql) {
+    auto& os = static_cast<QlOsDos&>(ql.os());
+    const auto ch = os.stdin_stream().read(1);
+    const auto key = ch.empty() ? 0 : ch[0];
+
+    if (key < 0x80) {
+        ql.arch().regs().write("al", key);
+    } else {
+        ql.arch().regs().write("al", 0);
+    }
+    ql.arch().regs().write("ah", get_scan_code(key));
+}
+
+// int16.py __leaf_01: the poll — the non-blocking console read has no
+// portable shape in the port (the curses timeout(0) analogue); degrades to
+// the documented NotImplemented
+void leaf_01(Qiling& /*ql*/) {
+    throw QlErrorNotImplemented("INT 16h poll: the curses-free port keeps the terminal detached");
+}
+
+void handler(Qiling& ql) {
+    const auto ah = ql.arch().regs().read("ah");
+
+    static const std::map<unsigned, std::function<void(Qiling&)>> leaves = {
+        {0x00, leaf_00},
+        {0x01, leaf_01},
+    };
+
+    const auto it = leaves.find(static_cast<unsigned>(ah));
+    if (it == leaves.end()) {
+        throw QlErrorNotImplemented("leaf of INT 16h is not implemented");
+    }
+
+    it->second(ql);
+}
+
+}  // namespace int16
+
 }  // namespace
 
 const std::map<unsigned, IntHandler>& handlers() {
     static const std::map<unsigned, IntHandler> table = {
         {0x13, int13::handler},
+        {0x15, int15::handler},
+        {0x16, int16::handler},
         {0x1a, int1a::handler},
         {0x19, int19::handler},
         {0x20, int20::handler},
