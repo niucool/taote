@@ -6,8 +6,12 @@
 // greenlet; the port surfaces it as not-implemented).
 #include <gtest/gtest.h>
 
+#include <cstdio>
 #include <filesystem>
 #include <vector>
+
+#include <unicorn/unicorn.h>
+#include <unicorn/x86.h>
 
 #include "qiling/core.hpp"
 #include "qiling/os/linux/linux.hpp"
@@ -179,6 +183,108 @@ TEST(ThreadClone, DISABLED_CloneSpawnsChildAndJoinWakes) {
 
     // the ctid word was zeroed by the child's _on_stop
     EXPECT_EQ(ql.mem().read_ptr(kXaddr, 4), 0);
+}
+
+// ---- the (b8) raw-engine bisect probe: the port's own engine and mappings
+// (ql.arch().uc() + the blob the failing fixture loads), driven entirely with
+// plain uc_* calls — the (b6b) minimal dispatcher restored to the full
+// three-slice interleave (the clone's hook does the child-ctx dance + the
+// compensation + the stop, the futex's hook parks, the slices ride
+// uc_emu_start/uc_context_restore). No QlLinuxThread, no management, no
+// facade hooks, no install_syscall_hooks. If the misfire reproduces here,
+// the delta lives in the port's engine/mappings (NOT the management); if it
+// stays clean while the port's run misfires, the delta is in the management
+// or the slice machinery — instrument run_ready next.
+static uc_context* r9_child_ctx = nullptr;
+static int r9_count = 0;
+static void r9_code_cb(uc_engine* uc, std::uint64_t address, std::uint32_t size, void* user_data) {
+    (void)user_data;
+    ++r9_count;
+    std::fprintf(stderr, "[r9e] 0x%llx size=%u\n", static_cast<unsigned long long>(address), size);
+    if (r9_count > 400) {
+        uc_emu_stop(uc);
+    }
+}
+static void r9_insn_cb(uc_engine* uc, void* user_data) {
+    (void)user_data;
+    std::uint64_t pc = 0;
+    uc_reg_read(uc, UC_X86_REG_RIP, &pc);
+    std::uint64_t rax = 0;
+    uc_reg_read(uc, UC_X86_REG_RAX, &rax);
+    std::fprintf(stderr, "[r9-insn] pc=%llx rax=%llx\n", static_cast<unsigned long long>(pc),
+                 static_cast<unsigned long long>(rax));
+    if (rax == 56) {
+        // the minimal clone dispatcher: the child's regs (rax=0, rip=after,
+        // rsp=child), the child's ctx saved from the mutated state, the
+        // parent's rax, the compensation (the syscall's pc), the stop
+        const std::uint64_t after = pc + 2;
+        const std::uint64_t zero = 0;
+        const std::uint64_t child_sp = 0x1203000;
+        uc_reg_write(uc, UC_X86_REG_RAX, &zero);
+        uc_reg_write(uc, UC_X86_REG_RIP, &after);
+        uc_reg_write(uc, UC_X86_REG_RSP, &child_sp);
+        uc_context_alloc(uc, &r9_child_ctx);
+        uc_context_save(uc, r9_child_ctx);
+        const std::uint64_t parent_rax = 2001;
+        uc_reg_write(uc, UC_X86_REG_RAX, &parent_rax);
+        uc_reg_write(uc, UC_X86_REG_RIP, &pc);
+        uc_emu_stop(uc);
+    } else {
+        // the futex park: the in-hook read + the stop + the return value
+        std::uint64_t v = 0;
+        uc_mem_read(uc, 0x1002000, &v, sizeof(v));
+        uc_emu_stop(uc);
+        const std::uint64_t zero = 0;
+        uc_reg_write(uc, UC_X86_REG_RAX, &zero);
+    }
+}
+
+TEST(ThreadClone, DISABLED_BisectRawEngineInterleave) {
+    const auto rootfs = std::filesystem::temp_directory_path() / "ql_clone_rootfs";
+    std::filesystem::create_directories(rootfs);
+
+    QilingOptions options;
+    options.code = join_body();
+    options.rootfs = rootfs.string();
+    options.ostype = QL_OS::LINUX;
+    options.archtype = QL_ARCH::X8664;
+    options.multithread = true;
+    Qiling ql(options);  // the port's engine + the mappings — never run()
+
+    ql.mem().write_ptr(kXaddr, 0xdeadbeef, 4);
+
+    uc_engine* uc = &ql.arch().uc();
+    uc_hook insn_hook = 0;
+    uc_hook code_hook = 0;
+    uc_hook_add(uc, &insn_hook, UC_HOOK_INSN, reinterpret_cast<void*>(r9_insn_cb), nullptr, 1, 0,
+                UC_X86_INS_SYSCALL);
+    uc_hook_add(uc, &code_hook, UC_HOOK_CODE, reinterpret_cast<void*>(r9_code_cb), nullptr, 1, 0);
+
+    // slice1: the parent's setup + the clone (the hook parks the parent's slice)
+    const std::uint64_t rsp = 0x1203000;
+    uc_reg_write(uc, UC_X86_REG_RSP, &rsp);
+    uc_emu_start(uc, 0x11ff000, 0xffffffffffffffffull, 0, 32337);
+
+    // slice2: the parent's resume — the not-taken loop, the futex park
+    const std::uint64_t parent_rax2 = 2001;
+    uc_reg_write(uc, UC_X86_REG_RAX, &parent_rax2);
+    uc_emu_start(uc, 0x11ff023, 0xffffffffffffffffull, 0, 32337);
+
+    // slice3: the child — the cached TB at 0x23, the taken jz, the store
+    r9_count = 0;
+    uc_context_restore(uc, r9_child_ctx);
+    const uc_err err = uc_emu_start(uc, 0x11ff023, 0xffffffffffffffffull, 0, 32337);
+    const auto pc = [&uc] {
+        std::uint64_t v = 0;
+        uc_reg_read(uc, UC_X86_REG_RIP, &v);
+        return v;
+    }();
+    std::fprintf(stderr, "[r9-end] err=%s pc=0x%llx\n", uc_strerror(err), static_cast<unsigned long long>(pc));
+    std::vector<std::uint8_t> got(4, 0);
+    uc_mem_read(uc, 0x1002000, got.data(), 4);
+    std::fprintf(stderr, "[r9-store] %u\n", static_cast<unsigned>(got[0]));
+    uc_context_free(r9_child_ctx);
+    r9_child_ctx = nullptr;
 }
 
 // the clone without CLONE_VM (the fork path) is not implemented on this host
