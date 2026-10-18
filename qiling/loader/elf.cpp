@@ -7,8 +7,6 @@
 #include "qiling/exception.hpp"
 #include "qiling/os/memory.hpp"
 
-#include <cstdio>
-#define DBG_NL "\n"
 #include "qiling/os/posix/posix.hpp"
 
 namespace qiling {
@@ -215,14 +213,7 @@ void QlLoaderELF::run() {
     const std::uint64_t stack_size = static_cast<std::uint64_t>(profile.get_int(ossection, "stack_size"));
     const std::uint64_t top_of_stack = stack_address + stack_size;
 
-    try {
-        ql_->mem().map(stack_address, stack_size, UC_PROT_ALL, "[stack]");
-    } catch (const QlErrorBase& e) {
-        std::fprintf(stderr, "[dbg-elf] stack map failed %llx+%llx: %s\n",
-                     (unsigned long long)stack_address, (unsigned long long)stack_size, e.what());
-        std::fflush(stderr);
-        throw;
-    }
+    ql_->mem().map(stack_address, stack_size, UC_PROT_ALL, "[stack]");
 
     // ET_DYN relocates to the profile load_address; ET_EXEC stays at its base
     const std::uint64_t load_address = is_dyn
@@ -268,14 +259,7 @@ void QlLoaderELF::run() {
 
     for (const auto& [lbound, ubound, perms] : regions) {
         if (ubound > lbound) {
-            try {
-                ql_->mem().map(lbound, ubound - lbound, perms, ql_->targetname());
-            } catch (const QlErrorBase& e) {
-                std::fprintf(stderr, "[dbg-elf] map failed lbound=%llx ubound=%llx: %s\n",
-                             (unsigned long long)lbound, (unsigned long long)ubound, e.what());
-                std::fflush(stderr);
-                throw;
-            }
+    ql_->mem().map(lbound, ubound - lbound, perms, ql_->targetname());
         }
     }
 
