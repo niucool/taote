@@ -1181,7 +1181,7 @@ constexpr std::uint64_t kEvCbOff = 0x40;      // the cb's offset in the blob
 constexpr std::uint64_t kEvParkOff = 0x90;     // the park's offset in the blob
 constexpr std::uint64_t kEvStack = 0x1180000;  // inside the shellcode mapping
 
-std::vector<std::uint8_t> ev_stub_body() {
+std::vector<std::uint8_t> ev_stub_body(bool for_trigger = false) {
     std::vector<std::uint8_t> code;
     const auto push_q = [&code](std::uint64_t v) {
         for (int i = 0; i < 8; ++i) code.push_back(static_cast<std::uint8_t>((v >> (8 * i)) & 0xFF));
@@ -1189,38 +1189,46 @@ std::vector<std::uint8_t> ev_stub_body() {
     code.insert(code.end(), {0x90});                              // base+00: nop (the hook marker)
     code.push_back(0xC3);                                         // base+01: ret (pops the stub)
     code.resize(kEvCbOff, 0x90);                       // pad to the cb
-    const std::pair<const char*, std::uint8_t> stores[] = {
-        {"\x48\x89\x3D", 0x3D}, {"\x48\x89\x35", 0x35}, {"\x48\x89\x15", 0x15},
-        {"\x48\x89\x0D", 0x0D}, {"\x4C\x89\x05", 0x05}, {"\x4C\x89\x0D", 0x0D},
-    };
-    (void)stores;
-    const std::uint8_t prefixes[6][3] = {
-        {0x48, 0x89, 0x3D}, {0x48, 0x89, 0x35}, {0x48, 0x89, 0x15},
-        {0x48, 0x89, 0x0D}, {0x4C, 0x89, 0x05}, {0x4C, 0x89, 0x0D},
+    // the ABSOLUTE disp32 store form: prefix + modrm(rm=100) + SIB 0x25 +
+    // disp32 — the bare `48 89 3D disp32` shape is RIP-RELATIVE (rm=101) and
+    // lands the store near the blob, not at the cell (the (b13)-style
+    // mechanical-audit lesson: verify the addressing mode, not just the reg
+    // field)
+    const std::uint8_t prefixes[6][4] = {
+        {0x48, 0x89, 0x3C, 0x25}, {0x48, 0x89, 0x34, 0x25}, {0x48, 0x89, 0x14, 0x25},
+        {0x48, 0x89, 0x0C, 0x25}, {0x4C, 0x89, 0x04, 0x25}, {0x4C, 0x89, 0x0C, 0x25},
     };
     for (int i = 0; i < 6; ++i) {
-        for (int b = 0; b < 3; ++b) code.push_back(prefixes[i][b]);
+        for (int b = 0; b < 4; ++b) code.push_back(prefixes[i][b]);
         const auto cell = 0x2000 + 8 * i;
         for (int b = 0; b < 4; ++b) code.push_back(static_cast<std::uint8_t>((cell >> (8 * b)) & 0xFF));
     }
     // mov rax, [rsp+8] (the 7th param rides here under the pushed cleaner)
     const std::uint8_t read7[] = {0x48, 0x8B, 0x44, 0x24, 0x08};
     code.insert(code.end(), read7, read7 + 5);
-    const std::uint8_t st_rax[] = {0x48, 0x89, 0x05, 0x30, 0x20, 0x00, 0x00};  // mov [0x2030], rax
-    code.insert(code.end(), st_rax, st_rax + 7);
+    const std::uint8_t st_rax[] = {0x48, 0x89, 0x04, 0x25, 0x30, 0x20, 0x00, 0x00};  // mov [0x2030], rax
+    code.insert(code.end(), st_rax, st_rax + 8);
+    if (for_trigger) {
+        // the trigger shape: the cb jmps to the park (the run(begin=cb) until
+        // = cb + len(code), so the blob extends with nops to the until and
+        // the tail never rets — the extras stay pushed, the upstream's
+        // unbalanced-stack shape verbatim)
+        const std::uint8_t jmp_park[] = {0xEB, 0x11};  // 0x7D + 2 + 0x11 = 0x90
+        code.insert(code.end(), jmp_park, jmp_park + 2);
+        code.resize(0xD0, 0x90);                                  // the ride to the until
+        return code;
+    }
     code.push_back(0xC3);                                         // the cb rets into the cleaner
     code.resize(kEvParkOff, 0x90);                     // pad to the park
     code.push_back(0xEB); code.push_back(0xFE);                   // base+90: jmp $
     return code;
 }
 
-// DISABLED_ (the stub-execution probe): the hook fires and the emit's
-// stack_push lands the trampoline (the diag traced rsp 0x11807f8 -> 0x11807f0),
-// but the post-ret flow never produces the callback stores — the suspected
-// cause is the shellcode-path heap mapping (the gen_stub_code trampoline
-// rides the QlOsPosix heap, which the macos shellcode loader path does not
-// map). Open item: map/verify the heap arena in the fixture, then re-enable.
-TEST(MacosOs, DISABLED_EvEmitRunTruePushesStubAndRunsCallback) {
+// the stub-execution probe (the (b13)-lesson blob): the emit stack-pushes
+// the gen_stub_code trampoline (the heap chunk, self-mapped by QlMemoryHeap),
+// the guest ret rides it into the cb, the cleaner unwinds the 7th param and
+// rets into the pre-pushed park where the emu's until stops.
+TEST(MacosOs, EvEmitRunTruePushesStubAndRunsCallback) {
     auto ql = make_macos_qiling(ev_stub_body());
     ql.mem().map(0x2000, 0x1000, UC_PROT_ALL, "[ev-cells]");
     // the stack rides inside the loader's 10MB shellcode mapping (the blob
@@ -1237,8 +1245,8 @@ TEST(MacosOs, DISABLED_EvEmitRunTruePushesStubAndRunsCallback) {
     ql.stack_push(base + kEvParkOff);
 
     bool fired = false;
-    HookRet keep = ql.hook_code([&](std::uint64_t, std::uint32_t) {
-        if (fired) {
+    HookRet keep = ql.hook_code([&](std::uint64_t pc, std::uint32_t) {
+        if (fired || pc != base) {
             return 0;
         }
         fired = true;
@@ -1263,15 +1271,15 @@ TEST(MacosOs, DISABLED_EvEmitRunTruePushesStubAndRunsCallback) {
     EXPECT_EQ(ql.mem().read_ptr(0x2030, 8), 0x7777ull);
 }
 
-// DISABLED_ (the trigger-drain probe): the drain itself is exercised with
-// the queued shape, but the in-emu callback execution (the run(begin=cb)
-// leg) never produces the stores — the same stub-execution open item as
-// EvEmitRunTruePushesStubAndRunsCallback (the suspected shellcode-path heap
-// mapping). Re-enable with it.
-TEST(MacosOs, DISABLED_EvTriggerDrainsQueuedJobs) {
-    auto ql = make_macos_qiling(ev_stub_body());
+// the trigger-drain probe: the queued job drains through run(begin=cb) with
+// the until = cb + len(code) (the os run's code-size tail) — the blob's cb
+// jmps to the park and rides the nop pad to the until; the two extra params
+// stay stack-pushed (the upstream's unbalanced-stack shape verbatim).
+TEST(MacosOs, EvTriggerDrainsQueuedJobs) {
+    auto ql = make_macos_qiling(ev_stub_body(true));
     ql.mem().map(0x2000, 0x1000, UC_PROT_ALL, "[ev-cells]");
-    ql.mem().map(kEvStack, 0x1000, UC_PROT_ALL, "[ev-stack]");
+    // the stack rides inside the loader's shellcode mapping (no extra map —
+    // 0x1180000 is already covered)
 
     auto& macos = dynamic_cast<qiling::os::macos::QlOsMacos&>(ql.os());
     auto& ev = macos.ev_manager();
@@ -1287,6 +1295,15 @@ TEST(MacosOs, DISABLED_EvTriggerDrainsQueuedJobs) {
     ql.arch().regs().write(UC_X86_REG_RSP, kEvStack + 0x800);
     ql.stack_push(base + kEvParkOff);
     const auto rsp_before = ql.arch().regs().read(UC_X86_REG_RSP);
+    // the run(begin=cb) until = cb + len(code) rides 0x40 past the blob's end
+    // (unreachable by construction — the upstream closes these runs via the
+    // kext savedrip machinery, deferred); the fixture's device: an address
+    // hook at the park stops the slice when the cb's jmp lands there
+    HookRet stopper = ql.hook_address([&]() {
+        ql.emu_stop();
+        return 0;
+    }, base + kEvParkOff);
+    (void)stopper;
     ev.trigger();
     // the six regs carried the first six params; the two extras pushed
     EXPECT_EQ(ql.mem().read_ptr(0x2000, 8), 0x1111ull);

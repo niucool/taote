@@ -200,9 +200,13 @@ void Qiling::do_lib_patch() {
 
 void Qiling::run(std::optional<std::uint64_t> begin, std::optional<std::uint64_t> end,
                  std::uint64_t timeout, std::uint64_t count) {
-    // replace the original entry point, exit point, timeout and count
+    // replace the original entry point, exit point, timeout and count — the
+    // set flags ride the optional's presence (the upstream's None-ness: the
+    // os run only overrides the loader entry when begin was given)
     entry_point_ = begin.value_or(0);
+    entry_point_set_ = begin.has_value();
     exit_point_ = end.value_or(0);
+    exit_point_set_ = end.has_value();
     timeout_ = timeout;
     count_ = count;
 
