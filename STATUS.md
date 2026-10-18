@@ -480,9 +480,9 @@ of the gevent hub.
 | `structs.hpp` | `os/qnx/structs.py` | Ported | the _sync/_sync_attr/_thread_local_storage layouts (all 32-bit cells) + the SYNC_OWNER_BITS helper |
 | `helpers.hpp` | `os/qnx/helpers.py` | Ported | the QnxConn record + the get_message_body (the iov form rides the first entry only — the upstream shape verbatim) |
 | the run() prelude | `qnx.py run()` | Ported | the OS32 profile addresses, the syspage map + the rootfs syspage.bin image, the TLS seed (errptr/pid/tid + the derived owner), the cpupage cells |
-| the handlers | `os/qnx/syscall.py` | Ported (slice) | channel_create (the counter), thread_destroy (the (-1,-1,status) exit), clock_time (the CLOCK_REALTIME ns read; the set-time warn+(-1)), clock_cycles (the 0xFE000000 id, the ns simplification), sys_cpupage_get/set (the ADDR/PLS/SYSPAGE indexes), connect_attach/detach (the ND+CLOEXEC pins, the coid counters), connect_flags, connect_client_info (the scoid=-1 record), sync_create/sync_mutex_lock/sync_mutex_unlock (the ker_sync.c stamps + the stubs), msg_sendv/msg_sendvnc (the type dispatch → the message.py handlers) + `message.cpp` io_write (the iov[0] header + the iov[1] payload, the posix write delegate) |
+| the handlers | `os/qnx/syscall.py` | Ported (complete) | channel_create (the counter), thread_destroy (the (-1,-1,status) exit), clock_time (the CLOCK_REALTIME ns read; the set-time warn+(-1)), clock_cycles (the 0xFE000000 id, the ns simplification), sys_cpupage_get/set (the ADDR/PLS/SYSPAGE indexes), connect_attach/detach (the ND+CLOEXEC pins, the coid counters), connect_flags, connect_client_info (the scoid=-1 record), sync_create/sync_mutex_lock/sync_mutex_unlock (the ker_sync.c stamps + the stubs), msg_sendv/msg_sendvnc (the type dispatch → the message.py handlers) + `message.cpp`: io_write (the iov[0] header + the iov[1] payload, the posix write delegate), io_close (the conn's fd clears first, the do_close delegate), mem_ctrl (the flat 24-byte struct, the unknown subtype throws, the known subtype warns and returns -1 — the upstream TODO verbatim), the io_connect COMBINE extra-iov walk (the align slot skipped at sparts>2, the fourth-iov _IO_PATHCONF name check with the name==5 → 1024 early return — the verbatim quirk; the _IO_STAT branch throws pending the posix pack_stat_struct family) |
 | `qnx.ql` | `qiling/profiles/qnx.ql` | Ported (deviation) | the verbatim copy + the [CODE] load_address (the same deviation as freebsd.ql) |
-| `tests/Qnx_Test.cpp` | the fixture flows | Ported | 12 fixtures: the channel_create + the thread_destroy exit; the clock_time read; the clock_cycles (the literal-pool blob for the 0xFE000000 id + the ARM32 return-register truncation pin); the cpupage set/get PLS roundtrip; the connect attach/detach (the side-channel coid); the flags + the client_info record (the KERNEL pid 1996); the sync create/lock stamps (the TLS owner (pid<<16\|tid), the WAITING bit clear); the msg_sendv io_write (the iov form, the byte-count return); the sys_conf both sub-paths (the _CONF_NUM pagesize reply + the _CONF_STR libpath iov string); the io_connect OPEN (the 40-byte header, the fd into the connection, the link reply umask); the io_read (the flat form, the nbytes==-rparts pin); the io_lseek (the 8-byte position reply); the io_stat (the QNXARMStat 18-cell packing); the mem_map (the anon private page, the prot>>=8, the <QQQ> reply); the channel_destroy (the upstream-absent fall-through pin) |
+| `tests/Qnx_Test.cpp` | the fixture flows | Ported | 16 fixtures: the channel_create + the thread_destroy exit; the clock_time read; the clock_cycles (the literal-pool blob for the 0xFE000000 id + the ARM32 return-register truncation pin); the cpupage set/get PLS roundtrip; the connect attach/detach (the side-channel coid); the flags + the client_info record (the KERNEL pid 1996); the sync create/lock stamps (the TLS owner (pid<<16\|tid), the WAITING bit clear); the msg_sendv io_write (the iov form, the byte-count return); the sys_conf both sub-paths (the _CONF_NUM pagesize reply + the _CONF_STR libpath iov string); the io_connect OPEN (the 40-byte header, the fd into the connection, the link reply umask); the io_read (the flat form, the nbytes==-rparts pin); the io_lseek (the 8-byte position reply); the io_stat (the QNXARMStat 18-cell packing); the mem_map (the anon private page, the prot>>=8, the <QQQ> reply); the channel_destroy (the upstream-absent fall-through pin); the io_close (the two-sweep close/EBADF ride); the mem_ctrl (the known subtype -1 + the unknown-subtype throw, which distinguishes the wired handler from the dispatcher's no-hook fall-through); the io_connect COMBINE+PATHCONF (the name==5 → 1024 ride); the io_devctl (the no-handler fall-through pin) |
 
 ### Findings
 
@@ -491,7 +491,13 @@ of the gevent hub.
   the Rn field); the rotate field is bits 11-8 (the `#0x30` written with the
   rotate nibble set became `#0x30000000`); the 0xFE000000 kercall id does not
   fit a rotimm — the fixture pools it via `ldr r12, [pc, #imm]` with the
-  little-endian literal.
+  little-endian literal; addresses above 0xFF00 are not single-rotimm
+  encodable either (`mov r4, #0x2304` silently encodes `#0x2300` — the
+  low byte is dropped by the rotate; use `mov r4, #0x2300` +
+  `add r4, r4, #4`); the fixture scratch regions must not overlap (a
+  4-entry iov array at 0x2100 runs to 0x211F and silently clobbers a hdr
+  body parked at 0x2110); the message-table's `sflag` rides
+  `file_sharing_modes` (SH_COMPAT=0 — not 1).
 - **the ARM32 return register truncation**: the dispatcher's set_return_value
   writes R0 (32-bit) — a 64-bit ns return truncates to its low 32 bits (the
   upstream's r0 write has the same shape; the clock_cycles fixture pins it).
@@ -516,10 +522,16 @@ of the gevent hub.
 `os/macos/`, `os/uefi/`, `os/dos/`, `qiling/hw/`,
 `qiling/extensions/mcu/` — resume criteria in PORT_PLAN.md §10 (OQ 9); the
 remaining profile files (dos/macos/uefi `.ql`) defer with them. The qnx
-remainder after the Phase 5.6 completion: the io_connect COMBINE subpaths
-(the extra-iov walk for _IO_STAT/_IO_PATHCONF — the upstream's
-connect-combine branch), the io_close/io_devctl and the interrupt/sched
-message families, and the connect_client_info other-process raise. The
+dialect is complete as of the Phase 5.6 close-out: every handler in the
+upstream's `os/qnx/message.py` and `syscall.py` is ported (io_close, mem_ctrl
+and the COMBINE extra-iov walk landed in the final slice; io_devctl has **no**
+upstream handler — the 0x106 type rides the dispatcher's no-hook fall-through,
+pinned by a fixture; the earlier "interrupt/sched message families" note was
+speculative — no such handlers exist upstream). The port-side deferrals inside
+qnx: the COMBINE `_IO_STAT` branch throws NotImplemented pending the posix
+`pack_stat_struct` family (the linux stat-layout packer — its own future
+slice), and the connect_client_info other-process raise rides the
+upstream-verbatim stub (the full body is upstream dead code). The
 upstream-absent kercalls (channel_destroy among them) resolve through the
 dispatcher's not-implemented fall-through (the pinned fixture behavior).
 
@@ -546,3 +558,10 @@ dispatcher's not-implemented fall-through (the pinned fixture behavior).
 
 Priority order adopted: **freebsd → qnx → dos → uefi → macos** (the dialects
 first: the marginal cost per dialect shrinks as the POSIX base stabilises).
+Status: freebsd ✅ (Phase 5.5), qnx ✅ (Phase 5.6) — **os/dos is the next major
+item** (~1,500 lines + `os/disk.py`, its only consumer; the interrupt phase,
+needing the COM/MBR loader branch on top of the done MZ sniffing), then uefi,
+then macos. The freebsd/qnx carry-overs into later slices: the posix
+`pack_stat_struct` family (the linux stat-layout packer — unblocks the qnx
+COMBINE `_IO_STAT` branch and the posix fstat/fstatat/stat delegates) and the
+connect_client_info full-body-vs-stub upstream oddity (documented above).

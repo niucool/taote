@@ -1315,3 +1315,43 @@ TEST(QnxOs, MsgIoConnectCombinePathconfReturns1024) {
     EXPECT_EQ(ql.os().exit_code(), 42);
     EXPECT_EQ(ql.mem().read_ptr(0x2300, 4), 1024u);
 }
+
+// the io_devctl (0x106) has no upstream handler (no ql_qnx_msg_io_devctl in
+// os/qnx/message.py) - the message rides the dispatcher's no-hook warn
+// fall-through and returns -1; the fixture pins that the unhandled io
+// message type neither stops nor hangs the emulation
+//   00: mov r0, #1 ; 04: mov r1, #0x2200 ; 08: mvn r2, #7
+//   0C: mov r3, #0 ; 10: mov r4, #0
+//   14: mov r12, #11 ; 18: swi 0
+//   1C: mov r4, #0x2300 ; 20: str r0, [r4]
+//   24: mvn r0, #0 ; 28: mvn r1, #0 ; 2C: mov r2, #42
+//   30: mov r12, #47 ; 34: swi 0
+TEST(QnxOs, MsgIoDevctlIsUnhandledUpstream) {
+    const std::vector<std::uint8_t> code = {
+        0x01, 0x00, 0xA0, 0xE3,  // 00: mov r0, #1
+        0x22, 0x1C, 0xA0, 0xE3,  // 04: mov r1, #0x2200
+        0x07, 0x20, 0xE0, 0xE3,  // 08: mvn r2, #7
+        0x00, 0x30, 0xA0, 0xE3,  // 0C: mov r3, #0
+        0x00, 0x40, 0xA0, 0xE3,  // 10: mov r4, #0
+        0x0B, 0xC0, 0xA0, 0xE3,  // 14: mov r12, #11
+        0x00, 0x00, 0x00, 0xEF,  // 18: swi 0
+        0x23, 0x4C, 0xA0, 0xE3,  // 1C: mov r4, #0x2300
+        0x00, 0x00, 0x84, 0xE5,  // 20: str r0, [r4]
+        0x00, 0x00, 0xE0, 0xE3,  // 24: mvn r0, #0
+        0x00, 0x10, 0xE0, 0xE3,  // 28: mvn r1, #0
+        0x2A, 0x20, 0xA0, 0xE3,  // 2C: mov r2, #42
+        0x2F, 0xC0, 0xA0, 0xE3,  // 30: mov r12, #47
+        0x00, 0x00, 0x00, 0xEF,  // 34: swi 0
+    };
+    auto ql = make_qnx_qiling(code);
+
+    ql.mem().map(kScratch, 0x1000, UC_PROT_ALL, "[qnx-scratch]");
+
+    // the flat body: type=0x106 (io_devctl)
+    ql.mem().write_ptr(0x2200, 0x106, 2);
+
+    ql.run();
+
+    EXPECT_EQ(ql.os().exit_code(), 42);
+    EXPECT_EQ(ql.mem().read_ptr(0x2300, 4), static_cast<std::uint32_t>(-1));
+}
