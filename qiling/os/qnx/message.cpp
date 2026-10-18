@@ -34,6 +34,7 @@ struct MsgTypeEntry {
 const MsgTypeEntry kMsgTypeTable[] = {
     {0x000, ql_qnx_msg_sys_conf},      // sys_conf
     {0x100, ql_qnx_msg_io_connect},    // io_connect
+    {0x101, ql_qnx_msg_io_read},       // io_read
     {0x102, ql_qnx_msg_io_write},      // io_write
 };
 
@@ -125,6 +126,38 @@ std::optional<std::int64_t> ql_qnx_msg_sys_conf(Qiling& ql, std::uint64_t coid, 
     }
 
     throw QlErrorNotImplemented("qnx sys_conf: the message is not implemented");
+}
+
+// message.py ql_qnx_msg_io_read (lib/c/1/read.c): the flat _io_read rides
+// sparts=-16; the nbytes must match -rparts and the posix read fills the
+// reply buffer
+std::optional<std::int64_t> ql_qnx_msg_io_read(Qiling& ql, std::uint64_t coid, std::uint64_t smsg,
+                                               std::int32_t sparts, std::uint64_t rmsg, std::int32_t rparts) {
+    const auto body = get_message_body(ql, smsg, sparts);
+
+    // struct _io_read in lib/c/public/sys/iomsg.h:
+    // (type_, combine_len, nbytes, xtype, zero) = unpack("<HHIII", body)
+    const auto type = static_cast<std::uint16_t>(body[0] | (body[1] << 8));
+    (void)type;
+    const auto combine_len = static_cast<std::uint16_t>(body[2] | (body[3] << 8));
+    const auto nbytes = static_cast<std::int32_t>(body[4] | (body[5] << 8) | (body[6] << 16) |
+                                                  (static_cast<std::uint32_t>(body[7]) << 24));
+    const auto xtype = static_cast<std::uint32_t>(body[8] | (body[9] << 8) | (body[10] << 16) |
+                                                  (static_cast<std::uint32_t>(body[11]) << 24));
+
+    if ((combine_len & kIoCombineFlag) != 0 || xtype != 0) {
+        throw QlErrorNotImplemented("qnx io_read: IO combine and XTYPE support not implemented");
+    }
+
+    if (nbytes != -rparts) {
+        throw QlErrorBase("qnx io_read: different sizes for io_read");
+    }
+
+    auto& conn = static_cast<QlOsQnx&>(ql.os()).connections().at(static_cast<std::uint32_t>(coid));
+    const auto* read_entry = posix::SyscallRegistry::instance().find("read");
+    const std::vector<std::uint64_t> read_args{static_cast<std::uint64_t>(*conn.fd), rmsg,
+                                               static_cast<std::uint64_t>(nbytes)};
+    return read_entry->handler(ql, read_args);
 }
 
 // message.py ql_qnx_msg_io_write: the write delegation — the header rides
