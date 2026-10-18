@@ -35,6 +35,45 @@ std::optional<std::int64_t> syscall_channel_create(Qiling& ql, const std::vector
     const auto chid = os.next_channel_id();
     return static_cast<std::int64_t>(chid);
 }
+// syscall.py ql_syscall_sys_cpupage_get: the cpupage cell reads (the
+// CPUPAGE_ADDR / CPUPAGE_PLS / CPUPAGE_SYSPAGE indexes)
+std::optional<std::int64_t> syscall_sys_cpupage_get(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    const auto index = params[0];
+    auto& os = static_cast<QlOsQnx&>(ql.os());
+
+    // CPUPAGE_ADDR
+    if (index == 0xffffffff) {
+        return static_cast<std::int64_t>(os.cpupage_addr());
+    }
+    // CPUPAGE_PLS
+    if (index == 1) {
+        return static_cast<std::int64_t>(ql.mem().read_ptr(os.cpupage_addr() + 4, 4));
+    }
+    // CPUPAGE_SYSPAGE
+    if (index == 2) {
+        return static_cast<std::int64_t>(os.syspage_addr());
+    }
+
+    ql.log().warn("ql_syscall_sys_cpupage_get (index " + std::to_string(index) + ") not implemented");
+    return std::nullopt;
+}
+
+// syscall.py ql_syscall_sys_cpupage_set: the CPUPAGE_PLS write
+std::optional<std::int64_t> syscall_sys_cpupage_set(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    const auto index = params[0];
+    const auto value = params[1];
+    auto& os = static_cast<QlOsQnx&>(ql.os());
+
+    // CPUPAGE_PLS
+    if (index == 1) {
+        ql.mem().write_ptr(os.cpupage_addr() + 4, value, 4);
+        return EOK;
+    }
+
+    ql.log().warn("ql_syscall_sys_cpupage_get (index " + std::to_string(index) + ") not implemented");
+    return std::nullopt;
+}
+
 // syscall.py ql_syscall_thread_destroy: the (-1, -1, status) request
 // terminates the process with the status as the exit code
 std::optional<std::int64_t> syscall_thread_destroy(Qiling& ql, const std::vector<std::uint64_t>& params) {
@@ -99,6 +138,8 @@ void register_qnx_syscalls() {
     // clock_cycles: the special 0xFE000000 kercall id (the kercalls.h base)
     registry.register_syscall({"clock_cycles", {}, syscall_clock_cycles});
     registry.register_syscall({"clock_time", {PARAM_INTN, PARAM_PTRX, PARAM_PTRX}, syscall_clock_time});
+    registry.register_syscall({"sys_cpupage_get", {PARAM_INTN}, syscall_sys_cpupage_get});
+    registry.register_syscall({"sys_cpupage_set", {PARAM_INTN, PARAM_INTN}, syscall_sys_cpupage_set});
     registry.register_syscall({"thread_destroy", {PARAM_INTN, PARAM_INTN, PARAM_INTN},
                                syscall_thread_destroy});
 }

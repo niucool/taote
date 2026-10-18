@@ -7,10 +7,14 @@
 #include "qiling/core.hpp"
 #include "qiling/os/posix/syscall/abi.hpp"
 #include "qiling/os/qnx/map_syscall.hpp"
+#include "qiling/os/qnx/structs.hpp"
 #include "qiling/os/qnx/syscall.hpp"
 
 #include "qiling/cc/arm.hpp"
 #include "qiling/os/fcall.hpp"
+
+#include <fstream>
+#include <iterator>
 
 namespace qiling {
 namespace os {
@@ -47,8 +51,41 @@ void QlOsQnx::load() {
 }
 
 void QlOsQnx::run() {
-    // the syspage/cpupage/TLS prelude (qnx.py run) lands with its fixture;
-    // the shellcode path rides the posix run (the emu_start over ql.code)
+    // the syspage/cpupage/TLS prelude (qnx.py run): the profile addresses,
+    // the syspage image from the rootfs, the TLS seed and the cpupage cells
+    const auto& os_profile = profile();
+    cpupage_addr_ = static_cast<std::uint64_t>(os_profile.get_int("OS32", "cpupage_address"));
+    cpupage_tls_addr_ = static_cast<std::uint64_t>(os_profile.get_int("OS32", "cpupage_tls_address"));
+    tls_data_addr_ = static_cast<std::uint64_t>(os_profile.get_int("OS32", "tls_data_address"));
+    syspage_addr_ = static_cast<std::uint64_t>(os_profile.get_int("OS32", "syspage_address"));
+
+    auto& mem = ql().mem();
+    mem.map(syspage_addr_, 0x4000, UC_PROT_ALL, "[syspage_mem]");
+    const auto syspage_hpath = path()->virtual_to_host_path("/syspage.bin");
+    std::ifstream sp(syspage_hpath, std::ios::binary);
+    if (!sp) {
+        throw QlErrorBase("qnx run: the syspage image is missing (" + syspage_hpath + ")");
+    }
+    const std::vector<std::uint8_t> image((std::istreambuf_iterator<char>(sp)), std::istreambuf_iterator<char>());
+    mem.write(syspage_addr_, image);
+
+    // the thread-local storage for the main thread (the upstream seeds
+    // errptr/pid/tid and derives the owner via SYNC_OWNER_BITS)
+    mem.write_ptr(cpupage_addr_, cpupage_tls_addr_, 4);
+    ThreadLocalStorage tls{};
+    tls.errptr = static_cast<std::uint32_t>(tls_data_addr_);
+    tls.pid = static_cast<std::int32_t>(pid());
+    tls.tid = 1;
+    tls.owner = sync_owner_bits(tls.pid, tls.tid);
+    const auto tls_bytes = std::vector<std::uint8_t>(reinterpret_cast<const std::uint8_t*>(&tls),
+                                                     reinterpret_cast<const std::uint8_t*>(&tls) + sizeof(tls));
+    mem.write(cpupage_tls_addr_, tls_bytes);
+
+    // the syspage pointer rides the second cpupage cell
+    mem.write_ptr(cpupage_addr_ + 8, syspage_addr_, 4);
+
+    // the emulation entry rides the posix run (the code blob and the loader
+    // paths)
     QlOsPosix::run();
 }
 

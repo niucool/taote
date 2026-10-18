@@ -8,6 +8,7 @@
 #include <gtest/gtest.h>
 
 #include <filesystem>
+#include <fstream>
 
 #include "qiling/core.hpp"
 #include "qiling/os/qnx/qnx.hpp"
@@ -32,6 +33,9 @@ namespace {
 // timestamp into the caller's 8-byte cell and the thread_destroy
 // (-1, -1, status) terminates with the status as the exit code
 constexpr std::uint64_t kScratch = 0x2000;
+
+// the synthetic syspage image (the prelude copies it into the syspage map)
+const std::vector<std::uint8_t> kSyspageImage(0x400, 0x42);
 constexpr std::uint64_t kOld = 0x2080;
 
 const std::vector<std::uint8_t>& channel_exit_body() {
@@ -52,6 +56,14 @@ const std::vector<std::uint8_t>& channel_exit_body() {
 Qiling make_qnx_qiling(const std::vector<std::uint8_t>& code) {
     const auto rootfs = std::filesystem::temp_directory_path() / "ql_qnx_rootfs";
     std::filesystem::create_directories(rootfs);
+
+    // the rootfs carries the syspage image (the upstream arm_qnx rootfs
+    // shape); the content is opaque to the kernel calls, a marker pattern
+    // suffices for the fixtures
+    std::ofstream sp(rootfs / "syspage.bin", std::ios::binary);
+    sp.write(reinterpret_cast<const char*>(kSyspageImage.data()),
+             static_cast<std::streamsize>(kSyspageImage.size()));
+    sp.close();
 
     QilingOptions options;
     options.rootfs = rootfs.string();
@@ -165,6 +177,62 @@ TEST(QnxOs, ClockCyclesReturnsNsClock) {
     const auto cycles = ql.mem().read_ptr(kRet, 4);
     EXPECT_NE(cycles, 5u);
     EXPECT_NE(cycles, 0u);
+}
+
+// the sys_cpupage_set/get flow over the run() prelude: the CPUPAGE_PLS
+// slot (cpupage+4) is set via kercall 8 and read back via kercall 7; the
+// index 2 returns the syspage address the prelude mapped. (The prelude
+// writes the TLS pointer at cpupage+0; the PLS slot starts unset.)
+constexpr std::uint64_t kCpupageRet = 0x2100;
+constexpr std::uint64_t kCpupageRet2 = 0x2104;
+
+//   00: mov r3, #0x2100  ; the scratch cell
+//   04: mov r0, #1       ; index = CPUPAGE_PLS
+//   08: mov r1, #0xAB0000 ; the PLS marker
+//   0C: mov r12, #8      ; sys_cpupage_set
+//   10: swi 0
+//   14: mov r0, #1       ; index = CPUPAGE_PLS (read back)
+//   18: mov r12, #7      ; sys_cpupage_get
+//   1C: swi 0
+//   20: str r0, [r3]
+//   24: mov r0, #2       ; index = CPUPAGE_SYSPAGE
+//   28: mov r12, #7
+//   2C: swi 0
+//   30: str r0, [r3, #4]
+//   34: mvn r0, #0 ; 38: mvn r1, #0 ; 3C: mov r2, #42
+//   40: mov r12, #47 ; 44: swi 0
+TEST(QnxOs, SysCpupageSetGetRoundtripsPls) {
+    const std::vector<std::uint8_t> code = {
+        0x21, 0x3C, 0xA0, 0xE3,  // 00: mov r3, #0x2100
+        0x01, 0x00, 0xA0, 0xE3,  // 04: mov r0, #1
+        0xAB, 0x18, 0xA0, 0xE3,  // 08: mov r1, #0xAB0000
+        0x08, 0xC0, 0xA0, 0xE3,  // 0C: mov r12, #8
+        0x00, 0x00, 0x00, 0xEF,  // 10: swi 0
+        0x01, 0x00, 0xA0, 0xE3,  // 14: mov r0, #1
+        0x07, 0xC0, 0xA0, 0xE3,  // 18: mov r12, #7
+        0x00, 0x00, 0x00, 0xEF,  // 1C: swi 0
+        0x00, 0x00, 0x83, 0xE5,  // 20: str r0, [r3]
+        0x02, 0x00, 0xA0, 0xE3,  // 24: mov r0, #2
+        0x07, 0xC0, 0xA0, 0xE3,  // 28: mov r12, #7
+        0x00, 0x00, 0x00, 0xEF,  // 2C: swi 0
+        0x04, 0x00, 0x83, 0xE5,  // 30: str r0, [r3, #4]
+        0x00, 0x00, 0xE0, 0xE3,  // 34: mvn r0, #0
+        0x00, 0x10, 0xE0, 0xE3,  // 38: mvn r1, #0
+        0x2A, 0x20, 0xA0, 0xE3,  // 3C: mov r2, #42
+        0x2F, 0xC0, 0xA0, 0xE3,  // 40: mov r12, #47
+        0x00, 0x00, 0x00, 0xEF,  // 44: swi 0
+    };
+    auto ql = make_qnx_qiling(code);
+
+    ql.mem().map(kScratch, 0x1000, UC_PROT_ALL, "[qnx-scratch]");
+
+    ql.run();
+
+    EXPECT_EQ(ql.os().exit_code(), 42);
+    // the PLS roundtrip: set(1, 0xAB0000) then get(1) hands the marker back
+    EXPECT_EQ(ql.mem().read_ptr(kCpupageRet, 4), 0xAB0000u);
+    // index 2: the syspage address the prelude mapped
+    EXPECT_EQ(ql.mem().read_ptr(kCpupageRet2, 4), 0xfc404000u);
 }
 
 // the clock_cycles flow: the kernel returns the core's free-running counter

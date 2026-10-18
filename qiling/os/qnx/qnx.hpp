@@ -28,6 +28,13 @@ public:
     std::uint64_t next_channel_id() { return channel_id_++; }
     std::uint64_t channel_id() const noexcept { return channel_id_; }
 
+    // the run() prelude state (qnx.py run: the OS32 profile addresses; the
+    // handlers read them back — sys_cpupage_get/set)
+    std::uint64_t cpupage_addr() const noexcept { return cpupage_addr_; }
+    std::uint64_t cpupage_tls_addr() const noexcept { return cpupage_tls_addr_; }
+    std::uint64_t tls_data_addr() const noexcept { return tls_data_addr_; }
+    std::uint64_t syspage_addr() const noexcept { return syspage_addr_; }
+
 protected:
     // qnx/map_syscall.py get_syscall_mapper: the ARM kercalls table
     // (trunk/services/system/public/sys/kercalls.h numbers)
@@ -42,6 +49,12 @@ private:
     // the connect_attach slice)
     std::uint64_t connection_id_lo_ = 0x400 + 1;
     std::uint64_t connection_id_hi_ = static_cast<std::uint64_t>(NTO_SIDE_CHANNEL) + 1;
+
+    // the run() prelude addresses (the OS32 profile)
+    std::uint64_t cpupage_addr_ = 0;
+    std::uint64_t cpupage_tls_addr_ = 0;
+    std::uint64_t tls_data_addr_ = 0;
+    std::uint64_t syspage_addr_ = 0;
 };
 
 }  // namespace qnx
