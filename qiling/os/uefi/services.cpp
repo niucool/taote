@@ -4,7 +4,9 @@
 #include "qiling/os/uefi/services.hpp"
 
 #include <cstring>
+#include <ctime>
 
+#include "qiling/os/utils.hpp"
 #include "qiling/os/uefi/context.hpp"
 #include "qiling/os/uefi/uefi.hpp"
 #include "qiling/loader/pe_uefi.hpp"
@@ -573,6 +575,240 @@ std::optional<std::uint64_t> hook_set_mem(Qiling& ql, std::uint64_t, const QlFun
     return std::nullopt;
 }
 
+// rt.py hook_GetTime (the EFI_TIME struct write: the local wall clock with
+// the unspecified timezone; the 16-byte layout Year u16/Month u8/Day u8/
+// Hour u8/Minute u8/Second u8/Pad1 u8/Nanosecond u32/TimeZone u16/Daylight
+// u8/Pad2 u8)
+std::optional<std::uint64_t> hook_get_time(Qiling& ql, std::uint64_t, const QlFunctionCall::Params& params) {
+    const auto time_ptr = params.at(0).second;
+
+    if (time_ptr == 0) {
+        return kEfiInvalidParameter;
+    }
+
+    const auto now = std::time(nullptr);
+    const auto& lt = *std::localtime(&now);
+
+    std::vector<std::uint8_t> efi_time(16, 0);
+    efi_time[0] = lt.tm_year + 1900 & 0xff;
+    efi_time[1] = (lt.tm_year + 1900) >> 8;
+    efi_time[2] = static_cast<std::uint8_t>(lt.tm_mon + 1);
+    efi_time[3] = static_cast<std::uint8_t>(lt.tm_mday);
+    efi_time[4] = static_cast<std::uint8_t>(lt.tm_hour);
+    efi_time[5] = static_cast<std::uint8_t>(lt.tm_min);
+    efi_time[6] = static_cast<std::uint8_t>(lt.tm_sec);
+    // the Pad1 + the Nanosecond (0) + the TimeZone = 0xffff (the unspecified)
+    efi_time[12] = 0xff;
+    efi_time[13] = 0xff;
+    // the Daylight + the Pad2 stay zero
+
+    ql.mem().write(time_ptr, efi_time);
+    return kEfiSuccess;
+}
+
+// rt.py hook_GetVariable (the variable store rides ql.env verbatim; the
+// name arrives as the raw WSTRING pointer — the port reads it with the
+// utils read_wstring, the upstream dxeapi resolves the accessor)
+std::optional<std::uint64_t> hook_get_variable(Qiling& ql, std::uint64_t, const QlFunctionCall::Params& params) {
+    const auto var_name = os::QlOsUtils::read_wstring(ql, params.at(0).second);
+    const auto vendor_guid = os::QlOsUtils::read_guid(ql, params.at(1).second);
+    const auto attr_ptr = params.at(2).second;
+    const auto data_size_ptr = params.at(3).second;
+    const auto data_ptr = params.at(4).second;
+
+    (void)vendor_guid;  // the namespace TODO verbatim
+
+    if (var_name.empty() || vendor_guid.empty() || data_size_ptr == 0) {
+        return kEfiInvalidParameter;
+    }
+
+    auto& env = ql.env_mut();
+    const auto it = env.find(var_name);
+    if (it == env.end()) {
+        return kEfiNotFound;
+    }
+
+    const auto& var_data = it->second;
+    const auto data_size = var_data.size();
+    const auto buff_size = ql.mem().read_ptr(data_size_ptr);
+
+    if (attr_ptr != 0) {
+        // FIXME verbatim: the default attribute set until the attributed
+        // variables are managed
+        const auto attributes = static_cast<std::uint64_t>(kEfiVariableNonVolatile | kEfiVariableBootserviceAccess |
+                                                          kEfiVariableRuntimeAccess);
+        ql.mem().write_ptr(attr_ptr, attributes, 4);
+    }
+
+    ql.mem().write_ptr(data_size_ptr, data_size);
+
+    if (buff_size < data_size) {
+        return kEfiBufferTooSmall;
+    }
+
+    if (data_ptr != 0) {
+        ql.mem().write(data_ptr, std::vector<std::uint8_t>(var_data.begin(), var_data.end()));
+    }
+
+    return kEfiSuccess;
+}
+
+// rt.py hook_GetNextVariableName (the nvvars ride the env["Names"] entry;
+// the upstream keeps a python list object — the port serializes the names
+// \0-joined; a missing Names entry returns EFI_NOT_FOUND where the
+// upstream's KeyError would abort)
+std::optional<std::uint64_t> hook_get_next_variable_name(Qiling& ql, std::uint64_t,
+                                                         const QlFunctionCall::Params& params) {
+    const auto var_name_size_ptr = params.at(0).second;
+    const auto var_name_ptr = params.at(1).second;
+    const auto vendor_guid = os::QlOsUtils::read_guid(ql, params.at(2).second);
+
+    if (var_name_size_ptr == 0 || var_name_ptr == 0 || vendor_guid.empty()) {
+        return kEfiInvalidParameter;
+    }
+
+    auto& env = ql.env_mut();
+    const auto names_it = env.find("Names");
+    if (names_it == env.end()) {
+        return kEfiNotFound;
+    }
+
+    const auto name_size = ql.mem().read_ptr(var_name_size_ptr);
+
+    // the \0-joined registry: the empty segments delimit the names
+    std::vector<std::string> nvvars;
+    std::string cur;
+    for (const auto ch : names_it->second) {
+        if (ch == '\0') {
+            if (!cur.empty()) {
+                nvvars.push_back(cur);
+            }
+            cur.clear();
+        } else {
+            cur.push_back(ch);
+        }
+    }
+    if (!cur.empty()) {
+        nvvars.push_back(cur);
+    }
+
+    // the last-read name rides var_name_ptr as the wide string
+    std::string last;
+    {
+        const auto raw = ql.mem().read(var_name_ptr, static_cast<std::size_t>(name_size));
+        for (std::size_t i = 0; i + 1 < raw.size(); i += 2) {
+            if (raw[i] == 0) {
+                break;
+            }
+            last.push_back(static_cast<char>(raw[i]));
+        }
+    }
+
+    std::size_t idx = nvvars.size();
+    for (std::size_t i = 0; i < nvvars.size(); ++i) {
+        if (nvvars[i] == last) {
+            idx = i;
+            break;
+        }
+    }
+    if (idx == nvvars.size()) {
+        return kEfiNotFound;
+    }
+    if (idx == nvvars.size() - 1) {
+        return kEfiNotFound;
+    }
+
+    const auto& next = nvvars[idx + 1];
+    // the wide-encoded new name (the char + the \x00 terminator per char)
+    std::vector<std::uint8_t> encoded;
+    for (const auto ch : next) {
+        encoded.push_back(static_cast<std::uint8_t>(ch));
+        encoded.push_back(0);
+    }
+    encoded.push_back(0);
+    encoded.push_back(0);
+
+    if (encoded.size() > name_size) {
+        ql.mem().write_ptr(var_name_size_ptr, encoded.size());
+        return kEfiBufferTooSmall;
+    }
+
+    ql.mem().write(var_name_ptr, encoded);
+    return kEfiSuccess;
+}
+
+// rt.py hook_SetVariable
+std::optional<std::uint64_t> hook_set_variable(Qiling& ql, std::uint64_t, const QlFunctionCall::Params& params) {
+    const auto var_name = os::QlOsUtils::read_wstring(ql, params.at(0).second);
+    const auto attributes = static_cast<std::uint32_t>(params.at(2).second);
+    const auto data_size = params.at(3).second;
+    const auto data_ptr = params.at(4).second;
+
+    if (var_name.empty()) {
+        return kEfiInvalidParameter;
+    }
+
+    if (attributes & kEfiVariableAuthenticatedWriteAccess) {
+        return kEfiUnsupported;  // the deprecated path verbatim
+    }
+
+    const bool append = (attributes & kEfiVariableAppendWrite) != 0;
+    const bool auth = (attributes & (kEfiVariableTimeBasedAuthenticatedWriteAccess |
+                                     kEfiVariableEnhancedAuthenticatedWriteAccess)) != 0;
+
+    auto& env = ql.env_mut();
+
+    // the data_size 0 deletes the var when not auth/append (the verbatim
+    // TODO notes ride the upstream comments)
+    if (data_size == 0 && !(auth || append)) {
+        const auto it = env.find(var_name);
+        if (it == env.end()) {
+            return kEfiNotFound;
+        }
+        env.erase(it);
+    }
+
+    std::string data;
+    if (data_size != 0) {
+        const auto raw = ql.mem().read(data_ptr, static_cast<std::size_t>(data_size));
+        data.assign(raw.begin(), raw.end());
+    }
+
+    if (append) {
+        const auto it = env.find(var_name);
+        if (it == env.end()) {
+            return kEfiNotFound;
+        }
+        data = it->second + data;
+    }
+
+    env[var_name] = std::move(data);
+    return kEfiSuccess;
+}
+
+// rt.py hook_GetNextHighMonotonicCount
+std::optional<std::uint64_t> hook_get_next_high_monotonic_count(Qiling& ql, std::uint64_t,
+                                                                const QlFunctionCall::Params& params) {
+    auto& os_uefi = static_cast<QlOsUefi&>(ql.os());
+    os_uefi.monotonic_count += 0x0000000100000000ull;
+    const auto hmc = (os_uefi.monotonic_count >> 32) & 0xffffffff;
+    ql.mem().write_ptr(params.at(0).second, hmc, 4);
+    return kEfiSuccess;
+}
+
+// rt.py hook_ResetSystem (the emu_stop shape)
+std::optional<std::uint64_t> hook_reset_system(Qiling& ql, std::uint64_t, const QlFunctionCall::Params&) {
+    ql.emu_stop();
+    return kEfiSuccess;
+}
+
+// rt.py hook_SetTime / hook_GetWakeupTime / hook_SetWakeupTime /
+// hook_UpdateCapsule / hook_QueryCapsuleCapabilities / hook_QueryVariableInfo
+// (the verbatim SUCCESS stubs)
+std::optional<std::uint64_t> hook_rt_success_stub(Qiling&, std::uint64_t, const QlFunctionCall::Params&) {
+    return kEfiSuccess;
+}
+
 }  // namespace
 
 void install_service_table(Qiling& ql, UefiContext& context, std::uint64_t base,
@@ -779,8 +1015,52 @@ void initialize_system_table(Qiling& ql, UefiContext& context, std::uint64_t gST
     };
     install_service_table(ql, context, gBS, bs_fields.data(), bs_fields.size());
 
-    // the runtime services table: the field cells stay zero until the
-    // variable-services slice (the stub shape)
+    // the runtime services table (rt.py initialize: the full descriptor)
+    static const std::vector<ServiceDescriptor> rt_fields = {
+        {"GetTime", {{"Time", PARAM_INTN}, {"Capabilities", PARAM_INTN}}, hook_get_time},
+        {"SetTime", {{"Time", PARAM_INTN}}, hook_rt_success_stub},
+        {"GetWakeupTime",
+         {{"Enabled", PARAM_INTN}, {"Pending", PARAM_INTN}, {"Time", PARAM_INTN}},
+         hook_rt_success_stub},
+        {"SetWakeupTime",
+         {{"Enable", PARAM_INT32}, {"Time", PARAM_INTN}},
+         hook_rt_success_stub},
+        {"SetVirtualAddressMap",
+         {{"MemoryMapSize", PARAM_INT32}, {"DescriptorSize", PARAM_INT32}, {"DescriptorVersion", PARAM_INT32},
+          {"VirtualMap", PARAM_INTN}},
+         hook_rt_success_stub},
+        {"ConvertPointer",
+         {{"DebugDisposition", PARAM_INTN}, {"Address", PARAM_INTN}},
+         hook_rt_success_stub},
+        {"GetVariable",
+         {{"VariableName", PARAM_PTRX + 2}, {"VendorGuid", PARAM_PTRX + 3}, {"Attributes", PARAM_INTN},
+          {"DataSize", PARAM_INTN}, {"Data", PARAM_INTN}},
+         hook_get_variable},
+        {"GetNextVariableName",
+         {{"VariableNameSize", PARAM_INTN}, {"VariableName", PARAM_INTN}, {"VendorGuid", PARAM_PTRX + 3}},
+         hook_get_next_variable_name},
+        {"SetVariable",
+         {{"VariableName", PARAM_PTRX + 2}, {"VendorGuid", PARAM_PTRX + 3}, {"Attributes", PARAM_INT32},
+          {"DataSize", PARAM_INTN}, {"Data", PARAM_INTN}},
+         hook_set_variable},
+        {"GetNextHighMonotonicCount", {{"HighCount", PARAM_INTN}}, hook_get_next_high_monotonic_count},
+        {"ResetSystem",
+         {{"ResetType", PARAM_INT32}, {"ResetStatus", PARAM_INT64}, {"DataSize", PARAM_INTN},
+          {"ResetData", PARAM_INTN}},
+         hook_reset_system},
+        {"UpdateCapsule",
+         {{"CapsuleHeaderArray", PARAM_INTN}, {"CapsuleCount", PARAM_INTN}, {"ScatterGatherList", PARAM_INT64}},
+         hook_rt_success_stub},
+        {"QueryCapsuleCapabilities",
+         {{"CapsuleHeaderArray", PARAM_INTN}, {"CapsuleCount", PARAM_INTN}, {"MaximumCapsuleSize", PARAM_INTN},
+          {"ResetType", PARAM_INTN}},
+         hook_rt_success_stub},
+        {"QueryVariableInfo",
+         {{"Attributes", PARAM_INT32}, {"MaximumVariableStorageSize", PARAM_INTN},
+          {"RemainingVariableStorageSize", PARAM_INTN}, {"MaximumVariableSize", PARAM_INTN}},
+         hook_rt_success_stub},
+    };
+    install_service_table(ql, context, gRT, rt_fields.data(), rt_fields.size());
 }
 
 }  // namespace uefi

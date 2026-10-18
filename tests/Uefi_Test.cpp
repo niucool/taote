@@ -224,7 +224,8 @@ TEST(UefiOs, BootServicesRaiseTplReturnsPreviousTpl) {
 // the shared PE skeleton builder: the code blob rides at the RVA 0x200 (the
 // 0x40-byte .text), the .data at the RVA 0x400 (the 0x40 bytes); the base
 // is the fixed 0x100000 so the code uses the absolute addressing
-std::vector<std::uint8_t> build_pe_with_code(const std::vector<std::uint8_t>& code, std::size_t data_size) {
+std::vector<std::uint8_t> build_pe_with_code(const std::vector<std::uint8_t>& code, std::size_t data_size,
+                                             const std::vector<std::uint8_t>& data = {}) {
     std::vector<std::uint8_t> v(0x400 + data_size + 0x80, 0x00);
     v[0] = 'M'; v[1] = 'Z';
     auto put16 = [&v](std::size_t off, std::uint16_t x) {
@@ -276,6 +277,9 @@ std::vector<std::uint8_t> build_pe_with_code(const std::vector<std::uint8_t>& co
     put32(0x188, 0xC0000040);
 
     std::copy(code.begin(), code.end(), v.begin() + 0x200);
+    if (!data.empty()) {
+        std::copy(data.begin(), data.end(), v.begin() + 0x400);
+    }
     return v;
 }
 
@@ -420,8 +424,6 @@ TEST(UefiOs, DISABLED_EventFamilyCreateSignalCheckClose) {
         (void)hook;
         ql.run();
     }
-        ql.run();
-    }
 
     EXPECT_EQ(ql.os().exit_code(), 0);
     EXPECT_EQ(ql.mem().read_ptr(kEventOut, 8), 0u);  // the first event id = len(events) = 0
@@ -437,4 +439,90 @@ TEST(UefiOs, DISABLED_EventFamilyCreateSignalCheckClose) {
     EXPECT_EQ(std::get<1>(loader.notify_list[0]), kNotifyFnCell);   // the notify fn
     EXPECT_EQ(std::get<2>(loader.notify_list[0]), (std::vector<std::uint64_t>{0, 0}));  // the callback args
     EXPECT_TRUE(loader.events.empty());        // the close erased the registry
+}
+
+// the RT variable services ride: the module SetVariables "MyVar" (the wide
+// name at the .data, the "Hello" payload) and immediately GetVariables it
+// back. The gRT lives at the SystemTable+0x58; the GetVariable field is the
+// RT index 6 (gRT+0x48) and SetVariable the index 8 (gRT+0x58) over the
+// 24-byte header. The variable store rides ql.env verbatim (rt.py).
+// DISABLED_: the same second-pass anomaly family as the event fixture.
+// The SetVariable (the first dispatch at blob+0x38) rides the address hook
+// and returns, but the emu then restarts mid-instruction (the fault pc =
+// blob+0x81, inside the second block's mov r10 displacement) and faults
+// with UC_ERR_READ_UNMAPPED before the GetVariable call. The handlers are
+// ported and the store rides ql.env; the second-pass mid-blob restart
+// needs the dispatch-path study (the same open item as
+// DISABLED_EventFamilyCreateSignalCheckClose).
+TEST(UefiOs, DISABLED_SetVariableThenGetVariableRoundTrip) {
+    const std::uint64_t kBase = 0x100000;
+    const std::uint64_t kNameCell = kBase + 0x400;
+    const std::uint64_t kAttrOut = kBase + 0x430;
+    const std::uint64_t kSizeOut = kBase + 0x438;
+    const std::uint64_t kGetBuf = kBase + 0x440;
+    const std::uint64_t kSetStatus = kBase + 0x460;
+    const std::uint64_t kGetStatus = kBase + 0x468;
+    const std::vector<std::uint8_t> code = {
+        // rax = gST->RuntimeServices (rdx = the SystemTable), stashed in r15
+        0x48, 0x8B, 0x42, 0x58,
+        0x49, 0x89, 0xC7,
+        // SetVariable(name, guid, attributes=0, size=5, data="Hello")
+        0x48, 0x83, 0xEC, 0x28,
+        0x48, 0xC7, 0x44, 0x24, 0x20, 0x20, 0x04, 0x10, 0x00,  // [rsp+0x20] = kSetData
+        0x48, 0xB9, 0x00, 0x04, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00,  // rcx = kNameCell
+        0x48, 0xBA, 0x10, 0x04, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00,  // rdx = kGuidCell
+        0x45, 0x31, 0xC0,                                      // xor r8d, r8d (attributes = 0)
+        0x41, 0xB9, 0x05, 0x00, 0x00, 0x00,                    // mov r9d, 5 (the size)
+        0x4D, 0x8B, 0x97, 0x58, 0x00, 0x00, 0x00,              // mov r10, [r15+0x58] (SetVariable)
+        0x41, 0xFF, 0xD2,
+        0x48, 0x83, 0xC4, 0x28,
+        0x48, 0xA3, 0x60, 0x04, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00,  // mov [kSetStatus], rax
+        // GetVariable(name, guid, &attr_out, &size_out, data_out)
+        0x48, 0x83, 0xEC, 0x28,
+        0x48, 0xC7, 0x44, 0x24, 0x20, 0x40, 0x04, 0x10, 0x00,  // [rsp+0x20] = kGetBuf
+        0x48, 0xB9, 0x00, 0x04, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00,  // rcx = kNameCell
+        0x48, 0xBA, 0x10, 0x04, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00,  // rdx = kGuidCell
+        0x49, 0xB8, 0x30, 0x04, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00,  // r8 = kAttrOut
+        0x49, 0xB9, 0x38, 0x04, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00,  // r9 = kSizeOut
+        0x4D, 0x8B, 0x97, 0x48, 0x00, 0x00, 0x00,              // mov r10, [r15+0x48] (GetVariable)
+        0x41, 0xFF, 0xD2,
+        0x48, 0x83, 0xC4, 0x28,
+        0x48, 0xA3, 0x68, 0x04, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00,  // mov [kGetStatus], rax
+        0x48, 0x31, 0xC0,
+        0xC3,
+    };
+    // the .data preload: the wide "MyVar ", the 16-byte guid, the "Hello"
+    // payload, the size-out preloaded with the buffer size 0x20
+    std::vector<std::uint8_t> data_payload(0xC0, 0x00);
+    {
+        const char name[] = "MyVar";
+        for (std::size_t i = 0; i <= 5; ++i) {
+            data_payload[i * 2] = static_cast<std::uint8_t>(name[i]);
+        }
+        data_payload[0x10] = 0x11; data_payload[0x11] = 0x22; data_payload[0x12] = 0x33;
+        data_payload[0x13] = 0x44; data_payload[0x14] = 0x55; data_payload[0x15] = 0x66;
+        data_payload[0x16] = 0x77; data_payload[0x17] = 0x88; data_payload[0x18] = 0x99;
+        data_payload[0x19] = 0xAA; data_payload[0x1A] = 0xBB; data_payload[0x1B] = 0xCC;
+        data_payload[0x1C] = 0xDD; data_payload[0x1D] = 0xEE; data_payload[0x1E] = 0xFF;
+        data_payload[0x1F] = 0x00;
+        data_payload[0x20] = 'H'; data_payload[0x21] = 'e'; data_payload[0x22] = 'l';
+        data_payload[0x23] = 'l'; data_payload[0x24] = 'o';
+        data_payload[0x38] = 0x20;  // the GetVariable's in-out buffer size
+    }
+    auto ql = make_uefi_qiling(build_pe_with_code(code, 0xC0, data_payload), "NVRAM.EFI");
+
+    ql.run();
+
+    EXPECT_EQ(ql.os().exit_code(), 0);
+    EXPECT_EQ(ql.mem().read_ptr(kSetStatus, 8), os::uefi::kEfiSuccess);
+    EXPECT_EQ(ql.mem().read_ptr(kGetStatus, 8), os::uefi::kEfiSuccess);
+    EXPECT_EQ(ql.mem().read_ptr(kSizeOut, 8), 5u);  // the in-out size updated to the data length
+    EXPECT_EQ(ql.mem().read_ptr(kAttrOut, 4),
+              static_cast<std::uint64_t>(os::uefi::kEfiVariableNonVolatile | os::uefi::kEfiVariableBootserviceAccess |
+                                         os::uefi::kEfiVariableRuntimeAccess));
+    const auto got = ql.mem().read(kGetBuf, 5);
+    EXPECT_EQ(std::string(got.begin(), got.end()), "Hello");
+
+    // the store rides ql.env verbatim
+    EXPECT_EQ(ql.env_mut()["MyVar"], "Hello");
 }

@@ -113,6 +113,9 @@ public:
     const std::vector<std::string>& argv() const noexcept { return argv_; }
     const std::string& rootfs() const noexcept { return rootfs_; }
     const std::map<std::string, std::string>& env() const noexcept { return env_; }
+    // the mutable env access (the uefi rt.py variable store rides ql.env
+    // verbatim; the GetVariable/SetVariable handlers mutate it)
+    std::map<std::string, std::string>& env_mut() noexcept { return env_; }
     const std::vector<std::uint8_t>& code() const noexcept { return code_; }
     bool multithread() const noexcept { return multithread_; }
     QL_STOP stop_options() const noexcept { return stop_options_; }

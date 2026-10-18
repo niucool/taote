@@ -89,6 +89,15 @@ constexpr std::uint64_t kEfiNotReady = kEfiErrorBit | 6;
 constexpr std::uint64_t kEfiOutOfResources = kEfiErrorBit | 9;
 constexpr std::uint64_t kEfiNotFound = kEfiErrorBit | 14;
 
+// PiMultiPhase.py EFI_VARIABLE (the attribute bits)
+constexpr std::uint32_t kEfiVariableNonVolatile = 0x00000001;
+constexpr std::uint32_t kEfiVariableBootserviceAccess = 0x00000002;
+constexpr std::uint32_t kEfiVariableRuntimeAccess = 0x00000004;
+constexpr std::uint32_t kEfiVariableAuthenticatedWriteAccess = 0x00000010;
+constexpr std::uint32_t kEfiVariableTimeBasedAuthenticatedWriteAccess = 0x00000020;
+constexpr std::uint32_t kEfiVariableAppendWrite = 0x00000040;
+constexpr std::uint32_t kEfiVariableEnhancedAuthenticatedWriteAccess = 0x00000080;
+
 }  // namespace uefi
 }  // namespace os
 }  // namespace qiling
