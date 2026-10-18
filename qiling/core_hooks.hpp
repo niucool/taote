@@ -52,6 +52,12 @@ struct HookCtx {
 class QlCoreHooks {
 public:
     explicit QlCoreHooks(uc_engine& uc);
+
+    // deferred-init ctor for the composition root: Qiling derives from
+    // QlCoreHooks but constructs the arch (and thus the uc handle) mid-ctor,
+    // mirroring the Python `QlCoreHooks.__init__(self, self.uc)` call order
+    QlCoreHooks() = default;
+    void init(uc_engine& uc) { h_uc_ = &uc; }
     virtual ~QlCoreHooks();
 
     QlCoreHooks(const QlCoreHooks&) = delete;

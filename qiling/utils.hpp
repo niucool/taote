@@ -7,13 +7,75 @@
 #define QILING_UTILS_HPP
 
 #include <cstdint>
+#include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <variant>
 
 #include "qiling/const.hpp"
+#include "qiling/arch/models.hpp"
 
 namespace qiling {
+
+class Qiling;
+class QlArch;
+class QlOs;
+class QlMemoryManager;
+class QlHwManager;
+
+namespace loader { class QlLoader; }
+
+class QlDebugger;  // the gdb/qdb stub surface (lands with Phase 6)
+
+// ---- component factories (utils.py select_* — PORT_PLAN.md 5.2) ----
+// Python resolves implementation classes via getattr(module, name) and binds
+// constructor kwargs with functools.partial. The C++ ports return callable
+// factories instead: the composition root invokes them with the Qiling* once
+// the object graph is being assembled.
+
+using ArchFactory = std::function<std::unique_ptr<QlArch>(Qiling*)>;
+using LoaderFactory = std::function<std::unique_ptr<loader::QlLoader>(Qiling*)>;
+using OsFactory = std::function<std::unique_ptr<QlOs>(Qiling*)>;
+
+// select_arch(archtype, cputype, endian, thumb) — binds the per-arch kwargs
+ArchFactory select_arch(QL_ARCH archtype, const QL_CPU& cputype, QL_ENDIAN endian, bool thumb);
+
+// select_loader(ostype, libcache) — only the BLOB loader exists until the
+// per-format loader slices land (PE in Phase 3, ELF in Phase 5); anything else
+// degrades to QlErrorNotImplemented, mirroring the Python module-miss behavior.
+LoaderFactory select_loader(QL_OS ostype, bool libcache);
+
+// select_os(ostype) — same degradation policy as select_loader
+OsFactory select_os(QL_OS ostype);
+
+// select_component(component_type, component_name) — generic registry lookup
+// used by core.py for os/memory and hw/hw. The returned factory takes the
+// owning Qiling* (the C++ components derive their sub-handles from it).
+std::function<std::unique_ptr<QlMemoryManager>(Qiling*)> select_component_memory();
+
+// select_debugger(options) — options: false/none degrade to nullptr; true is
+// an alias for "gdb"; "gdb[:host:port]" and "qdb[:rr]" resolve via
+// debugger_convert. Debugger instances land with the interactive-debugging
+// slice; the factory currently always yields nullptr after validating the
+// option string (QlErrorArch on unknown names, like debugger_convert).
+std::function<QlDebugger*(Qiling*)> select_debugger(std::variant<bool, std::string> options);
+
+// ---- emu-env guessing (utils.py ql_guess_emu_env + the private sniffers) ----
+
+// The (arch, os, endian) triple ql_guess_emu_env returns; nullopt fields mean
+// "not determined" exactly like the Python None fields.
+struct EmuEnvGuess {
+    std::optional<QL_ARCH> arch;
+    std::optional<QL_OS> ostype;
+    std::optional<QL_ENDIAN> endian;
+};
+
+// guesses the emulated environment from the target file (pathname extension,
+// then ELF / Mach-O / PE sniffing, mirroring the Python guessing-methods order).
+// A missing file degrades to empty guesses (the Python open() failure path).
+EmuEnvGuess ql_guess_emu_env(const std::string& path);
 
 // ---- string helpers (utils.py general-purpose functions) ----
 

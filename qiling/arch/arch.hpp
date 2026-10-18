@@ -19,7 +19,7 @@
 #include "qiling/arch/models.hpp"
 #include "qiling/arch/register.hpp"
 
-namespace qiling { class QlMemoryManager; }
+namespace qiling { class QlMemoryManager; class QlArchUtils; }
 
 namespace qiling {
 
@@ -56,7 +56,7 @@ public:
     // (models.hpp enums cast to their UC_CPU_* values). Null ql is accepted until
     // the Phase 3 composition root wires the object graph.
     QlArch(Qiling* ql, std::optional<std::uint32_t> cputype = std::nullopt);
-    virtual ~QlArch() = default;
+    virtual ~QlArch();
 
     // ClassVar[QL_ARCH] / ClassVar[int] — the per-arch type and word size
     virtual QL_ARCH type() const noexcept = 0;
@@ -87,6 +87,9 @@ public:
     void attach_memory(QlMemoryManager& mem) noexcept;
     QlMemoryManager* memory() const noexcept { return mem_; }
 
+    // core.py emu_start: the ARM _init_thumb adjustment (base: no-op)
+    virtual std::uint64_t adjust_emu_start(std::uint64_t begin) const { return begin; }
+
     std::uint64_t stack_push(std::uint64_t value);
     std::uint64_t stack_pop();
     std::uint64_t stack_read(std::int64_t offset) const;
@@ -95,9 +98,19 @@ public:
     // the cpu model value applied via uc_ctl_set_cpu_model (nullopt when default)
     const std::optional<std::uint32_t>& cpu() const noexcept { return cputype_; }
 
+    // arch.py: self.utils = QlArchUtils(ql) — the tracing helpers live on the
+    // arch layer (constructed lazily; needs the composition root for hooks/mem)
+    QlArchUtils& utils();
+
+    // drops the tracer hooks while the uc engine is still alive (the C++
+    // destruction order closes the derived-class uc handle before the base
+    // dtor runs; the Python original leans on GC ordering)
+    void shutdown_utils();
+
 protected:
     Qiling* ql_;
     QlMemoryManager* mem_ = nullptr;
+    QlArchUtils* utils_ = nullptr;  // lazily owned (deleted in the dtor)
 
 private:
     std::optional<std::uint32_t> cputype_;

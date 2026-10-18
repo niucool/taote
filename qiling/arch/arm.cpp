@@ -1,5 +1,7 @@
 #include "qiling/arch/arm.hpp"
 
+#include "qiling/os/memory.hpp"
+
 #include <unicorn/arm.h>
 #include <unicorn/unicorn.h>
 
@@ -78,7 +80,9 @@ RegMap merge(RegMap base, Rest... rest) {
 // ---- QlArchARM ----
 
 QlArchARM::QlArchARM(Qiling* ql, std::optional<ARM_CPU_MODEL> cputype, QL_ENDIAN endian, bool thumb, int extra_mode)
-    : QlArch(ql, cputype.has_value() ? std::optional<std::uint32_t>(static_cast<std::uint32_t>(*cputype)) : std::nullopt) {
+    : QlArch(ql, cputype.has_value() ? std::optional<std::uint32_t>(static_cast<std::uint32_t>(*cputype)) : std::nullopt),
+      init_endian_(endian),
+      init_thumb_(thumb) {
     uc_mode mode = UC_MODE_ARM;
     if (endian == QL_ENDIAN::EB) mode = static_cast<uc_mode>(mode | UC_MODE_BIG_ENDIAN);
     if (thumb) mode = static_cast<uc_mode>(mode | UC_MODE_THUMB);
@@ -246,9 +250,15 @@ bool QlArchCORTEX_M::using_psp() {
 }
 
 void QlArchCORTEX_M::init_context() {
-    // reads the initial MSP/PC from the vector table (cortex_m.py) — requires
-    // the Phase 2 memory manager
-    throw QlErrorBase("init_context requires the memory manager (wired in Phase 2)");
+    // reads the initial MSP/PC from the vector table (cortex_m.py) through
+    // the attached memory manager
+    if (mem_ == nullptr) {
+        throw QlErrorBase("init_context requires the memory manager (attach_memory)");
+    }
+
+    regs().write("lr", 0xffffffffu);
+    regs().write("msp", mem_->read_ptr(0x0, 4));
+    regs().write("pc", mem_->read_ptr(0x4, 4));
 }
 
 void QlArchCORTEX_M::unicorn_exception_handler(int intno) {

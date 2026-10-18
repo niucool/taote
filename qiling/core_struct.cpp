@@ -81,7 +81,12 @@ void check_signed_range(std::int64_t x) {
 
 }  // namespace
 
-QlCoreStructs::QlCoreStructs(QL_ENDIAN endian, int bit) : big_endian_(endian == QL_ENDIAN::EB) {
+QlCoreStructs::QlCoreStructs(QL_ENDIAN endian, int bit) {
+    init(endian, bit);
+}
+
+void QlCoreStructs::init(QL_ENDIAN endian, int bit) {
+    big_endian_ = endian == QL_ENDIAN::EB;
     // core_struct.py handlers table: the bit-width selected pack / packs /
     // unpack / unpacks bindings
     switch (bit) {

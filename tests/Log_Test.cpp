@@ -91,13 +91,20 @@ TEST(LogFormatter, ColoredPatternEmbedsAnsi) {
 }
 
 TEST(LogNamed, InstanceIdsIncrement) {
-    // log.py: logger name is qiling{QL_INSTANCE_ID}, incrementing per setup_logger call
+    // log.py: logger name is qiling{QL_INSTANCE_ID}, incrementing per
+    // setup_logger call. The absolute ids depend on how many loggers earlier
+    // suites created (the process-wide counter is shared), so the assertions
+    // check the increment relation rather than fixed names.
     const auto first = qiling::log::setup_logger({qiling::log::stdout_device()});
     const auto second = qiling::log::setup_logger({qiling::log::stdout_device()});
     ASSERT_NE(first, nullptr);
     ASSERT_NE(second, nullptr);
-    EXPECT_EQ(first->name(), "qiling114514");
-    EXPECT_EQ(second->name(), "qiling114515");
+    EXPECT_NE(first->name(), second->name());
+    EXPECT_EQ(first->name().rfind("qiling", 0), 0u);
+    EXPECT_EQ(second->name().rfind("qiling", 0), 0u);
+    const unsigned long long first_id = std::stoull(first->name().substr(6));
+    const unsigned long long second_id = std::stoull(second->name().substr(6));
+    EXPECT_EQ(second_id, first_id + 1);
 }
 
 TEST(LogNamed, OverrideLoggerIsUsedAsIs) {

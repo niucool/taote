@@ -14,6 +14,7 @@
 #include <any>
 #include <cstdint>
 #include <functional>
+#include <memory>
 
 #include "qiling/const.hpp"
 

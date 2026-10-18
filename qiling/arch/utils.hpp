@@ -9,16 +9,23 @@
 #define QILING_ARCH_UTILS_HPP
 
 #include <cstdint>
+#include <map>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include <capstone/capstone.h>
 #include <keystone/keystone.h>
 
 #include "qiling/const.hpp"
+#include "qiling/core_hooks_types.hpp"
 
 namespace qiling {
+
+class Qiling;
+class HookRet;
 
 // ---- capstone wrapper (the Python capstone `Cs` binding analogue) ----
 
@@ -68,6 +75,42 @@ private:
 // used by qltool prior to ql instantiation. to get an assembler object after ql
 // instantiation, use the appropriate ql.arch method (utils.py docstring, verbatim)
 Ks assembler(QL_ARCH arch, QL_ENDIAN endianness, bool is_thumb);
+
+// ---- QlArchUtils (arch/utils.py: the disassembly-trace helpers) ----
+// These depend on the hook engine and the memory manager (both live in Phase
+// 2); the instance is owned by the composition root and wired by the facade.
+
+std::string basename_of(std::string_view path);
+
+class QlArchUtils {
+public:
+    explicit QlArchUtils(Qiling& ql);
+    ~QlArchUtils();
+
+    // get_base_and_name (utils.py, lru_cache(maxsize=64)): the containing
+    // image's base address and basename, coalescing consecutive map regions
+    // that share a label; ('addr', '-') when no region matches
+    std::pair<std::uint64_t, std::string> get_base_and_name(std::uint64_t addr);
+
+    // disassembler (utils.py): the QL_VERBOSE.DISASM instruction trace line
+    void disassembler(Qiling& ql, std::uint64_t address, std::uint32_t size);
+
+    // setup_output (utils.py): at >= DISASM hook the code tracer; at >= DUMP
+    // also hook the basic-block tracer
+    void setup_output(QL_VERBOSE verbosity);
+
+    // unregisters the installed hooks (the RAII teardown; the composition
+    // root calls this before the uc engine closes)
+    void shutdown();
+
+public:
+    // exposed for the owning QlArch dtor (the hooks must drop before the
+    // QlCoreHooks base is torn down)
+    Qiling& ql_;
+    std::optional<HookRet> disasm_hook_;
+    std::optional<HookRet> block_hook_;
+    std::map<std::uint64_t, std::pair<std::uint64_t, std::string>> base_cache_;
+};
 
 }  // namespace qiling
 

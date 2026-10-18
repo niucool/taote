@@ -3,6 +3,8 @@
 #include <unicorn/unicorn.h>
 
 #include "qiling/os/memory.hpp"
+#include "qiling/arch/utils.hpp"
+#include <cstdio>\n"
 
 namespace qiling {
 
@@ -31,6 +33,31 @@ UcContext& UcContext::operator=(UcContext&& other) noexcept {
 }
 
 QlArch::QlArch(Qiling* ql, std::optional<std::uint32_t> cputype) : ql_(ql), cputype_(cputype) {}
+
+QlArch::~QlArch() {
+    // the tracer hooks were released by shutdown_utils() (called from the
+    // composition root while the uc engine is still open)
+    delete utils_;
+    utils_ = nullptr;
+}
+
+void QlArch::shutdown_utils() {
+    // drops the tracer hooks (and releases their RAII handles) while the
+    // derived class's uc engine is still open; called from the composition
+    // root's dtor, mirroring the Python teardown ordering
+    if (utils_ != nullptr) {
+        utils_->shutdown();
+    }
+}
+
+QlArchUtils& QlArch::utils() {
+    // lazy construction (Python builds it eagerly in the ctor; the C++ port
+    // defers until the composition root passes a complete facade)
+    if (utils_ == nullptr) {
+        utils_ = new QlArchUtils(*ql_);
+    }
+    return *utils_;
+}
 
 std::unique_ptr<UcContext> QlArch::save() {
     uc_context* raw = nullptr;

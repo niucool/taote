@@ -2,8 +2,20 @@
 
 #include <array>
 #include <charconv>
+#include <filesystem>
+#include <fstream>
 #include <limits>
 #include <stdexcept>
+
+#include "qiling/arch/x86.hpp"
+#include "qiling/arch/arm.hpp"
+#include "qiling/arch/arm64.hpp"
+#include "qiling/arch/mips.hpp"
+#include "qiling/arch/ppc.hpp"
+#include "qiling/arch/riscv.hpp"
+#include "qiling/exception.hpp"
+#include "qiling/loader/blob.hpp"
+#include "qiling/os/blob/blob.hpp"
 
 namespace qiling {
 
@@ -146,6 +158,364 @@ std::optional<QL_ARCH> arch_convert(std::string_view name) {
 std::optional<QL_DEBUGGER> debugger_convert(std::string_view name) {
     static constexpr std::array<std::pair<std::string_view, std::string_view>, 0> aliases{};
     return name_to_enum(name, aliases, debugger_name_table);
+}
+
+// ---- component factories (utils.py select_* — PORT_PLAN.md 5.2) ----
+
+// helpers extracting the per-arch optional model out of the QL_CPU variant
+namespace {
+
+template <typename Model>
+std::optional<Model> cpu_model_of(const QL_CPU& cpu) {
+    if (const auto* p = std::get_if<Model>(&cpu)) {
+        return *p;
+    }
+    return std::nullopt;
+}
+
+}  // namespace
+
+ArchFactory select_arch(QL_ARCH archtype, const QL_CPU& cputype, QL_ENDIAN endian, bool thumb) {
+    switch (archtype) {
+        case QL_ARCH::A8086:
+            return [cpu = cpu_model_of<X86_CPU_MODEL>(cputype)](Qiling* ql) -> std::unique_ptr<QlArch> {
+                return std::make_unique<QlArchA8086>(ql, cpu);
+            };
+        case QL_ARCH::X86:
+            return [cpu = cpu_model_of<X86_CPU_MODEL>(cputype)](Qiling* ql) -> std::unique_ptr<QlArch> {
+                return std::make_unique<QlArchX86>(ql, cpu);
+            };
+        case QL_ARCH::X8664:
+            return [cpu = cpu_model_of<X86_CPU_MODEL>(cputype)](Qiling* ql) -> std::unique_ptr<QlArch> {
+                return std::make_unique<QlArchX8664>(ql, cpu);
+            };
+        case QL_ARCH::ARM:
+            // arm.py binds endian + thumb kwargs
+            return [cpu = cpu_model_of<ARM_CPU_MODEL>(cputype), endian, thumb](Qiling* ql) -> std::unique_ptr<QlArch> {
+                return std::make_unique<QlArchARM>(ql, cpu, endian, thumb);
+            };
+        case QL_ARCH::ARM64:
+            return [cpu = cpu_model_of<ARM64_CPU_MODEL>(cputype)](Qiling* ql) -> std::unique_ptr<QlArch> {
+                return std::make_unique<QlArchARM64>(ql, cpu);
+            };
+        case QL_ARCH::MIPS:
+            // mips.py binds the endian kwarg
+            return [cpu = cpu_model_of<MIPS_CPU_MODEL>(cputype), endian](Qiling* ql) -> std::unique_ptr<QlArch> {
+                return std::make_unique<QlArchMIPS>(ql, cpu, endian);
+            };
+        case QL_ARCH::PPC:
+            return [cpu = cpu_model_of<PPC_CPU_MODEL>(cputype)](Qiling* ql) -> std::unique_ptr<QlArch> {
+                return std::make_unique<QlArchPPC>(ql, cpu);
+            };
+        case QL_ARCH::RISCV:
+            return [cpu = cpu_model_of<RISCV_CPU_MODEL>(cputype)](Qiling* ql) -> std::unique_ptr<QlArch> {
+                return std::make_unique<QlArchRISCV>(ql, cpu);
+            };
+        case QL_ARCH::RISCV64:
+            return [cpu = cpu_model_of<RISCV64_CPU_MODEL>(cputype)](Qiling* ql) -> std::unique_ptr<QlArch> {
+                return std::make_unique<QlArchRISCV64>(ql, cpu);
+            };
+        case QL_ARCH::CORTEX_M:
+            return [cpu = cpu_model_of<ARM_CPU_MODEL>(cputype)](Qiling* ql) -> std::unique_ptr<QlArch> {
+                return std::make_unique<QlArchCORTEX_M>(ql, cpu);
+            };
+    }
+
+    throw QlErrorArch("Unknown or unsupported architecture");
+}
+
+LoaderFactory select_loader(QL_OS ostype, bool libcache) {
+    (void)libcache;  // consumed by the PE loader (Phase 3+)
+
+    switch (ostype) {
+        case QL_OS::BLOB:
+            return [](Qiling* ql) -> std::unique_ptr<loader::QlLoader> {
+                return std::make_unique<loader::QlLoaderBLOB>(ql);
+            };
+        default:
+            // the per-format loaders (PE/ELF/Mach-O/DOS/UEFI/...) land with
+            // their phases; until then the module lookup degrades
+            throw QlErrorNotImplemented("loader for this os type is not implemented");
+    }
+}
+
+OsFactory select_os(QL_OS ostype) {
+    switch (ostype) {
+        case QL_OS::BLOB:
+            return [](Qiling* ql) -> std::unique_ptr<QlOs> {
+                return std::make_unique<QlOsBlob>(ql);
+            };
+        default:
+            throw QlErrorNotImplemented("os layer for this os type is not implemented");
+    }
+}
+
+std::function<QlDebugger*(Qiling*)> select_debugger(std::variant<bool, std::string> options) {
+    if (std::holds_alternative<bool>(options)) {
+        // false/None degrade to no debugger; true is an alias for "gdb"
+        if (!std::get<bool>(options)) {
+            return nullptr;
+        }
+        options = std::string("gdb");
+    }
+
+    // resolve the option string ("gdb", "qdb", "qdb:rr", "gdb:0.0.0.0:1234"):
+    // the head before the first ':' names the debugger (select.py splits on
+    // ':' and passes the rest as the debugger kwargs)
+    const auto& option = std::get<std::string>(options);
+    const auto colon = option.find(':');
+    const std::string head = colon == std::string::npos ? option : option.substr(0, colon);
+
+    if (debugger_convert(head).has_value()) {
+        // debugger instances land with the interactive-debugging slice
+        return nullptr;
+    }
+
+    throw QlErrorArch("Unknown or unsupported debugger");
+}
+
+// ---- emu-env guessing (utils.py ql_guess_emu_env) ----
+
+namespace {
+
+// __emu_env_from_pathname: extension and .kext probes
+EmuEnvGuess emu_env_from_pathname(const std::filesystem::path& path) {
+    std::error_code ec;
+
+    const auto name = path.string();
+    const std::string_view suffix(".kext");
+    const bool is_kext = name.size() >= suffix.size() &&
+        name.compare(name.size() - suffix.size(), suffix.size(), suffix.data(), suffix.size()) == 0;
+
+    if (std::filesystem::is_directory(path, ec) && is_kext) {
+        return EmuEnvGuess{QL_ARCH::X8664, QL_OS::MACOS, QL_ENDIAN::EL};
+    }
+
+    if (std::filesystem::is_regular_file(path, ec)) {
+        const auto ext = path.extension().string();
+        if (ext == ".DOS_COM" || ext == ".DOS_MBR" || ext == ".DOS_EXE") {
+            return EmuEnvGuess{QL_ARCH::A8086, QL_OS::DOS, QL_ENDIAN::EL};
+        }
+    }
+
+    return {};
+}
+
+// reads the first `count` bytes of a file (nullopt on I/O failure)
+std::optional<std::vector<std::uint8_t>> read_head(const std::filesystem::path& path, std::size_t count) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        return std::nullopt;
+    }
+
+    std::vector<std::uint8_t> bytes(count);
+    in.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(count));
+    bytes.resize(static_cast<std::size_t>(in.gcount()));
+    return bytes;
+}
+
+// __emu_env_from_elf: the hand-rolled EI header sniff (no elffile dependency)
+EmuEnvGuess emu_env_from_elf(const std::vector<std::uint8_t>& blob) {
+    // e_ident offsets per the gabi4 ch4.eheader.html table
+    constexpr std::uint8_t ELFCLASS32 = 1;
+    constexpr std::uint8_t ELFCLASS64 = 2;
+    constexpr std::uint8_t ELFDATA2LSB = 1;
+    constexpr std::uint8_t ELFDATA2MSB = 2;
+
+    constexpr std::uint16_t EM_386 = 3;
+    constexpr std::uint16_t EM_MIPS = 8;
+    constexpr std::uint16_t EM_PPC = 20;
+    constexpr std::uint16_t EM_ARM = 40;
+    constexpr std::uint16_t EM_X86_64 = 62;
+    constexpr std::uint16_t EM_AARCH64 = 183;
+    constexpr std::uint16_t EM_RISCV = 243;
+
+    if (blob.size() < 20 || !(blob[0] == 0x7f && blob[1] == 'E' && blob[2] == 'L' && blob[3] == 'F')) {
+        return {};
+    }
+
+    const std::uint8_t ei_class = blob[4];
+    const std::uint8_t ei_data = blob[5];
+    const std::uint8_t ei_osabi = blob[7];
+
+    QL_ENDIAN archendian{};
+    std::optional<QL_ARCH> archtype;
+    std::optional<QL_OS> ostype;
+
+    const bool little = ei_data == ELFDATA2LSB;
+    if (!little && ei_data != ELFDATA2MSB) {
+        return {};
+    }
+    archendian = little ? QL_ENDIAN::EL : QL_ENDIAN::EB;
+
+    // e_machine lives at offset 18 (2 bytes, in the file's own endianness)
+    const std::uint16_t machine = little
+        ? static_cast<std::uint16_t>(blob[18] | (blob[19] << 8))
+        : static_cast<std::uint16_t>((blob[18] << 8) | blob[19]);
+
+    const bool is32 = ei_class == ELFCLASS32;
+    const bool is64 = ei_class == ELFCLASS64;
+    if (!is32 && !is64) {
+        return {};
+    }
+
+    // per-class machine tables (utils.py machines32/machines64)
+    if (is32) {
+        switch (machine) {
+            case EM_386:   archtype = QL_ARCH::X86; break;
+            case EM_MIPS:  archtype = QL_ARCH::MIPS; break;
+            case EM_ARM:   archtype = QL_ARCH::ARM; break;
+            case EM_RISCV: archtype = QL_ARCH::RISCV; break;
+            case EM_PPC:   archtype = QL_ARCH::PPC; break;
+            default: break;
+        }
+    } else {
+        switch (machine) {
+            case EM_X86_64:  archtype = QL_ARCH::X8664; break;
+            case EM_AARCH64: archtype = QL_ARCH::ARM64; break;
+            case EM_RISCV:   archtype = QL_ARCH::RISCV64; break;
+            default: break;
+        }
+    }
+
+    // ei_osabi table (utils.py abis)
+    switch (ei_osabi) {
+        case 0:    // ELFOSABI_SYSV
+        case 3:    // ELFOSABI_LINUX
+        case 64:   // ELFOSABI_ARM_AEABI
+        case 97:   // ELFOSABI_ARM
+            ostype = QL_OS::LINUX;
+            break;
+        case 9:    // ELFOSABI_FREEBSD
+            ostype = QL_OS::FREEBSD;
+            break;
+        case 255:  // ELFOSABI_STANDALONE
+            ostype = QL_OS::BLOB;
+            break;
+        default:
+            break;
+    }
+
+    // qnx detection: fuzzy look for the interpreter name in the first 0x200 bytes
+    if (ostype == QL_OS::LINUX) {
+        constexpr std::string_view interp = "ldqnx.so";
+        const auto* begin = reinterpret_cast<const char*>(blob.data());
+        const std::string_view head{begin, blob.size()};
+        if (head.find(interp) != std::string_view::npos) {
+            ostype = QL_OS::QNX;
+        }
+    }
+
+    return EmuEnvGuess{archtype, ostype, archendian};
+}
+
+// __emu_env_from_macho: the 32-byte ident sniff
+EmuEnvGuess emu_env_from_macho(const std::vector<std::uint8_t>& blob) {
+    if (blob.size() < 8) {
+        return {};
+    }
+
+    const bool sig32 = blob[0] == 0xce && blob[1] == 0xfa && blob[2] == 0xed && blob[3] == 0xfe;
+    const bool sig64 = blob[0] == 0xcf && blob[1] == 0xfa && blob[2] == 0xed && blob[3] == 0xfe;
+    const bool fat = blob[0] == 0xca && blob[1] == 0xfe && blob[2] == 0xba && blob[3] == 0xbe;
+
+    if (!(sig32 || sig64 || fat)) {
+        return {};
+    }
+
+    EmuEnvGuess guess;
+    guess.ostype = QL_OS::MACOS;
+
+    // ident[4] = cputype (LSB), ident[7] = the 64-bit flag (Python ident[7] == 0x01)
+    if (blob[4] == 0x07 && blob[7] == 0x01) {
+        guess.endian = QL_ENDIAN::EL;
+        guess.arch = QL_ARCH::X8664;
+    } else if (blob[4] == 0x0c && blob[7] == 0x01) {
+        guess.endian = QL_ENDIAN::EL;
+        guess.arch = QL_ARCH::ARM64;
+    }
+
+    return guess;
+}
+
+// __emu_env_from_pe: the hand-rolled MZ/PE sniff (pefile-free)
+EmuEnvGuess emu_env_from_pe(const std::vector<std::uint8_t>& blob) {
+    if (blob.size() < 0x40 + 4 || blob[0] != 'M' || blob[1] != 'Z') {
+        return {};
+    }
+
+    const std::uint32_t pe_offset = static_cast<std::uint32_t>(blob[0x3c]) |
+                                    (static_cast<std::uint32_t>(blob[0x3d]) << 8) |
+                                    (static_cast<std::uint32_t>(blob[0x3e]) << 16) |
+                                    (static_cast<std::uint32_t>(blob[0x3f]) << 24);
+
+    // the PE signature and COFF machine field must fit
+    if (pe_offset > blob.size() || blob.size() - pe_offset < 4 + 20) {
+        return {};
+    }
+    if (blob[pe_offset] != 'P' || blob[pe_offset + 1] != 'E' || blob[pe_offset + 2] != 0 || blob[pe_offset + 3] != 0) {
+        return {};
+    }
+
+    const std::uint16_t machine = static_cast<std::uint16_t>(blob[pe_offset + 4] | (blob[pe_offset + 5] << 8));
+
+    EmuEnvGuess guess;
+    guess.endian = QL_ENDIAN::EL;
+
+    switch (machine) {
+        case 0x014c: guess.arch = QL_ARCH::X86; break;      // IMAGE_FILE_MACHINE_I386
+        case 0x8664: guess.arch = QL_ARCH::X8664; break;    // IMAGE_FILE_MACHINE_AMD64
+        case 0x01c0: guess.arch = QL_ARCH::ARM; break;      // IMAGE_FILE_MACHINE_ARM
+        case 0x01c4: guess.arch = QL_ARCH::ARM; break;      // IMAGE_FILE_MACHINE_THUMB
+        case 0xAA64: guess.arch = QL_ARCH::ARM64; break;    // IMAGE_FILE_MACHINE_ARM64
+        default:
+            return {};  // unknown machine: the Python mapper.get returns None
+    }
+
+    // optional header subsystem: magic at +24, subsystem at +24+68 (PE32/PE32+ agree)
+    const std::uint16_t subsystem = static_cast<std::uint16_t>(blob[pe_offset + 92] | (blob[pe_offset + 93] << 8));
+    constexpr std::uint16_t efi_subsystems[] = {10, 11, 12, 14, 13, 15, 16};  // APPLICATION, BOOT_SERVICE_DRIVER,
+                                                              // RUNTIME_DRIVER, ROM, plus the OBSOLETE trio
+    bool is_uefi = false;
+    for (const auto sub : efi_subsystems) {
+        if (subsystem == sub) {
+            is_uefi = true;
+            break;
+        }
+    }
+    guess.ostype = is_uefi ? QL_OS::UEFI : QL_OS::WINDOWS;
+
+    return guess;
+}
+
+}  // namespace
+
+EmuEnvGuess ql_guess_emu_env(const std::string& path) {
+    const std::filesystem::path fspath(path);
+
+    // guessing-methods order: pathname, elf, macho, pe — first decisive win
+    if (const auto guess = emu_env_from_pathname(fspath); guess.arch.has_value()) {
+        return guess;
+    }
+
+    // the ELF sniff reads 0x200 bytes (the Python reader does the same; the
+    // fuzzy qnx interpreter check consumes the remainder)
+    const auto blob = read_head(fspath, 0x200);
+    if (!blob) {
+        return {};
+    }
+
+    if (const auto guess = emu_env_from_elf(*blob); guess.arch.has_value()) {
+        return guess;
+    }
+    if (const auto guess = emu_env_from_macho(*blob); guess.arch.has_value()) {
+        return guess;
+    }
+    if (const auto guess = emu_env_from_pe(*blob); guess.arch.has_value()) {
+        return guess;
+    }
+
+    return {};
 }
 
 }  // namespace qiling

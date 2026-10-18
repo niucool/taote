@@ -1,0 +1,221 @@
+// Ported from qiling/core.py — the Qiling facade (the composition root).
+// Python: `class Qiling(QlCoreHooks, QlCoreStructs)`. The C++ port keeps the
+// inheritance so `ql.hook_code(...)`, `ql.pack8(...)` and the emu-start
+// discipline live on the facade exactly like upstream; the bases gain
+// deferred-init ctors to mirror the Python mid-constructor `__init__` calls.
+//
+// The ctor performs the core.py assembly sequence verbatim: argv/rootfs
+// validation, arch/os guessing, select_arch, profile setup, select_loader,
+// select_component('os','memory'), select_os, loader.run(), stop-guard setup.
+#ifndef QILING_CORE_HPP
+#define QILING_CORE_HPP
+
+#include <cstdint>
+#include <map>
+#include <memory>
+#include <optional>
+#include <string>
+#include <vector>
+
+#include "qiling/const.hpp"
+#include "qiling/core_hooks.hpp"
+#include "qiling/core_struct.hpp"
+#include "qiling/arch/models.hpp"
+#include "qiling/os/memory.hpp"
+#include "qiling/os/mapper.hpp"
+#include "qiling/arch/arch.hpp"
+#include "qiling/profiles/inireader.hpp"
+#include <spdlog/spdlog.h>
+
+namespace qiling {
+
+class QlArch;
+class QlOs;
+class QlHwManager;
+class UcContext;
+namespace loader { class QlLoader; }
+namespace os { class QlOsBlob; }
+
+// core.py save/restore state (the saved_states dict analogue)
+struct QilingSavedState {
+    std::optional<std::map<std::string, std::uint64_t>> reg;
+    std::optional<SavedMemory> mem;
+    std::optional<std::shared_ptr<UcContext>> cpu_context;
+};
+
+// core.py Qiling.__init__ kwargs (the C++ parameter object)
+struct QilingOptions {
+    // the emulated program argv; an empty list means shellcode execution
+    // (a '' placeholder is inserted, as in core.py)
+    std::vector<std::string> argv;
+
+    std::string rootfs = ".";
+
+    // the program environment variables
+    std::map<std::string, std::string> env;
+
+    // the shellcode (mutually exclusive with argv, core.py)
+    std::vector<std::uint8_t> code;
+
+    std::optional<QL_OS> ostype;
+    std::optional<QL_ARCH> archtype;
+    QL_CPU cputype = std::monostate{};
+
+    QL_VERBOSE verbose = QL_VERBOSE::DEFAULT;
+
+    // a user profile path (None/default profile otherwise)
+    std::optional<std::string> profile;
+
+    bool console = true;
+    bool log_plain = false;
+
+    bool multithread = false;
+
+    std::optional<std::string> filter;
+
+    QL_STOP stop = QL_STOP::NONE;
+
+    std::optional<QL_ENDIAN> endian;
+    bool thumb = false;
+};
+
+class Qiling final : public QlCoreHooks, public QlCoreStructs {
+public:
+    explicit Qiling(const QilingOptions& options = {});
+    ~Qiling() override;
+
+    Qiling(const Qiling&) = delete;
+    Qiling& operator=(const Qiling&) = delete;
+
+    // ---- Qiling components (core.py properties) ----
+
+    QlArch& arch() const noexcept { return *arch_; }
+    QlMemoryManager& mem() const noexcept { return *mem_; }
+    QlOs& os() const noexcept { return *os_; }
+    loader::QlLoader& loader() const noexcept { return *loader_; }
+
+    // hw is created for baremetal emulations only (core.py `if self.baremetal`)
+    QlHwManager* hw() const noexcept { return hw_; }
+    bool baremetal() const noexcept;
+
+    // the active profile (core.py profile property)
+    IniConfig& profile() const noexcept { return *profile_; }
+
+    // the instance logger (core.py log property — setup_logger(stderr))
+    spdlog::logger& log() const noexcept { return *log_; }
+
+    // ---- Qiling options (core.py properties) ----
+
+    const std::vector<std::string>& argv() const noexcept { return argv_; }
+    const std::string& rootfs() const noexcept { return rootfs_; }
+    const std::map<std::string, std::string>& env() const noexcept { return env_; }
+    const std::vector<std::uint8_t>& code() const noexcept { return code_; }
+    bool multithread() const noexcept { return multithread_; }
+    QL_STOP stop_options() const noexcept { return stop_options_; }
+    QL_VERBOSE verbose() const noexcept { return verbose_; }
+    void set_verbose(QL_VERBOSE v);
+
+    // path/targetname (core.py properties)
+    const std::string& path() const noexcept { return argv_.empty() ? placeholder_path_ : argv_[0]; }
+    std::string targetname() const;
+
+    QL_STATE emu_state() const noexcept { return state_; }
+
+    // emulation entry overrides (core.py entry_point/exit_point/timeout/count:
+    // None until run() replaces them; the C++ port tracks set-ness explicitly)
+    bool entry_point_set() const noexcept { return entry_point_set_; }
+    bool exit_point_set() const noexcept { return exit_point_set_; }
+    std::uint64_t entry_point() const noexcept { return entry_point_; }
+    std::uint64_t exit_point() const noexcept { return exit_point_; }
+    std::uint64_t timeout() const noexcept { return timeout_; }
+    std::uint64_t count() const noexcept { return count_; }
+    void set_entry_point(std::uint64_t addr) { entry_point_ = addr; entry_point_set_ = true; }
+    void set_exit_point(std::uint64_t addr) { exit_point_ = addr; exit_point_set_ = true; }
+
+    // ---- patching (core.py patch/do_bin_patch/do_lib_patch) ----
+
+    void patch(std::uint64_t offset, const std::vector<std::uint8_t>& data, std::optional<std::string> target = std::nullopt);
+    void do_bin_patch();
+    void do_lib_patch();
+
+    // ---- emulation control ----
+
+    // core.py run — the emulation entry (patches, exit trap, os.run)
+    void run(std::optional<std::uint64_t> begin = std::nullopt, std::optional<std::uint64_t> end = std::nullopt,
+             std::uint64_t timeout = 0, std::uint64_t count = 0);
+
+    friend class os::QlOsBlob;  // blob run() touches the private entry/exit state
+
+    // core.py emu_start — the rethrow-after-uc_emu_start discipline (core.py:727)
+    void emu_start(std::uint64_t begin, std::uint64_t end, std::uint64_t timeout = 0, std::uint64_t count = 0);
+
+    // core.py emu_stop / stop
+    void emu_stop();
+    void stop();
+
+    // stack delegation (core.py stack_push/pop/read/write)
+    std::uint64_t stack_push(std::uint64_t data);
+    std::uint64_t stack_pop();
+    std::uint64_t stack_read(std::int64_t offset);
+    void stack_write(std::int64_t offset, std::uint64_t data);
+
+    // core.py save/restore — the resumable snapshot state (the Python dict
+    // surface; the byte-level serialization for file snapshots is covered by
+    // the Snapshot suites)
+    QilingSavedState save(bool reg = true, bool mem = true, bool cpu_context = false);
+    void restore(const QilingSavedState& saved_state);
+
+    // fs mapper delegation (core.py add_fs_mapper/remove_fs_mapper)
+    void add_fs_mapper(std::string_view ql_path, QlFsBinding binding);
+    void remove_fs_mapper(std::string_view ql_path);
+
+    // exit trap (core.py _init_stop_guard/write_exit_trap)
+    void init_stop_guard();
+    void write_exit_trap();
+
+private:
+    std::vector<std::string> argv_;
+    std::string placeholder_path_ = "";  // core.py: argv = [''] for shellcode
+    std::string rootfs_;
+    std::map<std::string, std::string> env_;
+    std::vector<std::uint8_t> code_;
+
+    bool multithread_ = false;
+    QL_STOP stop_options_ = QL_STOP::NONE;
+    QL_VERBOSE verbose_ = QL_VERBOSE::DEFAULT;
+
+    std::unique_ptr<QlArch> arch_;
+    std::unique_ptr<QlMemoryManager> mem_;
+    std::unique_ptr<QlOs> os_;
+    std::unique_ptr<loader::QlLoader> loader_;
+    QlHwManager* hw_ = nullptr;  // owned when the hw manager lands (OQ 9)
+
+    IniConfig profile_default_;
+    IniConfig* profile_ = nullptr;
+    std::shared_ptr<spdlog::logger> log_;
+
+    QL_STATE state_ = QL_STATE::NOT_SET;
+
+    // patching records (core.py _patch_bin/_patch_lib)
+    struct BinPatch { std::uint64_t offset; std::vector<std::uint8_t> data; };
+    std::vector<BinPatch> patch_bin_;
+    struct LibPatch { std::uint64_t offset; std::vector<std::uint8_t> data; std::string filename; };
+    std::vector<LibPatch> patch_lib_;
+
+    bool debugger_ = false;
+    std::uint64_t timeout_ = 0;
+    std::uint64_t count_ = 0;
+    std::uint64_t entry_point_ = 0;
+    bool entry_point_set_ = false;
+    std::uint64_t exit_point_ = 0;
+    bool exit_point_set_ = false;
+    std::uint64_t initial_sp_ = 0;
+    bool initial_sp_set_ = false;
+    std::uint64_t exit_trap_addr_ = 0;
+    std::optional<HookRet> sp_check_handle_;
+    std::optional<HookRet> exit_trap_handle_;
+};
+
+}  // namespace qiling
+
+#endif  // QILING_CORE_HPP

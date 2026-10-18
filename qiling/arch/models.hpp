@@ -8,6 +8,7 @@
 #define QILING_ARCH_MODELS_HPP
 
 #include <cstdint>
+#include <variant>
 
 namespace qiling {
 
@@ -428,6 +429,10 @@ enum class RISCV64_CPU_MODEL : std::uint32_t {
     RISCV64_SIFIVE_E51 = 2,
     RISCV64_SIFIVE_U54 = 3,
 };
+
+// models.py QL_CPU — the union of per-architecture CPU model enums.
+// std::monostate stands for the Python None default.
+using QL_CPU = std::variant<std::monostate, X86_CPU_MODEL, ARM_CPU_MODEL, ARM64_CPU_MODEL, MIPS_CPU_MODEL, PPC_CPU_MODEL, RISCV_CPU_MODEL, RISCV64_CPU_MODEL>;
 
 }  // namespace qiling
 

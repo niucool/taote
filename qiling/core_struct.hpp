@@ -26,6 +26,11 @@ public:
     // struct.pack/unpack would raise struct.error (documented deviation).
     QlCoreStructs(QL_ENDIAN endian, int bit);
 
+    // deferred-init for the composition root (mirrors the Python
+    // QlCoreStructs.__init__(self, endian, bits) mid-construction call)
+    QlCoreStructs() = default;
+    void init(QL_ENDIAN endian, int bit);
+
     // bit-selected accessors (core_struct.py handlers table): pack / packs /
     // unpack / unpacks for the architecture word size
     std::string pack(std::uint64_t x) const { return (this->*pack_)(x); }

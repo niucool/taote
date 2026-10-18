@@ -42,6 +42,11 @@ public:
               QL_ENDIAN endian = QL_ENDIAN::EL, bool thumb = false,
               int extra_mode = 0);
 
+    // core.py emu_start: getattr(self.arch, '_init_thumb', False) -> begin |= 1
+    std::uint64_t adjust_emu_start(std::uint64_t begin) const override {
+        return init_thumb_ ? (begin | 1) : begin;
+    }
+
     QL_ARCH type() const noexcept override { return QL_ARCH::ARM; }
     int bits() const noexcept override { return 32; }
 
@@ -73,6 +78,11 @@ protected:
     static int ks_mode_for(bool thumb, bool big_endian) noexcept;
 
     UcHandle uc_;
+
+    // arm.py _init_endian/_init_thumb — the constructor mode bits, kept for
+    // core.py's emu_start thumb adjustment
+    QL_ENDIAN init_endian_ = QL_ENDIAN::EL;
+    bool init_thumb_ = false;
     std::optional<QlRegisterManager> regs_;
     std::optional<QlCprManager> cpr_;
     std::map<int, Cs> cs_cache_;

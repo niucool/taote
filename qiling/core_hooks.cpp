@@ -148,6 +148,7 @@ HookRet::~HookRet() {
     // 5.1 RAII hook handles: destroying the handle unregisters the hook
     if (hooks_ != nullptr) {
         hooks_->hook_del(*this);
+        hooks_ = nullptr;
     }
 }
 
