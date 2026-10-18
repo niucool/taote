@@ -970,6 +970,23 @@ accept peer write-back predates the helper and still writes the fixed
 110-byte unix sockaddr (the verbatim dynamic-size walk lands when the
 accept body rides the shared write_sockaddr helper — a small follow-up).
 
+### Phase 12 sub-slice 6 — the datagram sendto/recvfrom dest/src paths
+
+| piece | upstream | state | notes |
+|---|---|---|---|
+| sendto datagram | `syscall/socket.py` | ✅ | the dest parse rides the guest sockaddr (the AF_UNIX ql_unix_socket_path transform, the AF_INET (host, port)); the unsupported family falls through the verbatim "if dest is not None" gate returning 0; the (ConnectionError, FileNotFoundError) except branch rides 0 (verbatim) |
+| recvfrom datagram | `syscall/socket.py` | ✅ | the src address write-back over the QlSocket::recvfrom out params; the FIXME verbatim (the addrlen is NOT read — the whole obj writes at addr, no addrlen-cell update); the abstract-namespace path stays unfilled (the comment verbatim); the unsupported family rides objlen=0 (no write-back) |
+| the QlSocket sendto/recvfrom | `filestruct.py ql_socket.sendto/recvfrom` | ✅ | the host sendto/recvfrom with the AF_UNIX-path / AF_INET-addr split, the recvfrom n<=0 empty-read shape |
+| the fixture | `tests/Posix_Test.cpp` | ✅ | the UDP self-conversation: B binds 127.0.0.1:0 + getsockname fills the dest sa, A sendtos "PING" to it, B recvfroms it and the src (family, BE port, BE addr) writes back |
+
+Findings: the REX.B encoding trap fired AGAIN as 49 C7 C0 — a W+/-B
+`mov r8, imm32` mistaken for r9 (the r9 form is 49 C7 C1) — the overwritten
+src arg made the write-back land at the len cell while the fixture probed
+the src, a silent misdirect that still passed the PING assertion; and the
+sa layout gotcha: the dotted-quad addr rides at sa+4 (right after the
+family+port words) — preloading the port+addr as 6 bytes at +4 shifts the
+addr to +6 and the parse reads 0.0.127.0.
+
 ### Phase 12 sub-slice 3 — socketpair + the send/recv family
 
 | piece | upstream | state | notes |

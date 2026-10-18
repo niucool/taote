@@ -342,6 +342,77 @@ std::int64_t QlSocket::send(const std::vector<std::uint8_t>& data, int flags) {
     return n < 0 ? 0 : static_cast<std::int64_t>(n);
 }
 
+std::int64_t QlSocket::sendto(const std::vector<std::uint8_t>& data, int flags, const std::string& path,
+                              const std::string& host, std::uint16_t port) {
+    // ql_socket.sendto: the socket.sendto(buf, flags, dest) — the AF_UNIX
+    // rides the path, the AF_INET the (host, port); -1 on the error (the
+    // caller maps the ConnectionError/FileNotFoundError shapes onto 0)
+    sockaddr_storage ss{};
+    socklen_t slen = 0;
+    if (!path.empty()) {
+        auto* un = reinterpret_cast<sockaddr_un*>(&ss);
+        un->sun_family = static_cast<decltype(un->sun_family)>(kAfUnix);
+        const auto plen = std::min(path.size(), sizeof(un->sun_path));
+        std::memcpy(un->sun_path, path.data(), plen);
+        slen = static_cast<socklen_t>(2 + plen);
+    } else {
+        auto* in = reinterpret_cast<sockaddr_in*>(&ss);
+        in->sin_family = static_cast<decltype(in->sin_family)>(kAfInet);
+        in->sin_port = ::htons(port);
+        ::inet_pton(AF_INET, host.c_str(), &in->sin_addr);
+        slen = sizeof(sockaddr_in);
+    }
+#ifdef _WIN32
+    const int n = ::sendto(static_cast<SOCKET>(host_handle_),
+                           reinterpret_cast<const char*>(data.data()),
+                           static_cast<int>(data.size()), flags,
+                           reinterpret_cast<const sockaddr*>(&ss), slen);
+#else
+    const ssize_t n = ::sendto(static_cast<int>(host_handle_), data.data(), data.size(), flags,
+                               reinterpret_cast<const sockaddr*>(&ss), slen);
+#endif
+    return n < 0 ? -1 : static_cast<std::int64_t>(n);
+}
+
+std::vector<std::uint8_t> QlSocket::recvfrom(std::size_t bufsize, int flags, std::string& path,
+                                             std::string& host, std::uint16_t& port) {
+    // ql_socket.recvfrom: the socket.recvfrom(bufsize, flags) — the src
+    // address rides the out params
+    sockaddr_storage ss{};
+    std::vector<std::uint8_t> out(bufsize, 0);
+#ifdef _WIN32
+    int slen = sizeof(ss);
+    const int n = ::recvfrom(static_cast<SOCKET>(host_handle_),
+                             reinterpret_cast<char*>(out.data()),
+                             static_cast<int>(bufsize), flags,
+                             reinterpret_cast<sockaddr*>(&ss), &slen);
+#else
+    socklen_t slen = sizeof(ss);
+    const ssize_t n = ::recvfrom(static_cast<int>(host_handle_), out.data(), bufsize, flags,
+                                 reinterpret_cast<sockaddr*>(&ss), &slen);
+#endif
+    path.clear();
+    host.clear();
+    port = 0;
+    if (n <= 0) {
+        return {};
+    }
+    if (ss.ss_family == static_cast<decltype(ss.ss_family)>(kAfUnix)) {
+        const auto* un = reinterpret_cast<const sockaddr_un*>(&ss);
+        const auto have = slen > 2 ? static_cast<std::size_t>(slen) - 2 : 0;
+        path.assign(un->sun_path, std::min(have, sizeof(un->sun_path)));
+    } else if (ss.ss_family == static_cast<decltype(ss.ss_family)>(kAfInet)) {
+        const auto* in = reinterpret_cast<const sockaddr_in*>(&ss);
+        char buf[INET_ADDRSTRLEN] = {0};
+        if (::inet_ntop(AF_INET, &in->sin_addr, buf, sizeof(buf)) != nullptr) {
+            host = buf;
+        }
+        port = ntohs(in->sin_port);
+    }
+    out.resize(static_cast<std::size_t>(n));
+    return out;
+}
+
 bool QlSocket::shutdown(int how) {
     // ql_socket.shutdown: the ConnectionError shapes onto the caller's -1
     return host_socket_shutdown(host_handle_, how) == 0;
@@ -930,9 +1001,30 @@ std::optional<std::int64_t> syscall_sendto(Qiling& ql, const std::vector<std::ui
         return syscall_send(ql, {params[0], params[1], params[2], params[3]});
     }
 
-    // the datagram sendto rides its sub-slice (the dest parse + the
-    // sendto host call)
-    throw QlErrorBase("sendto: the datagram dest path lands with its slice");
+    // the datagram walk: the dest parse rides the guest sockaddr (the
+    // AF_UNIX ql_unix_socket_path transform, the AF_INET (host, port));
+    // the (ConnectionError, FileNotFoundError) branch rides 0 (verbatim)
+    const auto sa = parse_sockaddr(ql, params[4], params[5]);
+    std::string dest_path, dest_host;
+    std::uint16_t dest_port = 0;
+    if (sa.family == kAfUnix) {
+        dest_path = sa.unix_path;
+        if (!dest_path.empty() && dest_path.front() != char{0}) {
+            dest_path = ql.os().path()->virtual_to_host_path(dest_path);
+        }
+    } else if (sa.family == kAfInet) {
+        dest_host = sa.inet_host;
+        dest_port = sa.inet_port;
+    } else {
+        // dest stays None — the verbatim "if dest is not None" fall-through
+        return 0;
+    }
+
+    const auto data = ql.mem().read(params[1], params[2]);
+    if (sock->sendto(data, static_cast<int>(params[3]), dest_path, dest_host, dest_port) < 0) {
+        return 0;  // the except branch (verbatim)
+    }
+    return static_cast<std::int64_t>(data.size());
 }
 
 std::optional<std::int64_t> syscall_recvfrom(Qiling& ql, const std::vector<std::uint64_t>& params) {
@@ -950,7 +1042,47 @@ std::optional<std::int64_t> syscall_recvfrom(Qiling& ql, const std::vector<std::
         return syscall_recv(ql, {params[0], params[1], params[2], params[3]});
     }
 
-    throw QlErrorBase("recvfrom: the datagram src path lands with its slice");
+    // the datagram walk: the src address rides the out params; the
+    // write-back consults the FIXME verbatim (the addrlen is NOT read —
+    // the whole obj writes at addr), the abstract-namespace path stays
+    // unfilled (the upstream comment verbatim)
+    std::string src_path, src_host;
+    std::uint16_t src_port = 0;
+    const auto data = sock->recvfrom(static_cast<std::size_t>(params[2]),
+                                     static_cast<int>(params[3]), src_path, src_host, src_port);
+
+    std::size_t objlen = 0;
+    std::vector<std::uint8_t> obj;
+    if (sock->family() == kAfUnix) {
+        objlen = 2 + src_path.size() + 1;
+        obj.assign(objlen, 0);
+        obj[0] = 0x01;
+        obj[1] = 0x00;
+        // abstract Unix socket path is not filled in recvfrom
+        if (!src_path.empty()) {
+            std::memcpy(obj.data() + 2, src_path.data(), src_path.size());
+        }
+    } else if (sock->family() == kAfInet) {
+        objlen = 16;
+        obj.assign(16, 0);
+        obj[0] = 0x02;
+        obj[1] = 0x00;
+        obj[2] = static_cast<std::uint8_t>(src_port >> 8);
+        obj[3] = static_cast<std::uint8_t>(src_port & 0xff);
+        unsigned a = 0, b = 0, c = 0, d = 0;
+        std::sscanf(src_host.c_str(), "%u.%u.%u.%u", &a, &b, &c, &d);
+        obj[4] = static_cast<std::uint8_t>(a);
+        obj[5] = static_cast<std::uint8_t>(b);
+        obj[6] = static_cast<std::uint8_t>(c);
+        obj[7] = static_cast<std::uint8_t>(d);
+    }
+    // else objlen stays 0 — the verbatim "else objlen = 0" (no write-back)
+
+    if (objlen != 0) {
+        ql.mem().write(params[4], obj);
+    }
+    ql.mem().write(params[1], data);
+    return static_cast<std::int64_t>(data.size());
 }
 
 

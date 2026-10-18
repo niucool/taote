@@ -73,6 +73,16 @@ public:
     // recv returns the bytes read (the empty vector on the error), the send
     // the byte count (-1 on the error)
     std::vector<std::uint8_t> recv(std::size_t bufsize, int flags);
+
+    // the datagram dest/src walks (the ql_socket.sendto/recvfrom shapes):
+    // the sendto returns the byte count (-1 on the error — the caller maps
+    // the ConnectionError shapes onto 0); the recvfrom returns the data and
+    // the src address (the path for the AF_UNIX, the (host, port) for the
+    // AF_INET)
+    std::int64_t sendto(const std::vector<std::uint8_t>& data, int flags, const std::string& path,
+                        const std::string& host, std::uint16_t port);
+    std::vector<std::uint8_t> recvfrom(std::size_t bufsize, int flags, std::string& path,
+                                       std::string& host, std::uint16_t& port);
     std::int64_t send(const std::vector<std::uint8_t>& data, int flags);
 
     // getsockopt/setsockopt (the host-level values pass through — the
