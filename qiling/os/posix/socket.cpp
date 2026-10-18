@@ -1338,6 +1338,9 @@ std::optional<std::int64_t> syscall_socketcall(Qiling& ql, const std::vector<std
         {11, 6, nullptr, "sendto"}, {12, 6, nullptr, "recvfrom"},
         {13, 2, nullptr, "shutdown"}, {14, 5, nullptr, "setsockopt"},
         {15, 5, nullptr, "getsockopt"},
+        {17, 3, nullptr, "recvmsg"},   // the msg family (the socket.py
+                                        // recvmsg — the recvmmsg/sendmmsg
+                                        // slots stay unhandled upstream)
     };
 
     const auto call = static_cast<int>(params[0]);
@@ -1381,6 +1384,7 @@ std::optional<std::int64_t> syscall_socketcall(Qiling& ql, const std::vector<std
         case 13: return syscall_shutdown(ql, a);
         case 14: return syscall_setsockopt(ql, a);
         case 15: return syscall_getsockopt(ql, a);
+        case 17: return syscall_recvmsg(ql, a);
         default:
             throw QlErrorBase("socketcall: unreachable dispatch");
     }

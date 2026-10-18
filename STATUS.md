@@ -1032,6 +1032,33 @@ rather than fixed).
 The remaining socket deferrals: sendmmsg/recvmmsg (the msg-family
 multiplexers over the mmsghdr array — each its own slice).
 
+### Phase 12 sub-slice 10 — the socketcall recvmsg ride + the recvmmsg/sendmmsg fall-through pin (the family close-out)
+
+**Grounding correction to the sub-slice-9 deferral note:** the upstream
+defines **no recvmmsg and no sendmmsg handler** — the names exist only in
+the per-arch syscall tables (the x86 recvmmsg=337 / sendmmsg=345, the x8664
+299/307) and the SOCKETCALL enum lists the slots (19/20) without handlers.
+There was never a vlen/timeout walk to port — both names ride the
+dispatcher's not-implemented fall-through (the warn + the continue)
+verbatim.
+
+| piece | upstream | state | notes |
+|---|---|---|---|
+| socketcall SYS_RECVMSG | `net.py` handlers map | ✅ | the recvmsg ride added to the port's socketcall dispatch (the 3-arg form: fd, msg, flags) — the sub-slice-8 table had carried the calls 1–15 only, a verbatim gap now closed; the recvmmsg/sendmmsg socketcall slots stay unhandled (the verbatim NotImplementedError throw) |
+| recvmmsg/sendmmsg | the syscall tables only | ✅ pinned | the x86-32 fixture rides int-0x80 recvmmsg(337): the name resolves, the registry misses, the emulation **continues** (the marker store after the call lands) — the verbatim fall-through; the recvmsg ride in the same blob pins the socketcall dispatch through the ENOTCONN -1 (the documented deviation shape) |
+
+The socket family is now **fully closed against the upstream surface**:
+socket/shutdown, connect/bind/listen/accept, socketpair, send/recv/
+sendto/recvfrom (the STREAM + the NULL-addr + the datagram walks),
+getsockname/getpeername, getsockopt/setsockopt (the SOL_SOCKET + IP + TCP
+tables), recvmsg (the msghdr/iov/cmsg walk), socketcall (the x86
+multiplexer with the recvmsg ride), and the verbatim unimplemented shapes
+for sendmsg/recvmmsg/sendmmsg/accept4. **Findings:** the earlier
+assumption that recvmmsg/sendmmsg carried upstream handler bodies (with
+the vlen/timeout walk) was wrong — the handler bodies exist only for
+recvmsg; and the x86 recvmmsg id is 337 (the 365 hit was the ARM table —
+the table-array boundaries matter when pinning ids across arches).
+
 ### Phase 12 sub-slice 3 — socketpair + the send/recv family
 
 | piece | upstream | state | notes |

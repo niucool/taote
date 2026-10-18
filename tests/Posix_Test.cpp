@@ -1724,3 +1724,63 @@ TEST(PosixSocket, RecvmsgRidesMsghdrIovAndCmsg) {
     EXPECT_EQ(cmsg_type, kHostPktInfoType);
     EXPECT_EQ(cmsg_len, kHostPktInfoDataLen);               // the host pktinfo payload
 }
+
+// the socketcall recvmsg ride (the SYS_RECVMSG=17 slot rides the recvmsg
+// handler — the gap closed after the sub-slice-8 table review) and the
+// recvmmsg fall-through pin (the upstream defines NO recvmmsg/sendmmsg
+// handler — the name rides the dispatcher's not-implemented continue)
+TEST(PosixSocket, SocketcallRecvmsgRidesAndRecvmmsgFallsThrough) {
+    // the x86-32 blob: the socketcall(SYS_SOCKET) for fd 3, then the
+    // recvmmsg(299 on x86... — the x86 table rides recvmmsg at 365) via int
+    // 0x80 — the fall-through keeps the emulation alive; the marker store
+    // after it pins the continue
+    const std::vector<std::uint8_t> code = {
+        // socket(AF_INET, SOCK_STREAM, 0) via socketcall
+        0xB8, 0x66, 0x00, 0x00, 0x00,               // mov eax, 102 (socketcall)
+        0xBB, 0x01, 0x00, 0x00, 0x00,               // mov ebx, 1 (SYS_SOCKET)
+        0xB9, 0x00, 0x20, 0x00, 0x01,               // mov ecx, 0x1002000 (the args)
+        0xCD, 0x80,                                 // int 0x80
+        0xA3, 0x08, 0x22, 0x00, 0x01,               // mov [0x1002208], eax
+        // socketcall(SYS_RECVMSG=17, args@[0x1002100]) — the recvmsg ride
+        // (the msg_addr holds a zeroed msghdr — the namelen 0 reads empty;
+        // the verbatim-quirk bufsize rides 0)
+        0xB8, 0x66, 0x00, 0x00, 0x00,               // mov eax, 102
+        0xBB, 0x11, 0x00, 0x00, 0x00,               // mov ebx, 17 (SYS_RECVMSG)
+        0xB9, 0x00, 0x21, 0x00, 0x01,               // mov ecx, 0x1002100
+        0xCD, 0x80,                                 // int 0x80
+        0xA3, 0x10, 0x22, 0x00, 0x01,               // mov [0x1002210], eax
+        // recvmmsg(337 on x86) — the fall-through pin: the emulation
+        // continues and the marker lands
+        0xB8, 0x51, 0x01, 0x00, 0x00,               // mov eax, 337 (recvmmsg)
+        0xBB, 0x03, 0x00, 0x00, 0x00,               // mov ebx, 3 (the fd)
+        0xCD, 0x80,                                 // int 0x80
+        0xC7, 0x05, 0x18, 0x22, 0x00, 0x01, 0x2A, 0x00, 0x00, 0x00,  // mov dword [0x1002218], 42
+        0xB8, 0x01, 0x00, 0x00, 0x00,               // mov eax, 1 (exit)
+        0xBB, 0x00, 0x00, 0x00, 0x00,               // mov ebx, 0
+        0xCD, 0x80,                                 // int 0x80
+    };
+
+    QilingOptions options;
+    options.code = code;
+    options.rootfs = ensure_rootfs().string();
+    options.ostype = QL_OS::LINUX;
+    options.archtype = QL_ARCH::X86;
+    Qiling ql(options);
+
+    ql.mem().write_ptr(0x1002000, 2, 4);            // args[0]: AF_INET
+    ql.mem().write_ptr(0x1002004, 1, 4);            // args[1]: SOCK_STREAM
+    ql.mem().write_ptr(0x1002008, 0, 4);            // args[2]: 0
+    ql.mem().write_ptr(0x1002100, 3, 4);            // the recvmsg args[0]: the fd 3
+    ql.mem().write_ptr(0x1002104, 0x1002200, 4);    // the recvmsg args[1]: a zeroed msghdr
+    ql.mem().write_ptr(0x1002208, 0, 8);            // the msghdr cells (the results live beyond)
+
+    ql.run();
+
+    EXPECT_EQ(ql.os().exit_code(), 0);
+    EXPECT_EQ(ql.mem().read_ptr(0x1002208, 4), 3u);   // the socketcall socket rides fd 3
+    // the recvmsg ride: the unconnected STREAM raises ENOTCONN at the host
+    // (the upstream's except-ConnectionError wouldn't catch it either) — the
+    // documented -1 ride
+    EXPECT_EQ(ql.mem().read_ptr(0x1002210, 4), 0xFFFFFFFFu);
+    EXPECT_EQ(ql.mem().read_ptr(0x1002218, 4), 42u);  // the recvmmsg fall-through: the continue
+}
