@@ -1316,6 +1316,160 @@ TEST(QnxOs, MsgIoConnectCombinePathconfReturns1024) {
     EXPECT_EQ(ql.mem().read_ptr(0x2300, 4), 1024u);
 }
 
+// the COMBINE _IO_STAT walk: subtype=0 with four send iovs, the fourth
+// carrying the combined _io_stat (type=0x104, combine_len=8, zero=0) on the
+// existing /hello.txt; the upstream opens the path into the connection and
+// packs the stat via ql_syscall_fstat into the reply iov#2, then falls
+// through to the shared link-reply tail (the 20-byte reply at reply iov#1)
+//   00: mov r0, #1 ; 04: mov r1, #0x2100 ; 08: mov r2, #4
+//   0C: mov r3, #0x2400 ; 10: mov r4, #2 ; 14: mov r12, #11 ; 18: swi 0
+//   1C: mov r4, #0x2300 ; 20: str r0, [r4]
+//   24: mvn r0, #0 ; 28: mvn r1, #0 ; 2C: mov r2, #42
+//   30: mov r12, #47 ; 34: swi 0
+//   (the rmsg rides 0x2400 — 0x2150 is not single-rotimm encodable, the
+//   nonzero-low-byte gotcha; the reply cells move with it)
+TEST(QnxOs, MsgIoConnectCombineStatRidesFstatPacking) {
+    const std::vector<std::uint8_t> code = {
+        0x01, 0x00, 0xA0, 0xE3,  // 00: mov r0, #1
+        0x21, 0x1C, 0xA0, 0xE3,  // 04: mov r1, #0x2100
+        0x04, 0x20, 0xA0, 0xE3,  // 08: mov r2, #4
+        0x24, 0x3C, 0xA0, 0xE3,  // 0C: mov r3, #0x2400 (the rmsg — 0x2150
+                                  // is not single-rotimm encodable)
+        0x02, 0x40, 0xA0, 0xE3,  // 10: mov r4, #2
+        0x0B, 0xC0, 0xA0, 0xE3,  // 14: mov r12, #11
+        0x00, 0x00, 0x00, 0xEF,  // 18: swi 0
+        0x23, 0x4C, 0xA0, 0xE3,  // 1C: mov r4, #0x2300
+        0x00, 0x00, 0x84, 0xE5,  // 20: str r0, [r4]
+        0x00, 0x00, 0xE0, 0xE3,  // 24: mvn r0, #0
+        0x00, 0x10, 0xE0, 0xE3,  // 28: mvn r1, #0
+        0x2A, 0x20, 0xA0, 0xE3,  // 2C: mov r2, #42
+        0x2F, 0xC0, 0xA0, 0xE3,  // 30: mov r12, #47
+        0x00, 0x00, 0x00, 0xEF,  // 34: swi 0
+    };
+    auto ql = make_qnx_qiling(code);
+
+    {
+        std::ofstream f(std::filesystem::temp_directory_path() / "ql_qnx_rootfs" / "hello.txt", std::ios::binary);
+        f << "hello qnx!";
+    }
+
+    ql.mem().map(kScratch, 0x1000, UC_PROT_ALL, "[qnx-scratch]");
+
+    // the 4 send iovs: [0] the COMBINE hdr at 0x2180, [1] the path,
+    // [2] the align slot (discarded), [3] the combined _io_stat
+    constexpr std::uint64_t kCombineHdr = 0x2180;
+    ql.mem().write_ptr(0x2100, kCombineHdr, 4);
+    ql.mem().write_ptr(0x2104, 40, 4);
+    ql.mem().write_ptr(0x2108, 0x2140, 4);
+    ql.mem().write_ptr(0x210C, 11, 4);
+    ql.mem().write_ptr(0x2110, 0x2200, 4);   // the align slot (discarded)
+    ql.mem().write_ptr(0x2114, 40, 4);
+    ql.mem().write_ptr(0x2118, 0x2260, 4);   // the 4th iov: the _io_stat msg
+    ql.mem().write_ptr(0x211C, 8, 4);
+
+    // the _io_connect hdr: subtype=0 (COMBINE), ioflag=1 (-> O_RDONLY),
+    // mode=0x8000 (S_IFREG), sflag=1, the pinned cells
+    ql.mem().write_ptr(kCombineHdr + 0, 0x100, 2);
+    ql.mem().write_ptr(kCombineHdr + 2, 0, 2);
+    ql.mem().write_ptr(kCombineHdr + 4, 1, 4);
+    ql.mem().write_ptr(kCombineHdr + 8, 0xa18, 2);
+    ql.mem().write_ptr(kCombineHdr + 10, 0x10, 2);
+    ql.mem().write_ptr(kCombineHdr + 20, 1, 4);
+    ql.mem().write_ptr(kCombineHdr + 24, 0x8000, 4);
+    ql.mem().write_ptr(kCombineHdr + 28, 0, 2);
+    ql.mem().write_ptr(kCombineHdr + 30, 0, 2);
+    ql.mem().write(0x2140, std::vector<std::uint8_t>{'/', 'h', 'e', 'l', 'l', 'o', '.', 't', 'x', 't', 0x00});
+
+    // the combined _io_stat: type=0x104, combine_len=8, zero=0
+    ql.mem().write_ptr(0x2260, 0x104, 2);
+    ql.mem().write_ptr(0x2262, 8, 2);
+    ql.mem().write_ptr(0x2264, 0, 4);
+
+    // the 2 reply iovs (the array rides the blob's rmsg 0x2400): [1st] the
+    // 20-byte link reply, [2nd] the stat image at 0x21E0 — clear of the
+    // 0x2180 header scratch (the 72-byte image would overlap the header's
+    // tail cells from 0x2190)
+    ql.mem().write_ptr(0x2400, 0x2160, 4);
+    ql.mem().write_ptr(0x2404, 20, 4);
+    ql.mem().write_ptr(0x2408, 0x21E0, 4);
+    ql.mem().write_ptr(0x240C, 72, 4);
+
+    ql.run();
+
+    EXPECT_EQ(ql.os().exit_code(), 42);
+    // the handler returns 0 (the shared tail runs after the fstat)
+    EXPECT_EQ(ql.mem().read_ptr(0x2300, 4), 0u);
+    // the link reply at reply iov#1: the regular-file umask cell
+    EXPECT_EQ(ql.mem().read_ptr(0x2160 + 12, 4), 0x8000u);
+    // the stat image at reply iov#2: the QNXARMStat _pack_=4 layout — the
+    // hi cells zero, the size matching the file, the regular-file mode bits
+    EXPECT_EQ(ql.mem().read_ptr(0x21E0, 8) >> 32, 0u);   // st_ino_hi
+    EXPECT_EQ(ql.mem().read_ptr(0x21E0 + 8, 4), 10u);    // st_size
+    EXPECT_EQ(ql.mem().read_ptr(0x21E0 + 12, 4), 0u);    // st_size_hi
+    EXPECT_EQ(ql.mem().read_ptr(0x21E0 + 44, 4) & 0xF000u, 0x8000u);
+    EXPECT_EQ(ql.mem().read_ptr(0x21E0 + 68, 4), 0u);    // st_blocks_hi
+}
+
+// the COMBINE _IO_STAT on a missing path: the upstream's os.path.exists
+// check answers -1 before any open/fstat work
+TEST(QnxOs, MsgIoConnectCombineStatMissingPathReturnsMinus1) {
+    const std::vector<std::uint8_t> code = {
+        0x01, 0x00, 0xA0, 0xE3,  // 00: mov r0, #1
+        0x21, 0x1C, 0xA0, 0xE3,  // 04: mov r1, #0x2100
+        0x04, 0x20, 0xA0, 0xE3,  // 08: mov r2, #4
+        0x24, 0x3C, 0xA0, 0xE3,  // 0C: mov r3, #0x2400 (the rmsg — the path
+                                  // check answers before any reply read)
+        0x02, 0x40, 0xA0, 0xE3,  // 10: mov r4, #2
+        0x0B, 0xC0, 0xA0, 0xE3,  // 14: mov r12, #11
+        0x00, 0x00, 0x00, 0xEF,  // 18: swi 0
+        0x23, 0x4C, 0xA0, 0xE3,  // 1C: mov r4, #0x2300
+        0x00, 0x00, 0x84, 0xE5,  // 20: str r0, [r4]
+        0x00, 0x00, 0xE0, 0xE3,  // 24: mvn r0, #0
+        0x00, 0x10, 0xE0, 0xE3,  // 28: mvn r1, #0
+        0x2A, 0x20, 0xA0, 0xE3,  // 2C: mov r2, #42
+        0x2F, 0xC0, 0xA0, 0xE3,  // 30: mov r12, #47
+        0x00, 0x00, 0x00, 0xEF,  // 34: swi 0
+    };
+    auto ql = make_qnx_qiling(code);
+
+    ql.mem().map(kScratch, 0x1000, UC_PROT_ALL, "[qnx-scratch]");
+
+    constexpr std::uint64_t kCombineHdr = 0x2180;
+    ql.mem().write_ptr(0x2100, kCombineHdr, 4);
+    ql.mem().write_ptr(0x2104, 40, 4);
+    ql.mem().write_ptr(0x2108, 0x2140, 4);
+    ql.mem().write_ptr(0x210C, 12, 4);
+    ql.mem().write_ptr(0x2110, 0x2200, 4);
+    ql.mem().write_ptr(0x2114, 40, 4);
+    ql.mem().write_ptr(0x2118, 0x2260, 4);
+    ql.mem().write_ptr(0x211C, 8, 4);
+
+    ql.mem().write_ptr(kCombineHdr + 0, 0x100, 2);
+    ql.mem().write_ptr(kCombineHdr + 2, 0, 2);
+    ql.mem().write_ptr(kCombineHdr + 4, 1, 4);
+    ql.mem().write_ptr(kCombineHdr + 8, 0xa18, 2);
+    ql.mem().write_ptr(kCombineHdr + 10, 0x10, 2);
+    ql.mem().write_ptr(kCombineHdr + 20, 1, 4);
+    ql.mem().write_ptr(kCombineHdr + 24, 0x8000, 4);
+    ql.mem().write_ptr(kCombineHdr + 28, 0, 2);
+    ql.mem().write_ptr(kCombineHdr + 30, 0, 2);
+    ql.mem().write(0x2140, std::vector<std::uint8_t>{'/', 'm', 'i', 's', 's', 'i', 'n', 'g', '.', 't', 'x', 't', 0x00});
+
+    ql.mem().write_ptr(0x2260, 0x104, 2);
+    ql.mem().write_ptr(0x2262, 8, 2);
+    ql.mem().write_ptr(0x2264, 0, 4);
+
+    ql.mem().write_ptr(0x2150, 0x2160, 4);
+    ql.mem().write_ptr(0x2154, 20, 4);
+    ql.mem().write_ptr(0x2158, 0x2190, 4);
+    ql.mem().write_ptr(0x215C, 72, 4);
+
+    ql.run();
+
+    EXPECT_EQ(ql.os().exit_code(), 42);
+    EXPECT_EQ(ql.mem().read_ptr(0x2300, 4), static_cast<std::uint32_t>(-1));
+}
+
 // the io_devctl (0x106) has no upstream handler (no ql_qnx_msg_io_devctl in
 // os/qnx/message.py) - the message rides the dispatcher's no-hook warn
 // fall-through and returns -1; the fixture pins that the unhandled io

@@ -10,6 +10,7 @@
 #include "qiling/os/qnx/types.hpp"
 
 #include "qiling/os/filestruct.hpp"
+#include "qiling/os/posix/stat.hpp"
 #include "qiling/loader/elf.hpp"
 
 #include <array>
@@ -346,34 +347,14 @@ std::optional<std::int64_t> ql_qnx_msg_io_stat(Qiling& ql, std::uint64_t coid, s
     }
     auto st = host_fstat_fd(f->fileno());
 
-    // the QNXARMStat cells (stat.py, the _pack_=4 layout verbatim): ino,
-    // ino_hi, size, size_hi, dev, rdev, uid, gid, mtime, atime, ctime, mode,
-    // nlink, blksize, blocks, blksize, blocks, blocks_hi
-    const auto put32 = [rmsg, &ql](std::size_t off, std::uint64_t v) {
-        std::array<std::uint8_t, 4> cell{};
-        for (int i = 0; i < 4; ++i) {
-            cell[i] = static_cast<std::uint8_t>((v >> (8 * i)) & 0xff);
-        }
-        ql.mem().write(rmsg + off, std::vector<std::uint8_t>(cell.begin(), cell.end()));
-    };
-    put32(0, st.ino);
-    put32(4, 0);  // st_ino_hi
-    put32(8, st.size);
-    put32(12, 0);  // st_size_hi
-    put32(16, st.dev);
-    put32(20, st.rdev);
-    put32(24, st.uid);
-    put32(28, st.gid);
-    put32(32, static_cast<std::uint64_t>(st.mtime));
-    put32(36, static_cast<std::uint64_t>(st.atime));
-    put32(40, static_cast<std::uint64_t>(st.ctime));
-    put32(44, st.mode);
-    put32(48, st.nlink);
-    put32(52, static_cast<std::uint64_t>(st.blksize));
-    put32(56, static_cast<std::uint64_t>(st.blocks));
-    put32(60, static_cast<std::uint64_t>(st.blksize));
-    put32(64, static_cast<std::uint64_t>(st.blocks));
-    put32(68, 0);  // st_blocks_hi
+    // the QNXARMStat packing rides the posix stat family (the stat.py
+    // get_stat_struct dispatch + __common_pack_stat_struct): the _pack_=4
+    // 18-cell layout — ino, ino_hi, size, size_hi, dev, rdev, uid, gid,
+    // mtime, atime, ctime, mode, nlink, blksize, blocks, blksize, blocks,
+    // blocks_hi — with the hi cells zero and the duplicated blksize/blocks
+    // columns verbatim
+    const auto st_bytes = posix::pack_stat_struct(st, posix::get_stat_layout(QL_OS::QNX, ql.arch().type()));
+    ql.mem().write(rmsg, st_bytes);
 
     return 0;
 }
@@ -529,10 +510,34 @@ std::optional<std::int64_t> ql_qnx_msg_io_connect(Qiling& ql, std::uint64_t coid
             const auto x_type = static_cast<std::uint16_t>(iov_msg[0] | (iov_msg[1] << 8));
 
             if (x_type == 0x104) {  // == _IO_STAT
-                // the combine + fstat ride the posix ql_syscall_fstat
-                // packing (the pack_stat_struct family) - not yet ported;
-                // deferred with that slice
-                throw QlErrorNotImplemented("qnx io_connect: the COMBINE _IO_STAT path is not implemented");
+                // struct _io_stat: (x_type, x_combine_len, x_zero) =
+                // unpack("<HHI", iov_msg) — the header rides the combined
+                // iov (the upstream pins nothing on x_zero)
+                // stat.py: the missing path answers -1 before anything else
+                if (!std::filesystem::exists(real_path)) {
+                    return -1;
+                }
+                // reply iov_t no. 2: the stat image lands at its base
+                const auto stat_base = ql.mem().read_ptr(rmsg + 8, 4);
+                // the combined open: connections[coid].fd = the open
+                // delegate's fd (the upstream rides ql_syscall_open on the
+                // path iov's base with the converted ioflag/mode)
+                const auto* open_entry = posix::SyscallRegistry::instance().find("open");
+                const std::vector<std::uint64_t> open_args{static_cast<std::uint64_t>(iov1_base),
+                                                           static_cast<std::uint64_t>(ioflag),
+                                                           static_cast<std::uint64_t>(real_mode)};
+                const auto fd = open_entry->handler(ql, open_args);
+                auto& conn = static_cast<QlOsQnx&>(ql.os()).connections().at(static_cast<std::uint32_t>(coid));
+                conn.fd = static_cast<int>(fd.value_or(-1));
+                // ql_syscall_fstat(ql, fd, iov_base): the pack rides the
+                // posix stat family (the QNXARMStat layout for the ARM qnx)
+                auto* f = posix::fd_get(ql, *conn.fd).get();
+                if (f == nullptr) {
+                    return -EBADF;
+                }
+                const auto st = qiling::host_fstat_fd(f->fileno());
+                const auto st_bytes = posix::pack_stat_struct(st, posix::get_stat_layout(QL_OS::QNX, ql.arch().type()));
+                ql.mem().write(stat_base, st_bytes);
             } else if (x_type == 0x108) {  // == _IO_PATHCONF
                 // struct _io_pathconf: (type, combine_len, name, zero) =
                 // unpack("<HHhH", iov_msg)
@@ -550,9 +555,7 @@ std::optional<std::int64_t> ql_qnx_msg_io_connect(Qiling& ql, std::uint64_t coid
             // the other combined types: the upstream warns and continues to
             // the reply-iov#1 write
         }
-    }
-
-    if (subtype == 2) {  // == _IO_CONNECT_OPEN
+    } else if (subtype == 2) {  // == _IO_CONNECT_OPEN
         const auto* open_entry = posix::SyscallRegistry::instance().find("open");
         const std::vector<std::uint64_t> open_args{static_cast<std::uint64_t>(iov1_base),
                                                static_cast<std::uint64_t>(ioflag),
