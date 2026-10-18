@@ -699,14 +699,16 @@ the load-command stage walks the cmd_id/cmd_size pairs.
 | the container skeleton (the header + the magic/CPU checks) | `qiling/loader/macho.hpp/.cpp` | ✅ 5cfb208 | `MachoImage` + `parse_header()`; `valid()` rides the parsed magic |
 | the LC_SEGMENT_64 walk | `qiling/loader/macho.cpp` `parse_load_command()` | ✅ 2320192 | the Segment/Section records with the data.py content slicing; the unknown commands skip by their declared cmd_size |
 | the LC_UNIXTHREAD/LC_MAIN entries | `qiling/loader/macho.hpp/.cpp` | ✅ 119a801 | the X86_THREAD_STATE64 state (the entry = the rip, the 16th state slot after the 16 GPRs) and the LC_MAIN entry_offset/stack_size pair |
-| the remaining commands (LC_UUID, LC_SYMTAB, LC_DYLD_INFO…) | — | defer | the loader slices add them per need |
+| the remaining commands (LC_UUID, LC_DYLD_INFO…) | — | defer | the loader slices add them per need |
 | the fat-header branch + parseData | — | defer | the FatHeader slice + the data.py stage |
 | the fat-header branch | `macho.hpp/.cpp` | ✅ | the MAGIC_FAT dispatch: the big-endian arch_num + the 20-byte FatInfo records (the getBinary verbatim quirk — the archtype parameter is IGNORED, the scan takes the first x8664 slice then the first arm64), the picked slice re-sliced into the container and re-parsed through the 64-bit header + the load-command walk; the no-match case degrades to the invalid image (the deviation: the upstream would crash on the None slice) |
+| parseData (the data.py stage) | `macho.hpp/.cpp` | ✅ | the port's walk already merged parseLoadCommand + parseData (the single pass — the observable shape identical to the upstream's two passes; the global sections-list/sections_index ride skipped, the consumers index segments()[i].sections); this slice adds the four data-blob commands (LC_FUNCTION_STARTS/LC_DATA_IN_CODE/LC_CODE_SIGNATURE/LC_SEGMENT_SPLIT_INFO) as the DataBlob (data_offset, data_size, content-slice) records with the present flag and the accessors |
 
-Fixture-driven throughout (`tests/Loader_Macho_Test.cpp`, 9 tests): the
+Fixture-driven throughout (`tests/Loader_Macho_Test.cpp`, 11 tests): the
 minimal in-memory MH_EXECUTE blobs with hand-encoded command records, the
 fat-container fixtures riding the CAFEBABE wrapper with a decoy ARM64
-slice + the thin x8664 blob.
+slice + the thin x8664 blob, and the data-blob fixtures patching the
+extra-command body to the section content region.
 
 ### Phase 7 findings (upstream-parity notes)
 - **the section_64 stride is 0x50 with a reserved3 tail** — the Apple

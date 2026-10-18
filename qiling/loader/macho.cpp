@@ -316,6 +316,32 @@ bool MachoImage::parse_load_command() {
             has_main_ = true;
             main_entry_offset_ = get_u64(binary_file_, cur + 8);
             main_stack_size_ = get_u64(binary_file_, cur + 16);
+        } else if (cmd == LC_FUNCTION_STARTS || cmd == LC_DATA_IN_CODE ||
+                   cmd == LC_CODE_SIGNATURE || cmd == LC_SEGMENT_SPLIT_INFO) {
+            // data.py parseData: FunctionStarts / DataInCode / CodeSignature
+            // / SegmentSplitInfo — the (data_offset, data_size) body over
+            // the 8-byte header, then the content slice at the offset
+            if (cur + 16 > cur + cmd_size) {
+                return false;
+            }
+            DataBlob blob;
+            blob.present = true;
+            blob.offset = get_u32(binary_file_, cur + 8);
+            blob.size = get_u32(binary_file_, cur + 12);
+            const std::size_t at = blob.offset;
+            if (at <= binary_file_.size() && at + blob.size <= binary_file_.size()) {
+                blob.content.assign(binary_file_.begin() + static_cast<std::ptrdiff_t>(at),
+                                    binary_file_.begin() + static_cast<std::ptrdiff_t>(at + blob.size));
+            }
+            if (cmd == LC_FUNCTION_STARTS) {
+                function_starts_ = std::move(blob);
+            } else if (cmd == LC_DATA_IN_CODE) {
+                data_in_code_ = std::move(blob);
+            } else if (cmd == LC_CODE_SIGNATURE) {
+                code_signature_ = std::move(blob);
+            } else {
+                seg_split_info_ = std::move(blob);
+            }
         }
         // the other commands skip by the declared size until their slices
         cur += cmd_size;

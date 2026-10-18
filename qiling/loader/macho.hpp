@@ -41,6 +41,12 @@ constexpr std::uint32_t LC_UNIXTHREAD = 0x5;
 constexpr std::uint32_t LC_MAIN = 0x80000028;
 constexpr std::uint32_t LC_SYMTAB = 0x2;
 constexpr std::uint32_t LC_DYSYMTAB = 0xb;
+// the data-blob commands (the data.py parseData stage: the offset/size
+// body + the content slice)
+constexpr std::uint32_t LC_CODE_SIGNATURE = 0x1d;
+constexpr std::uint32_t LC_SEGMENT_SPLIT_INFO = 0x1e;
+constexpr std::uint32_t LC_FUNCTION_STARTS = 0x26;
+constexpr std::uint32_t LC_DATA_IN_CODE = 0x29;
 
 // nlist.h: the symbol-type bits (the N_SECT|N_EXT external-defined shape)
 constexpr std::uint8_t N_EXT = 0x1;
@@ -48,6 +54,16 @@ constexpr std::uint8_t N_TYPE = 0xe;
 constexpr std::uint8_t N_SECT = 0xe;
 
 constexpr std::uint32_t X86_THREAD_STATE64 = 0x00000004;
+
+// data.py FunctionStarts / DataInCode / CodeSignature / SegmentSplitInfo —
+// the common (data_offset, data_size, content-slice) triple over the
+// 8-byte command bodies
+struct DataBlob {
+    std::uint32_t offset = 0;
+    std::uint32_t size = 0;
+    std::vector<std::uint8_t> content;
+    bool present = false;
+};
 
 constexpr std::uint32_t CPU_ARCH_ABI64 = 0x01000000;
 constexpr std::uint32_t CPU_TYPE_X8664 = CPU_ARCH_ABI64 | 7;
@@ -207,6 +223,11 @@ private:
     std::uint64_t main_entry_offset_ = 0;
     std::uint64_t main_stack_size_ = 0;
 
+    DataBlob function_starts_;
+    DataBlob data_in_code_;
+    DataBlob code_signature_;
+    DataBlob seg_split_info_;
+
 public:
     // loadcommand.py LoadUnixThread (the flavor + the state entry; the
     // X86_THREAD_STATE64 ride: the entry = the rip, the 16th state slot)
@@ -221,6 +242,13 @@ public:
 
     bool has_dysymtab() const { return dysymtab_.present; }
     const Dysymtab& dysymtab() const { return dysymtab_; }
+
+    // data.py parseData: the four data-blob commands (the empty/present=false
+    // record when the file carries none)
+    const DataBlob& function_starts() const { return function_starts_; }
+    const DataBlob& data_in_code() const { return data_in_code_; }
+    const DataBlob& code_signature() const { return code_signature_; }
+    const DataBlob& seg_split_info() const { return seg_split_info_; }
 
     // the symbol record at the dysymtab index (the caller bounds-checks via
     // symbols().size())

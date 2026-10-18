@@ -308,3 +308,78 @@ TEST(LoaderMacho, FatContainerWithoutMatchDegradesToInvalid) {
     MachoImage image(path);
     EXPECT_FALSE(image.valid());
 }
+
+// the data-blob command family (data.py FunctionStarts / CodeSignature): the
+// 8-byte (data_offset, data_size) body + the content slice at the offset —
+// the blob rides build_blob's extra-command slot; the slice targets the
+// section content region, so the parsed content equals the code bytes
+TEST(LoaderMacho, FunctionStartsCarriesTheContentSlice) {
+    const std::vector<std::uint8_t> code = {0x48, 0x31, 0xC0, 0xC3};
+    // the command: cmd + size + the data_offset + the data_size; the
+    // content region starts at 32 (header) + 0x68 (the segment command) =
+    // 0x98 — but the extra command shifts the content_off; the offset is
+    // filled after the blob is built, riding the known layout
+    std::vector<std::uint8_t> extra(16, 0);
+    put32(extra, 0, LC_FUNCTION_STARTS);
+    put32(extra, 4, 16);
+
+    const auto path = std::filesystem::temp_directory_path() / "ql_macho_test" / "funcstarts.macho";
+    write_file(path, build_blob(code, false, extra));
+
+    // the content_off: the header 32 + the segment command 0x68 + the extra
+    // 16 (build_blob lays the extra after the section record)
+    const std::size_t content_off = 32 + 0x98 + 16;
+    {
+        // patch the command's data_offset/data_size to the content region
+        std::fstream f(path, std::ios::binary | std::ios::in | std::ios::out);
+        const std::size_t cmd_at = 32 + 0x98;
+        f.seekp(static_cast<std::streamoff>(cmd_at + 8));
+        const std::uint32_t off = static_cast<std::uint32_t>(content_off);
+        const std::uint8_t b[4] = {static_cast<std::uint8_t>(off), static_cast<std::uint8_t>(off >> 8),
+                                   static_cast<std::uint8_t>(off >> 16), static_cast<std::uint8_t>(off >> 24)};
+        f.write(reinterpret_cast<const char*>(b), 4);
+        f.write(reinterpret_cast<const char*>(b + 0), 0);  // the size next
+        const std::uint8_t sz[4] = {4, 0, 0, 0};
+        f.write(reinterpret_cast<const char*>(sz), 4);
+    }
+
+    MachoImage image(path);
+    ASSERT_TRUE(image.valid());
+    ASSERT_TRUE(image.function_starts().present);
+    EXPECT_EQ(image.function_starts().offset, content_off);
+    EXPECT_EQ(image.function_starts().size, 4u);
+    EXPECT_EQ(image.function_starts().content, code);
+    EXPECT_FALSE(image.code_signature().present);
+}
+
+// the same shape for the code-signature command (the LC_CODE_SIGNATURE
+// dispatch case)
+TEST(LoaderMacho, CodeSignatureCarriesTheContentSlice) {
+    const std::vector<std::uint8_t> code = {0x48, 0x31, 0xC0, 0xC3};
+    std::vector<std::uint8_t> extra(16, 0);
+    put32(extra, 0, LC_CODE_SIGNATURE);
+    put32(extra, 4, 16);
+
+    const auto path = std::filesystem::temp_directory_path() / "ql_macho_test" / "codesig.macho";
+    write_file(path, build_blob(code, false, extra));
+
+    const std::size_t content_off = 32 + 0x98 + 16;
+    {
+        std::fstream f(path, std::ios::binary | std::ios::in | std::ios::out);
+        const std::size_t cmd_at = 32 + 0x98;
+        f.seekp(static_cast<std::streamoff>(cmd_at + 8));
+        const std::uint32_t off = static_cast<std::uint32_t>(content_off);
+        const std::uint8_t b[4] = {static_cast<std::uint8_t>(off), static_cast<std::uint8_t>(off >> 8),
+                                   static_cast<std::uint8_t>(off >> 16), static_cast<std::uint8_t>(off >> 24)};
+        f.write(reinterpret_cast<const char*>(b), 4);
+        const std::uint8_t sz[4] = {4, 0, 0, 0};
+        f.write(reinterpret_cast<const char*>(sz), 4);
+    }
+
+    MachoImage image(path);
+    ASSERT_TRUE(image.valid());
+    ASSERT_TRUE(image.code_signature().present);
+    EXPECT_EQ(image.code_signature().offset, content_off);
+    EXPECT_EQ(image.code_signature().content, code);
+    EXPECT_FALSE(image.function_starts().present);
+}
