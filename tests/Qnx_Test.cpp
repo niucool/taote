@@ -353,6 +353,73 @@ TEST(QnxOs, ConnectFlagsAndClientInfoOnSeededSysmgrCoid) {
     EXPECT_EQ(ql.mem().read_ptr(0x210C, 4), 0u);
 }
 
+// the sync family: sync_create (NTO_SYNC_MUTEX_FREE) stamps the mutex-free
+// owner and the NONRECURSIVE count over the caller's 8-byte _sync cell;
+// sync_mutex_lock adopts the TLS owner cell (the prelude's (pid<<16|tid)
+// owner, the WAITING bit clear); a second cell stays untouched as the
+// control
+//   00: mov r0, #0        ; type = NTO_SYNC_MUTEX_FREE
+//   04: mov r1, #0x2200   ; syncp = A
+//   08: mov r2, #0        ; attrp = 0
+//   0C: mov r12, #78      ; sync_create
+//   10: swi 0
+//   14: mov r4, #0x2100 ; 18: str r0, [r4]
+//   1C: mov r0, #0x2200   ; syncp = A (the lock's first arg)
+//   20: mov r12, #80      ; sync_mutex_lock
+//   24: swi 0
+//   28: str r0, [r4, #4]
+//   2C: add r1, r1, #8    ; B = 0x2208
+//   30: mov r0, #0        ; type = NTO_SYNC_MUTEX_FREE
+//   34: mov r12, #78      ; sync_create B
+//   38: swi 0
+//   3C: str r0, [r4, #8]
+//   40: mvn r0, #0 ; 44: mvn r1, #0 ; 48: mov r2, #42
+//   4C: mov r12, #47 ; 50: swi 0
+TEST(QnxOs, SyncCreateAndMutexLockStampOwnerAndCount) {
+    const std::vector<std::uint8_t> code = {
+        0x00, 0x00, 0xA0, 0xE3,  // 00: mov r0, #0
+        0x22, 0x1C, 0xA0, 0xE3,  // 04: mov r1, #0x2200
+        0x00, 0x20, 0xA0, 0xE3,  // 08: mov r2, #0
+        0x4E, 0xC0, 0xA0, 0xE3,  // 0C: mov r12, #78
+        0x00, 0x00, 0x00, 0xEF,  // 10: swi 0
+        0x21, 0x4C, 0xA0, 0xE3,  // 14: mov r4, #0x2100
+        0x00, 0x00, 0x84, 0xE5,  // 18: str r0, [r4]
+        0x22, 0x0C, 0xA0, 0xE3,  // 1C: mov r0, #0x2200
+        0x50, 0xC0, 0xA0, 0xE3,  // 20: mov r12, #80
+        0x00, 0x00, 0x00, 0xEF,  // 24: swi 0
+        0x04, 0x00, 0x84, 0xE5,  // 28: str r0, [r4, #4]
+        0x08, 0x10, 0x81, 0xE2,  // 2C: add r1, r1, #8
+        0x00, 0x00, 0xA0, 0xE3,  // 30: mov r0, #0
+        0x4E, 0xC0, 0xA0, 0xE3,  // 34: mov r12, #78
+        0x00, 0x00, 0x00, 0xEF,  // 38: swi 0
+        0x08, 0x00, 0x84, 0xE5,  // 3C: str r0, [r4, #8]
+        0x00, 0x00, 0xE0, 0xE3,  // 40: mvn r0, #0
+        0x00, 0x10, 0xE0, 0xE3,  // 44: mvn r1, #0
+        0x2A, 0x20, 0xA0, 0xE3,  // 48: mov r2, #42
+        0x2F, 0xC0, 0xA0, 0xE3,  // 4C: mov r12, #47
+        0x00, 0x00, 0x00, 0xEF,  // 50: swi 0
+    };
+    auto ql = make_qnx_qiling(code);
+
+    ql.mem().map(kScratch, 0x1000, UC_PROT_ALL, "[qnx-scratch]");
+
+    ql.run();
+
+    EXPECT_EQ(ql.os().exit_code(), 42);
+    // all three kernel calls return EOK
+    EXPECT_EQ(ql.mem().read_ptr(0x2100, 4), 0u);
+    EXPECT_EQ(ql.mem().read_ptr(0x2104, 4), 0u);
+    EXPECT_EQ(ql.mem().read_ptr(0x2108, 4), 0u);
+    // A: the count is NONRECURSIVE and the owner is the TLS owner cell
+    // ((pid << 16 | tid) with the WAITING bit clear; the KERNEL pid is 1996
+    // = 0x7CC)
+    EXPECT_EQ(ql.mem().read_ptr(0x2200, 4), 0x80000000u);
+    EXPECT_EQ(ql.mem().read_ptr(0x2204, 4), 0x07CC0001u);
+    // B (created, never locked): the mutex-free owner
+    EXPECT_EQ(ql.mem().read_ptr(0x2208, 4), 0x80000000u);
+    EXPECT_EQ(ql.mem().read_ptr(0x220C, 4), 0u);
+}
+
 // the clock_cycles flow: the kernel returns the core's free-running counter
 // as the nanosecond wall clock (the upstream's simplification) in R0, which
 // the fixture stores into a second scratch cell — the pre-poisoned marker

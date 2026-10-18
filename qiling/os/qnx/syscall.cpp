@@ -7,9 +7,11 @@
 #include "qiling/os/posix/posix.hpp"
 #include "qiling/os/qnx/const.hpp"
 #include "qiling/os/qnx/qnx.hpp"
+#include "qiling/os/qnx/structs.hpp"
 
 #include <array>
 #include <chrono>
+#include <cstring>
 
 namespace qiling {
 namespace os {
@@ -161,6 +163,78 @@ std::optional<std::int64_t> syscall_connect_client_info(Qiling& ql, const std::v
     return 0;
 }
 
+// syscall.py ql_syscall_sync_create (source: openqnx
+// services/system/ker/ker_sync.c): the mutex-free type stamps the
+// NONRECURSIVE count and the type as the owner; the attr tweaks (the
+// recursive/errorcheck bits) apply when the caller passes _sync_attr
+std::optional<std::int64_t> syscall_sync_create(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    const auto type = static_cast<std::uint32_t>(params[0]);
+    const auto syncp = params[1];
+    const auto attrp = params[2];
+
+    std::uint32_t count = NTO_SYNC_NONRECURSIVE;
+    if (type != NTO_SYNC_MUTEX_FREE) {
+        ql.log().warn("sync_create: sync type not implemented");
+        return EINVAL;
+    }
+
+    if (attrp != 0) {
+        SyncAttr attr{};
+        auto bytes = ql.mem().read(attrp, sizeof(attr));
+        std::memcpy(&attr, bytes.data(), sizeof(attr));
+        if ((attr.flags & PTHREAD_RECURSIVE_MASK) != PTHREAD_RECURSIVE_DISABLE) {
+            count &= ~NTO_SYNC_NONRECURSIVE;
+        }
+        if ((attr.flags & PTHREAD_ERRORCHECK_DISABLE) != 0) {
+            count |= NTO_SYNC_NOERRORCHECK;
+        }
+    }
+
+    Sync sync{};
+    auto bytes = ql.mem().read(syncp, sizeof(sync));
+    std::memcpy(&sync, bytes.data(), sizeof(sync));
+    sync.count = static_cast<std::int32_t>(count);
+    sync.owner = type;
+    const auto* raw = reinterpret_cast<const std::uint8_t*>(&sync);
+    ql.mem().write(syncp, std::vector<std::uint8_t>(raw, raw + sizeof(sync)));
+    return EOK;
+}
+
+// syscall.py ql_syscall_sync_mutex_lock: the stub — the mutex owner adopts
+// the caller's TLS owner cell (the upstream's "proper mutexes" TODO, verbatim)
+std::optional<std::int64_t> syscall_sync_mutex_lock(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    const auto syncp = params[0];  // the lock's first (and only) kernel arg
+    auto& os = static_cast<QlOsQnx&>(ql.os());
+
+    Sync sync{};
+    auto bytes = ql.mem().read(syncp, sizeof(sync));
+    std::memcpy(&sync, bytes.data(), sizeof(sync));
+
+    ThreadLocalStorage tls{};
+    auto tls_bytes = ql.mem().read(os.cpupage_tls_addr(), sizeof(tls));
+    std::memcpy(&tls, tls_bytes.data(), sizeof(tls));
+
+    sync.owner = tls.owner;
+    const auto* raw = reinterpret_cast<const std::uint8_t*>(&sync);
+    ql.mem().write(syncp, std::vector<std::uint8_t>(raw, raw + sizeof(sync)));
+    return EOK;
+}
+
+// syscall.py ql_syscall_sync_mutex_unlock: the stub — the owner resets to
+// the mutex-free cell
+std::optional<std::int64_t> syscall_sync_mutex_unlock(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    const auto syncp = params[0];  // the unlock's first (and only) kernel arg
+
+    Sync sync{};
+    auto bytes = ql.mem().read(syncp, sizeof(sync));
+    std::memcpy(&sync, bytes.data(), sizeof(sync));
+
+    sync.owner = NTO_SYNC_MUTEX_FREE;
+    const auto* raw = reinterpret_cast<const std::uint8_t*>(&sync);
+    ql.mem().write(syncp, std::vector<std::uint8_t>(raw, raw + sizeof(sync)));
+    return EOK;
+}
+
 // syscall.py ql_syscall_thread_destroy: the (-1, -1, status) request
 // terminates the process with the status as the exit code
 std::optional<std::int64_t> syscall_thread_destroy(Qiling& ql, const std::vector<std::uint64_t>& params) {
@@ -235,6 +309,9 @@ void register_qnx_syscalls() {
                                syscall_connect_client_info});
     registry.register_syscall({"connect_flags", {PARAM_INTN, PARAM_INTN, PARAM_INTN, PARAM_INTN},
                                syscall_connect_flags});
+    registry.register_syscall({"sync_create", {PARAM_INTN, PARAM_PTRX, PARAM_PTRX}, syscall_sync_create});
+    registry.register_syscall({"sync_mutex_lock", {PARAM_PTRX}, syscall_sync_mutex_lock});
+    registry.register_syscall({"sync_mutex_unlock", {PARAM_PTRX}, syscall_sync_mutex_unlock});
     registry.register_syscall({"thread_destroy", {PARAM_INTN, PARAM_INTN, PARAM_INTN},
                                syscall_thread_destroy});
 }
