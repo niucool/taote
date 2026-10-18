@@ -663,7 +663,8 @@ LIBSYSTEM fixup (0x2000000 <= n < 0x3000000 maps to n - 0x2000000).
 | the kernel_api fncc surface (kernel_api.py, 111 handlers) | `qiling/os/macos/kernel_api.hpp/.cpp` + `kernel_api_registry.inc` | ✅ d397443 | the registry/builder mirror the posix kernel_api slice (the fluent `KernelApi(name, params, passthru) = handler` shape); the verbatim surface: the passthru stubs (the empty `return` bodies — the guest's own stub code runs), the real-bodied handlers (suulong/fuulong, read_random/erandom with the 0xdeadbeaf stamp, clock_get_calendar_microtime with the verbatim ms-arithmetic oddity, proc_selfpid 0x1337 / selfppid 0x13371337, msleep/kernel_thread_start the 0 stubs, vfs_context_proc the identity); the dispatch rides `QlOsMacos::hook_kernel_api` (inert until the QlLoaderMachO import symbols land) |
 | the QlLoaderMachO loader slice | `qiling/loader/macho.hpp/.cpp` + `select_loader` | ✅ e9ee146 | the container load (the segment mapping with the __PAGEZERO page + the LC_UNIXTHREAD/LC_MAIN entries), the shellcode branch (the ELF-shape map), the LC_SYMTAB symbol/string tables (the nlist_64 walk) feeding import_symbols; the deviation note: the import symbols ride the file's own LC_SYMTAB — the upstream's loadDriver walks the kernel.development symbol tables + the LC_DYSYMTAB relocations + the trampoline code (that path lands with the kernel-loader slice) |
 | the kernel_api dispatch end-to-end | `qiling/os/macos/macos.cpp` `hook_kernel_api` | ✅ e9ee146 | the stub-address dispatch through the import symbols + the user overrides + the registry + the os.call with the passthru; the fixture: the guest calls the _proc_selfpid stub, the hook fires, 0x1337 lands in rax, the pc past the call, exit(42) |
-| the ev_manager-dependent kernel_api handlers | — | defer | proc_name/proc_find/kauth_getuid/getgid/kauth_cred_setuidgid need the events/policy subsystem (the events/macos.py slice); they stay unregistered until then |
+| the events/policy slice | `qiling/os/macos/ev.hpp/.cpp` | ✅ 4156f1f | the QlEvManager port: the add_process proc_t image (the 1144-byte upstream layout: p_pid/p_ppid/p_pgrpid/p_flag=4/p_ucred/p_comm(17)/p_name(33) + the le_next/le_prev tail chain), set_allproc (the head cell), proc_find, the init_ev_ctx lazy cells (the label l_flags=1, the cred 501/501/501/15/groups(20,12,61,79,80,81)/20/20/501/2 with cr_label at 120, the vnode with v_name at 344), the register/emit/emit_by_type job surface, the QlOsPolicy mpo_file_check_mmap (the fileglob_t image + the emit) + the bank |
+| the re-pointed kernel_api handlers | `qiling/os/macos/kernel_api.cpp` | ✅ 4156f1f | proc_name (the p_comm image at buf, the size param unread — the upstream FIXME verbatim), proc_find (the image address, 0 on the miss), kauth_getuid/getgid (the lazy ev-ctx cred cells 501/20), kauth_cred_setuidgid (the fresh ucred carrying uid/uid/uid + ng 1 + gid/gid, the address returned) |
 | the mach_msg + the message-path machinery (MachMsg, the port-manager deal_with_msg) | — | defer | needs the MachMsg struct port + the message dispatch tree; deferred with a note (the kext/message surface rides the kernel-loader slices) |
 | the loadDriver path (the kernel.development parse + the LC_DYSYMTAB relocation walk + the static-symbol trampolines) | — | defer | the full kext flow needs the LC_DYSYMTAB/LC_SYMTAB symbol-classification walk over the kernel binary; the container + the symtab pieces exist |
 | shared_region_map_and_slide_np + sysctlbyname | — | defer | absent from the upstream's x8664 table (ARM64-only entries) — the x8664 port surface mirrors the table verbatim |
@@ -748,6 +749,13 @@ number 1 and through the fixup'd 0x2000000+1 (both terminate with the code
 - **the hook_code full-range registration**: the kernel-api hook now passes
   explicit begin=0/end=MAX bounds (the default begin=1/end=0 registration
   did not fire on the arm/qnx path — the pinned gotcha).
+- **the ev/policy image-layout pin**: the port's ucred_t cr_ref cell uses
+  the 4-byte shape (the upstream's `ctypes.c_ulong` splits 4/8 by host
+  platform — _WIN32 4, linux/macOS 8; the port pins the 4-byte shape
+  consistently for the writer and the readers at cr_posix = 20); the
+  policy's emit_by_type only queues jobs for REGISTERED callbacks — a
+  policy emit without a registered listener silently no-ops (the fixture
+  pins the listener-registration path first).
 
 ## Deferred (tracked, not built)
 
@@ -804,9 +812,10 @@ Status: freebsd ✅ (Phase 5.5), qnx ✅ (Phase 5.6), dos ✅ (Phase 6), uefi �
 stay DISABLED_ + documented) — **os/macos is in progress** (Phase 7 the
 container parser ✅, Phase 8 the dialect skeleton ✅, the syscall.py surface
 ✅ (except mach_msg), the kernel_api fncc surface ✅, the QlLoaderMachO
-container load + the end-to-end kernel_api dispatch ✅; the remaining
-deferrals: the loadDriver kernel-symbol walk, the ev_manager handlers, the
-mach_msg machinery). The dos carry-overs into later slices: the posix
+container load + the end-to-end kernel_api dispatch ✅, the events/policy
+slice ✅ — the remaining deferrals: the loadDriver kernel-symbol walk, the
+mach_msg machinery, the socket/ipf event emitters + the trigger stack-push
+path). The dos carry-overs into later slices: the posix
 `pack_stat_struct` family (unchanged) and the connect_client_info
 full-body-vs-stub upstream oddity (unchanged). The dos deferrals: the
 int10/int16 curses surface is console-detached (the resolution map and the
