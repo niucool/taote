@@ -549,6 +549,39 @@ of the gevent hub.
   established rule stands: the escape-bearing edits go through the edit
   tool, never the python heredoc.
 
+## Phase 6.5 - the os/uefi service-table phase continues (the BS dispatch + the protocol round trip)
+
+Building on the Phase 6 service-table skeleton (the ST layout, the BS/RT
+descriptor walk, the dxeapi-shaped dispatch), this slice landed the
+protocol-handler pairs and closed the loop end to end:
+
+| Piece | Upstream counterpart | Status | Notes |
+|---|---|---|---|
+| the BS protocol pair | `bs.py hook_InstallProtocolInterface` / `hook_HandleProtocol` | Ported | the common.py `InstallProtocolInterface`/`HandleProtocol` verbatim (the handle==0 heap alloc, the per-handle GUID-string dict, the `EFI_UNSUPPORTED` miss) + the `EFI_STATUS` error-bit constants (the const.py shapes) in `services.hpp` |
+| the pool/pages stubs | `bs.py hook_AllocatePages`/`FreePages`/`AllocatePool`/`FreePool` | Ported | the dxe shape verbatim (the AllocateAddress map branch carries the upstream TODO note verbatim; the pool type TODO too) |
+| the fixture | `tests/Uefi_Test.cpp` | Ported | `InstallThenHandleProtocolRoundTrip`: the module installs the GUID at the .data cells and immediately HandleProtocols it back (the blob walks gST->BootServices twice, reading the Install field at `gBS+0x80` and the HandleProtocol field at `gBS+0x88`) |
+
+### Phase 6.5 findings (upstream-parity notes)
+
+- **the BS service-table field layout**: the descriptor order rides the
+  table verbatim — `kTableHeaderSize` (24) + index*8; InstallProtocolInterface
+  (index 13) lands at `gBS+0x80` and HandleProtocol (index 14) at `gBS+0x88`.
+  The fixture's first-draft `[gBS+0x98]` read was the LocateProtocol slot.
+- **the post-call register state in the fcall adapter**: only `rax` carries
+  the return value; the blob cannot re-derive `gBS` from `rax` after a call
+  (rax = EFI_SUCCESS = 0) — the fixture's second field load went RIP-relative
+  straight at the field address (length-preserving, no later-disp shifts).
+- **the fixture imm64 base gotcha**: the hand-encoded `mov rcx, imm64`
+  immediates wrote `0x1000400` instead of `0x100400` (byte 3 = 0x01 puts the
+  bit at position 24) — the module's .data reads then faulted with uc_err 6
+  while the map list showed the region correctly mapped at 0x100000. The
+  blob edits stay length-preserving (the established rule) and the imm64
+  byte order needs the LE double-check.
+- **the upstream Interface param is stored verbatim** (common.py:40,
+  `dic[params["Protocol"]] = params["Interface"]`, no dereference), so the
+  round-trip assertion pins the passed-through pointer, not a dereferenced
+  interface value.
+
 ## Deferred (tracked, not built)
 
 `os/macos/`, `os/uefi/`, `qiling/hw/`,

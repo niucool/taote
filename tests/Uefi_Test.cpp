@@ -2,7 +2,6 @@
 
 #include <cstdint>
 #include <optional>
-#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <vector>
@@ -213,20 +212,129 @@ TEST(UefiOs, BootServicesRaiseTplReturnsPreviousTpl) {
 
     auto ql = make_uefi_qiling(v, "TPL.EFI");
 
-    {
-        auto hook = ql.hook_mem_unmapped([&ql](int access, std::uint64_t address, std::uint32_t size, std::int64_t value) {
-            (void)value;
-            std::fprintf(stderr, "[fault] access=%d addr=%#llx size=%u pc=%#llx\n", access,
-                         static_cast<unsigned long long>(address), size,
-                         static_cast<unsigned long long>(ql.arch().regs().arch_pc()));
-            return 0;
-        });
-        (void)hook;
-        ql.run();
-    }
+    ql.run();
 
     EXPECT_EQ(ql.os().exit_code(), 0);
     // the previous TPL: the TPL_APPLICATION level (the loader-initialized
     // state), stored by the module at the 0x100400 cell
     EXPECT_EQ(ql.mem().read_ptr(0x100400, 8), 4u);
+}
+
+// the shared PE skeleton builder: the code blob rides at the RVA 0x200 (the
+// 0x40-byte .text), the .data at the RVA 0x400 (the 0x40 bytes); the base
+// is the fixed 0x100000 so the code uses the absolute addressing
+std::vector<std::uint8_t> build_pe_with_code(const std::vector<std::uint8_t>& code, std::size_t data_size) {
+    std::vector<std::uint8_t> v(0x400 + data_size + 0x80, 0x00);
+    v[0] = 'M'; v[1] = 'Z';
+    auto put16 = [&v](std::size_t off, std::uint16_t x) {
+        v[off] = static_cast<std::uint8_t>(x & 0xff);
+        v[off + 1] = static_cast<std::uint8_t>(x >> 8);
+    };
+    auto put32 = [&v](std::size_t off, std::uint32_t x) {
+        for (int i = 0; i < 4; ++i) {
+            v[off + i] = static_cast<std::uint8_t>((x >> (8 * i)) & 0xff);
+        }
+    };
+    auto put64 = [&v](std::size_t off, std::uint64_t x) {
+        for (int i = 0; i < 8; ++i) {
+            v[off + i] = static_cast<std::uint8_t>((x >> (8 * i)) & 0xff);
+        }
+    };
+    put32(0x3C, 0x40);
+    v[0x40] = 'P'; v[0x41] = 'E'; v[0x42] = 0; v[0x43] = 0;
+    put16(0x44, 0x8664);
+    put16(0x46, 2);
+    put16(0x54, 0xF0);
+    put16(0x56, 0x0022);
+    put16(0x58, 0x20B);
+    v[0x5A] = 1;
+    put32(0x5C, 0x40);
+    put32(0x68, 0x200);
+    put32(0x6C, 0x200);
+    put64(0x70, 0x100000);
+    put32(0x78, 0x200);
+    put32(0x7C, 0x200);
+    put16(0x88, 1);
+    put32(0x90, 0x1000);
+    put32(0x94, 0x200);
+    put16(0x9C, 10);
+    put32(0xC4, 16);
+
+    v[0x148] = '.'; v[0x149] = 't'; v[0x14A] = 'e'; v[0x14B] = 'x'; v[0x14C] = 't';
+    put32(0x150, 0x80);
+    put32(0x154, 0x200);
+    put32(0x158, 0x80);
+    put32(0x15C, 0x200);
+    put32(0x168, 0x60000020);
+
+    v[0x170] = '.'; v[0x171] = 'd'; v[0x172] = 'a'; v[0x173] = 't'; v[0x174] = 'a';
+    put32(0x178, static_cast<std::uint32_t>(data_size));
+    put32(0x17C, 0x400);
+    put32(0x180, static_cast<std::uint32_t>(data_size));
+    put32(0x184, 0x400);
+    put32(0x188, 0xC0000040);
+
+    std::copy(code.begin(), code.end(), v.begin() + 0x200);
+    return v;
+}
+
+// the protocol ride: the module installs a protocol on a fresh handle
+// (InstallProtocolInterface(handle-out, the GUID at the .data, native,
+// the interface ptr)) then resolves it back (HandleProtocol(handle, the
+// GUID, the out)) and stores the interface
+//   the .data: 0x400 the GUID (16 bytes), 0x420 the interface value
+//   (0x100450), 0x440 the handle out, 0x448 the interface out, 0x450 the
+//   status out
+TEST(UefiOs, InstallThenHandleProtocolRoundTrip) {
+    std::vector<std::uint8_t> guid = {0xa1, 0x31, 0x1b, 0x5b, 0x62, 0x95, 0xd2, 0x11,
+                                      0x8e, 0x3f, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b};
+    const std::uint64_t kBase = 0x100000;
+    const std::uint64_t kGuidCell = kBase + 0x400;
+    const std::uint64_t kInterfaceCell = kBase + 0x420;
+    const std::uint64_t kHandleOut = kBase + 0x440;
+    const std::uint64_t kInterfaceOut = kBase + 0x448;
+    const std::uint64_t kStatusCell = kBase + 0x450;
+    const std::vector<std::uint8_t> code = {
+        // rax = gST->BootServices (rdx = the SystemTable, loaded first)
+        0x48, 0x8B, 0x42, 0x60,                    // mov rax, [rdx+0x60]
+        // rdx = kGuidCell (the arg2: the Protocol ptr)
+        0x48, 0xBA, 0x00, 0x04, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00,
+        // r9 = kInterfaceCell (the arg4: the Interface)
+        0x49, 0xB9, 0x20, 0x04, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00,
+        // r8d = 1 (the arg3: EFI_NATIVE_INTERFACE)
+        0x41, 0xB8, 0x01, 0x00, 0x00, 0x00,
+        // rcx = kHandleOut (the arg1: the handle out)
+        0x48, 0xB9, 0x40, 0x04, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00,
+        // r10 = [gBS+0x80] (the Install field)
+        0x4C, 0x8B, 0x90, 0x80, 0x00, 0x00, 0x00,
+        0x41, 0xFF, 0xD2,                          // call r10
+        // mov r10, [kHandleOut] (the handle value)
+        0x4C, 0x8B, 0x15, 0x07, 0x02, 0x00, 0x00,  // mov r10, [rip+0x207] -> 0x100440
+        // lea rdx, [kGuidCell]
+        0x48, 0xBA, 0x00, 0x04, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00,
+        // lea r8, [kInterfaceOut]
+        0x4C, 0x8D, 0x05, 0xFE, 0x01, 0x00, 0x00,  // lea r8, [rip+0x1fe] -> 0x100448
+        // mov rcx, r10
+        0x4C, 0x89, 0xD1,
+        // r10 = [gBS+0x88] (the HandleProtocol field, rip-relative: rax holds
+        // the install status after the call)
+        0x4C, 0x8B, 0x15, 0xBC, 0xFF, 0xEF, 0x03,
+        0x41, 0xFF, 0xD2,                          // call r10
+        // mov [kStatusCell], rax
+        0x48, 0xA3, 0x50, 0x04, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x48, 0x31, 0xC0,
+        0xC3,
+    };
+    (void)guid;
+    auto ql = make_uefi_qiling(build_pe_with_code(code, 0x60), "PROTO.EFI");
+    (void)kStatusCell;
+
+    ql.run();
+
+    EXPECT_EQ(ql.os().exit_code(), 0);
+    // the upstream common.py InstallProtocolInterface stores the Interface
+    // param verbatim (no dereference), so the HandleProtocol round trip
+    // returns the same pointer the module passed (kInterfaceCell)
+    EXPECT_EQ(ql.mem().read_ptr(kInterfaceOut, 8), kInterfaceCell);
+    EXPECT_EQ(ql.mem().read_ptr(kStatusCell, 8), 0u);
 }

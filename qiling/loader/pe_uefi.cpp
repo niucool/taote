@@ -179,7 +179,6 @@ void QlLoaderPE_UEFI::execute_next_module() {
 }
 
 void QlLoaderPE_UEFI::register_eoe_trap(std::uint64_t address) {
-    std::fprintf(stderr, "[diag] registering eoe trap at %#llx\n", static_cast<unsigned long long>(address));
     // the eoe trap: regain control when a module entry returns; the
     // teardown (the notifications + the unloads) lands with the service
     // slices - the slice-1 trap chains the next module or stops
@@ -195,7 +194,6 @@ void QlLoaderPE_UEFI::register_eoe_trap(std::uint64_t address) {
             return 0;
         }
         // no more modules: terminate gracefully
-        std::fprintf(stderr, "[trap] stopping\n");
         os_uefi.set_exit_code(0);
         os_uefi.stop();
         return 0;
@@ -263,8 +261,6 @@ void QlLoaderPE_UEFI::init_smm_environment() {
 }
 
 void QlLoaderPE_UEFI::run() {
-    auto& os_uefi = static_cast<os::uefi::QlOsUefi&>(ql_->os());
-
     // intel 64-bit uefi modules only (the upstream checks verbatim)
     if (ql_->arch().type() != QL_ARCH::X8664) {
         throw QlErrorArch("Only 64-bit modules are supported at the moment");
