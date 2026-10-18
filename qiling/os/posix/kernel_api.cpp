@@ -211,7 +211,28 @@ const bool kernel_api_extended_registered = [] {
         [](Qiling&, std::uint64_t, const auto&) { return std::optional<std::uint64_t>{0}; };
 
     // @linux_kernel_api(params={"Ptr": POINTER})
-    KernelApi("___stack_chk_fail", {{"Ptr", K_POINTER}}) =
+    KernelApi("__stack_chk_fail", {{"Ptr", K_POINTER}}) =
+        [](Qiling&, std::uint64_t, const auto&) { return std::optional<std::uint64_t>{0}; };
+
+    // @linux_kernel_api(params={"Ptr": POINTER, "name": STRING})
+    KernelApi("__unregister_chrdev", {{"Ptr", K_POINTER}, {"name", K_STRING}}) =
+        [](Qiling&, std::uint64_t, const auto&) { return std::optional<std::uint64_t>{0}; };
+
+    // @linux_kernel_api(params={"Ptr": POINTER}) — the upstream strcpy body is
+    // a pass (the stub, verbatim)
+    KernelApi("strcpy", {{"Ptr", K_POINTER}}) =
+        [](Qiling&, std::uint64_t, const auto&) { return std::optional<std::uint64_t>{}; };
+
+    // @linux_kernel_api(params={"Ptr": POINTER})
+    KernelApi("device_create", {{"Ptr", K_POINTER}}) =
+        [](Qiling&, std::uint64_t, const auto&) { return std::optional<std::uint64_t>{0}; };
+
+    // @linux_kernel_api(params={"Ptr": POINTER})
+    KernelApi("device_destroy", {{"Ptr", K_POINTER}}) =
+        [](Qiling&, std::uint64_t, const auto&) { return std::optional<std::uint64_t>{0}; };
+
+    // @linux_kernel_api(params={"Ptr": POINTER})
+    KernelApi("class_destroy", {{"Ptr", K_POINTER}}) =
         [](Qiling&, std::uint64_t, const auto&) { return std::optional<std::uint64_t>{0}; };
 
     // @linux_kernel_api(params={"Ptr": POINTER})

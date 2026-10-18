@@ -42,6 +42,16 @@ TEST(KernelApiHandlers, RegistryCarriesUpstreamSurface) {
     EXPECT_NE(KernelApiRegistry::instance().find("__x86_indirect_thunk_rax"), nullptr);
     EXPECT_NE(KernelApiRegistry::instance().find("sys_read"), nullptr);
 
+    // the upstream-missing-in-port fill-ins (the verbatim stubs) + the
+    // corrected __stack_chk_fail name (the upstream hook_ prefix strip)
+    EXPECT_NE(KernelApiRegistry::instance().find("strcpy"), nullptr);
+    EXPECT_NE(KernelApiRegistry::instance().find("__unregister_chrdev"), nullptr);
+    EXPECT_NE(KernelApiRegistry::instance().find("device_create"), nullptr);
+    EXPECT_NE(KernelApiRegistry::instance().find("device_destroy"), nullptr);
+    EXPECT_NE(KernelApiRegistry::instance().find("class_destroy"), nullptr);
+    EXPECT_NE(KernelApiRegistry::instance().find("__stack_chk_fail"), nullptr);
+    EXPECT_EQ(KernelApiRegistry::instance().find("___stack_chk_fail"), nullptr);
+
     // the thunk thunks are passthru
     EXPECT_TRUE(KernelApiRegistry::instance().find("__x86_indirect_thunk_rax")->passthru);
 
