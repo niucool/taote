@@ -257,6 +257,21 @@ The ELF container parsing, the interpreter loading, the vsyscall page, the ET_RE
 - **the QlLoader base gained `brk_address`**: the unistd brk reads/writes it through the loader pointer; the ELF loader mirrors its private `brk_address_` into the base member at load time (the accessor + the base member coexist — the in-class assignment collision needs the `QlLoader::` qualification).
 - **getpid returns 0x512 / getppid 0x1024**: the upstream constants kept verbatim (the real-pid identities land with the multithread slices).
 
+## Phase 5 — the fd-table slice (245/245 gtest green)
+
+| File | Python counterpart | Status | Notes |
+|---|---|---|---|
+| `qiling/os/posix/posix.hpp` (QlFileDes) | `posix.py QlFileDes` | Ported | the 1024-slot fd table over `shared_ptr<QlFsMappedObject>`, the bounds-checked `at`/`set`, the save/restore views; the std streams occupy fd[0..2] (the ctor wiring, the property-setter semantics verbatim) |
+| `qiling/os/posix/const_mapping.*` | `os/posix/const_mapping.py` | Ported | `ql_open_flag_mapping`: the linux_x86_open_flags → windows host flags table walk (the FLAG_UNSUPPORTED drops), the O_BINARY bit forced at the end (the "NOTE: not sure why this one is needed" comment, verbatim) |
+| `syscall.cpp` (the fd set) | `fcntl.py` + `unistd.py` | Ported | open/openat/creat (the `__do_open` flow: the flag mapping before the fs_mapper open, the -ENOENT collapse), close (the slot clear), read/write (through the table — the fd0/1/2 special cases retired), lseek (the as-signed 32-bit offset), _llseek (the high/low composition + the result write), dup/dup2/dup3 |
+| `tests/Posix_Test.cpp` (OpenWriteCloseReopenRead) | the fd flows | Ported | open(O_RDWR|O_CREAT) → write → close → reopen(O_RDONLY) → read; the bytes round-trip and the reopen reuses the freed slot |
+
+### Findings
+
+- **the flag mapping runs before the open** (fcntl.py `__do_open`, verbatim): `QlFile::open` decodes the HOST (MSVC CRT) flag spellings (`_O_CREAT=0x100` etc.) — the guest tables only feed the mapper.
+- **the open-failure translations collapse onto -ENOENT** in this slice (the typed FileNotFound/IsADirectory/AccessDenied refinements defer with the errno granularity slice).
+- the dup2/dup3 target-slot form shares the handler (the dup3 flags handling — O_CLOEXEC — lands with the fcntl slice).
+
 ## Deferred (tracked, not built)
 
 `os/freebsd/`, `os/qnx/`, `os/macos/`, `os/uefi/`, `os/dos/`, `qiling/hw/`,
