@@ -294,6 +294,13 @@ TEST(ThreadClone, DISABLED_BisectRawEngineInterleave) {
 // into the 11-byte store) — a raw-unicorn behavior the port must handle;
 // if it stays clean, the delta is in the port's engine state (the loader's
 // mappings/permissions) — bisect the mapping details next.
+// ---- the (b10) minimal-blob bisect: the standalone harness + a MINIMAL
+// join-shaped blob — the clone's syscall, the test, the jz TAKEN DIRECTLY
+// into the 11-byte store (no nop padding at the taken target, unlike the
+// P19 blob whose taken target was a 1-byte nop and fired CLEAN). If this
+// misfires, the trigger is the taken-entry-into-the-multi-byte-instruction
+// shape itself — a raw-unicorn behavior the port's blob authoring (and any
+// guest code shaped like it) must account for.
 static void r9b_body(uc_engine* uc) {
     // slice1: the parent's setup + the clone
     const std::uint64_t rsp = 0x1203000;
@@ -334,6 +341,60 @@ TEST(ThreadClone, DISABLED_BisectStandaloneHarnessPortBlob) {
     uc_hook_add(uc, &code_hook, UC_HOOK_CODE, reinterpret_cast<void*>(r9_code_cb), nullptr, 1, 0);
 
     r9b_body(uc);
+    uc_close(uc);
+}
+
+
+TEST(ThreadClone, DISABLED_BisectMinimalTakenEntryStore) {
+    uc_engine* uc = nullptr;
+    ASSERT_EQ(uc_open(UC_ARCH_X86, UC_MODE_64, &uc), UC_ERR_OK);
+    uc_mem_map(uc, 0x11ff000, 0x1000, UC_PROT_ALL);
+    // the minimal join shape: the clone's syscall, the test, the jz TAKEN
+    // directly into the 11-byte store (the taken target = the store itself)
+    const std::vector<std::uint8_t> blob = {
+        0x48, 0xC7, 0xC0, 0x38, 0x00, 0x00, 0x00,          // 00: mov rax, 56
+        0x0F, 0x05,                                        // 07: syscall (the clone)
+        0x48, 0x85, 0xC0,                                  // 09: test rax, rax
+        0x74, 0x07,                                        // 0c: jz +7 -> 0x15 (the store)
+        0xB8, 0xCA, 0x00, 0x00, 0x00,                      // 0e: mov eax, 202
+        0x0F, 0x05,                                        // 13: syscall (the park)
+        0xC7, 0x04, 0x25, 0x00, 0x20, 0x00, 0x01, 0x2A, 0x00, 0x00, 0x00,
+                                                           // 15: mov dword [0x1002000], 42
+        0xEB, 0xFE,                                        // 20: jmp $
+    };
+    uc_mem_write(uc, 0x11ff000, blob.data(), blob.size());
+    uc_mem_map(uc, 0x1002000, 0x1000, UC_PROT_ALL);
+    const std::uint32_t sentinel = 0xdeadbeef;
+    uc_mem_write(uc, 0x1002000, &sentinel, sizeof(sentinel));
+    uc_mem_map(uc, 0x1202000, 0x2000, UC_PROT_ALL);
+
+    uc_hook insn_hook = 0;
+    uc_hook code_hook = 0;
+    uc_hook_add(uc, &insn_hook, UC_HOOK_INSN, reinterpret_cast<void*>(r9_insn_cb), nullptr, 1, 0,
+                UC_X86_INS_SYSCALL);
+    uc_hook_add(uc, &code_hook, UC_HOOK_CODE, reinterpret_cast<void*>(r9_code_cb), nullptr, 1, 0);
+
+    // slice1: the parent's setup + the clone
+    const std::uint64_t rsp = 0x1203000;
+    uc_reg_write(uc, UC_X86_REG_RSP, &rsp);
+    uc_emu_start(uc, 0x11ff000, 0xffffffffffffffffull, 0, 32337);
+    // slice2: the parent's resume at the post-clone continuation (0x09) —
+    // the test (rax=2001, not taken), the futex park
+    const std::uint64_t parent_rax2 = 2001;
+    uc_reg_write(uc, UC_X86_REG_RAX, &parent_rax2);
+    uc_emu_start(uc, 0x11ff009, 0xffffffffffffffffull, 0, 32337);
+    // slice3: the child — the test (rax=0), the jz TAKEN, the store at 0x15
+    r9_count = 0;
+    uc_context_restore(uc, r9_child_ctx);
+    const uc_err err = uc_emu_start(uc, 0x11ff009, 0xffffffffffffffffull, 0, 32337);
+    std::uint64_t pc = 0;
+    uc_reg_read(uc, UC_X86_REG_RIP, &pc);
+    std::fprintf(stderr, "[r9b-end] err=%s pc=0x%llx\n", uc_strerror(err), static_cast<unsigned long long>(pc));
+    std::vector<std::uint8_t> got(4, 0);
+    uc_mem_read(uc, 0x1002000, got.data(), 4);
+    std::fprintf(stderr, "[r9b-store] %u\n", static_cast<unsigned>(got[0]));
+    uc_context_free(r9_child_ctx);
+    r9_child_ctx = nullptr;
     uc_close(uc);
 }
 
