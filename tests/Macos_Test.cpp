@@ -15,6 +15,13 @@
 #include "qiling/arch/x86.hpp"
 #include "qiling/os/filestruct.hpp"
 #include "qiling/os/macos/kernel_api.hpp"
+#include "qiling/loader/macho.hpp"
+
+using qiling::loader::macho::CPU_TYPE_X8664;
+using qiling::loader::macho::MH_EXECUTE;
+using qiling::loader::macho::LC_SEGMENT_64;
+using qiling::loader::macho::LC_SYMTAB;
+using qiling::loader::macho::LC_UNIXTHREAD;
 #include "qiling/os/macos/macos.hpp"
 #include "qiling/os/posix/posix.hpp"
 
@@ -798,6 +805,135 @@ TEST(MacosOs, KernelApiReadRandomAndSelfPid) {
     const auto r3 = ppid->handler(ql, 0, {});
     ASSERT_TRUE(r3.has_value());
     EXPECT_EQ(*r3, 0x13371337ull);
+}
+
+// ---- the QlLoaderMachO slice: the container load + the kernel-api
+// dispatch end-to-end ----
+//
+// The macho file: the MH_EXECUTE whose __TEXT carries the guest code (the
+// call into the _proc_selfpid stub) + the LC_SYMTAB declaring the symbol at
+// the stub address + the LC_UNIXTHREAD entry. The loader maps the segment,
+// the hook_code fires at the stub call, the non-passthru os.call returns
+// 0x1337 into rax and the pc past the call.
+void write_macho_kernel_fixture(const std::filesystem::path& path) {
+    constexpr std::uint64_t kBase = 0x1000000;
+    constexpr std::uint64_t kStub = kBase + 0x300;   // the _proc_selfpid stub
+    constexpr std::uint64_t kEntry = kBase + 0x200;  // the code start (past
+                                                     // the command region)
+    constexpr std::uint32_t kTextSize = 0x1000;
+
+    std::vector<std::uint8_t> file(kTextSize, 0);
+    auto put32 = [&file](std::size_t off, std::uint32_t x) {
+        for (int i = 0; i < 4; ++i) {
+            file[off + i] = static_cast<std::uint8_t>(x >> (8 * i));
+        }
+    };
+    auto put64 = [&file](std::size_t off, std::uint64_t x) {
+        for (int i = 0; i < 8; ++i) {
+            file[off + i] = static_cast<std::uint8_t>(x >> (8 * i));
+        }
+    };
+
+    // the header (the 3 commands: the __TEXT segment + the symtab + the
+    // thread)
+    put32(0, 0xFEEDFACF);
+    put32(4, CPU_TYPE_X8664);
+    put32(12, MH_EXECUTE);
+    put32(16, 3);                              // ncmds
+    put32(20, 72 + 24 + 184);                  // sizeofcmds
+
+    // the __TEXT segment: the fields at cmd+8 (the name) / +24 (the vm
+    // address) / +32 (the vm size) / +40 (the file offset) / +48 (the file
+    // size) / +60 (the init prot) / +64 (the nsects) — the cmd base 32
+    put32(32, LC_SEGMENT_64);
+    put32(36, 72);
+    for (std::size_t i = 0; i < sizeof("__TEXT"); ++i) {
+        file[32 + 8 + i] = "__TEXT"[i];              // the name at cmd+8
+    }
+    put64(32 + 24, kBase);                     // the vm address
+    put64(32 + 32, kTextSize);                 // the vm size
+    put64(32 + 40, 0);                         // the file offset
+    put64(32 + 48, kTextSize);                 // the file size
+    put32(32 + 60, 5);                         // the init prot (RX)
+    put32(32 + 64, 0);                         // the nsects
+
+    // the LC_SYMTAB: the symoff/nsyms/stroff/strsize quadruple
+    const std::uint32_t symoff = 0x180;              // the nlist array
+    const std::uint32_t stroff = 0x1a0;              // the string table
+    put32(32 + 72, LC_SYMTAB);
+    put32(32 + 72 + 4, 24);
+    put32(32 + 72 + 8, symoff);
+    put32(32 + 72 + 12, 1);                    // nsyms
+    put32(32 + 72 + 16, stroff);
+    put32(32 + 72 + 20, 16);                   // strsize
+    // the nlist_64: _proc_selfpid at the stub address (the N_EXT|N_SECT type)
+    put32(symoff, 0);                          // n_strx
+    file[symoff + 4] = 0x0f;                         // n_type = N_EXT|N_SECT
+    file[symoff + 5] = 1;                            // n_sect
+    put64(symoff + 8, kStub);                  // n_value
+    const std::string sym = "_proc_selfpid";
+    for (std::size_t i = 0; i <= sym.size(); ++i) {
+        file[stroff + i] = static_cast<std::uint8_t>(sym[i]);
+    }
+
+    // the LC_UNIXTHREAD: the rip = the code start
+    constexpr std::size_t thread_at = 32 + 72 + 24;
+    put32(thread_at, LC_UNIXTHREAD);
+    put32(thread_at + 4, 184);
+    put32(thread_at + 8, 4);                   // the flavor (X86_THREAD_STATE64)
+    put32(thread_at + 12, 21);                 // the count
+    put64(thread_at + 16 + 16 * 8, kEntry);    // the rip
+
+    // the guest code at kEntry: the call into the stub + the store + exit
+    auto emit = [&file](std::size_t at, std::initializer_list<std::uint8_t> bytes) {
+        std::size_t i = 0;
+        for (const auto b : bytes) {
+            file[at + i++] = b;
+        }
+    };
+    emit(0x200, {0x48, 0xB8, 0x00, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00});  // mov rax, kStub
+                                                                                // (0x1000300)
+    emit(0x20a, {0xFF, 0xD0});                                 // call rax
+    emit(0x20c, {0x48, 0x89, 0x05});                           // mov [rip+disp32], rax
+    const std::int32_t store_disp =
+        static_cast<std::int32_t>(0x1000800 - (0x1000200 + 0x0c + 7));  // the rip-rel
+                                                                        // base rides
+                                                                        // inside the
+                                                                        // image
+    for (int i = 0; i < 4; ++i) {
+        file[0x20f + i] = static_cast<std::uint8_t>(static_cast<std::uint32_t>(store_disp) >> (8 * i));
+    }
+    emit(0x213, {0xBF, 0x2A, 0x00, 0x00, 0x00});               // mov edi, 42
+    emit(0x218, {0xB8, 0x01, 0x00, 0x00, 0x00});               // mov eax, 1
+    emit(0x21d, {0x0F, 0x05});                                 // syscall
+    file[0x300] = 0xC3;                                        // the stub's ret
+
+    std::ofstream f(path, std::ios::binary);
+    f.write(reinterpret_cast<const char*>(file.data()), static_cast<std::streamsize>(file.size()));
+}
+
+TEST(MacosOs, MachoLoaderMapsAndKernelApiDispatches) {
+    const auto exe = std::filesystem::temp_directory_path() / "ql_macho_kext" / "driver.macho";
+    std::filesystem::create_directories(exe.parent_path());
+    write_macho_kernel_fixture(exe);
+
+    const auto rootfs = std::filesystem::temp_directory_path() / "ql_macos_rootfs";
+    std::filesystem::create_directories(rootfs);
+
+    QilingOptions options;
+    options.argv = {exe.string()};
+    options.rootfs = rootfs.string();
+    options.ostype = QL_OS::MACOS;
+    options.archtype = QL_ARCH::X8664;
+    Qiling ql(options);
+
+    ql.mem().map(0x2000, 0x1000, UC_PROT_ALL, "[macos-scratch]");
+    ql.run();
+
+    EXPECT_EQ(ql.os().exit_code(), 42);
+    // the stub call rode the hook: _proc_selfpid returned 0x1337 and the pc
+    // landed past the call (the store carried it into the in-image cell)
+    EXPECT_EQ(ql.mem().read_ptr(0x1000800, 4), 0x1337u);
 }
 
 TEST(MacosOs, GetentropyReturnsSuccess) {

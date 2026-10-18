@@ -56,10 +56,10 @@ protected:
     // maps to n - 0x2000000) before the lookup
     std::string_view map_syscall(QL_ARCH archtype, unsigned num) const override;
 
-    // hook.py hook_kernel_api: the stub-address dispatch (the Mach-O loader
-    // supplies the import symbols — the QlLoaderMachO slice; the dispatch
-    // stays inert until then, mirroring the posix ET_REL gate)
-    void hook_kernel_api(std::uint64_t address, std::uint32_t size);
+    // hook.py hook_kernel_api: the stub-address dispatch (the QlLoaderMachO
+    // supplies the import symbols; the posix enable_kernel_api_hooks lambda
+    // dispatches through the virtual)
+    void hook_kernel_api(std::uint64_t address, std::uint32_t size) override;
 
 private:
     void load();

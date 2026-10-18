@@ -101,7 +101,7 @@ public:
 
     // hook.py hook_kernel_api — the code hook dispatching the loader's import
     // stubs through the user overrides and the kernel api registry
-    void hook_kernel_api(std::uint64_t address, std::uint32_t size);
+    virtual void hook_kernel_api(std::uint64_t address, std::uint32_t size);
 
     // elf.py run: ql.hook_code(hook_kernel_api) — the handle lives on the os
     // so the shutdown discipline releases it with the other hook owners

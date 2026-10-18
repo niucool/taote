@@ -9,6 +9,9 @@
 #include "qiling/core.hpp"
 #include "qiling/os/macos/map_syscall.hpp"
 #include "qiling/os/macos/syscall.hpp"
+#include "qiling/os/macos/kernel_func.hpp"
+#include "qiling/os/macos/kernel_api.hpp"
+#include "qiling/loader/macho.hpp"
 
 #include "qiling/cc/intel.hpp"
 #include "qiling/os/fcall.hpp"
@@ -138,12 +141,58 @@ void QlOsMacos::load() {
 
 void QlOsMacos::hook_kernel_api(std::uint64_t address, std::uint32_t size) {
     (void)size;
-    (void)address;
-    // hook.py hook_kernel_api: the api lookup rides the loader's
-    // import_symbols — the QlLoaderMachO slice supplies them; the dispatch
-    // stays inert until that lands (the posix ET_REL gate shape). The
-    // TODO(loader slice): the import_symbols lookup + the user-override +
-    // the registry dispatch + the os.call with the passthru
+
+    // hook.py hook_kernel_api: the stub-address dispatch rides the loader's
+    // import_symbols (the QlLoaderMachO symbol walk)
+    const auto* loader_macho = dynamic_cast<const loader::macho::QlLoaderMachO*>(&ql().loader());
+    if (loader_macho == nullptr) {
+        return;
+    }
+    const auto* imported = loader_macho->import_symbols_at(address);
+    if (imported == nullptr) {
+        return;
+    }
+    // the macho C symbols carry the leading underscore (the upstream's
+    // getattr rides hook_<name> with the raw symbol — the port's registry
+    // keys are the unprefixed names, so one underscore strips here)
+    std::string api_name = imported->name;
+    if (!api_name.empty() && api_name[0] == '_') {
+        api_name.erase(0, 1);
+    }
+
+    // the user override runs raw with (ql, address, api_name) — no param
+    // resolution (hook.py, verbatim)
+    if (const auto* user = find_user_api(api_name)) {
+        (*user)(ql(), address, api_name);
+        return;
+    }
+
+    const auto* entry = KernelApiRegistry::instance().find(api_name);
+    if (entry == nullptr) {
+        // hook.py: a warning; the debug_stop surfaces QlErrorSyscallNotFound
+        if (ql().debug_stop()) {
+            throw QlErrorSyscallNotFound("MacOS kernel API implementation not found: " + api_name);
+        }
+        return;
+    }
+
+    // the @macos_kernel_api wrapper body (fncc.py): the os.call with the
+    // passthru + the onenter/onexit user hooks; the placeholder-typed params
+    // resolve through the resolvers table
+    const auto* entry_ptr = entry;
+    auto* self_ql = &ql();
+    const auto func = [entry_ptr, self_ql](std::uint64_t pc,
+                                           const std::vector<std::pair<std::string, std::uint64_t>>& raw)
+        -> std::optional<std::uint64_t> {
+        std::vector<std::uint64_t> values;
+        values.reserve(raw.size());
+        for (const auto& [name, value] : raw) {
+            (void)name;
+            values.push_back(value);
+        }
+        return entry_ptr->handler(*self_ql, pc, self_ql->os().resolve_named_params(entry_ptr->params, values));
+    };
+    call(address, api_name, func, entry->params, {}, {}, entry->passthru);
 }
 
 std::string_view QlOsMacos::map_syscall(QL_ARCH archtype, unsigned num) const {

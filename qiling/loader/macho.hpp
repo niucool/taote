@@ -19,9 +19,12 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <map>
 #include <optional>
 #include <string>
 #include <vector>
+
+#include "qiling/loader/loader.hpp"
 
 namespace qiling {
 namespace loader {
@@ -34,6 +37,12 @@ constexpr std::uint32_t MAGIC_FAT[] = {0xBEBAFECA, 0xCAFEBABE};
 constexpr std::uint32_t LC_SEGMENT_64 = 0x19;
 constexpr std::uint32_t LC_UNIXTHREAD = 0x5;
 constexpr std::uint32_t LC_MAIN = 0x80000028;
+constexpr std::uint32_t LC_SYMTAB = 0x2;
+
+// nlist.h: the symbol-type bits (the N_SECT|N_EXT external-defined shape)
+constexpr std::uint8_t N_EXT = 0x1;
+constexpr std::uint8_t N_TYPE = 0xe;
+constexpr std::uint8_t N_SECT = 0xe;
 
 constexpr std::uint32_t X86_THREAD_STATE64 = 0x00000004;
 
@@ -80,9 +89,25 @@ struct Segment {
     std::vector<Section> sections;
 };
 
+// one load command (the parsed cmd_id/cmd_size pair + its file offset)
+struct Command {
+    std::uint32_t cmd_id = 0;
+    std::uint32_t cmd_size = 0;
+    std::size_t offset = 0;
+};
+
+// nlist.h nlist_64 (the symbol-table entry)
+struct Symbol {
+    std::uint32_t n_strx = 0;
+    std::uint8_t n_type = 0;
+    std::uint8_t n_sect = 0;
+    std::uint16_t n_desc = 0;
+    std::uint64_t n_value = 0;
+};
+
 // parser.py MachoParser — the container parse (the header + the load-command
-// walk: LC_SEGMENT_64 collects the segments/sections; the non-segment
-// commands are skipped by their cmd_size until their slices land)
+// walk: LC_SEGMENT_64 collects the segments/sections; LC_SYMTAB carries the
+// symbol/string tables for the kernel-api dispatch)
 class MachoImage {
 public:
     explicit MachoImage(const std::filesystem::path& path);
@@ -91,7 +116,39 @@ public:
     const Header& header() const { return header_; }
 
     const std::vector<Segment>& segments() const { return segments_; }
+    const std::vector<Command>& commands() const { return commands_; }
 
+    // loadcommand.py LC_SYMTAB (the symoff/nsyms/stroff/strsize quadruple);
+    // the empty vector when the file carries no symbol table
+    const std::vector<Symbol>& symbols() const { return symbols_; }
+    std::string string_at(std::uint32_t strx) const;
+
+private:
+    bool parse_header();
+    bool parse_load_command();
+
+    std::vector<std::uint8_t> binary_file_;
+    Header header_;
+    std::vector<Segment> segments_;
+    std::vector<Command> commands_;
+    std::vector<Symbol> symbols_;
+    std::string binary_path_;
+
+    bool has_symtab_ = false;
+    std::uint32_t symoff_ = 0;
+    std::uint32_t nsyms_ = 0;
+    std::uint32_t stroff_ = 0;
+    std::uint32_t strsize_ = 0;
+
+    bool has_unixthread_ = false;
+    std::uint32_t thread_flavor_ = 0;
+    std::optional<std::uint64_t> unixthread_entry_;
+
+    bool has_main_ = false;
+    std::uint64_t main_entry_offset_ = 0;
+    std::uint64_t main_stack_size_ = 0;
+
+public:
     // loadcommand.py LoadUnixThread (the flavor + the state entry; the
     // X86_THREAD_STATE64 ride: the entry = the rip, the 16th state slot)
     bool has_unixthread() const { return has_unixthread_; }
@@ -102,23 +159,49 @@ public:
     bool has_main() const { return has_main_; }
     std::uint64_t main_entry_offset() const { return main_entry_offset_; }
     std::uint64_t main_stack_size() const { return main_stack_size_; }
+};
+
+// loader/macho.py QlLoaderMACHO — the macho x8664 loader. Sub-slice 1: the
+// segment mapping (the loadMacho three-pass shape), the entry (the
+// LC_UNIXTHREAD/LC_MAIN + the __PAGEZERO offset) and the shellcode branch;
+// the loadDriver path (the kernel parse + the LC_DYSYMTAB relocation walk)
+// lands with its own slice — the import_symbols here ride the file's own
+// LC_SYMTAB (the deviation note: the upstream derives them from the kernel
+// symbol walk).
+class QlLoaderMachO final : public QlLoader {
+public:
+    explicit QlLoaderMachO(Qiling* ql, std::string dyld_path = {});
+
+    void run() override;
+
+    // hook.py: the stub-address -> the api name lookup (the kernel-api
+    // dispatch gate); the ImportSymbol shape mirrors the QlLoaderELF's
+    struct ImportSymbol {
+        std::uint64_t address;
+        std::string name;
+    };
+
+    const ImportSymbol* import_symbols_at(std::uint64_t address) const {
+        const auto it = import_symbols_.find(address);
+        return it == import_symbols_.end() ? nullptr : &it->second;
+    }
+
+    // loader.py: the kext/driver flags the os layer reads
+    const std::string& kext_name() const { return kext_name_; }
+    bool is_driver() const { return is_driver_; }
 
 private:
-    bool parse_header();
-    bool parse_load_command();
+    void load_macho();
+    void load_segment(const Segment& seg, std::uint64_t slide);
 
-    std::vector<std::uint8_t> binary_file_;
-    Header header_;
-    std::vector<Segment> segments_;
-
-    bool has_unixthread_ = false;
-    std::uint32_t thread_flavor_ = 0;
-    std::optional<std::uint64_t> unixthread_entry_;
-
-    bool has_main_ = false;
-    std::uint64_t main_entry_offset_ = 0;
-    std::uint64_t main_stack_size_ = 0;
+    std::string dyld_path_;
+    std::string kext_name_;
+    bool is_driver_ = false;
+    std::uint64_t binary_entry_ = 0;
+    std::uint64_t vm_end_addr_ = 0;
+    std::map<std::uint64_t, ImportSymbol> import_symbols_;
 };
+
 
 }  // namespace macho
 }  // namespace loader

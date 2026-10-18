@@ -1,8 +1,11 @@
 // Ported from qiling/loader/macho_parser/parser.py — the MachoImage parse
 // (the skeleton: the ctor runs parseFile(); parseHeader is real, the
 // load-command/data stages land with their slices).
+#include "qiling/core.hpp"
+#include "qiling/os/os.hpp"
 #include "qiling/loader/macho.hpp"
 
+#include <algorithm>
 #include <cstring>
 #include <fstream>
 
@@ -92,6 +95,35 @@ bool MachoImage::parse_load_command() {
         if (cmd_size < 8 || cur + cmd_size > binary_file_.size()) {
             return false;
         }
+        commands_.push_back({cmd, cmd_size, cur});
+
+        if (cmd == LC_SYMTAB) {
+            // loadcommand.py LoadSymtab: the symoff/nsyms/stroff/strsize
+            // quadruple rides the cmd body
+            has_symtab_ = true;
+            symoff_ = get_u32(binary_file_, cur + 8);
+            nsyms_ = get_u32(binary_file_, cur + 12);
+            stroff_ = get_u32(binary_file_, cur + 16);
+            strsize_ = get_u32(binary_file_, cur + 20);
+
+            // the nlist_64 entries (the 16-byte records at the symoff)
+            symbols_.clear();
+            symbols_.reserve(nsyms_);
+            for (std::uint32_t s = 0; s < nsyms_; ++s) {
+                const std::size_t at = symoff_ + s * 16;
+                if (at + 16 > binary_file_.size()) {
+                    break;
+                }
+                Symbol sym;
+                sym.n_strx = get_u32(binary_file_, at);
+                sym.n_type = binary_file_[at + 4];
+                sym.n_sect = binary_file_[at + 5];
+                sym.n_desc = static_cast<std::uint16_t>(get_u32(binary_file_, at + 6) & 0xffff);
+                sym.n_value = get_u64(binary_file_, at + 8);
+                symbols_.push_back(sym);
+            }
+        }
+
         if (cmd == LC_SEGMENT_64) {
             // loadcommand.py LoadSegment64: the 72-byte command base (the 8
             // name + the 8/8/8/8 fields + the 4/4/4/4 prots/nsects/flags)
@@ -179,6 +211,127 @@ bool MachoImage::parse_load_command() {
         cur += cmd_size;
     }
     return true;
+}
+
+std::string MachoImage::string_at(std::uint32_t strx) const {
+    if (!has_symtab_ || strx >= strsize_) {
+        return {};
+    }
+    const std::size_t at = stroff_ + strx;
+    const auto end = binary_file_.data() + at;
+    const auto limit = binary_file_.data() + binary_file_.size();
+    const auto nul = std::find(end, limit, static_cast<std::uint8_t>(0));
+    return std::string(end, nul);
+}
+
+// ---- loader/macho.py QlLoaderMACHO ----
+
+QlLoaderMachO::QlLoaderMachO(Qiling* ql, std::string dyld_path)
+    : QlLoader(ql), dyld_path_(std::move(dyld_path)) {}
+
+void QlLoaderMachO::run() {
+    auto& profile = ql_->profile();
+
+    // the shellcode path (loader/macho.py run: the code region maps, the
+    // entry moves up into the top page, the sp rides there)
+    if (!ql_->code().empty()) {
+        const auto shellcode_base = ql_->os().entry_point() + 0x200000 - 0x1000;
+        ql_->mem().map(ql_->os().entry_point(), ql_->os().code_ram_size(), UC_PROT_ALL, "[shellcode_stack]");
+        ql_->mem().write(shellcode_base, ql_->code());
+        ql_->arch().regs().set_arch_sp(shellcode_base);
+        ql_->os().set_entry_point(shellcode_base);
+        entry_point = shellcode_base;
+        load_address = shellcode_base;
+        return;
+    }
+
+    // the container path: the OS64 stack/heap + the parse + the three-pass
+    // load (macho.py run verbatim shape; the commpage and the dyld branch
+    // ride their slices)
+    const auto stack_address = static_cast<std::uint64_t>(
+        profile.get_int("OS64", "stack_address"));
+    const auto stack_size = static_cast<std::uint64_t>(
+        profile.get_int("OS64", "stack_size"));
+
+    const auto image_path = ql_->path();
+    MachoImage image(image_path);
+    if (!image.valid()) {
+        throw QlErrorBase("macho parse failed: " + image_path);
+    }
+    is_driver_ = image.header().file_type == 0xb;  // MH_KEXT_BUNDLE
+
+    // the segment pass (macho.py loadMacho pass 2): the map + the content
+    const auto slide = static_cast<std::uint64_t>(profile.get_int("LOADER", "slide"));
+    for (const auto& seg : image.segments()) {
+        load_segment(seg, slide);
+    }
+
+    // the entry pass (macho.py pass 1): the LC_UNIXTHREAD rip or the LC_MAIN
+    // offset (+ the page-zero anchor)
+    if (image.has_unixthread() && image.unixthread_entry().has_value()) {
+        binary_entry_ = *image.unixthread_entry();
+    } else if (image.has_main()) {
+        std::uint64_t page_zero = 0;
+        for (const auto& seg : image.segments()) {
+            if (seg.name == "__PAGEZERO") {
+                page_zero = seg.vm_size;
+            }
+        }
+        binary_entry_ = image.main_entry_offset() + page_zero;
+    }
+
+    // the import symbols (hook.py: the stub address -> the api name; the
+    // deviation note: the upstream walks the kernel.development symbol
+    // tables — this port-side shortcut rides the file's own LC_SYMTAB)
+    for (const auto& sym : image.symbols()) {
+        if (sym.n_value == 0) {
+            continue;
+        }
+        const auto name = image.string_at(sym.n_strx);
+        if (!name.empty()) {
+            import_symbols_[sym.n_value] = ImportSymbol{sym.n_value, name};
+        }
+    }
+
+    // the stack (macho.py loadStack: the argv/env pushes ride their slices —
+    // the sp lands at the region top verbatim)
+    const auto sp = stack_address + stack_size;
+    ql_->mem().map(stack_address, stack_size, UC_PROT_ALL, "[stack]");
+    ql_->arch().regs().set_arch_sp(sp);
+    init_sp = sp;
+
+    entry_point = binary_entry_ + slide;
+    load_address = entry_point;
+    ql_->os().set_entry_point(entry_point);
+}
+
+void QlLoaderMachO::load_segment(const Segment& seg, std::uint64_t slide) {
+    // loadSegment64: the __PAGEZERO maps one page; the rest maps and writes
+    // the content (the page-round tail on the vm end)
+    constexpr std::uint64_t kPageSize = 0x1000;
+    const auto vaddr_start = seg.vm_address + slide;
+    auto vaddr_end = seg.vm_address + seg.vm_size + slide;
+
+    if (seg.name.rfind("__PAGEZERO", 0) == 0) {
+        ql_->mem().map(vaddr_start, kPageSize, UC_PROT_ALL, "[__PAGEZERO]");
+        if (vm_end_addr_ < vaddr_end) {
+            vm_end_addr_ = vaddr_end;
+        }
+        return;
+    }
+
+    if (vaddr_end % kPageSize != 0) {
+        vaddr_end = ((vaddr_end / kPageSize) + 1) * kPageSize;
+    }
+    auto data = seg.content;
+    if (data.size() < static_cast<std::size_t>(vaddr_end - vaddr_start)) {
+        data.resize(static_cast<std::size_t>(vaddr_end - vaddr_start), 0);
+    }
+    ql_->mem().map(vaddr_start, vaddr_end - vaddr_start, UC_PROT_ALL, "[loadSegment64]");
+    ql_->mem().write(vaddr_start, data);
+    if (vm_end_addr_ < vaddr_end) {
+        vm_end_addr_ = vaddr_end;
+    }
 }
 
 }  // namespace macho

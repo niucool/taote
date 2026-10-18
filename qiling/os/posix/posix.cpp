@@ -143,12 +143,15 @@ void QlOsPosix::shutdown() {
 }
 
 void QlOsPosix::enable_kernel_api_hooks() {
-    // elf.py run: self.ql.hook_code(hook_kernel_api)
+    // elf.py run: self.ql.hook_code(hook_kernel_api). The explicit full-range
+    // bounds: the default begin=1/end=0 registration does not fire on the
+    // arm/qnx path (the pinned hook_code gotcha) — the full range keeps the
+    // dispatch live across the loaders
     auto* self = this;
     kernel_api_hook_ = ql().hook_code([self](std::uint64_t address, std::uint32_t size) -> int {
         self->hook_kernel_api(address, size);
         return 0;
-    });
+    }, 0, 0xffffffffffffffffull);
 }
 
 void QlOsPosix::hook_kernel_api(std::uint64_t address, std::uint32_t size) {
