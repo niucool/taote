@@ -24,6 +24,18 @@ namespace {
 // message.py _IO_COMBINE_FLAG
 constexpr std::uint16_t kIoCombineFlag = 0x8000;
 
+// the table membership probe (the `x in table` python idiom over the
+// name/flag tables)
+template <typename Table>
+bool table_contains(const Table& table, unsigned key) {
+    for (const auto& entry : table) {
+        if (entry.first == key) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // map_msgtype.py msgtype_table (lib/c/public/sys/iomsg.h): the dispatch
 // entries (the type → the handler)
 struct MsgTypeEntry {
@@ -35,6 +47,7 @@ const MsgTypeEntry kMsgTypeTable[] = {
     {0x000, ql_qnx_msg_sys_conf},      // sys_conf
     {0x100, ql_qnx_msg_io_connect},    // io_connect
     {0x101, ql_qnx_msg_io_read},       // io_read
+    {0x109, ql_qnx_msg_io_lseek},      // io_lseek
     {0x102, ql_qnx_msg_io_write},      // io_write
 };
 
@@ -160,21 +173,51 @@ std::optional<std::int64_t> ql_qnx_msg_io_read(Qiling& ql, std::uint64_t coid, s
     return read_entry->handler(ql, read_args);
 }
 
+// message.py ql_qnx_msg_io_lseek (lib/c/1/lseek.c): the flat _io_lseek
+// (sparts=-16, rparts=-8); the whence goes through the posix lseek and the
+// 8-byte position lands at rmsg
+std::optional<std::int64_t> ql_qnx_msg_io_lseek(Qiling& ql, std::uint64_t coid, std::uint64_t smsg,
+                                                std::int32_t sparts, std::uint64_t rmsg, std::int32_t rparts) {
+    // struct _io_lseek in lib/c/public/sys/iomsg.h:
+    // (type, combine_len, whence, zero, offset) = unpack("<HHhHQ", smsg, 16)
+    const auto hdr = ql.mem().read(smsg, 16);
+    const auto rd16 = [&hdr](std::size_t off) {
+        return static_cast<std::uint16_t>(hdr[off] | (hdr[off + 1] << 8));
+    };
+    const auto type = rd16(0);
+    const auto combine_len = rd16(2);
+    const auto whence = static_cast<std::int16_t>(rd16(4));
+    const auto zero = rd16(6);
+    std::uint64_t offset = 0;
+    for (int i = 0; i < 8; ++i) {
+        offset |= static_cast<std::uint64_t>(hdr[8 + i]) << (8 * i);
+    }
+
+    if (sparts != -16 || rparts != -8) {
+        throw QlErrorBase("qnx io_lseek: the input/output sizes are wrong");
+    }
+    if (type != 0x109 || combine_len != 16 || zero != 0) {
+        throw QlErrorBase("qnx io_lseek: the message is wrong");
+    }
+    if (!table_contains(lseek_whence, static_cast<unsigned>(whence))) {
+        throw QlErrorNotImplemented("qnx io_lseek: unknown lseek direction");
+    }
+
+    auto& conn = static_cast<QlOsQnx&>(ql.os()).connections().at(static_cast<std::uint32_t>(coid));
+    const auto* lseek_entry = posix::SyscallRegistry::instance().find("lseek");
+    const std::vector<std::uint64_t> lseek_args{static_cast<std::uint64_t>(*conn.fd),
+                                                static_cast<std::uint64_t>(offset),
+                                                static_cast<std::uint64_t>(whence)};
+    const auto regreturn = lseek_entry->handler(ql, lseek_args);
+
+    // the 8-byte position at the reply
+    ql.mem().write_ptr(rmsg, regreturn.value_or(0), 8);
+    return 0;
+}
+
 // message.py ql_qnx_msg_io_write: the write delegation — the header rides
 // iov[0] and the payload rides iov[1] (the smsg+8 dword); the combine and
 // the xtype paths are not implemented (the upstream raise shape)
-// the table membership probe (the `x in table` python idiom over the
-// name/flag tables)
-template <typename Table>
-bool table_contains(const Table& table, unsigned key) {
-    for (const auto& entry : table) {
-        if (entry.first == key) {
-            return true;
-        }
-    }
-    return false;
-}
-
 // message.py ql_qnx_msg_io_connect (_connect_ctrl.c::_connect_io): the
 // OPEN path — the header rides iov[0] and the path rides iov[1]; the fd
 // lands in the connection and the 20-byte link reply at the reply's first

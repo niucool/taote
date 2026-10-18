@@ -32,6 +32,10 @@ std::optional<std::int64_t> ql_qnx_msg_io_write(Qiling& ql, std::uint64_t coid, 
 std::optional<std::int64_t> ql_qnx_msg_io_read(Qiling& ql, std::uint64_t coid, std::uint64_t smsg,
                                                std::int32_t sparts, std::uint64_t rmsg, std::int32_t rparts);
 
+// message.py ql_qnx_msg_io_lseek (lib/c/1/lseek.c): the lseek delegation
+std::optional<std::int64_t> ql_qnx_msg_io_lseek(Qiling& ql, std::uint64_t coid, std::uint64_t smsg,
+                                                std::int32_t sparts, std::uint64_t rmsg, std::int32_t rparts);
+
 // message.py ql_qnx_msg_sys_conf: the confstr/sysconf dispatch
 // (lib/c/1a/confstr.c + lib/c/1/sysconf.c)
 std::optional<std::int64_t> ql_qnx_msg_sys_conf(Qiling& ql, std::uint64_t coid, std::uint64_t smsg,
