@@ -1445,3 +1445,37 @@ TEST(TbSemantics, DISABLED_RealModeIntHookRawProbe) {
 
     uc_close(uc);
 }
+
+// the high-canonical-address probe: the kext fixture's loadbase
+// 0xffffff7000000000 has bit 47 set (the non-canonical 64-bit form) — this
+// probe pins whether the stock unicorn maps + fetches there. The finding
+// (either way) feeds the load_driver loadbase decision in STATUS.md.
+// DISABLED_ (the pinned uc limitation): the stock unicorn 2.1.4 maps
+// 0xffffff7000000000 fine (uc_mem_map returns OK) but the FETCH there
+// faults UC_ERR_FETCH_UNMAPPED — the verbatim kext loadbase cannot execute
+// on this uc build. The load_driver keeps the verbatim default; the
+// fixture-driven paths pass a low loadbase via driver_loadbase.
+TEST(TbSemantics, DISABLED_HighCanonicalAddressFetchProbe) {
+    uc_engine* uc = nullptr;
+    ASSERT_EQ(uc_open(UC_ARCH_X86, UC_MODE_64, &uc), UC_ERR_OK);
+
+    constexpr std::uint64_t kBase = 0xffffff7000000000;
+    const uc_err map_err = uc_mem_map(uc, kBase, 0x1000, UC_PROT_ALL);
+    ASSERT_EQ(map_err, UC_ERR_OK) << "uc_strerror: " << uc_strerror(map_err);
+
+    // mov eax, 0x77 ; ret
+    const std::vector<std::uint8_t> blob = {0xB8, 0x77, 0x00, 0x00, 0x00, 0xC3};
+    ASSERT_EQ(uc_mem_write(uc, kBase, blob.data(), blob.size()), UC_ERR_OK);
+
+    std::uint64_t sp = 0xffffff700000f00;
+    uc_reg_write(uc, UC_X86_REG_RSP, &sp);
+
+    const uc_err err = uc_emu_start(uc, kBase, 0, 0, 0);
+    EXPECT_EQ(err, UC_ERR_OK) << "uc_strerror: " << uc_strerror(err);
+
+    std::uint64_t rax = 0;
+    uc_reg_read(uc, UC_X86_REG_RAX, &rax);
+    EXPECT_EQ(rax, 0x77ull);
+
+    uc_close(uc);
+}

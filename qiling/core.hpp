@@ -77,6 +77,12 @@ struct QilingOptions {
 
     std::optional<QL_ENDIAN> endian;
     bool thumb = false;
+
+    // the kext driver loadbase override (the macho loadDriver's loadbase
+    // parameter; 0 means the verbatim default 0xffffff7000000000 — the stock
+    // unicorn 2.1.4 cannot fetch there, so the fixture-driven paths pass a
+    // low loadbase — see TbSemantics.HighCanonicalAddressFetchProbe)
+    std::uint64_t driver_loadbase = 0;
 };
 
 class Qiling final : public QlCoreHooks, public QlCoreStructs {
@@ -194,6 +200,11 @@ private:
     bool multithread_ = false;
     QL_STOP stop_options_ = QL_STOP::NONE;
     QL_VERBOSE verbose_ = QL_VERBOSE::DEFAULT;
+    // the macho driver loadbase override (0 = the verbatim default)
+    std::uint64_t driver_loadbase_ = 0;
+
+public:
+    std::uint64_t driver_loadbase() const noexcept { return driver_loadbase_; }
 
     std::unique_ptr<QlArch> arch_;
     std::unique_ptr<QlMemoryManager> mem_;

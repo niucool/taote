@@ -124,6 +124,32 @@ bool MachoImage::parse_load_command() {
             }
         }
 
+        if (cmd == LC_DYSYMTAB) {
+            // loadcommand.py LoadDysymbolTable: the 18-field command body
+            // (the local/extern index pairs over the symtab + the toc/mod
+            // /extref/indirect tables + the two relocation lists)
+            has_dysymtab_ = true;
+            dysymtab_.present = true;
+            dysymtab_.ilocalsym = get_u32(binary_file_, cur + 8);
+            dysymtab_.nlocalsym = get_u32(binary_file_, cur + 12);
+            dysymtab_.iextdefsym = get_u32(binary_file_, cur + 16);
+            dysymtab_.nextdefsym = get_u32(binary_file_, cur + 20);
+            dysymtab_.iundefsym = get_u32(binary_file_, cur + 24);
+            dysymtab_.nundefsym = get_u32(binary_file_, cur + 28);
+            dysymtab_.tocoff = get_u32(binary_file_, cur + 32);
+            dysymtab_.ntoc = get_u32(binary_file_, cur + 36);
+            dysymtab_.modtaboff = get_u32(binary_file_, cur + 40);
+            dysymtab_.nmodtab = get_u32(binary_file_, cur + 44);
+            dysymtab_.extrefsymoff = get_u32(binary_file_, cur + 48);
+            dysymtab_.nextrefsyms = get_u32(binary_file_, cur + 52);
+            dysymtab_.indirectsymoff = get_u32(binary_file_, cur + 56);
+            dysymtab_.nindirectsyms = get_u32(binary_file_, cur + 60);
+            dysymtab_.extreloff = get_u32(binary_file_, cur + 64);
+            dysymtab_.nextrel = get_u32(binary_file_, cur + 68);
+            dysymtab_.locreloff = get_u32(binary_file_, cur + 72);
+            dysymtab_.nlocrel = get_u32(binary_file_, cur + 76);
+        }
+
         if (cmd == LC_SEGMENT_64) {
             // loadcommand.py LoadSegment64: the 72-byte command base (the 8
             // name + the 8/8/8/8 fields + the 4/4/4/4 prots/nsects/flags)
@@ -260,39 +286,6 @@ void QlLoaderMachO::run() {
     }
     is_driver_ = image.header().file_type == 0xb;  // MH_KEXT_BUNDLE
 
-    // the segment pass (macho.py loadMacho pass 2): the map + the content
-    const auto slide = static_cast<std::uint64_t>(profile.get_int("LOADER", "slide"));
-    for (const auto& seg : image.segments()) {
-        load_segment(seg, slide);
-    }
-
-    // the entry pass (macho.py pass 1): the LC_UNIXTHREAD rip or the LC_MAIN
-    // offset (+ the page-zero anchor)
-    if (image.has_unixthread() && image.unixthread_entry().has_value()) {
-        binary_entry_ = *image.unixthread_entry();
-    } else if (image.has_main()) {
-        std::uint64_t page_zero = 0;
-        for (const auto& seg : image.segments()) {
-            if (seg.name == "__PAGEZERO") {
-                page_zero = seg.vm_size;
-            }
-        }
-        binary_entry_ = image.main_entry_offset() + page_zero;
-    }
-
-    // the import symbols (hook.py: the stub address -> the api name; the
-    // deviation note: the upstream walks the kernel.development symbol
-    // tables — this port-side shortcut rides the file's own LC_SYMTAB)
-    for (const auto& sym : image.symbols()) {
-        if (sym.n_value == 0) {
-            continue;
-        }
-        const auto name = image.string_at(sym.n_strx);
-        if (!name.empty()) {
-            import_symbols_[sym.n_value] = ImportSymbol{sym.n_value, name};
-        }
-    }
-
     // the stack (macho.py loadStack: the argv/env pushes ride their slices —
     // the sp lands at the region top verbatim)
     const auto sp = stack_address + stack_size;
@@ -300,7 +293,50 @@ void QlLoaderMachO::run() {
     ql_->arch().regs().set_arch_sp(sp);
     init_sp = sp;
 
-    entry_point = binary_entry_ + slide;
+    if (is_driver_) {
+        // macho.py: `if self.is_driver: self.loadDriver(self.stack_address); self.ql.hook_code(hook_kernel_api)`
+        // — the hook registration rides the os load()'s enable_kernel_api_hooks
+        // (the port's deviation note there); the loadbase rides the options'
+        // driver_loadbase override (0 = the verbatim 0xffffff7000000000)
+        load_driver(stack_address, image,
+                    ql_->driver_loadbase() != 0 ? ql_->driver_loadbase() : 0xffffff7000000000ull);
+        entry_point = binary_entry_ + loadbase_;
+    } else {
+        // the segment pass (macho.py loadMacho pass 2): the map + the content
+        const auto slide = static_cast<std::uint64_t>(profile.get_int("LOADER", "slide"));
+        for (const auto& seg : image.segments()) {
+            load_segment(seg, slide);
+        }
+
+        // the entry pass (macho.py pass 1): the LC_UNIXTHREAD rip or the LC_MAIN
+        // offset (+ the page-zero anchor)
+        if (image.has_unixthread() && image.unixthread_entry().has_value()) {
+            binary_entry_ = *image.unixthread_entry();
+        } else if (image.has_main()) {
+            std::uint64_t page_zero = 0;
+            for (const auto& seg : image.segments()) {
+                if (seg.name == "__PAGEZERO") {
+                    page_zero = seg.vm_size;
+                }
+            }
+            binary_entry_ = image.main_entry_offset() + page_zero;
+        }
+
+        // the import symbols (hook.py: the stub address -> the api name; the
+        // deviation note: the upstream walks the kernel.development symbol
+        // tables — this port-side shortcut rides the file's own LC_SYMTAB)
+        for (const auto& sym : image.symbols()) {
+            if (sym.n_value == 0) {
+                continue;
+            }
+            const auto name = image.string_at(sym.n_strx);
+            if (!name.empty()) {
+                import_symbols_[sym.n_value] = ImportSymbol{sym.n_value, name};
+            }
+        }
+
+        entry_point = binary_entry_ + slide;
+    }
     load_address = entry_point;
     ql_->os().set_entry_point(entry_point);
 }
@@ -331,6 +367,134 @@ void QlLoaderMachO::load_segment(const Segment& seg, std::uint64_t slide) {
     ql_->mem().write(vaddr_start, data);
     if (vm_end_addr_ < vaddr_end) {
         vm_end_addr_ = vaddr_end;
+    }
+}
+
+// macho.py loadDriver: the kext segments at the 0xffffff7000000000 loadbase,
+// the [STATIC] stub page, the kernel.development parse + the segment load,
+// and the kernel symbol walk (the local + the extern defs over the kernel's
+// LC_DYSYMTAB/LC_SYMTAB) feeding import_symbols_ (the kernel-api dispatch
+// gate); the relocation passes ride the relocation slice. The upstream
+// never sets the entry here (the fixtures drive via os.load_kext) — the
+// port derives it from the kext's LC_UNIXTHREAD + the loadbase so the
+// run()-driven fixtures can start the blob directly (the documented
+// deviation)
+void QlLoaderMachO::load_driver(std::uint64_t stack_addr, const MachoImage& image,
+                                std::uint64_t loadbase) {
+    (void)stack_addr;
+    import_symbols_.clear();
+    constexpr std::uint64_t kPageSize = 0x1000;
+    loadbase_ = loadbase;
+    load_address = loadbase_;
+    for (const auto& seg : image.segments()) {
+        load_segment(seg, loadbase_);
+    }
+    kext_size_ = vm_end_addr_ - loadbase_;
+
+    const std::filesystem::path kernel_path =
+        std::filesystem::path(ql_->rootfs()) / "System" / "Library" / "Kernels" / "kernel.development";
+    MachoImage kernel(kernel_path);
+    if (!kernel.valid()) {
+        throw QlErrorBase("kernel parse failed: " + kernel_path.string());
+    }
+
+    // the [STATIC] page for the external static symbol jmp code
+    static_addr_ = vm_end_addr_;
+    ql_->mem().map(static_addr_, kPageSize, UC_PROT_ALL, "[STATIC]");
+    vm_end_addr_ += kPageSize;
+    static_symbols_.clear();
+
+    // the kernel segments (the slide 0; the first segment's vm address is
+    // the kernel base)
+    bool first = true;
+    for (const auto& seg : kernel.segments()) {
+        if (first) {
+            kernel_base_ = seg.vm_address;
+            first = false;
+        }
+        load_segment(seg, 0);
+    }
+
+    // the kernel's local + extern symbol walk (the upstream walks the
+    // dysymtab index ranges over the symtab and feeds import_symbols with
+    // the raw n_value -> name pairs — the hook dispatch keys on these)
+    const auto& dys = kernel.dysymtab();
+    for (std::uint32_t i = 0; i < dys.nlocalsym; ++i) {
+        const auto* sym = kernel.symbol_at(dys.ilocalsym + i);
+        if (sym == nullptr) {
+            break;
+        }
+        const auto name = kernel.string_at(sym->n_strx);
+        if (!name.empty()) {
+            kernel_local_symbols_[name] = sym->n_value;
+            import_symbols_[sym->n_value] = ImportSymbol{sym->n_value, name};
+        }
+    }
+    for (std::uint32_t i = 0; i < dys.nextdefsym; ++i) {
+        const auto* sym = kernel.symbol_at(dys.iextdefsym + i);
+        if (sym == nullptr) {
+            break;
+        }
+        const auto name = kernel.string_at(sym->n_strx);
+        if (!name.empty()) {
+            kernel_extrn_symbols_[name] = sym->n_value;
+            import_symbols_[sym->n_value] = ImportSymbol{sym->n_value, name};
+        }
+    }
+
+    // (the local + external relocation passes ride the relocation slice)
+
+    // the entry pass (the run()'s non-driver shape: the LC_UNIXTHREAD rip or
+    // the LC_MAIN offset; the segments loaded at the loadbase — the raw rip
+    // rides the loadbase at the emu-start time)
+    if (image.has_unixthread() && image.unixthread_entry().has_value()) {
+        binary_entry_ = *image.unixthread_entry();
+    } else if (image.has_main()) {
+        std::uint64_t page_zero = 0;
+        for (const auto& seg : image.segments()) {
+            if (seg.name == "__PAGEZERO") {
+                page_zero = seg.vm_size;
+            }
+        }
+        binary_entry_ = image.main_entry_offset() + page_zero;
+    }
+
+    // the kext's own symbol details (the upstream's kext_local_symbols /
+    // kext_extern_symbols dicts, the dysymtab index ranges over the kext's
+    // own symtab)
+    const auto& kdys = image.dysymtab();
+    for (std::uint32_t i = 0; i < kdys.nlocalsym; ++i) {
+        const auto* sym = image.symbol_at(kdys.ilocalsym + i);
+        if (sym == nullptr) {
+            break;
+        }
+        const auto name = image.string_at(sym->n_strx);
+        if (!name.empty()) {
+            kext_local_symbols_[name] = sym->n_value;
+        }
+    }
+    for (std::uint32_t i = 0; i < kdys.nextdefsym; ++i) {
+        const auto* sym = image.symbol_at(kdys.iextdefsym + i);
+        if (sym == nullptr) {
+            break;
+        }
+        const auto name = image.string_at(sym->n_strx);
+        if (!name.empty()) {
+            kext_extern_symbols_[name] = sym->n_value;
+        }
+    }
+
+    // the non-IOKit entry walk: __realmain points at the start function's
+    // address (the kext link convention); __antimain at the stop
+    const auto realmain = kext_local_symbols_.find("__realmain");
+    if (realmain != kext_local_symbols_.end()) {
+        const auto at = loadbase_ + realmain->second;
+        kext_start_ = ql_->mem().read_ptr(at, 8);
+    }
+    const auto antimain = kext_local_symbols_.find("__antimain");
+    if (antimain != kext_local_symbols_.end()) {
+        const auto at = loadbase_ + antimain->second;
+        kext_stop_ = ql_->mem().read_ptr(at, 8);
     }
 }
 

@@ -38,6 +38,7 @@ constexpr std::uint32_t LC_SEGMENT_64 = 0x19;
 constexpr std::uint32_t LC_UNIXTHREAD = 0x5;
 constexpr std::uint32_t LC_MAIN = 0x80000028;
 constexpr std::uint32_t LC_SYMTAB = 0x2;
+constexpr std::uint32_t LC_DYSYMTAB = 0xb;
 
 // nlist.h: the symbol-type bits (the N_SECT|N_EXT external-defined shape)
 constexpr std::uint8_t N_EXT = 0x1;
@@ -105,6 +106,32 @@ struct Symbol {
     std::uint64_t n_value = 0;
 };
 
+// the dysymtab_command (macho_loader.py LoadDysymbolTable): the local/extern
+// symbol index pairs over the LC_SYMTAB table plus the two relocation lists
+// (the 8-byte relocation_info records: r_address(4) + the packed word with
+// r_symbolnum(24)/r_pcrel/r_length/r_extern/r_type)
+struct Dysymtab {
+    std::uint32_t ilocalsym = 0;
+    std::uint32_t nlocalsym = 0;
+    std::uint32_t iextdefsym = 0;
+    std::uint32_t nextdefsym = 0;
+    std::uint32_t iundefsym = 0;
+    std::uint32_t nundefsym = 0;
+    std::uint32_t tocoff = 0;
+    std::uint32_t ntoc = 0;
+    std::uint32_t modtaboff = 0;
+    std::uint32_t nmodtab = 0;
+    std::uint32_t extrefsymoff = 0;
+    std::uint32_t nextrefsyms = 0;
+    std::uint32_t indirectsymoff = 0;
+    std::uint32_t nindirectsyms = 0;
+    std::uint32_t extreloff = 0;
+    std::uint32_t nextrel = 0;
+    std::uint32_t locreloff = 0;
+    std::uint32_t nlocrel = 0;
+    bool present = false;
+};
+
 // parser.py MachoParser — the container parse (the header + the load-command
 // walk: LC_SEGMENT_64 collects the segments/sections; LC_SYMTAB carries the
 // symbol/string tables for the kernel-api dispatch)
@@ -135,6 +162,8 @@ private:
     std::string binary_path_;
 
     bool has_symtab_ = false;
+    bool has_dysymtab_ = false;
+    Dysymtab dysymtab_;
     std::uint32_t symoff_ = 0;
     std::uint32_t nsyms_ = 0;
     std::uint32_t stroff_ = 0;
@@ -159,15 +188,25 @@ public:
     bool has_main() const { return has_main_; }
     std::uint64_t main_entry_offset() const { return main_entry_offset_; }
     std::uint64_t main_stack_size() const { return main_stack_size_; }
+
+    bool has_dysymtab() const { return dysymtab_.present; }
+    const Dysymtab& dysymtab() const { return dysymtab_; }
+
+    // the symbol record at the dysymtab index (the caller bounds-checks via
+    // symbols().size())
+    const Symbol* symbol_at(std::uint32_t index) const {
+        return index < symbols_.size() ? &symbols_[index] : nullptr;
+    }
+
 };
 
-// loader/macho.py QlLoaderMACHO — the macho x8664 loader. Sub-slice 1: the
-// segment mapping (the loadMacho three-pass shape), the entry (the
-// LC_UNIXTHREAD/LC_MAIN + the __PAGEZERO offset) and the shellcode branch;
-// the loadDriver path (the kernel parse + the LC_DYSYMTAB relocation walk)
-// lands with its own slice — the import_symbols here ride the file's own
-// LC_SYMTAB (the deviation note: the upstream derives them from the kernel
-// symbol walk).
+// loader/macho.py QlLoaderMACHO — the macho x8664 loader. The loadMacho
+// path (the three-pass shape) rides the container branch; the loadDriver
+// path (the kext: the segments at the 0xffffff7000000000 loadbase, the
+// [STATIC] stub page, the kernel.development parse, the kernel local/extern
+// symbol walk feeding import_symbols_, the kext's own symbol details and
+// the __realmain/__antimain entry walk, and — with the relocation slice —
+// the local + external relocation passes) rides the MH_KEXT_BUNDLE branch.
 class QlLoaderMachO final : public QlLoader {
 public:
     explicit QlLoaderMachO(Qiling* ql, std::string dyld_path = {});
@@ -190,9 +229,33 @@ public:
     const std::string& kext_name() const { return kext_name_; }
     bool is_driver() const { return is_driver_; }
 
+    // the load_driver products (the load_kext os-side drive and the fixture
+    // assertions read these)
+    std::uint64_t kext_start() const { return kext_start_; }
+    std::uint64_t kext_stop() const { return kext_stop_; }
+    std::uint64_t kext_size() const { return kext_size_; }
+    const std::map<std::string, std::uint64_t>& kernel_local_symbols() const {
+        return kernel_local_symbols_;
+    }
+    const std::map<std::string, std::uint64_t>& kernel_extrn_symbols() const {
+        return kernel_extrn_symbols_;
+    }
+
 private:
     void load_macho();
     void load_segment(const Segment& seg, std::uint64_t slide);
+    // macho.py loadDriver: the kext segments at the loadbase, the kernel
+    // parse (System/Library/Kernels/kernel.development), the kernel symbol
+    // walk (the local + the extern defs) feeding import_symbols_, the kext
+    // symbol details and the __realmain/__antimain entry walk; the
+    // relocation passes land with the relocation slice
+    // macho.py loadDriver(stack_addr, loadbase=-1, ...): the loadbase rides
+    // the parameter (the verbatim default 0xffffff7000000000; the stock
+    // unicorn 2.1.4 cannot FETCH at that address — the TbSemantics.High-
+    // CanonicalAddressFetchProbe pins it — so the fixture-driven paths pass
+    // a low loadbase, documented in STATUS.md)
+    void load_driver(std::uint64_t stack_addr, const MachoImage& image,
+                     std::uint64_t loadbase = 0xffffff7000000000ull);
 
     std::string dyld_path_;
     std::string kext_name_;
@@ -200,6 +263,18 @@ private:
     std::uint64_t binary_entry_ = 0;
     std::uint64_t vm_end_addr_ = 0;
     std::map<std::uint64_t, ImportSymbol> import_symbols_;
+    // the load_driver state (the upstream's loadDriver locals)
+    std::uint64_t loadbase_ = 0;
+    std::uint64_t kext_size_ = 0;
+    std::uint64_t kernel_base_ = 0;
+    std::uint64_t static_addr_ = 0;
+    std::map<std::string, std::uint64_t> static_symbols_;
+    std::map<std::string, std::uint64_t> kernel_local_symbols_;
+    std::map<std::string, std::uint64_t> kernel_extrn_symbols_;
+    std::map<std::string, std::uint64_t> kext_local_symbols_;
+    std::map<std::string, std::uint64_t> kext_extern_symbols_;
+    std::uint64_t kext_start_ = 0;
+    std::uint64_t kext_stop_ = 0;
 };
 
 

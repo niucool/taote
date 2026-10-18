@@ -21,11 +21,14 @@ using qiling::loader::macho::CPU_TYPE_X8664;
 using qiling::loader::macho::MH_EXECUTE;
 using qiling::loader::macho::LC_SEGMENT_64;
 using qiling::loader::macho::LC_SYMTAB;
+using qiling::loader::macho::LC_DYSYMTAB;
 using qiling::loader::macho::LC_UNIXTHREAD;
 #include "qiling/os/macos/macos.hpp"
 #include "qiling/os/posix/posix.hpp"
 
 using namespace qiling;
+using ResolvedParams = qiling::os::macos::ResolvedParams;
+using KernelApi = qiling::os::macos::KernelApi;
 
 namespace {
 
@@ -380,6 +383,181 @@ TEST(MacosOs, MachMsgHostInfoShortContentAndBadFlavorThrow) {
     EXPECT_THROW(run_mach_msg_id(200, 28, 1), qiling::QlErrorBase);
     // the unknown flavor (999): the flavor-not-supported branch
     EXPECT_THROW(run_mach_msg_id(200, 40, 999), qiling::QlErrorBase);
+}
+
+// ---- the kext/kernel-symbol machinery ----
+//
+// The kernel.development fixture: MH_EXECUTE with the __TEXT at 0x20000000,
+// one extern-def symbol _host_info_probe (n_value 0x20000040, the body
+// mov eax,0x77; ret), the LC_SYMTAB + the LC_DYSYMTAB (iextdefsym=0,
+// nextdefsym=1). The kext fixture: MH_KEXT_BUNDLE (0xb) whose blob calls the
+// kernel symbol directly — the kernel-api hook intercepts the call through
+// the kernel symbol walk (the import chain the registry keys on).
+void write_macho_kernel_development(const std::filesystem::path& path) {
+    constexpr std::uint64_t kKernelBase = 0x20000000;
+    constexpr std::uint64_t kSymValue = kKernelBase + 0x200;  // _host_info_probe
+    constexpr std::uint32_t kTextSize = 0x1000;
+
+    std::vector<std::uint8_t> file(kTextSize, 0);
+    auto put32 = [&file](std::size_t off, std::uint32_t x) {
+        for (int i = 0; i < 4; ++i) {
+            file[off + i] = static_cast<std::uint8_t>(x >> (8 * i));
+        }
+    };
+    auto put64 = [&file](std::size_t off, std::uint64_t x) {
+        for (int i = 0; i < 8; ++i) {
+            file[off + i] = static_cast<std::uint8_t>(x >> (8 * i));
+        }
+    };
+
+    put32(0, 0xFEEDFACF);
+    put32(4, CPU_TYPE_X8664);
+    put32(12, MH_EXECUTE);
+    put32(16, 3);                              // ncmds
+    put32(20, 72 + 24 + 96);                   // sizeofcmds (seg + symtab + dysymtab)
+
+    put32(32, LC_SEGMENT_64);
+    put32(36, 72);
+    for (std::size_t i = 0; i < sizeof("__TEXT"); ++i) {
+        file[32 + 8 + i] = "__TEXT"[i];
+    }
+    put64(32 + 24, kKernelBase);
+    put64(32 + 32, kTextSize);
+    put64(32 + 40, 0);
+    put64(32 + 48, kTextSize);
+    put32(32 + 60, 5);
+    put32(32 + 64, 0);
+
+    const std::uint32_t symoff = 0x180;
+    const std::uint32_t stroff = 0x1a0;
+    put32(32 + 72, LC_SYMTAB);
+    put32(32 + 72 + 4, 24);
+    put32(32 + 72 + 8, symoff);
+    put32(32 + 72 + 12, 1);                    // nsyms
+    put32(32 + 72 + 16, stroff);
+    put32(32 + 72 + 20, 32);                   // strsize
+    put32(symoff, 0);                          // n_strx
+    file[symoff + 4] = 0x0f;                   // n_type = N_EXT|N_SECT
+    file[symoff + 5] = 1;                      // n_sect
+    put64(symoff + 8, kSymValue);
+    const std::string sym = "_host_info_probe";
+    for (std::size_t i = 0; i <= sym.size(); ++i) {
+        file[stroff + i] = static_cast<std::uint8_t>(sym[i]);
+    }
+
+    // the LC_DYSYMTAB: the extern-def range covers the one symbol
+    put32(32 + 72 + 24, LC_DYSYMTAB);
+    put32(32 + 72 + 24 + 4, 96);
+    put32(32 + 72 + 24 + 16, 0);               // iextdefsym
+    put32(32 + 72 + 24 + 20, 1);               // nextdefsym
+    put32(32 + 72 + 24 + 64, 0);               // extreloff
+    put32(32 + 72 + 24 + 68, 0);               // nextrel
+    put32(32 + 72 + 24 + 72, 0);               // locreloff
+    put32(32 + 72 + 24 + 76, 0);               // nlocrel
+
+    // the kernel body at the file offset 0x200 (clear of the commands — the
+    // 0x40 placement collided with the segment command and the body bytes
+    // parsed as the vm_size)
+    file[0x200] = 0xB8;
+    file[0x201] = 0x77; file[0x202] = 0x00; file[0x203] = 0x00; file[0x204] = 0x00;
+    file[0x205] = 0xC3;
+
+    std::ofstream f(path, std::ios::binary);
+    f.write(reinterpret_cast<const char*>(file.data()), static_cast<std::streamsize>(file.size()));
+}
+
+void write_macho_kext_fixture(const std::filesystem::path& path, std::uint64_t kernel_sym_addr) {
+    constexpr std::uint32_t kTextSize = 0x1000;
+    constexpr std::uint64_t kEntryOff = 0x200;   // the blob's file offset
+
+    std::vector<std::uint8_t> file(kTextSize, 0);
+    auto put32 = [&file](std::size_t off, std::uint32_t x) {
+        for (int i = 0; i < 4; ++i) {
+            file[off + i] = static_cast<std::uint8_t>(x >> (8 * i));
+        }
+    };
+    auto put64 = [&file](std::size_t off, std::uint64_t x) {
+        for (int i = 0; i < 8; ++i) {
+            file[off + i] = static_cast<std::uint8_t>(x >> (8 * i));
+        }
+    };
+
+    put32(0, 0xFEEDFACF);
+    put32(4, CPU_TYPE_X8664);
+    put32(12, 0xb);                            // MH_KEXT_BUNDLE
+    put32(16, 2);                              // ncmds (the segment + the thread)
+    put32(20, 72 + 184);                       // sizeofcmds
+
+    put32(32, LC_SEGMENT_64);
+    put32(36, 72);
+    for (std::size_t i = 0; i < sizeof("__TEXT"); ++i) {
+        file[32 + 8 + i] = "__TEXT"[i];
+    }
+    put64(32 + 24, 0);                         // the vm address (the loadbase slides it)
+    put64(32 + 32, kTextSize);
+    put64(32 + 40, 0);
+    put64(32 + 48, kTextSize);
+    put32(32 + 60, 5);
+    put32(32 + 64, 0);
+
+    constexpr std::size_t thread_at = 32 + 72;
+    put32(thread_at, LC_UNIXTHREAD);
+    put32(thread_at + 4, 184);
+    put32(thread_at + 8, 4);                   // X86_THREAD_STATE64
+    put32(thread_at + 12, 21);
+    put64(thread_at + 16 + 16 * 8, kEntryOff); // the rip = the raw entry offset
+
+    // the blob: movabs rax, <the kernel symbol>; call rax; mov [0x2140], rax;
+    // exit(42)
+    std::size_t at = kEntryOff;
+    file[at++] = 0x48; file[at++] = 0xB8;
+    for (int i = 0; i < 8; ++i) {
+        file[at++] = static_cast<std::uint8_t>(kernel_sym_addr >> (8 * i));
+    }
+    file[at++] = 0xFF; file[at++] = 0xD0;      // call rax
+    file[at++] = 0x48; file[at++] = 0x89; file[at++] = 0x04; file[at++] = 0x25;  // mov [0x2140], rax
+    file[at++] = 0x40; file[at++] = 0x21; file[at++] = 0x00; file[at++] = 0x00;
+    file[at++] = 0xBF; file[at++] = 0x2A; file[at++] = 0x00; file[at++] = 0x00; file[at++] = 0x00;  // mov edi, 42
+    file[at++] = 0xB8; file[at++] = 0x01; file[at++] = 0x00; file[at++] = 0x00; file[at++] = 0x00;  // mov eax, 1
+    file[at++] = 0x0F; file[at++] = 0x05;
+
+    std::ofstream f(path, std::ios::binary);
+    f.write(reinterpret_cast<const char*>(file.data()), static_cast<std::streamsize>(file.size()));
+}
+
+TEST(MacosOs, KextDriverResolvesKernelSymbols) {
+    const auto rootfs = std::filesystem::temp_directory_path() / "ql_macos_rootfs";
+    const auto kernel_dir = rootfs / "System" / "Library" / "Kernels";
+    std::filesystem::create_directories(kernel_dir);
+    write_macho_kernel_development(kernel_dir / "kernel.development");
+
+    const auto kext = std::filesystem::temp_directory_path() / "ql_macho_kext2" / "driver.macho";
+    std::filesystem::create_directories(kext.parent_path());
+    constexpr std::uint64_t kKernelBase = 0x20000000;
+    // the kext loadbase: the verbatim default 0xffffff7000000000 cannot be
+    // FETCHED by the stock unicorn 2.1.4 (the HighCanonicalAddressFetchProbe
+    // pin) — the fixture rides a low loadbase the engine can execute at
+    constexpr std::uint64_t kKextLoadbase = 0x30000000;
+    write_macho_kext_fixture(kext, kKernelBase + 0x200);
+
+    QilingOptions options;
+    options.argv = {kext.string()};
+    options.rootfs = rootfs.string();
+    options.ostype = QL_OS::MACOS;
+    options.archtype = QL_ARCH::X8664;
+    options.driver_loadbase = kKextLoadbase;
+    Qiling ql(options);
+    ql.mem().map(0x2000, 0x1000, UC_PROT_ALL, "[macos-scratch]");
+    // the registry hook: the import chain (the kernel symbol's n_value ->
+    // import_symbols_ -> the hook dispatch -> the registry hit) answers the
+    // call INSTEAD of the kernel body
+    KernelApi("host_info_probe", {}) = [](Qiling&, std::uint64_t, const ResolvedParams&) {
+        return std::optional<std::uint64_t>(0x99);
+    };
+    ql.run();
+
+    EXPECT_EQ(ql.os().exit_code(), 42);
+    EXPECT_EQ(ql.mem().read_ptr(0x2140, 4), 0x99u);
 }
 
 TEST(MacosOs, CsopsWritesFlagAndReturnsSuccess) {

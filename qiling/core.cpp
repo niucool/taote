@@ -28,6 +28,7 @@ Qiling::Qiling(const QilingOptions& options) {
     multithread_ = options.multithread;
     stop_options_ = options.stop;
     verbose_ = options.verbose;
+    driver_loadbase_ = options.driver_loadbase;
 
     // ---- argv setup (core.py) ----
     if (!options.argv.empty()) {
