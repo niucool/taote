@@ -997,6 +997,21 @@ addr to +6 and the parse reads 0.0.127.0.
 The socket-option mapping surface is now complete for the levels the linux
 apps touch (the SOL_SOCKET + the IP + the TCP walks).
 
+### Phase 12 sub-slice 8 — socketcall (the x86 multiplexer, the family close-out)
+
+| piece | upstream | state | notes |
+|---|---|---|---|
+| socketcall | `syscall/net.py ql_syscall_socketcall` | ✅ | the call→handler table (the SOCKETCALL values 1–15 with the per-call arg counts mirroring the upstream's inspect.signature walk: socket/bind/connect/get* 3, listen/shutdown 2, send/recv/socketpair 4, sendto/recvfrom 6, the sockopt pair 5); the args array reads at the pointer-size stride; the unhandled calls (the recvmsg/sendmmsg/accept4 slots — the recvmsg defers with its slice, the accept4 has no upstream bare handler) throw the verbatim 'socketcall: call {call} not implemented' |
+| the fixture | `tests/Posix_Test.cpp` | ✅ | the x86-32 blob riding int 0x80 (the QlSyscallABIIntel32 register ABI: eax=102, ebx=SYS_SOCKET, ecx=the args pointer) through the socket body, asserting the fd 3 |
+
+The socket family surface in the port now covers: socket/shutdown,
+connect/bind/listen/accept, socketpair, send/recv/sendto/recvfrom (the
+STREAM + the NULL-addr + the datagram walks), getsockname/getpeername,
+getsockopt/setsockopt (the SOL_SOCKET + IP + TCP tables), socketcall. The
+remaining deferrals: recvmsg/sendmsg + the msg family (its own slice),
+accept4's verbatim NotImplemented (the upstream has no bare handler),
+sendmmsg/recvmmsg.
+
 ### Phase 12 sub-slice 3 — socketpair + the send/recv family
 
 | piece | upstream | state | notes |

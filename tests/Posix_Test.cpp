@@ -1573,3 +1573,38 @@ TEST(PosixSocket, IpTcpOptionTablesRoundTrip) {
     EXPECT_EQ(ql.mem().read_ptr(0x1002100, 4), 64u);  // the TTL rides 64
     EXPECT_EQ(ql.mem().read_ptr(0x1002218, 8), 0u);   // the TCP_NODELAY set ok
 }
+
+// the x86 multiplexer: socketcall(SYS_SOCKET, args[]) rides the existing
+// socket body through the args-array walk (the int-0x80 ride, the 32-bit
+// ABI)
+TEST(PosixSocket, SocketcallX86MultiplexerRidesSocketBody) {
+    const std::vector<std::uint8_t> code = {
+        // socketcall(SYS_SOCKET=1, args@[0x1002000]) — the args hold
+        // (AF_INET=2, SOCK_STREAM=1, 0)
+        0xB8, 0x66, 0x00, 0x00, 0x00,               // mov eax, 102 (socketcall)
+        0xBB, 0x01, 0x00, 0x00, 0x00,               // mov ebx, 1 (SYS_SOCKET)
+        0xB9, 0x00, 0x20, 0x00, 0x01,               // mov ecx, 0x1002000
+        0xCD, 0x80,                                 // int 0x80
+        0xA3, 0x08, 0x22, 0x00, 0x01,               // mov [0x1002208], eax
+        // exit(0) via int 0x80 (the x86 exit=1)
+        0xB8, 0x01, 0x00, 0x00, 0x00,               // mov eax, 1 (exit)
+        0xBB, 0x00, 0x00, 0x00, 0x00,               // mov ebx, 0
+        0xCD, 0x80,                                 // int 0x80
+    };
+
+    QilingOptions options;
+    options.code = code;
+    options.rootfs = ensure_rootfs().string();
+    options.ostype = QL_OS::LINUX;
+    options.archtype = QL_ARCH::X86;
+    Qiling ql(options);
+
+    ql.mem().write_ptr(0x1002000, 2, 4);           // args[0]: AF_INET
+    ql.mem().write_ptr(0x1002004, 1, 4);           // args[1]: SOCK_STREAM
+    ql.mem().write_ptr(0x1002008, 0, 4);           // args[2]: 0
+
+    ql.run();
+
+    EXPECT_EQ(ql.os().exit_code(), 0);
+    EXPECT_EQ(ql.mem().read_ptr(0x1002208, 4), 3u);  // the fd rides 3 (the socket body)
+}

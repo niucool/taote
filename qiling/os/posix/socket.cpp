@@ -1228,6 +1228,70 @@ std::optional<std::int64_t> syscall_socketpair(Qiling& ql, const std::vector<std
     return 0;
 }
 
+std::optional<std::int64_t> syscall_socketcall(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    // ql_syscall_socketcall(call, args): the x86 multiplexer (net.py) — the
+    // call picks the handler, the args array rides the guest memory at the
+    // pointer-size stride, the per-call arg counts mirror the upstream's
+    // inspect.signature walk. The unhandled calls (recvmsg/sendmmsg/accept4
+    // land with their slices) throw the NotImplementedError shape verbatim.
+    struct Entry { int call; std::size_t nargs; void (*invoke)(Qiling&, const std::vector<std::uint64_t>&); const char* name; };
+    static constexpr Entry kCalls[] = {
+        {1, 3, nullptr, "socket"},   {2, 3, nullptr, "bind"},
+        {3, 3, nullptr, "connect"}, {4, 2, nullptr, "listen"},
+        {5, 3, nullptr, "accept"},  {6, 3, nullptr, "getsockname"},
+        {7, 3, nullptr, "getpeername"}, {8, 4, nullptr, "socketpair"},
+        {9, 4, nullptr, "send"},    {10, 4, nullptr, "recv"},
+        {11, 6, nullptr, "sendto"}, {12, 6, nullptr, "recvfrom"},
+        {13, 2, nullptr, "shutdown"}, {14, 5, nullptr, "setsockopt"},
+        {15, 5, nullptr, "getsockopt"},
+    };
+
+    const auto call = static_cast<int>(params[0]);
+    const auto args = params[1];
+
+    const Entry* entry = nullptr;
+    for (const auto& e : kCalls) {
+        if (e.call == call) {
+            entry = &e;
+            break;
+        }
+    }
+    if (entry == nullptr) {
+        // the verbatim raise: 'socketcall: call {name or call} not
+        // implemented' (the name lookup rides the SOCKETCALL enum — the
+        // unknown numeric keeps the number, matching the upstream shape)
+        throw QlErrorBase(std::string("socketcall: call ") +
+                          std::to_string(call) + " not implemented");
+    }
+
+    std::vector<std::uint64_t> a;
+    a.reserve(entry->nargs);
+    for (std::size_t i = 0; i < entry->nargs; ++i) {
+        a.push_back(static_cast<std::uint64_t>(
+            ql.mem().read_ptr(args + i * static_cast<std::uint64_t>(ql.arch().pointersize()))));
+    }
+
+    switch (entry->call) {
+        case 1:  return syscall_socket(ql, a);
+        case 2:  return syscall_bind(ql, a);
+        case 3:  return syscall_connect(ql, a);
+        case 4:  return syscall_listen(ql, a);
+        case 5:  return syscall_accept(ql, a);
+        case 6:  return syscall_getsockname(ql, a);
+        case 7:  return syscall_getpeername(ql, a);
+        case 8:  return syscall_socketpair(ql, a);
+        case 9:  return syscall_send(ql, a);
+        case 10: return syscall_recv(ql, a);
+        case 11: return syscall_sendto(ql, a);
+        case 12: return syscall_recvfrom(ql, a);
+        case 13: return syscall_shutdown(ql, a);
+        case 14: return syscall_setsockopt(ql, a);
+        case 15: return syscall_getsockopt(ql, a);
+        default:
+            throw QlErrorBase("socketcall: unreachable dispatch");
+    }
+}
+
 }  // namespace posix
 }  // namespace os
 }  // namespace qiling

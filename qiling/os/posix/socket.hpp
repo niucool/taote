@@ -125,6 +125,7 @@ std::optional<std::int64_t> syscall_connect(Qiling& ql, const std::vector<std::u
 std::optional<std::int64_t> syscall_bind(Qiling& ql, const std::vector<std::uint64_t>& params);
 std::optional<std::int64_t> syscall_listen(Qiling& ql, const std::vector<std::uint64_t>& params);
 std::optional<std::int64_t> syscall_accept(Qiling& ql, const std::vector<std::uint64_t>& params);
+std::optional<std::int64_t> syscall_socketcall(Qiling& ql, const std::vector<std::uint64_t>& params);
 std::optional<std::int64_t> syscall_getsockname(Qiling& ql, const std::vector<std::uint64_t>& params);
 std::optional<std::int64_t> syscall_getpeername(Qiling& ql, const std::vector<std::uint64_t>& params);
 }  // namespace posix

@@ -1319,6 +1319,9 @@ void register_builtin_syscalls() {
     registry.register_syscall({"sendto", {PARAM_INTN, PARAM_PTRX, PARAM_INTN, PARAM_INTN, PARAM_PTRX, PARAM_INTN}, syscall_sendto});
     registry.register_syscall({"recvfrom", {PARAM_INTN, PARAM_PTRX, PARAM_INTN, PARAM_INTN, PARAM_PTRX, PARAM_INTN}, syscall_recvfrom});
     // the option pair (the SOL_SOCKET level + the SO_* names pass through)
+    // the x86 multiplexer (the x86 table rides the socketcall name at 102;
+    // the x8664 never reaches it)
+    registry.register_syscall({"socketcall", {PARAM_INTN, PARAM_PTRX}, syscall_socketcall});
     registry.register_syscall({"getsockname", {PARAM_INTN, PARAM_PTRX, PARAM_PTRX}, syscall_getsockname});
     registry.register_syscall({"getpeername", {PARAM_INTN, PARAM_PTRX, PARAM_PTRX}, syscall_getpeername});
     registry.register_syscall({"getsockopt", {PARAM_INTN, PARAM_INTN, PARAM_INTN, PARAM_PTRX, PARAM_PTRX}, syscall_getsockopt});
