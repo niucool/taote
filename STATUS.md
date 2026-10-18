@@ -443,9 +443,13 @@ of the gevent hub.
   - **P1 - the stop is immediate**: uc_emu_stop inside a UC_HOOK_INSN callback takes effect right after the hooked instruction - the TB tail does NOT run past the stop; the pc lands at the hooked instruction + its size (the natural post-instruction advance).
   - **P2 - the in-hook pc set gets the instruction's size re-added**: a set_arch_pc inside the INSN hook survives, but unicorn's post-instruction advance adds the hooked instruction's length onto it afterward (the effective resume pc = set + insn size). This is the drift mechanism: the clone handler's in-hook child-pc set + the parent's in-hook restore each had the +2 (the syscall's size) re-applied onto the live pc.
   - **P3 - no syscall re-fire on the resume**: a fresh emu_start after the stop does not re-execute the hooked instruction.
-  - **P4/P5 - the mid-TB restart**: the restart onto a FRESH TB (an address never used as a begin) executes correctly (P4); the restart onto a CACHED TB (the address was an interior point of a previously-translated TB) mis-executes the taken path (P5, the raw-unicorn reproduction). The uc_ctl tb flush before the restart was attempted and MEASURED: it does not cure the mis-execution. The remaining direction (the fresh-TB spawn starts) needs the child's first begin to be an address unicorn has not translated an interior TB through, which the clone continuation semantics cannot provide without a deeper TB-cache change. The clone-join test stays DISABLED_ on this.
+  - **P4 - the fresh-TB mid-TB restart**: the restart onto an address never used as a begin executes correctly (the taken-path store lands).
+  - **P5 - the cached-TB restart (the 2026-10 study's CORRECTED verdict)**: the original "cached-TB mis-execution" was A PROBE ARTIFACT - the probe's own runaway code-hook guard (code_count > 64 -> uc_emu_stop) tripped in the child phase after the parent's jmp$ loop burned the budget (the code trace showed the child stopping after ONE instruction - indistinguishable from a mis-execution without the trace). The corrected P5 (MidTbRestartOnCachedTb, re-enabled, the guard defused between phases) PASSES: the cached-TB restart executes correctly. The uc_ctl tb flush is NOT needed (the flush experiment rode the same artifact).
+  - **P6-P13 - the probe inventory (all DISABLED_ in the harness, all PASS with --gtest_also_run_disabled_tests)**: P6 the instrumented P5 (the per-phase traces), P7 the poisoning bisect (the natural-until / code-hook-stop / count-cap exits all clean), P8 the INSN-continuation interior TB (the parent's TB spanning the syscall + the body - the child's interior restart works), P9 the INSN-stop park + the second syscall, P10 until=0xffffffffffffffff (the port's emu_start argument shape), P11 the in-hook RIP write (the clone's -2 compensation shape), P12 the full uc_context save/restore switch, P13 the emu_stop inside the clone hook. Every shape passes with the store landing.
+  - **P1x - the raw-unicorn verdict**: emu_start into a cached TB (whatever the begin provenance - an emu_start begin, an INSN-hook continuation, a uc_context restore) executes CORRECTLY on unicorn 2.1.4; no uc_ctl/flush/re-register sequence is needed.
+  - **the REAL second-pass anomaly (the clone + the uefi fixtures, trace-pinned)**: on the SECOND execution through a cached region a UC_HOOK_CODE event fires carrying the PREVIOUS instruction's size (the clone: the taken-exit event at the store (+0x67) with size=2 = the jz's size, the pc walking +2 INTO the 11-byte store -> the mid-instruction UC_ERR_READ_UNMAPPED; the uefi: the call r10 event at 0x10027b with the mov r10's 7, the pc at 0x10027b+7=0x100282 -> the call falls through and the dispatch never reaches the field's address hook). The trigger could NOT be reproduced in the raw harness (the 7 probe shapes), so it is a port-side hook/dispatch interaction - the open item narrows to isolating which one (the candidates: the trampoline indirection layer, the multi-dispatcher uc registration, or an interaction with the handler-in-hook register writes).
   - **the fix applied**: the clone handler compensates the parent's in-hook restore with the pre-advance (the set to after_syscall - 2 so the post-advance lands on after_syscall); the parent's slice-end pc now lands exactly at the clone's continuation (the trace evidence).
-- **the mid-TB restart on a CACHED TB (the remaining open issue)**: the child thread's restart address (the clone's continuation) can sit inside a TB the parent already executed (the parent's wait-loop slice translated it); the raw-unicorn reproduction (the TbSemantics.MidTbRestartThenAbsoluteStore passes on a fresh TB, DISABLED_MidTbRestartOnCachedTb faults on the cached one) shows the taken-path store after the cached-TB mid-TB restart mis-executes. The fix directions: the fresh-TB start addresses for the spawned threads or the tb flush on the spawn. The clone-join test stays DISABLED_ on this; the round-robin wake flow (the futex interleave without clone) is green.
+- **the mid-TB restart on a CACHED TB (the CORRECTED open issue)**: the cached-TB restart itself is CLEAN raw (the P5/P8-P13 probe verdict - see the retraction above); the clone-join and the uefi second-dispatch failures share the SECOND-PASS SIZE-LAG signature instead (the taken-exit / second-pass UC_HOOK_CODE event carrying the previous instruction's size and the pc advancing by it). The fix direction: isolate the port-side interaction that produces the lag (a raw probe replicating the port's exact trampoline chain is the next step), not a TB-cache change. The clone-join test stays DISABLED_ on this (the blocker comment carries the re-pinned signature); the round-robin wake flow (the futex interleave without clone) is green.
 - **the mips O32 return convention** inverts the negative returns onto the a3 flag pair - the same shape as the real kernel ABI.
 
 ## Phase 5.5 - the os/freebsd dialect (the first deferred-subsystem slice)
@@ -590,14 +594,18 @@ protocol-handler pairs and closed the loop end to end:
   `4D` REX.WB prefix; the same class as the freebsd `48 C7 C5` (rbp) trap.
   The RIP-relative form (`4C 8B 15`) needs no REX.B and avoids the whole
   class — prefer it for the absolute field loads in the fixture blobs.
-- **the open item: the second pass through a multi-call blob restarts mid-instruction** —
+- **the open item: the second pass through a multi-call blob mis-fires with the size-lag** —
   both the event fixture (the second call to the same CheckEvent field) and the
   RT round-trip (the SetVariable → the GetVariable sequence) show the first
-  dispatch riding cleanly and the emu then re-entering the blob mid-instruction
-  (the RT's fault pc = blob+0x81, inside the second block's mov r10 disp) and
-  faulting. The candidate study: the emu_start/TB interaction across a
-  dispatch-driven pc relocation mid-run (the cached-TB restart family from the
-  clone-saga pins). Both fixtures DISABLED_ with the signatures.
+  dispatch riding cleanly and the second-pass UC_HOOK_CODE event carrying the
+  PREVIOUS instruction's size (the event fixture: the call r10 event at
+  0x10027b with the mov r10's 7, the pc at +7 skipping the call; the RT's
+  fault pc = blob+0x81, inside the second block's mov r10 disp). The TB-restart
+  study (the P5/P8-P13 probe verdict) EXONERATES the cached-TB restart itself —
+  the mechanism is the SECOND-PASS SIZE-LAG signature (shared with the
+  clone-join blocker; see the Phase 5 finding), a port-side hook/dispatch
+  interaction, not the raw unicorn TB cache. Both fixtures DISABLED_ with the
+  signatures.
 
 ## Phase 7 - the loader/macho container parser (the macho_parser port)
 

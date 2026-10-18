@@ -127,18 +127,21 @@ const std::vector<std::uint8_t>& join_body() {
 // stores 42, wakes the futex and exits; its _on_stop zeroes the ctid word
 // and wakes the futex waiter (the parent); the parent's join loop observes
 // the zero and exits with 42
-// KNOWN ISSUE (the mid-TB cached-TB restart, the TbSemantics probe): the
-// parent's slice-end pc drift is FIXED (the clone handler compensates the
-// unicorn post-hook pc re-advance - see the TbSemantics.PcSetInHookGets-
-// InsnSizeAdded finding); the remaining blocker is the CHILD's restart at
-// the clone's continuation pc: that address sits inside the parent's CACHED
-// TB (the parent executed it in its wait-loop slice), and the mid-TB
-// restart on a cached TB mis-executes the child's body (the TbSemantics.
-// DISABLED_MidTbRestartOnCachedTb raw-unicorn reproduction: the taken-path
-// store after the cached-TB restart faults/skips). The upstream tolerates
+// KNOWN ISSUE (the taken-exit code-hook mis-fire, the TB-restart study): the
+// mid-TB cached-TB-restart theory is RETRACTED - the raw-unicorn probes
+// (P5/P8/P9/P10/P11/P12/P13) all PASS, the cached-TB restart executes
+// correctly in every modeled shape (the original P5 failure was the probe's
+// own runaway code-hook guard: code_count > 64 -> uc_emu_stop, tripped after
+// the phase-2 loop burned the budget). The ACTUAL blocker, re-pinned with the
+// code tracer: the child's taken exit from the cached TB at the test/jz pair
+// fires UC_HOOK_CODE at the taken target (the store at +0x67) with size=2 -
+// the JZ's size, not the store's 11 - and the pc advances +2 INTO the store
+// (the mid-instruction walk into the UC_ERR_READ_UNMAPPED). The raw harness
+// could not reproduce it in 7 probe shapes, so the trigger is a port-side
+// interaction (the full hook set, the handler-in-hook register writes, or
+// the management's slicing) that makes the taken-exit hook fire carry the
+// branch's size. Open item: isolate that interaction; the upstream tolerates
 // this through the gevent scheduling (the child never restarts mid-TB).
-// Disabled until the restart semantics are pinned (a fresh-TB start for the
-// spawned threads, or the uc tb_flush on the spawn).
 TEST(ThreadClone, DISABLED_CloneSpawnsChildAndJoinWakes) {
     const auto rootfs = std::filesystem::temp_directory_path() / "ql_clone_rootfs";
     std::filesystem::create_directories(rootfs);
@@ -154,6 +157,21 @@ TEST(ThreadClone, DISABLED_CloneSpawnsChildAndJoinWakes) {
     // the ctid word starts at the tid value the CHILD_SETTID will write;
     // pre-store a non-zero sentinel so the join loop's first read differs
     ql.mem().write_ptr(kXaddr, 0xdeadbeef, 4);
+
+    // TEMPORARY DIAGNOSTIC: the code tracer riding the x8664 hook_code path;
+    // the HookRet stays alive for the run (the RAII handle unregisters on
+    // destruction — the pinned facade gotcha)
+    static thread_local std::vector<std::uint64_t> trace;
+    trace.clear();
+    const auto tracer = ql.hook_code([](std::uint64_t address, std::uint32_t size) -> int {
+        trace.push_back(address);
+        std::fprintf(stderr, "[ctrace] 0x%llx size=%u\n", static_cast<unsigned long long>(address), size);
+        if (trace.size() > 400) {
+            return 1;  // the stop
+        }
+        return 0;
+    }, 0, 0xffffffffffffull);
+    (void)tracer;
 
     ql.run();
 

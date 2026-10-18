@@ -188,7 +188,6 @@ void QlLoaderPE_UEFI::register_eoe_trap(std::uint64_t address) {
         if (os_uefi.notify_after_module_execution(static_cast<int>(self->modules.size()))) {
             return 0;
         }
-        std::fprintf(stderr, "[trap] modules=%zu\n", self->modules.size());
         if (!self->modules.empty()) {
             self->execute_next_module();
             return 0;

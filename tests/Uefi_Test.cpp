@@ -353,12 +353,17 @@ TEST(UefiOs, InstallThenHandleProtocolRoundTrip) {
 // the 24-byte header. gBS persists in r15 across the calls (rax carries
 // the statuses)
 // DISABLED_: the second dispatch to the same CheckEvent field (0x4000200)
-// faults with a 1-byte UC_MEM_READ_UNMAPPED at [0] while the first call to
-// the same field dispatched cleanly (the trace: pc=0x100282 r10=0x4000200
-// rcx=0 rax=0 after the create/check1/signal round had already ridden the
-// address hooks). The handlers themselves are registered and the first
-// three dispatches (create/check1/signal) flowed; the second-pass anomaly
-// needs the dispatch-path study before the fixture can go green.
+// mis-fires — the TB-restart study (the 2026-10 session) re-pinned the
+// mechanism: on the SECOND execution through a cached region the
+// UC_HOOK_CODE event at the call carries the PREVIOUS instruction's size
+// (the mov r10's 7) and the pc advances by that wrong size (0x10027b + 7 =
+// 0x100282), so the call r10 falls through and the dispatch never reaches
+// the field's address hook (the first three dispatches — create/check1/
+// signal — flowed cleanly through the same mechanism). The same
+// second-pass size-lag signature as the clone-join blocker (the taken-exit
+// event at the store carrying the jz's size=2). The raw probes (P6-P13)
+// exonerate the cached-TB restart itself, so the trigger is a port-side
+// hook/dispatch interaction — the open item narrows to isolating it.
 TEST(UefiOs, DISABLED_EventFamilyCreateSignalCheckClose) {
     const std::uint64_t kBase = 0x100000;
     const std::uint64_t kNotifyFnCell = kBase + 0x448;

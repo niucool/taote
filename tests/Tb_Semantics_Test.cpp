@@ -19,6 +19,8 @@
 #include <string_view>
 #include <vector>
 
+#include <cstdio>
+
 #include <unicorn/unicorn.h>
 #include <unicorn/x86.h>
 
@@ -64,9 +66,9 @@ struct Probe {
 
 void probe_code_hook(uc_engine* uc, std::uint64_t address, std::uint32_t size, void* user_data) {
     auto* self = static_cast<Probe*>(user_data);
-    (void)size;
     ++self->code_count;
     self->code_trace.push_back(address);
+    std::fprintf(stderr, "[psize] 0x%llx size=%u\n", static_cast<unsigned long long>(address), size);
     if (self->code_count > 64) {
         // the runaway guard: the trace has seen enough, stop
         uc_emu_stop(uc);
@@ -255,7 +257,14 @@ TEST(TbSemantics, MidTbRestartThenAbsoluteStore) {
 // child's first emu_start to begin on an address unicorn has never used as
 // a begin, which the clone continuation semantics cannot provide. DISABLED_
 // as the documented open question; see STATUS.md.
-TEST(TbSemantics, DISABLED_MidTbRestartOnCachedTb) {
+// P5 (re-run after the P7 bisect disproved the cached-TB theory): the
+// runaway guard in make_probe's code hook (code_count > 64 -> uc_emu_stop)
+// fired during phase 2's jmp$ loop, so the ORIGINAL P5 phase-3 stopped after
+// one instruction — the "cached-TB mis-execution" was the guard, not the
+// cache. This re-run defuses the guard for the phases after the syscall
+// stop (stop_in_hook off after phase 1; the code hook stays for the
+// observability) and asserts the taken-path store lands on the cached TB.
+TEST(TbSemantics, MidTbRestartOnCachedTb) {
     auto p = make_probe(true);
     ASSERT_NE(p.uc, nullptr);
 
@@ -272,28 +281,613 @@ TEST(TbSemantics, DISABLED_MidTbRestartOnCachedTb) {
     uc_mem_map(p.uc, 0x1002000, 0x1000, UC_PROT_ALL);
     const std::uint64_t kBodyEnd = kBase + body.size();
 
-    // the parent pass: the syscall stops the slice (the cached TB from 0x0)
+    // phase 1: the syscall stops the slice (the cached TB from 0x0)
     uc_emu_start(p.uc, kBase, kBodyEnd, 0, 0);
+    // defuse the guard + the stop for the phases after the syscall stop:
+    // the syscall hook stays but the rax flow never re-enters it; the code
+    // hook's runaway budget resets per phase
+    p.stop_in_hook = false;
 
-    // the parent's second slice: the mid-TB restart at the syscall+2 — this
-    // pass CACHES the TB starting at the syscall+2 (the not-taken path)
+    // phase 2: the not-taken pass (rax=2001) — the TB from +0x02 caches
     const std::uint64_t child_tid = 2001;
     uc_reg_write(p.uc, UC_X86_REG_RAX, &child_tid);
+    p.code_count = 0;
     const uc_err err2 = uc_emu_start(p.uc, kSyscall + 2, kBodyEnd, 0, 4096);
     (void)err2;
 
-    // the child pass: the SAME begin address (the cached TB), the rax=0
+    // phase 3: the SAME begin address (the cached TB), the rax=0
     const std::uint64_t zero = 0;
     const std::uint64_t child_sp = 0x1203000;
     uc_mem_map(p.uc, child_sp - 0x1000, 0x1000, UC_PROT_ALL);
     uc_reg_write(p.uc, UC_X86_REG_RAX, &zero);
     uc_reg_write(p.uc, UC_X86_REG_RSP, &child_sp);
-    // the fix: the tb flush before the child's restart (the P5 direction 2)
-    uc_ctl_flush_tb(p.uc);
+    p.code_count = 0;
     const uc_err err = uc_emu_start(p.uc, kSyscall + 2, kBodyEnd, 0, 4096);
 
     std::vector<std::uint8_t> got(4, 0);
     uc_mem_read(p.uc, 0x1002000, got.data(), 4);
+    EXPECT_EQ(err, UC_ERR_OK);
+    EXPECT_EQ(got[0], 42);
+}
+
+// P6: the instrumented P5 — the per-phase code traces printed to stderr so
+// the mis-execution mechanism is observable. The phases: (1) the syscall
+// stop (the TB from 0x00 cached), (2) the parent's second slice from +0x02
+// (rax=2001, the not-taken path — the TB from +0x02 cached), (3) the child
+// restart at +0x02 with rax=0 (the taken path expected: the jz to +0x0e and
+// the store). The trace after each phase shows what executed; the child's
+// trace tells whether the jz fell through (the stale-TB theory) or the TB
+// never ran (the restart-refused theory).
+static void probe_dump_trace(const char* tag, const std::vector<std::uint64_t>& trace) {
+    std::fprintf(stderr, "[%s]", tag);
+    for (const auto pc : trace) {
+        std::fprintf(stderr, " 0x%llx", static_cast<unsigned long long>(pc));
+    }
+    std::fprintf(stderr, "\n");
+}
+
+TEST(TbSemantics, DISABLED_P6CachedTbRestartInstrumented) {
+    auto p = make_probe(true);
+    ASSERT_NE(p.uc, nullptr);
+
+    std::string body{
+        '\x0F', '\x05',                      // +0x00 syscall
+        '\x48', '\x85', '\xC0',              // +0x02 test rax, rax
+        '\x74', '\x07',                      // +0x05 jz +7 (to +0x0e)
+        '\x90', '\x90', '\x90',              // +0x07 nops (the parent path)
+        '\xEB', '\xFE',                      // +0x0a jmp $
+        '\x90', '\x90',                      // +0x0c pad
+        '\xC7', '\x04', '\x25', '\x00', '\x20', '\x00', '\x01', '\x2A', '\x00', '\x00', '\x00',  // +0x0e store
+        '\xEB', '\xFE'};                     // +0x19 jmp $
+    uc_mem_write(p.uc, kBase, body.data(), body.size());
+    uc_mem_map(p.uc, 0x1002000, 0x1000, UC_PROT_ALL);
+    const std::uint64_t kBodyEnd = kBase + body.size();
+
+    // phase 1: the syscall stop
+    uc_emu_start(p.uc, kBase, kBodyEnd, 0, 0);
+    probe_dump_trace("p6-phase1", p.code_trace);
+    p.code_trace.clear();
+
+    // phase 2: the parent's second slice (rax=2001, the not-taken path)
+    const std::uint64_t child_tid = 2001;
+    uc_reg_write(p.uc, UC_X86_REG_RAX, &child_tid);
+    uc_emu_start(p.uc, kSyscall + 2, kBodyEnd, 0, 4096);
+    probe_dump_trace("p6-phase2", p.code_trace);
+    const auto pc2 = reg(p.uc, UC_X86_REG_RIP);
+    std::fprintf(stderr, "[p6-phase2-end] pc=0x%llx\n", static_cast<unsigned long long>(pc2));
+    p.code_trace.clear();
+
+    // phase 3: the child restart at the SAME begin (rax=0, the taken path)
+    const std::uint64_t zero = 0;
+    const std::uint64_t child_sp = 0x1203000;
+    uc_mem_map(p.uc, child_sp - 0x1000, 0x1000, UC_PROT_ALL);
+    uc_reg_write(p.uc, UC_X86_REG_RAX, &zero);
+    uc_reg_write(p.uc, UC_X86_REG_RSP, &child_sp);
+    const uc_err err = uc_emu_start(p.uc, kSyscall + 2, kBodyEnd, 0, 4096);
+    probe_dump_trace("p6-phase3", p.code_trace);
+    const auto pc3 = reg(p.uc, UC_X86_REG_RIP);
+    std::fprintf(stderr, "[p6-phase3-end] err=%s pc=0x%llx\n", uc_strerror(err),
+                 static_cast<unsigned long long>(pc3));
+
+    std::vector<std::uint8_t> got(4, 0);
+    uc_mem_read(p.uc, 0x1002000, got.data(), 4);
+    std::fprintf(stderr, "[p6-store] %u\n", static_cast<unsigned>(got[0]));
+    EXPECT_EQ(err, UC_ERR_OK);
+    EXPECT_EQ(got[0], 42);
+}
+
+// P7: the poisoning bisect — what about phase 2 poisons phase 3? Three
+// fresh-uc experiments, each phase-1 = the syscall stop, then a phase-2 run
+// from +0x02 with a DIFFERENT exit cause, then the phase-3 child restart at
+// +0x02 (rax=0, the taken path):
+//   E1  the phase-2 exit = the natural until (until=0x100a, no count)
+//   E2  the phase-2 exit = uc_emu_stop from a code hook at 0x100a
+//   E3  the phase-2 exit = the count cap (the P5 shape, the known-failing
+//       control)
+// The store-lands answer per experiment isolates the exit-cause family that
+// poisons the cached-TB restart.
+struct P7Result {
+    uc_err err = UC_ERR_OK;
+    std::uint32_t store = 0;
+    std::vector<std::uint64_t> trace;
+    std::uint64_t pc = 0;
+};
+
+enum class P7Exit { Until, StopHook, Count };
+
+static P7Result p7_run(P7Exit exit_kind) {
+    P7Result out;
+    Probe p;
+    p.stop_in_hook = true;
+    if (exit_kind == P7Exit::StopHook) {
+        // the code hook uc_emu_stops at 0x100a (the jmp$ address) on the
+        // phase-2 pass only
+        p.code_count = 0;
+    }
+    uc_open(UC_ARCH_X86, UC_MODE_64, &p.uc);
+    uc_mem_map(p.uc, kBase, 0x1000, UC_PROT_ALL);
+    std::string body{
+        '\x0F', '\x05',
+        '\x48', '\x85', '\xC0',
+        '\x74', '\x07',
+        '\x90', '\x90', '\x90',
+        '\xEB', '\xFE',
+        '\x90', '\x90',
+        '\xC7', '\x04', '\x25', '\x00', '\x20', '\x00', '\x01', '\x2A', '\x00', '\x00', '\x00',
+        '\xEB', '\xFE'};
+    uc_mem_write(p.uc, kBase, body.data(), body.size());
+    uc_mem_map(p.uc, 0x1002000, 0x1000, UC_PROT_ALL);
+    uc_mem_map(p.uc, 0x1202000, 0x2000, UC_PROT_ALL);
+    const std::uint64_t kBodyEnd = kBase + body.size();
+
+    uc_hook_add(p.uc, &p.insn_hook, UC_HOOK_INSN, reinterpret_cast<void*>(probe_syscall_hook), &p, 1, 0,
+                UC_X86_INS_SYSCALL);
+
+    // the phase-2 stop-hook rides a dedicated UC_HOOK_CODE bound to 0x100a
+    // (the address-bound hook stops the phase-2 pass; the guard flag keeps
+    // it inert for the phase-3 pass)
+    static bool p7_stop_armed = false;
+    p7_stop_armed = (exit_kind == P7Exit::StopHook);
+    static Probe* p7_owner = nullptr;
+    p7_owner = &p;
+    auto* stop_hook_fn = +[](uc_engine* uc, std::uint64_t address, std::uint32_t size, void* user_data) {
+        (void)address;
+        (void)size;
+        auto* self = static_cast<Probe*>(user_data);
+        self->code_trace.push_back(address);
+        if (p7_stop_armed && address == kBase + 0x0a) {
+            uc_emu_stop(uc);
+        }
+        if (self->code_trace.size() > 256) {
+            uc_emu_stop(uc);
+        }
+    };
+    uc_hook code_hook2 = 0;
+    uc_hook_add(p.uc, &code_hook2, UC_HOOK_CODE, reinterpret_cast<void*>(stop_hook_fn), &p, 1, 0);
+
+    // phase 1: the syscall stop
+    uc_emu_start(p.uc, kBase, kBodyEnd, 0, 0);
+
+    // phase 2: the not-taken pass (rax=2001)
+    const std::uint64_t child_tid = 2001;
+    uc_reg_write(p.uc, UC_X86_REG_RAX, &child_tid);
+    switch (exit_kind) {
+    case P7Exit::Until:
+        uc_emu_start(p.uc, kSyscall + 2, kBase + 0x0a, 0, 0);
+        break;
+    case P7Exit::StopHook:
+        p7_stop_armed = true;
+        uc_emu_start(p.uc, kSyscall + 2, kBodyEnd, 0, 0);
+        p7_stop_armed = false;
+        break;
+    case P7Exit::Count:
+        uc_emu_start(p.uc, kSyscall + 2, kBodyEnd, 0, 4096);
+        break;
+    }
+    p.code_trace.clear();
+
+    // phase 3: the child restart at the same begin (rax=0, the taken path)
+    const std::uint64_t zero = 0;
+    uc_reg_write(p.uc, UC_X86_REG_RAX, &zero);
+    const uc_err err = uc_emu_start(p.uc, kSyscall + 2, kBodyEnd, 0, 4096);
+    out.err = err;
+    out.trace = p.code_trace;
+    out.pc = reg(p.uc, UC_X86_REG_RIP);
+    std::vector<std::uint8_t> got(4, 0);
+    uc_mem_read(p.uc, 0x1002000, got.data(), 4);
+    out.store = got[0];
+    uc_close(p.uc);
+    p.uc = nullptr;
+    return out;
+}
+
+TEST(TbSemantics, DISABLED_P7PoisoningBisect) {
+    const auto e1 = p7_run(P7Exit::Until);
+    std::fprintf(stderr, "[p7-E1-until] err=%s pc=0x%llx store=%u trace0=0x%llx n=%zu\n",
+                 uc_strerror(e1.err), static_cast<unsigned long long>(e1.pc), e1.store,
+                 e1.trace.empty() ? 0ull : static_cast<unsigned long long>(e1.trace[0]), e1.trace.size());
+
+    const auto e2 = p7_run(P7Exit::StopHook);
+    std::fprintf(stderr, "[p7-E2-stophook] err=%s pc=0x%llx store=%u trace0=0x%llx n=%zu\n",
+                 uc_strerror(e2.err), static_cast<unsigned long long>(e2.pc), e2.store,
+                 e2.trace.empty() ? 0ull : static_cast<unsigned long long>(e2.trace[0]), e2.trace.size());
+
+    const auto e3 = p7_run(P7Exit::Count);
+    std::fprintf(stderr, "[p7-E3-count] err=%s pc=0x%llx store=%u trace0=0x%llx n=%zu\n",
+                 uc_strerror(e3.err), static_cast<unsigned long long>(e3.pc), e3.store,
+                 e3.trace.empty() ? 0ull : static_cast<unsigned long long>(e3.trace[0]), e3.trace.size());
+}
+
+// P8: the corrected cached-TB model — the parent's TB from the syscall
+// CONTINUES past the syscall inside the SAME pass (the INSN hook returns,
+// unicorn advances into the body — the TB [0x00..0x0a] spans the syscall AND
+// the body), so the +0x02 begin the child uses later sits INTERIOR to a
+// cached TB (P5's phase-2 modeled the +0x02 TB as an emu_start BEGIN, which
+// the clone never does). Phases: (1) emu_start(0x00) with the syscall hook
+// NOT stopping — the TB continues through the not-taken loop (rax=2001);
+// (2) the child emu_start(+0x02) with rax=0 — the taken path expected to
+// reach the store.
+TEST(TbSemantics, DISABLED_P8InsnContinuationCachedTb) {
+    auto p = make_probe(true);
+    p.stop_in_hook = false;  // the syscall hook records and returns — the
+                             // TB continues past the syscall
+    ASSERT_NE(p.uc, nullptr);
+
+    std::string body{
+        '\x0F', '\x05',                      // +0x00 syscall
+        '\x48', '\x85', '\xC0',              // +0x02 test rax, rax
+        '\x74', '\x07',                      // +0x05 jz +7 (to +0x0e)
+        '\x90', '\x90', '\x90',              // +0x07 nops (the parent path)
+        '\xEB', '\xFE',                      // +0x0a jmp $
+        '\x90', '\x90',                      // +0x0c pad
+        '\xC7', '\x04', '\x25', '\x00', '\x20', '\x00', '\x01', '\x2A', '\x00', '\x00', '\x00',  // +0x0e store
+        '\xEB', '\xFE'};                     // +0x19 jmp $
+    uc_mem_write(p.uc, kBase, body.data(), body.size());
+    uc_mem_map(p.uc, 0x1002000, 0x1000, UC_PROT_ALL);
+    const std::uint64_t kBodyEnd = kBase + body.size();
+
+    // phase 1: the parent's pass — the TB from 0x00 spans the syscall and
+    // the not-taken body; the count caps the jmp$ loop
+    const std::uint64_t parent_rax = 2001;
+    uc_reg_write(p.uc, UC_X86_REG_RAX, &parent_rax);
+    uc_emu_start(p.uc, kBase, kBodyEnd, 0, 4096);
+
+    // phase 2: the child's restart at +0x02 (interior to the cached TB),
+    // rax=0 — the taken path to the store (the guard budget resets: the
+    // phase-1 loop burned it — the pinned guard artifact)
+    p.code_count = 0;
+    p.code_trace.clear();
+    const std::uint64_t zero = 0;
+    uc_reg_write(p.uc, UC_X86_REG_RAX, &zero);
+    const uc_err err = uc_emu_start(p.uc, kSyscall + 2, kBodyEnd, 0, 4096);
+    probe_dump_trace("p8-phase2", p.code_trace);
+    const auto pc = reg(p.uc, UC_X86_REG_RIP);
+    std::fprintf(stderr, "[p8-end] err=%s pc=0x%llx\n", uc_strerror(err), static_cast<unsigned long long>(pc));
+
+    std::vector<std::uint8_t> got(4, 0);
+    uc_mem_read(p.uc, 0x1002000, got.data(), 4);
+    std::fprintf(stderr, "[p8-store] %u\n", static_cast<unsigned>(got[0]));
+    EXPECT_EQ(err, UC_ERR_OK);
+    EXPECT_EQ(got[0], 42);
+}
+
+// P9: the P8 shape plus the parent's pass ending via an INSN-hook stop (the
+// futex-park shape — the only P7 variant untested) and the per-event hook
+// size printed. The body: the clone syscall at +0x00 (the hook returns — the
+// TB continues) and a second syscall at +0x0a whose INSN hook uc_emu_stops
+// (the parent's park). The child then restarts at +0x02 (rax=0) and the
+// taken-path store's hook size tells whether the INSN-stop poisons the
+// taken-path entry decode.
+TEST(TbSemantics, DISABLED_P9InsnStopPoisonsTakenEntry) {
+    Probe p;
+    p.stop_in_hook = false;  // the first syscall's hook: records, returns
+    uc_open(UC_ARCH_X86, UC_MODE_64, &p.uc);
+    uc_mem_map(p.uc, kBase, 0x1000, UC_PROT_ALL);
+
+    //   +0x00: 0F 05                 syscall (the hook returns — the TB continues)
+    //   +0x02: 48 85 C0              test rax, rax
+    //   +0x05: 74 07                 jz +7 (to +0x0e)
+    //   +0x07: 90 90                 nop nop
+    //   +0x09: 0F 05                 syscall (the INSN hook stops — the park)
+    //   +0x0b: 90 90                 nop nop
+    //   +0x0d: (the pad)
+    //   +0x0e: C7 04 25 00 20 00 01 2A 00 00 00   mov dword [0x1002000], 42
+    //   +0x19: EB FE                 jmp $
+    std::string body{
+        '\x0F', '\x05',
+        '\x48', '\x85', '\xC0',
+        '\x74', '\x07',
+        '\x90', '\x90',
+        '\x0F', '\x05',
+        '\x90', '\x90',
+        '\x90',
+        '\xC7', '\x04', '\x25', '\x00', '\x20', '\x00', '\x01', '\x2A', '\x00', '\x00', '\x00',
+        '\xEB', '\xFE'};
+    uc_mem_write(p.uc, kBase, body.data(), body.size());
+    uc_mem_map(p.uc, 0x1002000, 0x1000, UC_PROT_ALL);
+    const std::uint64_t kBodyEnd = kBase + body.size();
+
+    // the INSN hook: the first syscall returns (pass 1), the second stops
+    p.stop_in_hook = false;
+    uc_hook_add(p.uc, &p.insn_hook, UC_HOOK_INSN, reinterpret_cast<void*>(probe_syscall_hook), &p, 1, 0,
+                UC_X86_INS_SYSCALL);
+    uc_hook_add(p.uc, &p.code_hook, UC_HOOK_CODE, reinterpret_cast<void*>(probe_code_hook), &p, 1, 0);
+
+    // phase 1: the parent (rax=2001) — the clone-syscall hook returns, the
+    // body runs to the second syscall whose hook stops the pass
+    const std::uint64_t parent_rax = 2001;
+    uc_reg_write(p.uc, UC_X86_REG_RAX, &parent_rax);
+    uc_emu_start(p.uc, kBase, kBodyEnd, 0, 4096);
+    probe_dump_trace("p9-phase1", p.code_trace);
+    p.code_trace.clear();
+    p.code_count = 0;
+
+    // phase 2: the child restart at +0x02 (rax=0) — the taken path to the
+    // store; the hook sizes print per event
+    const std::uint64_t zero = 0;
+    uc_reg_write(p.uc, UC_X86_REG_RAX, &zero);
+    const uc_err err = uc_emu_start(p.uc, kSyscall + 2, kBodyEnd, 0, 4096);
+    probe_dump_trace("p9-phase2", p.code_trace);
+    const auto pc = reg(p.uc, UC_X86_REG_RIP);
+    std::fprintf(stderr, "[p9-end] err=%s pc=0x%llx\n", uc_strerror(err), static_cast<unsigned long long>(pc));
+
+    std::vector<std::uint8_t> got(4, 0);
+    uc_mem_read(p.uc, 0x1002000, got.data(), 4);
+    std::fprintf(stderr, "[p9-store] %u\n", static_cast<unsigned>(got[0]));
+    EXPECT_EQ(err, UC_ERR_OK);
+    EXPECT_EQ(got[0], 42);
+}
+
+// P10: the P9 shape with the PORT's emu_start arguments — until =
+// 0xffffffffffffffff (the port's thread-slice exit_point) and the code-hook
+// sizes printed. The until changes unicorn's exit/translate path; the taken
+// path's hook size at the store tells whether the until=MAX shape mis-decodes
+// the taken entry.
+TEST(TbSemantics, DISABLED_P10UntilMaxTakenEntry) {
+    Probe p;
+    p.stop_in_hook = false;
+    uc_open(UC_ARCH_X86, UC_MODE_64, &p.uc);
+    uc_mem_map(p.uc, kBase, 0x1000, UC_PROT_ALL);
+
+    std::string body{
+        '\x0F', '\x05',
+        '\x48', '\x85', '\xC0',
+        '\x74', '\x07',
+        '\x90', '\x90',
+        '\x0F', '\x05',
+        '\x90', '\x90',
+        '\x90',
+        '\xC7', '\x04', '\x25', '\x00', '\x20', '\x00', '\x01', '\x2A', '\x00', '\x00', '\x00',
+        '\xEB', '\xFE'};
+    uc_mem_write(p.uc, kBase, body.data(), body.size());
+    uc_mem_map(p.uc, 0x1002000, 0x1000, UC_PROT_ALL);
+
+    p.stop_in_hook = false;
+    uc_hook_add(p.uc, &p.insn_hook, UC_HOOK_INSN, reinterpret_cast<void*>(probe_syscall_hook), &p, 1, 0,
+                UC_X86_INS_SYSCALL);
+    uc_hook_add(p.uc, &p.code_hook, UC_HOOK_CODE, reinterpret_cast<void*>(probe_code_hook), &p, 1, 0);
+
+    // phase 1: the parent (rax=2001) — runs to the second syscall's stop
+    const std::uint64_t parent_rax = 2001;
+    uc_reg_write(p.uc, UC_X86_REG_RAX, &parent_rax);
+    uc_emu_start(p.uc, kBase, 0xffffffffffffffffull, 0, 4096);
+    p.code_trace.clear();
+    p.code_count = 0;
+
+    // phase 2: the child restart at +0x02 (rax=0) — the PORT's argument shape
+    const std::uint64_t zero = 0;
+    uc_reg_write(p.uc, UC_X86_REG_RAX, &zero);
+    const uc_err err = uc_emu_start(p.uc, kSyscall + 2, 0xffffffffffffffffull, 0, 4096);
+    probe_dump_trace("p10-phase2", p.code_trace);
+    const auto pc = reg(p.uc, UC_X86_REG_RIP);
+    std::fprintf(stderr, "[p10-end] err=%s pc=0x%llx\n", uc_strerror(err), static_cast<unsigned long long>(pc));
+
+    std::vector<std::uint8_t> got(4, 0);
+    uc_mem_read(p.uc, 0x1002000, got.data(), 4);
+    std::fprintf(stderr, "[p10-store] %u\n", static_cast<unsigned>(got[0]));
+    EXPECT_EQ(err, UC_ERR_OK);
+    EXPECT_EQ(got[0], 42);
+}
+
+// P11: the P10 shape plus the port's clone-handler RIP write inside the
+// syscall INSN hook (the parent-compensation: set RIP = the syscall address
+// so the post-hook +size re-add lands the parent on the continuation). The
+// RIP write inside the hook is the one remaining port-side variable; if the
+// child's taken-path entry at the store then mis-decodes (size=2, the
+// mid-instruction walk) the clone fault reproduces raw.
+static uc_engine* p11_uc = nullptr;
+static void p11_syscall_hook(uc_engine* uc, void* user_data) {
+    auto* self = static_cast<Probe*>(user_data);
+    std::uint64_t pc = 0;
+    uc_reg_read(uc, UC_X86_REG_RIP, &pc);
+    self->syscall_fired.push_back(pc);
+    if (pc == kBase) {
+        // the clone shape: the handler writes RIP back to the syscall address
+        // (the -2 compensation) INSIDE the hook; the post-hook re-add lands
+        // the parent at the continuation
+        uc_reg_write(uc, UC_X86_REG_RIP, &pc);
+    } else {
+        // the futex-park shape: the second syscall stops the parent pass
+        uc_emu_stop(uc);
+    }
+}
+
+TEST(TbSemantics, DISABLED_P11HookRipWriteCachedTb) {
+    Probe p;
+    uc_open(UC_ARCH_X86, UC_MODE_64, &p.uc);
+    uc_mem_map(p.uc, kBase, 0x1000, UC_PROT_ALL);
+
+    std::string body{
+        '\x0F', '\x05',
+        '\x48', '\x85', '\xC0',
+        '\x74', '\x07',
+        '\x90', '\x90',
+        '\x0F', '\x05',
+        '\x90', '\x90',
+        '\x90',
+        '\xC7', '\x04', '\x25', '\x00', '\x20', '\x00', '\x01', '\x2A', '\x00', '\x00', '\x00',
+        '\xEB', '\xFE'};
+    uc_mem_write(p.uc, kBase, body.data(), body.size());
+    uc_mem_map(p.uc, 0x1002000, 0x1000, UC_PROT_ALL);
+
+    uc_hook_add(p.uc, &p.insn_hook, UC_HOOK_INSN, reinterpret_cast<void*>(p11_syscall_hook), &p, 1, 0,
+                UC_X86_INS_SYSCALL);
+    uc_hook_add(p.uc, &p.code_hook, UC_HOOK_CODE, reinterpret_cast<void*>(probe_code_hook), &p, 1, 0);
+
+    // phase 1: the parent (rax=2001) — the clone hook writes RIP=+0x00 inside
+    // the hook (the port's compensation), the TB continues to the park
+    const std::uint64_t parent_rax = 2001;
+    uc_reg_write(p.uc, UC_X86_REG_RAX, &parent_rax);
+    uc_emu_start(p.uc, kBase, 0xffffffffffffffffull, 0, 4096);
+    p.code_trace.clear();
+    p.code_count = 0;
+
+    // phase 2: the child restart at +0x02 (rax=0) — the taken path
+    const std::uint64_t zero = 0;
+    uc_reg_write(p.uc, UC_X86_REG_RAX, &zero);
+    const uc_err err = uc_emu_start(p.uc, kSyscall + 2, 0xffffffffffffffffull, 0, 4096);
+    probe_dump_trace("p11-phase2", p.code_trace);
+    const auto pc = reg(p.uc, UC_X86_REG_RIP);
+    std::fprintf(stderr, "[p11-end] err=%s pc=0x%llx\n", uc_strerror(err), static_cast<unsigned long long>(pc));
+
+    std::vector<std::uint8_t> got(4, 0);
+    uc_mem_read(p.uc, 0x1002000, got.data(), 4);
+    std::fprintf(stderr, "[p11-store] %u\n", static_cast<unsigned>(got[0]));
+    EXPECT_EQ(err, UC_ERR_OK);
+    EXPECT_EQ(got[0], 42);
+}
+
+// P12: the P11 shape plus the port's full uc_context_save/restore switch.
+// The port's thread switch snapshots the parent with uc_context_save INSIDE
+// the INSN hook (after the clone handler) and uc_context_restores the child
+// before its slice — a mechanism the earlier probes never exercised. If the
+// child's taken-path entry at the store mis-decodes (the size=2 hook event,
+// the mid-instruction walk) the clone fault reproduces raw.
+static uc_context* p12_child_ctx = nullptr;
+static void p12_syscall_hook(uc_engine* uc, void* user_data) {
+    auto* self = static_cast<Probe*>(user_data);
+    std::uint64_t pc = 0;
+    uc_reg_read(uc, UC_X86_REG_RIP, &pc);
+    self->syscall_fired.push_back(pc);
+    if (pc == kBase) {
+        // the clone shape: the child's context snapshots (rax=0, the pc at
+        // the continuation), then the parent's RIP compensation inside the
+        // hook (the -2 + the re-add = the continuation)
+        const std::uint64_t zero = 0;
+        uc_reg_write(uc, UC_X86_REG_RAX, &zero);
+        uc_context_alloc(uc, &p12_child_ctx);
+        uc_context_save(uc, p12_child_ctx);  // the child's pc = the continuation
+        const std::uint64_t parent_rax = 2001;
+        uc_reg_write(uc, UC_X86_REG_RAX, &parent_rax);
+        uc_reg_write(uc, UC_X86_REG_RIP, &pc);  // the -2 compensation
+    } else {
+        uc_emu_stop(uc);
+    }
+}
+
+TEST(TbSemantics, DISABLED_P12ContextSwitchTakenEntry) {
+    Probe p;
+    uc_open(UC_ARCH_X86, UC_MODE_64, &p.uc);
+    uc_mem_map(p.uc, kBase, 0x1000, UC_PROT_ALL);
+
+    std::string body{
+        '\x0F', '\x05',
+        '\x48', '\x85', '\xC0',
+        '\x74', '\x07',
+        '\x90', '\x90',
+        '\x0F', '\x05',
+        '\x90', '\x90',
+        '\x90',
+        '\xC7', '\x04', '\x25', '\x00', '\x20', '\x00', '\x01', '\x2A', '\x00', '\x00', '\x00',
+        '\xEB', '\xFE'};
+    uc_mem_write(p.uc, kBase, body.data(), body.size());
+    uc_mem_map(p.uc, 0x1002000, 0x1000, UC_PROT_ALL);
+    uc_mem_map(p.uc, 0x1202000, 0x2000, UC_PROT_ALL);
+
+    uc_hook_add(p.uc, &p.insn_hook, UC_HOOK_INSN, reinterpret_cast<void*>(p12_syscall_hook), &p, 1, 0,
+                UC_X86_INS_SYSCALL);
+    uc_hook_add(p.uc, &p.code_hook, UC_HOOK_CODE, reinterpret_cast<void*>(probe_code_hook), &p, 1, 0);
+
+    // the parent's pass: the clone hook (the child ctx snapshot + the RIP
+    // compensation) then the park at the second syscall
+    const std::uint64_t parent_rax = 2001;
+    uc_reg_write(p.uc, UC_X86_REG_RAX, &parent_rax);
+    uc_emu_start(p.uc, kBase, 0xffffffffffffffffull, 0, 4096);
+    p.code_trace.clear();
+    p.code_count = 0;
+
+    // the child's slice: the context restore (rax=0, the pc at the
+    // continuation) then emu_start at the continuation pc
+    uc_context_restore(p.uc, p12_child_ctx);
+    const std::uint64_t child_sp = 0x1203000;
+    uc_reg_write(p.uc, UC_X86_REG_RSP, &child_sp);
+    const uc_err err = uc_emu_start(p.uc, kSyscall + 2, 0xffffffffffffffffull, 0, 4096);
+    probe_dump_trace("p12-phase2", p.code_trace);
+    const auto pc = reg(p.uc, UC_X86_REG_RIP);
+    std::fprintf(stderr, "[p12-end] err=%s pc=0x%llx\n", uc_strerror(err), static_cast<unsigned long long>(pc));
+
+    std::vector<std::uint8_t> got(4, 0);
+    uc_mem_read(p.uc, 0x1002000, got.data(), 4);
+    std::fprintf(stderr, "[p12-store] %u\n", static_cast<unsigned>(got[0]));
+    uc_context_free(p12_child_ctx);
+    p12_child_ctx = nullptr;
+    EXPECT_EQ(err, UC_ERR_OK);
+    EXPECT_EQ(got[0], 42);
+}
+
+// P13: the P12 shape plus the port's emu_stop INSIDE the clone hook (the
+// port's handler stops the parent's pass right after the child snapshot —
+// P12 let the parent continue to the second syscall). The child's slice then
+// starts from a ctx saved inside a hook that ended its own emu_start.
+static uc_context* p13_child_ctx = nullptr;
+static void p13_syscall_hook(uc_engine* uc, void* user_data) {
+    auto* self = static_cast<Probe*>(user_data);
+    std::uint64_t pc = 0;
+    uc_reg_read(uc, UC_X86_REG_RIP, &pc);
+    self->syscall_fired.push_back(pc);
+    if (pc == kBase) {
+        // the port's clone shape: the child ctx (rax=0, the pc at the
+        // continuation = the post-advance position), then the parent's RIP
+        // compensation, then the stop INSIDE the hook
+        const std::uint64_t zero = 0;
+        uc_reg_write(uc, UC_X86_REG_RAX, &zero);
+        uc_context_alloc(uc, &p13_child_ctx);
+        uc_context_save(uc, p13_child_ctx);
+        const std::uint64_t parent_rax = 2001;
+        uc_reg_write(uc, UC_X86_REG_RAX, &parent_rax);
+        const std::uint64_t syscall_pc = kBase;  // the -2 compensation target
+        uc_reg_write(uc, UC_X86_REG_RIP, &syscall_pc);
+        uc_emu_stop(uc);
+    } else {
+        uc_emu_stop(uc);
+    }
+}
+
+TEST(TbSemantics, DISABLED_P13StopInCloneHook) {
+    Probe p;
+    uc_open(UC_ARCH_X86, UC_MODE_64, &p.uc);
+    uc_mem_map(p.uc, kBase, 0x1000, UC_PROT_ALL);
+
+    std::string body{
+        '\x0F', '\x05',
+        '\x48', '\x85', '\xC0',
+        '\x74', '\x07',
+        '\x90', '\x90',
+        '\x0F', '\x05',
+        '\x90', '\x90',
+        '\x90',
+        '\xC7', '\x04', '\x25', '\x00', '\x20', '\x00', '\x01', '\x2A', '\x00', '\x00', '\x00',
+        '\xEB', '\xFE'};
+    uc_mem_write(p.uc, kBase, body.data(), body.size());
+    uc_mem_map(p.uc, 0x1002000, 0x1000, UC_PROT_ALL);
+    uc_mem_map(p.uc, 0x1202000, 0x2000, UC_PROT_ALL);
+
+    uc_hook_add(p.uc, &p.insn_hook, UC_HOOK_INSN, reinterpret_cast<void*>(p13_syscall_hook), &p, 1, 0,
+                UC_X86_INS_SYSCALL);
+    uc_hook_add(p.uc, &p.code_hook, UC_HOOK_CODE, reinterpret_cast<void*>(probe_code_hook), &p, 1, 0);
+
+    // the parent's pass: the clone hook stops it inside the hook
+    const std::uint64_t parent_rax = 2001;
+    uc_reg_write(p.uc, UC_X86_REG_RAX, &parent_rax);
+    uc_emu_start(p.uc, kBase, 0xffffffffffffffffull, 0, 4096);
+    p.code_trace.clear();
+    p.code_count = 0;
+
+    // the child's slice: the ctx restore (rax=0, the pc at the continuation)
+    // then emu_start at the continuation pc
+    uc_context_restore(p.uc, p13_child_ctx);
+    const std::uint64_t child_sp = 0x1203000;
+    uc_reg_write(p.uc, UC_X86_REG_RSP, &child_sp);
+    const uc_err err = uc_emu_start(p.uc, kSyscall + 2, 0xffffffffffffffffull, 0, 4096);
+    probe_dump_trace("p13-phase2", p.code_trace);
+    const auto pc = reg(p.uc, UC_X86_REG_RIP);
+    std::fprintf(stderr, "[p13-end] err=%s pc=0x%llx\n", uc_strerror(err), static_cast<unsigned long long>(pc));
+
+    std::vector<std::uint8_t> got(4, 0);
+    uc_mem_read(p.uc, 0x1002000, got.data(), 4);
+    std::fprintf(stderr, "[p13-store] %u\n", static_cast<unsigned>(got[0]));
+    uc_context_free(p13_child_ctx);
+    p13_child_ctx = nullptr;
     EXPECT_EQ(err, UC_ERR_OK);
     EXPECT_EQ(got[0], 42);
 }
