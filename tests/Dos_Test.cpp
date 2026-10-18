@@ -90,9 +90,9 @@ TEST(DosOs, ClockServicesReturnBcdTimeAndTicks) {
         0xB4, 0x02,        // mov ah, 02
         0xCD, 0x1A,        // int 1ah
         0x88, 0x2E, 0x30, 0x01,  // mov [0x0130], ch
-        0x88, 0x2E, 0x32, 0x01,  // mov [0x0132], cl
+        0x88, 0x0E, 0x32, 0x01,  // mov [0x0132], cl (modrm reg=CL=0x0E)
         0x88, 0x36, 0x34, 0x01,  // mov [0x0134], dh
-        0x88, 0x1E, 0x36, 0x01,  // mov [0x0136], dl
+        0x88, 0x16, 0x36, 0x01,  // mov [0x0136], dl
         0xB4, 0x00,        // mov ah, 00
         0xCD, 0x1A,        // int 1ah
         0xA2, 0x38, 0x01,  // mov [0x0138], al
@@ -121,4 +121,52 @@ TEST(DosOs, ClockServicesReturnBcdTimeAndTicks) {
     // the ticks read: al=0 (the midnight rollover flag), the cx:dx pair
     // carries the elapsed ticks
     EXPECT_EQ(ql.mem().read_ptr(data_base + 8, 1), 0u);
+}
+
+// the int 19h MBR boot ride: the MBR image loads at 0x7C00 (the loader's
+// MBR branch: cs=0, ip=0x7c00, dx=0x80, the QlDisk mapping); the MBR stores
+// dl, bumps the pass counter and re-boots through int 19h once (the reload
+// reads the same file back through the QlDisk), then exits through
+// int 21h ah=4c on the second pass
+//   MBR: mov [0x0130], dl | mov al, [0x0132] | inc al | mov [0x0132], al |
+//        cmp al, 2 | je done | int 19h | done: mov ah,4c | int 21h
+TEST(DosOs, MbrBootRebootsThroughInt19) {
+    const std::vector<std::uint8_t> mbr_code = {
+        0x88, 0x16, 0x30, 0x01,  // mov [0x0130], dl (modrm reg=DL=0x16)
+        0xA0, 0x32, 0x01,        // mov al, [0x0132]
+        0xFE, 0xC0,              // inc al
+        0xA2, 0x32, 0x01,        // mov [0x0132], al
+        0x3C, 0x02,              // cmp al, 2
+        0x74, 0x04,              // je done (+4)
+        0xCD, 0x19,              // int 19h
+        0xEB, 0x00,              // jmp over (unreached on pass 1)
+        0xB4, 0x4C,              // done: mov ah, 4c
+        0xCD, 0x21,              // int 21h
+    };
+    std::vector<std::uint8_t> mbr(512, 0x90);
+    std::copy(mbr_code.begin(), mbr_code.end(), mbr.begin());
+    mbr[510] = 0x55;
+    mbr[511] = 0xAA;
+
+    const auto rootfs = std::filesystem::temp_directory_path() / kDosRootfs;
+    std::filesystem::create_directories(rootfs);
+    const auto mbr_path = rootfs / "DISK.DOS_MBR";
+    {
+        std::ofstream f(mbr_path, std::ios::binary);
+        f.write(reinterpret_cast<const char*>(mbr.data()), static_cast<std::streamsize>(mbr.size()));
+    }
+
+    QilingOptions options;
+    options.rootfs = rootfs.string();
+    options.argv = {mbr_path.string()};
+    options.ostype = QL_OS::DOS;
+    options.archtype = QL_ARCH::A8086;
+    Qiling ql{options};
+
+    ql.run();
+
+    EXPECT_EQ(ql.os().exit_code(), 0);
+    // the dl marker (the BIOS-to-MBR handoff value) and the two passes
+    EXPECT_EQ(ql.mem().read_ptr(0x130, 1), 0x80u);
+    EXPECT_EQ(ql.mem().read_ptr(0x132, 1), 2u);
 }

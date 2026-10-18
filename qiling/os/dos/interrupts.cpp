@@ -5,6 +5,7 @@
 #include "qiling/os/dos/interrupts.hpp"
 
 #include <ctime>
+#include <fstream>
 #include <filesystem>
 #include <thread>
 
@@ -335,11 +336,53 @@ void handler(Qiling& ql) {
 
 }  // namespace int1a
 
+// ---- int19.py (the MBR boot: reload the boot sector and transfer) ----
+
+namespace int19 {
+
+// the drive bindings key the fs mapper by the hex string of the drive
+// number (the loader/dos.py add_mapping(0x80, ...) int key ported as "0x80")
+std::string drive_key(std::uint64_t dl) {
+    char buf[16];
+    std::snprintf(buf, sizeof(buf), "0x%x", static_cast<unsigned>(dl & 0xff));
+    return std::string(buf);
+}
+
+void handler(Qiling& ql) {
+    // int19.py: dl carries the drive; the mapped disk rides the fs mapper,
+    // the unmapped case falls back to the program file itself
+    const auto dl = ql.arch().regs().read("dl");
+    std::vector<std::uint8_t> mbr;
+
+    auto& os = static_cast<QlOsDos&>(ql.os());
+    const auto key = drive_key(dl);
+    if (os.fs_mapper() != nullptr && os.fs_mapper()->has_mapping(key)) {
+        auto disk = os.fs_mapper()->open(key, "rb+");
+        disk->lseek(0, 0);
+        mbr = disk->read(512);
+    } else {
+        std::ifstream f(ql.path(), std::ios::binary);
+        mbr.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+        if (mbr.size() > 512) {
+            mbr.resize(512);
+        }
+    }
+
+    // int19.py: write at 0x7C00 then transfer (cs=0x07C0, ip=0); the memory
+    // is not cleaned (the upstream note)
+    ql.mem().write(0x7C00, mbr);
+    ql.arch().regs().write("cs", 0x07C0);
+    ql.arch().regs().write("ip", 0);
+}
+
+}  // namespace int19
+
 }  // namespace
 
 const std::map<unsigned, IntHandler>& handlers() {
     static const std::map<unsigned, IntHandler> table = {
         {0x1a, int1a::handler},
+        {0x19, int19::handler},
         {0x20, int20::handler},
         {0x21, int21::handler},
     };
