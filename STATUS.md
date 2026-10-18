@@ -886,6 +886,20 @@ encoded 0xDD and the stale rax masked the miss); the \b escape in a python
 heredoc mangles exactly as pinned before — the edit tool with the on-disk
 bytes is the only reliable repair.
 
+## Phase 11 - the signal family (the sigaction struct + rt_sigaction/
+rt_sigprocmask/signal)
+
+| piece | upstream | state | notes |
+|---|---|---|---|
+| the sigaction struct | `signal.py __make_sigaction` | ✅ | the `GuestSigaction` (the handler/mask/flags/restorer u64 slots); the field ORDER per arch verbatim (the x8664 puts the mask last, the x86/ARM families put the mask second — theFIXME'd-out union quirk: the handler slot carries both spellings); the load/save ride the native width (the 32-bit hosts shrink to 4-byte cells) |
+| rt_sigaction | `signal.py` | ✅ | the EINVAL checks verbatim (the signum out of NSIG=32 or the SIGKILL/SIGSTOP pair → -1); the oldact write rides the PREVIOUS state (the write-before-load order — the first call answers zeros); the act load stores into the os.sig table |
+| rt_sigprocmask | `signal.py __sigprocmask` | ✅ | the BLOCK/UNBLOCK/SETMASK walk over the os.blocked_signals; the verbatim quirk preserved: the old mask writes to NEWSET (the upstream line rides write_ptr(newset, ...) — NOT oldset — so the guest's requested set is read back AFTER the old-mask overwrite); the KILL/STOP bits drop silently after the apply |
+| signal | `signal.py` | ✅ | the verbatim 0 stub (no registration) |
+| the fixtures | `tests/Posix_Test.cpp` | ✅ 2 green | the x8664 sigaction round trip (the install + the read-back + the two EINVAL branches) and the sigprocmask walk (the blocked-after quirk: the BLOCK pass's guest set never applies — the old-mask overwrite rides first; the SETMASK pass sets bit 2 with the KILL/STOP drop) |
+
+The frame machinery (the actual signal delivery + the sigreturn) is its
+own later slice; the delivery hooks hang off the same sig_actions_ table.
+
 ## Deferred (tracked, not built)
 
 `os/macos/` (the remaining surface: the syscall handlers, the kernel_api

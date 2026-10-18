@@ -38,6 +38,7 @@ add_library(qiling STATIC
     os/posix/kernel_api.cpp
     os/posix/const_mapping.cpp
     os/posix/stat.cpp
+    os/posix/signal.cpp
     os/posix/mman.cpp
     os/posix/syscall.cpp
     os/posix/syscall/abi.cpp

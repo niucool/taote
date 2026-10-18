@@ -1042,6 +1042,126 @@ TEST(PosixDir, ReadlinkPseudoFilesAndExistingPaths) {
     EXPECT_EQ(ql.mem().read(0x1002400, 1)[0], 0u);  // nothing written (the NUL stays)
 }
 
+// ---- the signal family (signal.py: rt_sigaction / rt_sigprocmask / ----
+// ---- signal) ----
+
+// the x8664 sigaction round trip: the act (handler/flags/restorer/mask, 32
+// bytes) loads into the os table; the oldact read-back carries the fields;
+// the SIGKILL and the out-of-NSIG signums answer -EINVAL
+TEST(PosixSignal, RtSigactionRoundTripAndEinval) {
+    const std::vector<std::uint8_t> code = {
+        // rt_sigaction(10, act@0x1002000, old@0x1002100) — the oldact
+        // carries the PREVIOUS state (empty on the first call, the verbatim
+        // write-before-load order)
+        0x48, 0xC7, 0xC0, 0x0D, 0x00, 0x00, 0x00,  // mov rax, 13 (rt_sigaction)
+        0x48, 0xC7, 0xC7, 0x0A, 0x00, 0x00, 0x00,  // mov rdi, 10 (SIGUSR1)
+        0x48, 0xC7, 0xC6, 0x00, 0x20, 0x00, 0x01,  // mov rsi, 0x1002000
+        0x48, 0xC7, 0xC2, 0x00, 0x21, 0x00, 0x01,  // mov rdx, 0x1002100
+        0x0F, 0x05,
+        0x48, 0x89, 0x04, 0x25, 0x08, 0x22, 0x00, 0x01,  // mov [0x1002208], rax
+        // the read-back: rt_sigaction(10, 0, old@0x1002180) — the just-
+        // registered action rides out
+        0x48, 0xC7, 0xC0, 0x0D, 0x00, 0x00, 0x00,
+        0x48, 0xC7, 0xC7, 0x0A, 0x00, 0x00, 0x00,  // mov rdi, 10
+        0x48, 0xC7, 0xC6, 0x00, 0x00, 0x00, 0x00,  // mov rsi, 0
+        0x48, 0xC7, 0xC2, 0x80, 0x21, 0x00, 0x01,  // mov rdx, 0x1002180
+        0x0F, 0x05,
+        0x48, 0x89, 0x04, 0x25, 0x28, 0x22, 0x00, 0x01,  // mov [0x1002228], rax
+        // rt_sigaction(9, 0, 0) — the SIGKILL EINVAL
+        0x48, 0xC7, 0xC0, 0x0D, 0x00, 0x00, 0x00,
+        0x48, 0xC7, 0xC7, 0x09, 0x00, 0x00, 0x00,  // mov rdi, 9
+        0x48, 0xC7, 0xC6, 0x00, 0x00, 0x00, 0x00,  // mov rsi, 0
+        0x48, 0xC7, 0xC2, 0x00, 0x00, 0x00, 0x00,
+        0x0F, 0x05,
+        0x48, 0x89, 0x04, 0x25, 0x10, 0x22, 0x00, 0x01,  // mov [0x1002210], rax
+        // rt_sigaction(32, 0, 0) — the out-of-NSIG EINVAL
+        0x48, 0xC7, 0xC0, 0x0D, 0x00, 0x00, 0x00,
+        0x48, 0xC7, 0xC7, 0x20, 0x00, 0x00, 0x00,  // mov rdi, 32
+        0x48, 0xC7, 0xC6, 0x00, 0x00, 0x00, 0x00,
+        0x48, 0xC7, 0xC2, 0x00, 0x00, 0x00, 0x00,
+        0x0F, 0x05,
+        0x48, 0x89, 0x04, 0x25, 0x18, 0x22, 0x00, 0x01,  // mov [0x1002218], rax
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00,
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00,
+        0x0F, 0x05,
+    };
+
+    QilingOptions options = posix_options(code);
+    Qiling ql(options);
+
+    // the act: handler=0xdead0001, flags=0x04000000 (SA_RESTORER),
+    // restorer=0xdead0002, mask=0x3
+    ql.mem().write_ptr(0x1002000, 0xdead0001, 8);
+    ql.mem().write_ptr(0x1002008, 0x04000000, 8);
+    ql.mem().write_ptr(0x1002010, 0xdead0002, 8);
+    ql.mem().write_ptr(0x1002018, 0x3, 8);
+
+    ql.run();
+
+    EXPECT_EQ(ql.os().exit_code(), 0);
+    EXPECT_EQ(ql.mem().read_ptr(0x1002208, 8), 0u);                 // the install ok
+    // the first call's oldact: the PREVIOUS state — empty (zeros) verbatim
+    EXPECT_EQ(ql.mem().read_ptr(0x1002100, 8), 0u);
+    // the read-back call: the just-registered action rides out (the x8664
+    // field order: handler/flags/restorer/mask)
+    EXPECT_EQ(ql.mem().read_ptr(0x1002228, 8), 0u);
+    EXPECT_EQ(ql.mem().read_ptr(0x1002180, 8), 0xdead0001ull);      // the handler
+    EXPECT_EQ(ql.mem().read_ptr(0x1002188, 8), 0x04000000ull);      // the flags
+    EXPECT_EQ(ql.mem().read_ptr(0x1002190, 8), 0xdead0002ull);      // the restorer
+    EXPECT_EQ(ql.mem().read_ptr(0x1002198, 8), 0x3ull);             // the mask
+    EXPECT_EQ(ql.mem().read_ptr(0x1002210, 8), 0xFFFFFFFFFFFFFFFFull);  // the SIGKILL EINVAL
+    EXPECT_EQ(ql.mem().read_ptr(0x1002218, 8), 0xFFFFFFFFFFFFFFFFull);  // the NSIG EINVAL
+}
+
+// rt_sigprocmask: the BLOCK/UNBLOCK/SETMASK walk over the os mask, the
+// verbatim old-writes-to-NEWSET quirk, and the KILL/STOP silent drop
+TEST(PosixSignal, SigprocmaskWalksTheMaskWithTheVerbatimQuirks) {
+    const std::vector<std::uint8_t> code = {
+        // rt_sigprocmask(SIG_BLOCK=0, new@0x1002000, old@0x1002100)
+        0x48, 0xC7, 0xC0, 0x0E, 0x00, 0x00, 0x00,  // mov rax, 14 (rt_sigprocmask)
+        0x48, 0x31, 0xFF,                           // xor rdi, rdi (how = SIG_BLOCK)
+        0x48, 0xC7, 0xC6, 0x00, 0x20, 0x00, 0x01,  // mov rsi, 0x1002000
+        0x48, 0xC7, 0xC2, 0x00, 0x21, 0x00, 0x01,  // mov rdx, 0x1002100
+        0x0F, 0x05,
+        0x48, 0x89, 0x04, 0x25, 0x08, 0x22, 0x00, 0x01,  // mov [0x1002208], rax
+        // the guest rewrites the new set: the KILL+STOP bits (the drop test)
+        // rt_sigprocmask(SIG_SETMASK=2, new@0x1002080, 0)
+        0x48, 0xC7, 0xC0, 0x0E, 0x00, 0x00, 0x00,
+        0x48, 0xC7, 0xC7, 0x02, 0x00, 0x00, 0x00,  // mov rdi, 2 (SIG_SETMASK)
+        0x48, 0xC7, 0xC6, 0x80, 0x20, 0x00, 0x01,  // mov rsi, 0x1002080
+        0x48, 0xC7, 0xC2, 0x00, 0x00, 0x00, 0x00,  // mov rdx, 0
+        0x0F, 0x05,
+        0x48, 0x89, 0x04, 0x25, 0x10, 0x22, 0x00, 0x01,  // mov [0x1002210], rax
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00,
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00,
+        0x0F, 0x05,
+    };
+
+    QilingOptions options = posix_options(code);
+    Qiling ql(options);
+
+    // the guest's set: bit 5 (SIGTRAP) + the KILL/STOP bits
+    ql.mem().write_ptr(0x1002000, (1ull << 5) | (1ull << 9) | (1ull << 19), 8);
+    // the SETMASK set: only bit 2 (SIGINT) — but the BLOCK pass's old mask
+    // (written to newset verbatim) rides the read-back
+    ql.mem().write_ptr(0x1002080, (1ull << 2), 8);
+
+    ql.run();
+
+    EXPECT_EQ(ql.os().exit_code(), 0);
+    EXPECT_EQ(ql.mem().read_ptr(0x1002208, 8), 0u);
+    EXPECT_EQ(ql.mem().read_ptr(0x1002210, 8), 0u);
+    // the verbatim quirk: the BLOCK pass's oldset wrote the (empty) old mask
+    // to newset BEFORE the read — so the guest's (1<<5|KILL|STOP) set never
+    // applied; the mask after BLOCK = 0. The SETMASK pass then set bit 2
+    // with the KILL/STOP drop riding after.
+    const auto& os = static_cast<const os::posix::QlOsPosix&>(ql.os());
+    EXPECT_EQ(os.blocked_signals(), (1ull << 2));
+    // the newset cell carries the pre-BLOCK old mask (0) — the verbatim
+    // write-to-newset quirk
+    EXPECT_EQ(ql.mem().read_ptr(0x1002000, 8), 0u);
+}
+
 TEST(PosixSyscall, UnhandledSyscallWarnsButDoesNotThrow) {
     // an unknown syscall id: load_syscall warns and continues (the
     // debug_stop behavior lands with its slice)

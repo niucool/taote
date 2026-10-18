@@ -1,6 +1,7 @@
 #include <cstdio>
 #include "qiling/os/posix/syscall.hpp"
 #include "qiling/os/posix/mman.hpp"
+#include "qiling/os/posix/signal.hpp"
 
 #include <algorithm>
 #include <filesystem>
@@ -1294,6 +1295,11 @@ void register_builtin_syscalls() {
     registry.register_syscall({"munmap", {PARAM_PTRX, PARAM_INTN}, syscall_munmap});
     registry.register_syscall({"mprotect", {PARAM_PTRX, PARAM_INTN, PARAM_INTN}, syscall_mprotect});
     registry.register_syscall({"madvise", {PARAM_PTRX, PARAM_INTN, PARAM_INTN}, syscall_madvise});
+    // signal.py: the sigaction family (the signal syscall rides the verbatim
+    // 0 stub; the sigset width rides the native type)
+    registry.register_syscall({"rt_sigaction", {PARAM_INTN, PARAM_PTRX, PARAM_PTRX}, syscall_rt_sigaction});
+    registry.register_syscall({"rt_sigprocmask", {PARAM_INTN, PARAM_PTRX, PARAM_PTRX}, syscall_rt_sigprocmask});
+    registry.register_syscall({"signal", {PARAM_INTN, PARAM_PTRX}, syscall_signal});
 
     // the futex dispatch (os/posix/syscall/futex.py) + the yield (sched.py)
     registry.register_syscall({"futex", {PARAM_INTN, PARAM_INTN, PARAM_INTN, PARAM_INTN, PARAM_INTN, PARAM_INTN}, syscall_futex});

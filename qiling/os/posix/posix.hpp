@@ -14,6 +14,7 @@
 #include "qiling/exception.hpp"
 #include "qiling/core_hooks_types.hpp"
 #include "qiling/os/os.hpp"
+#include "qiling/os/posix/signal.hpp"
 #include "qiling/os/posix/syscall.hpp"
 #include "qiling/os/memory.hpp"
 #include "qiling/os/posix/syscall/abi.hpp"
@@ -142,6 +143,23 @@ private:
     int gid_ = 1000;
     int egid_ = 1000;
     int pid_ = 1996;
+
+public:
+    // signal.py: the per-signum sigaction table (the os.sig dict) + the
+    // blocked-signal mask (the os.blocked_signals attr) — the frame
+    // machinery (the delivery) lands with its slice
+    const GuestSigaction* sig_action(int signum) const {
+        return sig_actions_[static_cast<std::size_t>(signum)] ? &*sig_actions_[static_cast<std::size_t>(signum)] : nullptr;
+    }
+    void set_sig_action(int signum, std::optional<GuestSigaction> v) {
+        sig_actions_[static_cast<std::size_t>(signum)] = std::move(v);
+    }
+    std::uint64_t blocked_signals() const noexcept { return blocked_signals_; }
+    void set_blocked_signals(std::uint64_t v) noexcept { blocked_signals_ = v; }
+
+private:
+    std::array<std::optional<GuestSigaction>, kNSig> sig_actions_{};
+    std::uint64_t blocked_signals_ = 0;
 };
 
 }  // namespace posix
