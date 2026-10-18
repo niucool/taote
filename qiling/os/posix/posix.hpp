@@ -64,7 +64,7 @@ private:
     std::array<std::shared_ptr<QlFsMappedObject>, NR_OPEN> fds_{};
 };
 
-class QlOsPosix final : public QlOs {
+class QlOsPosix : public QlOs {
 public:
     explicit QlOsPosix(Qiling* ql);
 

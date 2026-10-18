@@ -18,6 +18,7 @@
 #include "qiling/loader/blob.hpp"
 #include "qiling/os/blob/blob.hpp"
 #include "qiling/os/posix/posix.hpp"
+#include "qiling/os/linux/linux.hpp"
 #include "qiling/os/windows/windows.hpp"
 #include "qiling/loader/pe.hpp"
 #include "qiling/loader/elf.hpp"
@@ -284,7 +285,7 @@ OsFactory select_os(QL_OS ostype) {
             };
         case QL_OS::LINUX:
             return [](Qiling* ql) -> std::unique_ptr<QlOs> {
-                return std::make_unique<os::posix::QlOsPosix>(ql);
+                return std::make_unique<os::linux::QlOsLinux>(ql);
             };
         default:
             throw QlErrorNotImplemented("os layer for this os type is not implemented");

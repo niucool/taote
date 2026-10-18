@@ -147,6 +147,7 @@ void QlLoaderELF::run() {
     if (elf.type() == ET_REL) {
         // elf.py run: the driver path + the kernel api dispatch hook
         load_driver(elf, bytes, top_of_stack, 0x8000000);
+        is_driver = true;  // elf.py: self.is_driver = (elftype == ET_REL)
 
         // the shared run() tail lands the sp on the (aligned) stack top
         ql_->arch().regs().set_arch_sp(stack_address_);

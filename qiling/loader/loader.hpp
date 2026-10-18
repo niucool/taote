@@ -54,6 +54,7 @@ public:
     std::uint64_t init_sp = 0;
     std::uint64_t init_sp_pb = 0;  // physical base for the initial stack (ARM boot)
     std::uint64_t brk_address = 0;  // unistd.py brk: the program break
+    bool is_driver = false;         // elf.py: true for the ET_REL loads
 
     // loader.py skip_exit_check — set by loaders that place their own return
     // guard (e.g. baremetal/bootloaders)
