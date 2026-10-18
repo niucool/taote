@@ -52,6 +52,7 @@ const MsgTypeEntry kMsgTypeTable[] = {
     {0x101, ql_qnx_msg_io_read},       // io_read
     {0x104, ql_qnx_msg_io_stat},       // io_stat
     {0x116, ql_qnx_msg_io_close},      // io_close
+    {0x041, ql_qnx_msg_mem_ctrl},      // mem_ctrl
     {0x040, ql_qnx_msg_mem_map},       // mem_map
     {0x109, ql_qnx_msg_io_lseek},      // io_lseek
     {0x102, ql_qnx_msg_io_write},      // io_write
@@ -219,6 +220,34 @@ std::optional<std::int64_t> syscall_mmap_impl(Qiling& ql, std::uint64_t addr, st
     ql.mem().protect(lbound, mapping_size, static_cast<int>(prot));
 
     return static_cast<std::int64_t>(addr);
+}
+
+// message.py ql_qnx_msg_mem_ctrl (services/system/public/sys/memmsg.h): the
+// flat struct read directly at smsg (24 bytes, NOT the get_message_body
+// walk); the known subtype warns the not-implemented TODO and returns -1
+// (the upstream TODO shape verbatim)
+std::optional<std::int64_t> ql_qnx_msg_mem_ctrl(Qiling& ql, std::uint64_t coid, std::uint64_t smsg,
+                                                std::int32_t sparts, std::uint64_t rmsg, std::int32_t rparts) {
+    (void)coid;
+
+    // struct _mem_ctrl in services/system/public/sys/memmsg.h:
+    // (type, subtype, flags, addr, len) = unpack("<HHIQQ", read(smsg, 24))
+    const auto raw = ql.mem().read(smsg, 24);
+    const auto type = static_cast<std::uint16_t>(raw[0] | (raw[1] << 8));
+    const auto subtype = static_cast<std::uint16_t>(raw[2] | (raw[3] << 8));
+
+    if (sparts != -24 || rparts != 0) {
+        throw QlErrorBase("qnx mem_ctrl: the input/output sizes are wrong");
+    }
+    if (type != 0x041) {
+        throw QlErrorBase("qnx mem_ctrl: the mem_ctrl message is wrong");
+    }
+    if (!table_contains(mem_ctrl_subtypes, subtype)) {
+        throw QlErrorNotImplemented("qnx mem_ctrl: the MEM_CTRL subtype is not implemented");
+    }
+
+    // the upstream TODO: warn + return -1
+    return -1;
 }
 
 // message.py ql_qnx_msg_mem_map (services/system/public/sys/memmsg.h): the

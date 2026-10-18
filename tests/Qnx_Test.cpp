@@ -12,6 +12,7 @@
 #include <fstream>
 
 #include "qiling/core.hpp"
+#include "qiling/exception.hpp"
 #include "qiling/os/qnx/const.hpp"
 #include "qiling/os/qnx/qnx.hpp"
 
@@ -1159,4 +1160,78 @@ TEST(QnxOs, MsgIoCloseClearsConnFd) {
     EXPECT_EQ(ql.os().exit_code(), 42);
     EXPECT_EQ(ql.mem().read_ptr(0x2300, 4), 0u);
     EXPECT_EQ(ql.mem().read_ptr(0x2304, 4), static_cast<std::uint32_t>(-9));
+}
+
+// the mem_ctrl message: the flat struct read directly at smsg (24 bytes,
+// not the get_message_body walk); the known subtype logs the not-implemented
+// warning and returns -1 (the upstream TODO shape verbatim)
+//   00: mov r0, #1          ; coid = 1
+//   04: mov r1, #0x2200     ; smsg = the flat _mem_ctrl
+//   08: mvn r2, #23         ; sparts = -24
+//   0C: mov r3, #0 ; 10: mov r4, #0    ; rmsg/rparts unused (rparts = 0)
+//   14: mov r12, #11 ; 18: swi 0
+//   1C: mov r4, #0x2300 ; 20: str r0, [r4]
+//   24: mvn r0, #0 ; 28: mvn r1, #0 ; 2C: mov r2, #42
+//   30: mov r12, #47 ; 34: swi 0
+TEST(QnxOs, MsgMemCtrlWarnsNotImplemented) {
+    const std::vector<std::uint8_t> code = {
+        0x01, 0x00, 0xA0, 0xE3,  // 00: mov r0, #1
+        0x22, 0x1C, 0xA0, 0xE3,  // 04: mov r1, #0x2200
+        0x17, 0x20, 0xE0, 0xE3,  // 08: mvn r2, #23
+        0x00, 0x30, 0xA0, 0xE3,  // 0C: mov r3, #0
+        0x00, 0x40, 0xA0, 0xE3,  // 10: mov r4, #0
+        0x0B, 0xC0, 0xA0, 0xE3,  // 14: mov r12, #11
+        0x00, 0x00, 0x00, 0xEF,  // 18: swi 0
+        0x23, 0x4C, 0xA0, 0xE3,  // 1C: mov r4, #0x2300
+        0x00, 0x00, 0x84, 0xE5,  // 20: str r0, [r4]
+        0x00, 0x00, 0xE0, 0xE3,  // 24: mvn r0, #0
+        0x00, 0x10, 0xE0, 0xE3,  // 28: mvn r1, #0
+        0x2A, 0x20, 0xA0, 0xE3,  // 2C: mov r2, #42
+        0x2F, 0xC0, 0xA0, 0xE3,  // 30: mov r12, #47
+        0x00, 0x00, 0x00, 0xEF,  // 34: swi 0
+    };
+    auto ql = make_qnx_qiling(code);
+
+    ql.mem().map(kScratch, 0x1000, UC_PROT_ALL, "[qnx-scratch]");
+
+    // the flat _mem_ctrl (24 bytes): type=0x041, subtype=1 (PROTECT),
+    // flags=0x3, addr, len
+    ql.mem().write_ptr(0x2200, 0x041, 2);
+    ql.mem().write_ptr(0x2202, 1, 2);
+    ql.mem().write_ptr(0x2204, 0x3, 4);
+    ql.mem().write_ptr(0x2208, 0x8000, 8);
+    ql.mem().write_ptr(0x2210, 0x1000, 8);
+
+    ql.run();
+
+    EXPECT_EQ(ql.os().exit_code(), 42);
+    EXPECT_EQ(ql.mem().read_ptr(0x2300, 4), static_cast<std::uint32_t>(-1));
+}
+
+// the mem_ctrl handler distinction: the upstream's real handler throws for
+// the unknown subtype (NotImplementedError) while the dispatcher's no-hook
+// fall-through would just warn and return -1; the unknown subtype pin
+// proves the handler is wired (the flat struct's subtype=99)
+TEST(QnxOs, MemCtrlUnknownSubtypeThrows) {
+    const std::vector<std::uint8_t> code = {
+        0x01, 0x00, 0xA0, 0xE3,  // 00: mov r0, #1
+        0x22, 0x1C, 0xA0, 0xE3,  // 04: mov r1, #0x2200
+        0x17, 0x20, 0xE0, 0xE3,  // 08: mvn r2, #23
+        0x00, 0x30, 0xA0, 0xE3,  // 0C: mov r3, #0
+        0x00, 0x40, 0xA0, 0xE3,  // 10: mov r4, #0
+        0x0B, 0xC0, 0xA0, 0xE3,  // 14: mov r12, #11
+        0x00, 0x00, 0x00, 0xEF,  // 18: swi 0
+    };
+    auto ql = make_qnx_qiling(code);
+
+    ql.mem().map(kScratch, 0x1000, UC_PROT_ALL, "[qnx-scratch]");
+
+    // the flat _mem_ctrl with the unknown subtype 99
+    ql.mem().write_ptr(0x2200, 0x041, 2);
+    ql.mem().write_ptr(0x2202, 99, 2);
+    ql.mem().write_ptr(0x2204, 0x3, 4);
+    ql.mem().write_ptr(0x2208, 0x8000, 8);
+    ql.mem().write_ptr(0x2210, 0x1000, 8);
+
+    EXPECT_THROW(ql.run(), QlErrorNotImplemented);
 }

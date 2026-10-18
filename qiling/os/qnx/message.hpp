@@ -56,6 +56,11 @@ std::optional<std::int64_t> ql_qnx_msg_mem_map(Qiling& ql, std::uint64_t coid, s
 std::optional<std::int64_t> ql_qnx_msg_io_close(Qiling& ql, std::uint64_t coid, std::uint64_t smsg,
                                                 std::int32_t sparts, std::uint64_t rmsg, std::int32_t rparts);
 
+// message.py ql_qnx_msg_mem_ctrl (services/system/public/sys/memmsg.h): the
+// not-implemented warn + (-1) TODO shape
+std::optional<std::int64_t> ql_qnx_msg_mem_ctrl(Qiling& ql, std::uint64_t coid, std::uint64_t smsg,
+                                                std::int32_t sparts, std::uint64_t rmsg, std::int32_t rparts);
+
 // message.py ql_qnx_msg_sys_conf: the confstr/sysconf dispatch
 // (lib/c/1a/confstr.c + lib/c/1/sysconf.c)
 std::optional<std::int64_t> ql_qnx_msg_sys_conf(Qiling& ql, std::uint64_t coid, std::uint64_t smsg,
