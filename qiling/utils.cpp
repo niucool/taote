@@ -15,6 +15,7 @@
 #include "qiling/os/qnx/qnx.hpp"
 #include "qiling/os/dos/dos.hpp"
 #include "qiling/loader/dos.hpp"
+#include "qiling/os/mcu.hpp"
 #include "qiling/os/uefi/uefi.hpp"
 #include "qiling/loader/pe_uefi.hpp"
 #include "qiling/arch/arm.hpp"
@@ -331,6 +332,10 @@ OsFactory select_os(QL_OS ostype) {
         case QL_OS::UEFI:
             return [](Qiling* ql) -> std::unique_ptr<QlOs> {
                 return std::make_unique<os::uefi::QlOsUefi>(ql);
+            };
+        case QL_OS::MCU:
+            return [](Qiling* ql) -> std::unique_ptr<QlOs> {
+                return std::make_unique<os::QlOsMcu>(ql);
             };
         default:
             throw QlErrorNotImplemented("os layer for this os type is not implemented");

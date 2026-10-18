@@ -106,7 +106,7 @@ public:
     loader::QlLoader& loader() const noexcept { return *loader_; }
 
     // hw is created for baremetal emulations only (core.py `if self.baremetal`)
-    QlHwManager* hw() const noexcept { return hw_; }
+    hw::QlHwManager* hw() const noexcept { return hw_.get(); }
     bool baremetal() const noexcept;
 
     // the active profile (core.py profile property)
@@ -211,7 +211,7 @@ public:
     std::unique_ptr<QlMemoryManager> mem_;
     std::unique_ptr<QlOs> os_;
     std::unique_ptr<loader::QlLoader> loader_;
-    QlHwManager* hw_ = nullptr;  // owned when the hw manager lands (OQ 9)
+    std::unique_ptr<hw::QlHwManager> hw_;  // the baremetal half (OQ 9)
 
     IniConfig profile_default_;
     IniConfig* profile_ = nullptr;

@@ -224,9 +224,9 @@ public:
     virtual void step() {}
 
     // the snapshot pair (the verbatim save/restore over the instance bytes)
-    std::vector<std::uint8_t> save() const { return instance_; }
+    virtual std::vector<std::uint8_t> save() const { return instance_; }
 
-    void restore(const std::vector<std::uint8_t>& data) {
+    virtual void restore(const std::vector<std::uint8_t>& data) {
         instance_.assign(data.begin(), data.end());
     }
 

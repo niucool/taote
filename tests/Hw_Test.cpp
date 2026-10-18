@@ -9,9 +9,20 @@
 #include "qiling/core.hpp"
 #include "qiling/hw/hw.hpp"
 #include "qiling/hw/peripheral.hpp"
+#include "qiling/hw/cm_systick.hpp"
 #include "qiling/exception.hpp"
 
 using namespace qiling;
+
+namespace {
+
+std::filesystem::path ensure_hw_rootfs() {
+    const auto base = std::filesystem::temp_directory_path() / "ql_hw_rootfs";
+    std::filesystem::create_directories(base);
+    return base;
+}
+
+}  // namespace
 
 namespace {
 
@@ -146,8 +157,7 @@ TEST(HwManager, NonMappedMmioRidesHandlerBuffer) {
     EXPECT_EQ(got[1], 0xa5);
 }
 
-TEST(HwManager, StepWalksPeripheralsAndSaveRestore) {
-    auto ql = make_hw_ql();
+TEST(HwManager, StepWalksPeripheralsAndSaveRestore) {    auto ql = make_hw_ql();
     qiling::hw::QlHwManager hw(ql);
 
     hw.register_struct("stub", [](Qiling& q, const std::string& label) {
@@ -168,4 +178,65 @@ TEST(HwManager, StepWalksPeripheralsAndSaveRestore) {
     EXPECT_EQ(peripheral->raw_read(4, 4), 7u);
     peripheral->restore(saved);
     EXPECT_EQ(peripheral->raw_read(4, 4), 1u);
+}
+
+// the guest-side ride: the x86-64 blob stores the SYSTICK LOAD/CTRL through
+// the mmio (the cpu load/store against the peripheral), the test drives the
+// step walk, and the COUNTFLAG rides the read-clear
+TEST(HwManager, GuestBlobStoresThroughMmioToSysTick) {
+    const std::vector<std::uint8_t> code = {
+        // mov eax, 3
+        0xB8, 0x03, 0x00, 0x00, 0x00,
+        // mov [0xE000E014], eax   -- the moffs store (the 8-byte abs64 LE)
+        0xA3, 0x14, 0xE0, 0x00, 0xE0, 0x00, 0x00, 0x00, 0x00,
+        // mov eax, 7
+        0xB8, 0x07, 0x00, 0x00, 0x00,
+        // mov [0xE000E010], eax
+        0xA3, 0x10, 0xE0, 0x00, 0xE0, 0x00, 0x00, 0x00, 0x00,
+        // exit(0)
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00,
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00,
+        0x0F, 0x05,
+    };
+
+    QilingOptions options;
+    options.code = code;
+    options.rootfs = ensure_hw_rootfs().string();
+    options.ostype = QL_OS::LINUX;
+    options.archtype = QL_ARCH::X8664;
+    Qiling ql(options);
+
+    qiling::hw::QlHwManager hw(ql);
+    hw.register_struct("cm3_systick", [](Qiling& q, const std::string& label) {
+        return std::make_unique<qiling::hw::CortexMSysTick>(q, label);
+    });
+    auto* systick = hw.create("systick", "cm3_systick", 0xE000E010);
+    ASSERT_NE(systick, nullptr);
+    // the SYSTICK base is not page-aligned: the mmio map covers the containing
+    // page while the peripheral keeps its verbatim 0xE000E010 base
+    hw.setup_mmio(0xE000E000, 0x1000, "[systick-page]");
+
+    auto tracer = ql.hook_mem_write_invalid([&](int access, std::uint64_t addr, std::uint32_t size, std::int64_t) -> int {
+        std::fprintf(stderr, "[wfault] access=%d addr=%llx size=%u rip=%llx\n", access,
+                     (unsigned long long)addr, size, (unsigned long long)ql.arch().regs().arch_pc());
+        return 0;
+    });
+    (void)tracer;
+
+    ql.run();
+
+    // the guest stores landed: the LOAD cell carries 3, the CTRL the mask 7
+    EXPECT_EQ(systick->raw_read(4, 4), 3u);
+    EXPECT_EQ(systick->raw_read(0, 4), 7u);
+
+    // the step walk: 3 -> 2 -> 1 -> 0 -> (the COUNTFLAG set + the reload to 3)
+    hw.step();  // 3 -> 2
+    hw.step();  // 2 -> 1
+    EXPECT_EQ(systick->raw_read(8, 4), 1u);
+    hw.step();  // 1 -> 0
+    hw.step();  // the zero reload: COUNTFLAG | VAL = LOAD(3)
+    EXPECT_EQ(systick->raw_read(0, 4),
+              (qiling::hw::systick_ctrl::ENABLE | qiling::hw::systick_ctrl::TICKINT |
+               qiling::hw::systick_ctrl::CLKSOURCE | qiling::hw::systick_ctrl::COUNTFLAG));
+    EXPECT_EQ(systick->raw_read(8, 4), 3u);
 }

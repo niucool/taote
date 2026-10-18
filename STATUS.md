@@ -1078,6 +1078,36 @@ base-ctor virtual call lands on the base body — the classic CTOR-virtual
 order). The guest-side blob ride (the load/store instructions against the
 mmio) is the next slice's first fixture.
 
+### Phase 13.1 — the guest-side mmio fixture + the CortexMSysTick (the first concrete peripheral)
+
+| piece | upstream | state | notes |
+|---|---|---|---|
+| QlTimerPeripheral | `hw/timer/timer.py` | ✅ | the ratio accessor pair + the extended snapshot (the ratio rides the save bytes' header, the verbatim `(ratio, bytes(instance))` pair shape) |
+| CortexMSysTick | `hw/timer/cm_systick.py` (+ `cm3_systick.py` the pass-through) | ✅ | the 4-register SYSTICK image (CTRL@0/LOAD@4/VAL@8/CALIB@12, the CALIB seed 0xC0000000), the step downcount (the COUNTFLAG set + the LOAD reload at zero), the read-clear COUNTFLAG, the CTRL reserved-bit mask + the low-24-bit non-CTRL mask, the LOAD-write restart; the **TICKINT → the NVIC set_pending branch defers with the intc slice** (the hw manager carries no nvic yet) |
+| SYSTICK_CTRL | `hw/const/cm4_systick.py` | ✅ | the ENABLE/TICKINT/CLKSOURCE/COUNTFLAG bit table verbatim |
+| the fixture | `tests/Hw_Test.cpp` | ✅ | the guest x86-64 blob stores the LOAD/CTRL through the mmio (the A3 moffs form), the test drives the step walk, the COUNTFLAG read-clear pinned |
+
+Findings: the `C7 04 25` SIB-store encoding burned the disp32 byte order
+twice (the wrong-order variants faulted as the write-unmapped at the
+garbage addresses — the tracer caught the first, the mis-grouped imm32 the
+second); the `A3` moffs form is the reliable fixture shape (the 8-byte
+abs64 LE — the same form the earlier posix fixtures use). The SysTick's
+mmio map covers the containing page (0xE000E000) while the peripheral
+keeps its verbatim 0xE000E010 base — the sub-page region rides the
+handler's offset math.
+
+### Phase 13.2 — the QlOsMcu skeleton + the core hw_ wiring
+
+| piece | upstream | state | notes |
+|---|---|---|---|
+| QlOsMcu | `os/mcu/mcu.py` | ✅ core | the QlOs subclass (the type MCU → the baremetal membership), the stop (emu_stop + runable=false), the non-fast-mode run walk (the `while runable: emu_start(pc, 0, count=1); hw.step(); counter++` verbatim, the end-address + the count breaks); the **fast-mode MCUTask path throws** (lands with the uc-task slice) |
+| the core wiring | `core.py` `if self.baremetal` | ✅ | the Qiling ctor creates the QlHwManager for the baremetal os (the MCU) — the hw() accessor returns the live manager; the select_os MCU case lands |
+| the loader | `loader/mcu.py` | defers | the QlLoaderMCU (the elf/bin/hex reset walks + the ihex parser) rides the next slice; until then the MCU emulations go through the blob-style code path |
+
+The hw phase resumes at the intc slice (the CortexMNvic + the SCB — the
+SysTick's TICKINT branch needs the set_pending walk) or the first real MCU
+board profile (the stm32f4xx/gd32vf103 const tables).
+
 ### Phase 12 sub-slice 3 — socketpair + the send/recv family
 
 | piece | upstream | state | notes |

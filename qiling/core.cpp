@@ -6,6 +6,7 @@
 #include "qiling/host.hpp"
 #include "qiling/log.hpp"
 #include "qiling/loader/blob.hpp"
+#include "qiling/hw/hw.hpp"
 #include "qiling/os/memory.hpp"
 #include "qiling/os/os.hpp"
 #include "qiling/profiles/inireader.hpp"
@@ -120,9 +121,8 @@ Qiling::Qiling(const QilingOptions& options) {
     arch().attach_memory(*mem_);
 
     if (baremetal()) {
-        // the hw manager lands with the bare-metal peripherals slice
-        // (PORT_PLAN.md §10, OQ 9)
-        hw_ = nullptr;
+        // core.py: `if self.baremetal: self._hw = select_component('hw', 'hw')(self)`
+        hw_ = std::make_unique<hw::QlHwManager>(*this);
     }
 
     // run the loader
