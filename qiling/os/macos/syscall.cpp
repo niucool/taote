@@ -10,6 +10,7 @@
 #include "qiling/core.hpp"
 #include "qiling/os/macos/const.hpp"
 #include "qiling/os/macos/macos.hpp"
+#include "qiling/os/macos/kernel_func.hpp"
 #include "qiling/os/posix/syscall.hpp"
 #include "qiling/os/utils.hpp"
 #include "qiling/os/filestruct.hpp"
@@ -62,6 +63,77 @@ std::optional<std::int64_t> syscall_csops(Qiling& ql, const std::vector<std::uin
 // (the buffer stays untouched, verbatim)
 std::optional<std::int64_t> syscall_getentropy(Qiling&, const std::vector<std::uint64_t>&) {
     return KERN_SUCCESS;
+}
+
+// syscall.py ql_syscall_kernelrpc_mach_vm_allocate_trap: the bump allocator
+// off the task's min_offset — the region maps, zeroes, advances the cursor
+// and writes the allocated address into the caller's *addr cell
+std::optional<std::int64_t> syscall_kernelrpc_mach_vm_allocate_trap(Qiling& ql,
+                                                                    const std::vector<std::uint64_t>& params) {
+    const auto addr = params[1];
+    const auto size = params[2];
+
+    auto& os_macos = dynamic_cast<QlOsMacos&>(ql.os());
+    const auto mmap_address = os_macos.macho_task().min_offset;
+    const auto mmap_end = page_align_end(mmap_address + size, PAGE_SIZE);
+
+    ql.mem().map(mmap_address, mmap_end - mmap_address, UC_PROT_ALL, "[mach-vm-alloc]");
+    ql.mem().write(mmap_address, std::vector<std::uint8_t>(mmap_end - mmap_address, 0));
+    os_macos.macho_task_mut().min_offset = mmap_end;
+    ql.mem().write(addr, {static_cast<std::uint8_t>(mmap_address), static_cast<std::uint8_t>(mmap_address >> 8),
+                          static_cast<std::uint8_t>(mmap_address >> 16), static_cast<std::uint8_t>(mmap_address >> 24),
+                          static_cast<std::uint8_t>(mmap_address >> 32), static_cast<std::uint8_t>(mmap_address >> 40),
+                          static_cast<std::uint8_t>(mmap_address >> 48), static_cast<std::uint8_t>(mmap_address >> 56)});
+    return 0;
+}
+
+// syscall.py ql_syscall_kernelrpc_mach_vm_deallocate_trap: the no-op stub
+// returning KERN_SUCCESS
+std::optional<std::int64_t> syscall_kernelrpc_mach_vm_deallocate_trap(Qiling&, const std::vector<std::uint64_t>&) {
+    return KERN_SUCCESS;
+}
+
+// syscall.py ql_syscall_kernelrpc_mach_vm_map_trap: the vmmap cursor walk
+// (the mask alignment verbatim) + the page-aligned map + the *addr write
+std::optional<std::int64_t> syscall_kernelrpc_mach_vm_map_trap(Qiling& ql,
+                                                               const std::vector<std::uint64_t>& params) {
+    const auto address = params[1];
+    const auto size = params[2];
+    const auto mask = params[3];
+
+    auto& os_macos = dynamic_cast<QlOsMacos&>(ql.os());
+    auto vmmap_end = os_macos.macho_vmmap_end();
+    if ((vmmap_end & mask) > 0) {
+        vmmap_end -= vmmap_end & mask;
+        vmmap_end += mask + 1;
+    }
+
+    const auto vmmap_address = page_align_end(vmmap_end, PAGE_SIZE);
+    const auto vmmap_end_page = page_align_end(vmmap_address + size, PAGE_SIZE);
+
+    os_macos.set_macho_vmmap_end(vmmap_end_page);
+    ql.mem().map(vmmap_address, vmmap_end_page - vmmap_address, UC_PROT_ALL, "[mach-vm-map]");
+    ql.mem().write(address, {static_cast<std::uint8_t>(vmmap_address), static_cast<std::uint8_t>(vmmap_address >> 8),
+                             static_cast<std::uint8_t>(vmmap_address >> 16), static_cast<std::uint8_t>(vmmap_address >> 24),
+                             static_cast<std::uint8_t>(vmmap_address >> 32), static_cast<std::uint8_t>(vmmap_address >> 40),
+                             static_cast<std::uint8_t>(vmmap_address >> 48), static_cast<std::uint8_t>(vmmap_address >> 56)});
+    return KERN_SUCCESS;
+}
+
+// syscall.py ql_syscall_kernelrpc_mach_port_deallocate_trap: the log-only
+// no-op (no return)
+std::optional<std::int64_t> syscall_kernelrpc_mach_port_deallocate_trap(Qiling&, const std::vector<std::uint64_t>&) {
+    return std::nullopt;
+}
+
+// syscall.py ql_syscall_kernelrpc_mach_port_mod_refs_trap: the `pass` stub
+std::optional<std::int64_t> syscall_kernelrpc_mach_port_mod_refs_trap(Qiling&, const std::vector<std::uint64_t>&) {
+    return std::nullopt;
+}
+
+// syscall.py ql_syscall_kernelrpc_mach_port_construct_trap: the `pass` stub
+std::optional<std::int64_t> syscall_kernelrpc_mach_port_construct_trap(Qiling&, const std::vector<std::uint64_t>&) {
+    return std::nullopt;
 }
 
 // macos/utils.py set_eflags_cf: the CF bit (bit 0) set to the target
@@ -213,6 +285,22 @@ void register_macos_syscalls() {
     registry.register_syscall({"getattrlist", {PARAM_PTRX, PARAM_PTRX, PARAM_PTRX, PARAM_INTN, PARAM_INTN},
                                syscall_getattrlist});
     registry.register_syscall({"getrlimit", {PARAM_INTN, PARAM_PTRX}, syscall_getrlimit});
+    registry.register_syscall({"kernelrpc_mach_vm_allocate_trap",
+                               {PARAM_INTN, PARAM_PTRX, PARAM_INTN, PARAM_INTN},
+                               syscall_kernelrpc_mach_vm_allocate_trap});
+    registry.register_syscall({"kernelrpc_mach_vm_deallocate_trap",
+                               {PARAM_INTN, PARAM_PTRX, PARAM_INTN},
+                               syscall_kernelrpc_mach_vm_deallocate_trap});
+    registry.register_syscall({"kernelrpc_mach_vm_map_trap",
+                               {PARAM_INTN, PARAM_PTRX, PARAM_INTN, PARAM_INTN, PARAM_INTN, PARAM_INTN},
+                               syscall_kernelrpc_mach_vm_map_trap});
+    registry.register_syscall({"kernelrpc_mach_port_deallocate_trap", {}, syscall_kernelrpc_mach_port_deallocate_trap});
+    registry.register_syscall({"kernelrpc_mach_port_mod_refs_trap",
+                               {PARAM_INTN, PARAM_INTN, PARAM_INTN, PARAM_INTN},
+                               syscall_kernelrpc_mach_port_mod_refs_trap});
+    registry.register_syscall({"kernelrpc_mach_port_construct_trap",
+                               {PARAM_INTN, PARAM_INTN, PARAM_PTRX, PARAM_PTRX},
+                               syscall_kernelrpc_mach_port_construct_trap});
 }
 
 }  // namespace macos

@@ -1,8 +1,6 @@
 // Ported from qiling/os/macos/kernel_func.py — the macos FileSystem helper
 // (the vm-to-real path mapping over the rootfs + the isexists check + the
-// getattrlist common-attr walk). The open() member rides the posix open
-// path (the upstream's FileSystem.open wraps os.open; the port's posix open
-// handler already carries the rootfs mapping).
+// getattrlist common-attr walk) + the macos/utils.py page_align_end helper.
 #ifndef QILING_OS_MACOS_KERNEL_FUNC_HPP
 #define QILING_OS_MACOS_KERNEL_FUNC_HPP
 
@@ -16,6 +14,15 @@
 namespace qiling {
 namespace os {
 namespace macos {
+
+// macos/utils.py page_align_end: the round-up to the page multiple (the
+// verbatim arithmetic shape)
+inline std::uint64_t page_align_end(std::uint64_t addr, std::uint64_t page_size) {
+    if (addr % page_size == 0) {
+        return addr;
+    }
+    return ((addr / page_size) + 1) * page_size;
+}
 
 // kernel_func.py FileSystem
 class FileSystem {

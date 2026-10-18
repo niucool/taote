@@ -386,6 +386,141 @@ TEST(MacosOs, SigprocmaskLeavesRaxUntouched) {
     EXPECT_EQ(ql.mem().read_ptr(kCellBase, 4), 48u);   // rax untouched (48)
 }
 
+TEST(MacosOs, VmAllocateBumpsTaskCursorAndWritesAddr) {
+    // kernelrpc_mach_vm_allocate_trap = 0x100000a: the bump allocator off
+    // the task's min_offset (the seeded MachoTask: min_offset 0) — the
+    // region maps at min_offset, the cursor advances past the page end and
+    // the allocated address rides back through *addr; the return is 0
+    const std::uint64_t kAddrCell = 0x23c0;
+    std::vector<std::uint8_t> code = {
+        0xBB, 0x00, 0x21, 0x00, 0x00,                // mov ebx, 0x2100
+        0xBF, 0x00, 0x00, 0x00, 0x00,                // mov edi, 0 (port)
+        0xBE, 0xC0, 0x23, 0x00, 0x00,                // mov esi, kAddrCell (*addr)
+        0xBA, 0x00, 0x10, 0x00, 0x00,                // mov edx, 0x1000 (size)
+        0x41, 0xBA, 0x00, 0x00, 0x00, 0x00,          // mov r10d, 0 (flags)
+        0xB8, 0x0A, 0x00, 0x00, 0x01,                // mov eax, 0x100000a
+        0x0F, 0x05,                                  // syscall
+    };
+    emit_store_rax(code, 0x00);
+    code.insert(code.end(), kBlobExit.begin(), kBlobExit.end());
+
+    auto ql = make_macos_qiling(code);
+    ql.mem().map(0x2000, 0x2000, UC_PROT_ALL, "[macos-scratch]");
+    ql.run();
+
+    EXPECT_EQ(ql.os().exit_code(), 42);
+    EXPECT_EQ(ql.mem().read_ptr(kCellBase, 4), 0u);    // the return 0
+    // the *addr cell carries the allocated base = the task's min_offset (0)
+    EXPECT_EQ(ql.mem().read_ptr(kAddrCell, 8), 0u);
+    // the region maps: a write through the host side lands (the cursor
+    // advanced by the page-aligned size)
+    const auto& task = dynamic_cast<const qiling::os::macos::QlOsMacos&>(ql.os()).macho_task();
+    EXPECT_EQ(task.min_offset, 0x1000u);
+}
+
+TEST(MacosOs, VmAllocateSecondCallRidesPastTheFirstRegion) {
+    // the second allocate starts at the advanced cursor (the 0x1000-shifted
+    // bump allocator) — the *addr cell carries 0x1000
+    const std::uint64_t kAddrCell = 0x23c0;
+    const std::uint64_t kAddrCell2 = 0x23e0;
+    std::vector<std::uint8_t> code = {
+        0xBB, 0x00, 0x21, 0x00, 0x00,                // mov ebx, 0x2100
+        0xBF, 0x00, 0x00, 0x00, 0x00,                // mov edi, 0 (port)
+        0xBE, 0xC0, 0x23, 0x00, 0x00,                // mov esi, kAddrCell
+        0xBA, 0x00, 0x10, 0x00, 0x00,                // mov edx, 0x1000
+        0x41, 0xBA, 0x00, 0x00, 0x00, 0x00,          // mov r10d, 0
+        0xB8, 0x0A, 0x00, 0x00, 0x01,                // mov eax, 0x100000a
+        0x0F, 0x05,                                  // syscall (the first allocate)
+        0xBF, 0x00, 0x00, 0x00, 0x00,                // mov edi, 0
+        0xBE, 0xE0, 0x23, 0x00, 0x00,                // mov esi, kAddrCell2
+        0xBA, 0x00, 0x08, 0x00, 0x00,                // mov edx, 0x800
+        0x41, 0xBA, 0x00, 0x00, 0x00, 0x00,          // mov r10d, 0
+        0xB8, 0x0A, 0x00, 0x00, 0x01,                // mov eax, 0x100000a
+        0x0F, 0x05,                                  // syscall (the second allocate)
+    };
+    emit_store_rax(code, 0x00);
+    code.insert(code.end(), kBlobExit.begin(), kBlobExit.end());
+
+    auto ql = make_macos_qiling(code);
+    ql.mem().map(0x2000, 0x2000, UC_PROT_ALL, "[macos-scratch]");
+    ql.run();
+
+    EXPECT_EQ(ql.os().exit_code(), 42);
+    EXPECT_EQ(ql.mem().read_ptr(kAddrCell, 8), 0u);        // the first base
+    EXPECT_EQ(ql.mem().read_ptr(kAddrCell2, 8), 0x1000u);  // the second base
+}
+
+TEST(MacosOs, VmMapWalksVmmapCursorWithMask) {
+    // kernelrpc_mach_vm_map_trap = 0x100000f: the vmmap cursor starts at the
+    // profile's vmmap_trap_address (0x4000000f4000); the mask 0x3fff ride
+    // the upstream alignment: end & mask != 0 -> end -= end & mask;
+    // end += mask + 1; the map page-aligns at PAGE_SIZE and the address
+    // rides through *addr
+    const std::uint64_t kAddrCell = 0x23c0;
+    std::vector<std::uint8_t> code = {
+        0xBB, 0x00, 0x21, 0x00, 0x00,                // mov ebx, 0x2100
+        0xBF, 0x00, 0x00, 0x00, 0x00,                // mov edi, 0 (target)
+        0xBE, 0xC0, 0x23, 0x00, 0x00,                // mov esi, kAddrCell (*addr)
+        0xBA, 0x00, 0x10, 0x00, 0x00,                // mov edx, 0x1000 (size)
+        0x41, 0xBA, 0x00, 0x40, 0x00, 0x00,          // mov r10d, 0x4000 (mask, the 4th arg)
+        0x41, 0xB8, 0x00, 0x00, 0x00, 0x00,          // mov r8d, 0 (flags)
+        0x45, 0x31, 0xC9,                            // xor r9d, r9d (cur_protection)
+        0xB8, 0x0F, 0x00, 0x00, 0x01,                // mov eax, 0x100000f
+        0x0F, 0x05,                                  // syscall
+    };
+    emit_store_rax(code, 0x00);
+    code.insert(code.end(), kBlobExit.begin(), kBlobExit.end());
+
+    auto ql = make_macos_qiling(code);
+    ql.mem().map(0x2000, 0x2000, UC_PROT_ALL, "[macos-scratch]");
+    ql.run();
+
+    EXPECT_EQ(ql.os().exit_code(), 42);
+    EXPECT_EQ(ql.mem().read_ptr(kCellBase, 4), 0u);    // KERN_SUCCESS
+    // the cursor walk: 0x4000000f4000 & 0x4000 != 0 -> -= 0x4000, += 0x4001,
+    // then the page round-up lands at 0x4000000f5000
+    EXPECT_EQ(ql.mem().read_ptr(kAddrCell, 8), 0x4000000f5000ull);
+}
+
+TEST(MacosOs, PortNoopStubsLeaveRaxUntouched) {
+    // the 0x1000012 port_deallocate / 0x1000013 mod_refs / 0x1000018
+    // construct bodies are the upstream's log+pass stubs — no return (rax
+    // stays at the pre-syscall value = the mov eax constant)
+    std::vector<std::uint8_t> code = {
+        0xBB, 0x00, 0x21, 0x00, 0x00,                // mov ebx, 0x2100
+        0xB8, 0x12, 0x00, 0x00, 0x01,                // mov eax, 0x1000012
+        0x0F, 0x05,                                  // syscall
+    };
+    emit_store_rax(code, 0x00);
+    const auto push = [&code](std::initializer_list<std::uint8_t> bytes) {
+        code.insert(code.end(), bytes);
+    };
+    push({0xBF, 0x00, 0x00, 0x00, 0x00});            // mov edi, 0 (target)
+    push({0xBE, 0x07, 0x30, 0x00, 0x00});            // mov esi, 0x3007 (name)
+    push({0x41, 0xBA, 0x00, 0x00, 0x00, 0x00});      // mov r10d, 0 (right)
+    push({0x41, 0xB8, 0x01, 0x00, 0x00, 0x00});      // mov r8d, 1 (delta)
+    push({0xB8, 0x13, 0x00, 0x00, 0x01});            // mov eax, 0x1000013
+    push({0x0F, 0x05});
+    emit_store_rax(code, 0x08);
+    push({0xBF, 0x00, 0x00, 0x00, 0x00});            // mov edi, 0
+    push({0xBE, 0x00, 0x00, 0x00, 0x00});            // mov esi, 0 (options)
+    push({0xBA, 0x00, 0x00, 0x00, 0x00});            // mov edx, 0 (context)
+    push({0x41, 0xB8, 0x00, 0x00, 0x00, 0x00});      // mov r8d, 0 (name cell)
+    push({0xB8, 0x18, 0x00, 0x00, 0x01});            // mov eax, 0x1000018
+    push({0x0F, 0x05});
+    emit_store_rax(code, 0x10);
+    code.insert(code.end(), kBlobExit.begin(), kBlobExit.end());
+
+    auto ql = make_macos_qiling(code);
+    ql.mem().map(0x2000, 0x2000, UC_PROT_ALL, "[macos-scratch]");
+    ql.run();
+
+    EXPECT_EQ(ql.os().exit_code(), 42);
+    EXPECT_EQ(ql.mem().read_ptr(kCellBase, 4), 0x1000012u);       // rax untouched
+    EXPECT_EQ(ql.mem().read_ptr(kCellBase + 8, 4), 0x1000013u);
+    EXPECT_EQ(ql.mem().read_ptr(kCellBase + 0x10, 4), 0x1000018u);
+}
+
 TEST(MacosOs, GetentropyReturnsSuccess) {
     auto ql = make_macos_qiling(getentropy_body());
     ql.mem().map(0x2000, 0x1000, UC_PROT_ALL, "[macos-scratch]");  // the page-aligned base (the 0x2100 cells ride inside)

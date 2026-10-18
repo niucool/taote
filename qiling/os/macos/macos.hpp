@@ -37,6 +37,13 @@ public:
     const MachPort& macho_mach_port() const { return *macho_mach_port_; }
     const MachPortManager& macho_port_manager() const { return *macho_port_manager_; }
     const MachoTask& macho_task() const { return *macho_task_; }
+    MachoTask& macho_task_mut() { return *macho_task_; }
+
+    // loader/macho.py seeds macho_vmmap_end from the profile's
+    // vmmap_trap_address (the ctor-seeded deviation, same as the mach
+    // surfaces); the vm_map trap walks it
+    std::uint64_t macho_vmmap_end() const { return macho_vmmap_end_; }
+    void set_macho_vmmap_end(std::uint64_t v) { macho_vmmap_end_ = v; }
     const MachoThread& macho_thread() const { return *macho_thread_; }
 
     // loader/macho.py seeds the fs helper on the QlOs (the FileSystem over
@@ -57,6 +64,7 @@ private:
     std::unique_ptr<MachoTask> macho_task_;
     std::unique_ptr<MachoThread> macho_thread_;
     std::unique_ptr<FileSystem> macho_fs_;
+    std::uint64_t macho_vmmap_end_ = 0;
 };
 
 }  // namespace macos

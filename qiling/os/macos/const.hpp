@@ -45,6 +45,9 @@ constexpr std::uint32_t VREG = 1;
 constexpr std::uint32_t VDIR = 2;
 constexpr std::uint32_t VLNK = 5;
 
+// const.py PAGE_SIZE
+constexpr std::uint64_t PAGE_SIZE = 0x1000;
+
 }  // namespace macos
 }  // namespace os
 }  // namespace qiling

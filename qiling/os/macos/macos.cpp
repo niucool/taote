@@ -151,7 +151,11 @@ std::string_view QlOsMacos::map_syscall(QL_ARCH archtype, unsigned num) const {
 void QlOsMacos::run() {
     // macos.py run: the kext machinery (the savedrip stack push + the
     // hook_ret address hooks over the loader's kext surface) rides the
-    // Mach-O kernel-loader slice; the plain branches are the posix run shape
+    // Mach-O kernel-loader slice; the plain branches are the posix run shape.
+    // loader/macho.py run() also seeds macho_vmmap_end from the profile's
+    // vmmap_trap_address — read here (the profile loads after the os
+    // construction; the qnx prelude reads its keys on the same pattern)
+    macho_vmmap_end_ = static_cast<std::uint64_t>(profile().get_int("OS64", "vmmap_trap_address"));
     QlOsPosix::run();
 }
 
