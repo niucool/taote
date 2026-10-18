@@ -43,6 +43,7 @@ add_library(qiling STATIC
     os/freebsd/syscall.cpp
     os/macos/macos.cpp
     os/macos/syscall.cpp
+    os/macos/kernel_func.cpp
     os/qnx/qnx.cpp
     os/qnx/syscall.cpp
     os/qnx/helpers.cpp

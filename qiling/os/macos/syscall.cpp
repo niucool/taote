@@ -4,12 +4,16 @@
 // simple stubs (csops, getentropy).
 #include "qiling/os/macos/syscall.hpp"
 
+#include <cstdio>
 #include <cstring>
 
 #include "qiling/core.hpp"
 #include "qiling/os/macos/const.hpp"
 #include "qiling/os/macos/macos.hpp"
 #include "qiling/os/posix/syscall.hpp"
+#include "qiling/os/utils.hpp"
+#include "qiling/os/filestruct.hpp"
+#include "qiling/exception.hpp"
 
 namespace qiling {
 namespace os {
@@ -60,6 +64,138 @@ std::optional<std::int64_t> syscall_getentropy(Qiling&, const std::vector<std::u
     return KERN_SUCCESS;
 }
 
+// macos/utils.py set_eflags_cf: the CF bit (bit 0) set to the target
+std::uint64_t set_eflags_cf(Qiling& ql, std::uint64_t target_cf) {
+    const auto flags = ql.arch().regs().read("eflags") & 0xfffffffe;
+    const auto out = flags | target_cf;
+    ql.arch().regs().write("eflags", out);
+    return out;
+}
+
+// syscall.py ql_syscall_access_macos: the ENOENT/KERN_SUCCESS over the fs
+// isexists (the raw errno value rides rax — the macos handlers return the
+// numbers directly, unlike the posix negative-errno convention)
+std::optional<std::int64_t> syscall_access_macos(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    const auto path = params[0];
+    const auto& os_macos = dynamic_cast<const QlOsMacos&>(ql.os());
+    const auto path_str = QlOsUtils::read_cstring(ql, path);
+    if (!os_macos.macho_fs().isexists(path_str)) {
+        return ENOENT;
+    }
+    return KERN_SUCCESS;
+}
+
+// syscall.py ql_syscall_sigprocmask: the log-only no-op (no return — the
+// upstream body ends without returning, so rax stays untouched)
+std::optional<std::int64_t> syscall_sigprocmask(Qiling&, const std::vector<std::uint64_t>&) {
+    return std::nullopt;
+}
+
+// syscall.py ql_syscall_fcntl64_macos: the fixed cmd table (GETFL/GETFD
+// answer 2, SETFL/SETFD 0, ADDFILESIGS_RETURN writes the 0xefffffff blob)
+std::optional<std::int64_t> syscall_fcntl64_macos(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    const auto cmd = static_cast<std::uint32_t>(params[1]);
+    const auto arg = params[2];
+
+    std::int64_t regreturn = 0;
+    if (cmd == F_GETFL) {
+        regreturn = 2;
+    } else if (cmd == F_SETFL) {
+        regreturn = 0;
+    } else if (cmd == F_GETFD) {
+        regreturn = 2;
+    } else if (cmd == F_SETFD) {
+        regreturn = 0;
+    } else if (cmd == F_ADDFILESIGS_RETURN) {
+        const std::array<std::uint8_t, 4> blob = {0xff, 0xff, 0xff, 0xef};  // pack32(0xefffffff)
+        ql.mem().write(arg, std::vector<std::uint8_t>(blob.begin(), blob.end()));
+        regreturn = 0;
+    }
+    return regreturn;
+}
+
+// syscall.py ql_syscall_pread: seek + read through the fd table, the data
+// into buf, the CF cleared, nbyte returned
+std::optional<std::int64_t> syscall_pread(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    const auto fd = static_cast<std::int64_t>(params[0]);
+    const auto buf = params[1];
+    const auto nbyte = static_cast<std::size_t>(params[2]);
+    const auto offset = params[3];
+
+    if (fd >= 0 && fd <= MAX_FD_SIZE) {
+        auto f = ql.os<posix::QlOsPosix>().fd().at(static_cast<int>(fd));
+        if (f != nullptr) {
+            f->lseek(offset, SEEK_SET);
+            const auto data = f->read(nbyte);
+            ql.mem().write(buf, data);
+        }
+    }
+    set_eflags_cf(ql, 0x0);
+    return static_cast<std::int64_t>(nbyte);
+}
+
+// syscall.py ql_syscall_getattrlist: the 24-byte attrlist unpack + the
+// commonattr walk + the length-prefixed write into the caller's buffer
+std::optional<std::int64_t> syscall_getattrlist(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    const auto path = params[0];
+    const auto alist = params[1];
+    const auto attribute_buffer = params[2];
+    const auto buffer_size = params[3];
+
+    auto u16 = [&](std::uint64_t at) {
+        const auto b = ql.mem().read(at, 2);
+        return static_cast<std::uint32_t>(b[0]) | static_cast<std::uint32_t>(b[1]) << 8;
+    };
+    auto u32 = [&](std::uint64_t at) {
+        const auto b = ql.mem().read(at, 4);
+        return static_cast<std::uint32_t>(b[0]) | static_cast<std::uint32_t>(b[1]) << 8 |
+               static_cast<std::uint32_t>(b[2]) << 16 | static_cast<std::uint32_t>(b[3]) << 24;
+    };
+    const auto commonattr = u32(alist + 4);
+
+    const auto& os_macos = dynamic_cast<const QlOsMacos&>(ql.os());
+    const auto path_str = QlOsUtils::read_cstring(ql, path);
+
+    std::vector<std::uint8_t> attr;
+    if (commonattr != 0) {
+        attr = os_macos.macho_fs().get_common_attr(path_str, commonattr);
+        if (attr.empty()) {
+            // the upstream raises QlErrorSyscallError("Error File Not Exist")
+            throw QlErrorSyscallError("Error File Not Exist " + path_str);
+        }
+    }
+
+    const auto attr_len = static_cast<std::uint32_t>(attr.size() + 4);
+    std::vector<std::uint8_t> packed;
+    packed.reserve(4 + attr.size());
+    for (int i = 0; i < 4; ++i) {
+        packed.push_back(static_cast<std::uint8_t>(attr_len >> (8 * i)));
+    }
+    packed.insert(packed.end(), attr.begin(), attr.end());
+
+    if (packed.size() > buffer_size) {
+        return 1;
+    }
+    ql.mem().write(attribute_buffer, packed);
+    set_eflags_cf(ql, 0x0);
+    return KERN_SUCCESS;
+}
+
+// syscall.py ql_syscall_getrlimit: the rlp writes (the upstream writes both
+// cells AT rlp — the second overwrites the first, verbatim) and NO return
+// in the success path (rax untouched; the EINVAL range check rides the
+// upstream's odd `which & _RLIMIT_POSIX_FLAG` masking verbatim)
+std::optional<std::int64_t> syscall_getrlimit(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    const auto rlp = params[1];
+    const auto which = static_cast<std::uint32_t>(params[0]) & 0x1000;  // _RLIMIT_POSIX_FLAG
+    if (which >= 9) {  // RLIM_NLIMITS
+        return EINVAL;
+    }
+    ql.mem().write(rlp, std::vector<std::uint8_t>{0x00, 0x13, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00});  // rlim_cur
+    ql.mem().write(rlp, std::vector<std::uint8_t>{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F});  // rlim_max
+    return std::nullopt;
+}
+
 }  // namespace
 
 void register_macos_syscalls() {
@@ -70,6 +206,13 @@ void register_macos_syscalls() {
     registry.register_syscall({"host_self_trap", {}, syscall_host_self_trap});
     registry.register_syscall({"csops", {PARAM_INTN, PARAM_INTN, PARAM_PTRX, PARAM_INTN}, syscall_csops});
     registry.register_syscall({"getentropy", {PARAM_PTRX, PARAM_INTN}, syscall_getentropy});
+    registry.register_syscall({"access_macos", {PARAM_PTRX, PARAM_INTN}, syscall_access_macos});
+    registry.register_syscall({"sigprocmask", {PARAM_INTN, PARAM_PTRX, PARAM_PTRX}, syscall_sigprocmask});
+    registry.register_syscall({"fcntl64_macos", {PARAM_INTN, PARAM_INTN, PARAM_INTN}, syscall_fcntl64_macos});
+    registry.register_syscall({"pread", {PARAM_INTN, PARAM_PTRX, PARAM_INTN, PARAM_INTN}, syscall_pread});
+    registry.register_syscall({"getattrlist", {PARAM_PTRX, PARAM_PTRX, PARAM_PTRX, PARAM_INTN, PARAM_INTN},
+                               syscall_getattrlist});
+    registry.register_syscall({"getrlimit", {PARAM_INTN, PARAM_PTRX}, syscall_getrlimit});
 }
 
 }  // namespace macos

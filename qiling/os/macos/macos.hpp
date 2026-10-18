@@ -15,6 +15,7 @@
 
 #include "qiling/os/posix/posix.hpp"
 #include "qiling/os/macos/mach_port.hpp"
+#include "qiling/os/macos/kernel_func.hpp"
 
 namespace qiling {
 namespace os {
@@ -38,6 +39,10 @@ public:
     const MachoTask& macho_task() const { return *macho_task_; }
     const MachoThread& macho_thread() const { return *macho_thread_; }
 
+    // loader/macho.py seeds the fs helper on the QlOs (the FileSystem over
+    // the rootfs); the same ctor-seeded deviation as the mach surfaces
+    const FileSystem& macho_fs() const { return *macho_fs_; }
+
 protected:
     // map_syscall.py get_syscall_mapper: the MACOS per-arch table; the
     // x8664 numbers carry the LIBSYSTEM fixup (0x2000000 <= n < 0x3000000
@@ -51,6 +56,7 @@ private:
     std::unique_ptr<MachPortManager> macho_port_manager_;
     std::unique_ptr<MachoTask> macho_task_;
     std::unique_ptr<MachoThread> macho_thread_;
+    std::unique_ptr<FileSystem> macho_fs_;
 };
 
 }  // namespace macos

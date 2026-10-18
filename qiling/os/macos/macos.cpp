@@ -78,6 +78,7 @@ QlOsMacos::QlOsMacos(Qiling* ql) : QlOsPosix(ql) {
     // host_port stays the fixed 0x303)
     macho_task_ = std::make_unique<MachoTask>();
     macho_thread_ = std::make_unique<MachoThread>();
+    macho_fs_ = std::make_unique<FileSystem>(*ql);
 
     register_macos_syscalls();
     load();
