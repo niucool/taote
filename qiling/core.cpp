@@ -131,12 +131,20 @@ Qiling::Qiling(const QilingOptions& options) {
 }
 
 Qiling::~Qiling() {
-    // tear down the tracer hooks while the uc engine is alive: the C++
-    // destruction order closes the arch's uc handle before the QlCoreHooks
-    // base dtor runs, so anything touching uc at that point would dangle
+    std::fflush(stderr);
+    // tear down the os-owned hooks and the tracer hooks while the uc engine
+    // is alive: the C++ destruction order closes the arch's uc handle before
+    // the QlCoreHooks base dtor runs, so anything touching uc at that point
+    // would dangle
+    if (os_ != nullptr) {
+        os_->shutdown();
+    }
     if (arch_ != nullptr) {
         arch_->shutdown_utils();
     }
+    // release every remaining uc hook handle while the engine is alive (the
+    // base-class dtor runs after the arch members have closed uc)
+    clear_hooks();
 }
 
 bool Qiling::baremetal() const noexcept {

@@ -77,8 +77,9 @@ TEST(SelectLoader, BlobFactoryAvailable) {
 }
 
 TEST(SelectLoader, NonBlobRaisesNotImplemented) {
-    // PE lands with the loader slices; ELF with Phase 5 (PORT_PLAN.md §10)
-    for (const auto os : {QL_OS::LINUX, QL_OS::WINDOWS, QL_OS::MACOS, QL_OS::FREEBSD, QL_OS::UEFI, QL_OS::DOS}) {
+    // PE landed with Phase 4; the remaining per-format loaders degrade
+    // (PORT_PLAN.md Phase 5+)
+    for (const auto os : {QL_OS::MACOS, QL_OS::FREEBSD, QL_OS::UEFI, QL_OS::DOS, QL_OS::QNX}) {
         EXPECT_THROW(select_loader(os, false), QlErrorNotImplemented) << static_cast<int>(os);
     }
 }
@@ -89,7 +90,7 @@ TEST(SelectOs, BlobFactoryAvailable) {
 }
 
 TEST(SelectOs, NonBlobRaisesNotImplemented) {
-    for (const auto os : {QL_OS::LINUX, QL_OS::WINDOWS, QL_OS::MACOS, QL_OS::FREEBSD, QL_OS::UEFI, QL_OS::DOS, QL_OS::QNX, QL_OS::MCU}) {
+    for (const auto os : {QL_OS::MACOS, QL_OS::FREEBSD, QL_OS::UEFI, QL_OS::DOS, QL_OS::QNX}) {
         EXPECT_THROW(select_os(os), QlErrorNotImplemented) << static_cast<int>(os);
     }
 }

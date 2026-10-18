@@ -16,6 +16,9 @@
 #include "qiling/exception.hpp"
 #include "qiling/loader/blob.hpp"
 #include "qiling/os/blob/blob.hpp"
+#include "qiling/os/posix/posix.hpp"
+#include "qiling/os/windows/windows.hpp"
+#include "qiling/loader/pe.hpp"
 
 namespace qiling {
 
@@ -232,9 +235,20 @@ LoaderFactory select_loader(QL_OS ostype, bool libcache) {
             return [](Qiling* ql) -> std::unique_ptr<loader::QlLoader> {
                 return std::make_unique<loader::QlLoaderBLOB>(ql);
             };
+        case QL_OS::WINDOWS:
+            return [libcache](Qiling* ql) -> std::unique_ptr<loader::QlLoader> {
+                return std::make_unique<loader::QlLoaderPE>(ql, libcache);
+            };
+        case QL_OS::LINUX:
+            // shellcode runs take the blob loader's mapping path (loader/elf.py
+            // pe=None equivalent); the ELF container parsing lands with
+            // Phase 5 (PORT_PLAN.md)
+            return [](Qiling* ql) -> std::unique_ptr<loader::QlLoader> {
+                return std::make_unique<loader::QlLoaderBLOB>(ql);
+            };
         default:
-            // the per-format loaders (PE/ELF/Mach-O/DOS/UEFI/...) land with
-            // their phases; until then the module lookup degrades
+            // the remaining per-format loaders (ELF/Mach-O/DOS/UEFI/...) land
+            // with their phases; until then the module lookup degrades
             throw QlErrorNotImplemented("loader for this os type is not implemented");
     }
 }
@@ -244,6 +258,14 @@ OsFactory select_os(QL_OS ostype) {
         case QL_OS::BLOB:
             return [](Qiling* ql) -> std::unique_ptr<QlOs> {
                 return std::make_unique<QlOsBlob>(ql);
+            };
+        case QL_OS::WINDOWS:
+            return [](Qiling* ql) -> std::unique_ptr<QlOs> {
+                return std::make_unique<os::windows::QlOsWindows>(ql);
+            };
+        case QL_OS::LINUX:
+            return [](Qiling* ql) -> std::unique_ptr<QlOs> {
+                return std::make_unique<os::posix::QlOsPosix>(ql);
             };
         default:
             throw QlErrorNotImplemented("os layer for this os type is not implemented");

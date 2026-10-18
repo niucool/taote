@@ -25,9 +25,16 @@ add_library(qiling STATIC
     os/path.cpp
     os/filestruct.cpp
     os/mapper.cpp
+    os/posix/posix.cpp
+    os/posix/syscall.cpp
+    os/posix/syscall/abi.cpp
+    os/windows/handle.cpp
+    os/windows/fncc.cpp
+    os/windows/windows.cpp
     os/blob/blob.cpp
     loader/loader.cpp
     loader/blob.cpp
+    loader/pe.cpp
     snapshot.cpp
     cc/cc.cpp
     cc/arm.cpp
@@ -45,11 +52,14 @@ target_compile_definitions(qiling PRIVATE QILING_SOURCE_DIR="${PROJECT_SOURCE_DI
 # mirroring the Python package layout (port root = repo root, PORT_PLAN.md D16).
 target_include_directories(qiling PUBLIC ${PROJECT_SOURCE_DIR})
 
+find_package(pe-parse CONFIG REQUIRED)
+
 target_link_libraries(qiling PUBLIC
     spdlog::spdlog
     unicorn::unicorn
     capstone::capstone
     keystone::keystone
+    pe-parse::pe-parse
 )
 
 add_library(qiling::qiling ALIAS qiling)

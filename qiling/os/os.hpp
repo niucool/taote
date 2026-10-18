@@ -20,6 +20,7 @@
 #include "qiling/const.hpp"
 #include "qiling/exception.hpp"
 #include "qiling/os/filestruct.hpp"
+#include "qiling/os/fcall.hpp"
 #include "qiling/os/mapper.hpp"
 #include "qiling/os/stats.hpp"
 
@@ -56,6 +57,11 @@ public:
 
     // os main method; derivatives must implement one of their own
     virtual void run() = 0;
+
+    // releases the os-owned hooks while the uc engine is still open (the
+    // C++ destruction order closes the arch's uc handle before the base
+    // dtors run; the Python original leans on GC ordering)
+    virtual void shutdown() {}
 
     // os.py stop — multithreaded derivatives install thread_management
     virtual void stop();
@@ -97,7 +103,11 @@ public:
     std::uint64_t exit_point() const noexcept { return exit_point_; }
     void set_exit_point(std::uint64_t addr) noexcept { exit_point_ = addr; }
 
-    QlFunctionCall& fcall() const noexcept { return *fcall_; }
+    QlFunctionCall& fcall() const noexcept { return fcall_nonowning_ != nullptr ? *fcall_nonowning_ : *fcall_; }
+
+    // the non-owning rebind (windows.py: self.fcall = self.fcall_select(cc)):
+    // the instance stays owned by the caller; a later set_fcall clears it
+    void set_fcall_ptr(QlFunctionCall& fcall) { fcall_nonowning_ = &fcall; }
     void set_fcall(std::unique_ptr<QlFunctionCall> fcall);
 
     // the profile the os layer reads its sections from (os.py self.profile)
@@ -157,6 +167,7 @@ protected:
 
     QlOsStats stats_;
     std::unique_ptr<QlFunctionCall> fcall_;
+    QlFunctionCall* fcall_nonowning_ = nullptr;
 
     bool child_processes_ = false;
     void* thread_management_ = nullptr;  // QlThread* (thread management slice)
