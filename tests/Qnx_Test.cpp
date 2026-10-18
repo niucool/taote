@@ -420,6 +420,67 @@ TEST(QnxOs, SyncCreateAndMutexLockStampOwnerAndCount) {
     EXPECT_EQ(ql.mem().read_ptr(0x220C, 4), 0u);
 }
 
+// the msg_sendv flow over the seeded stdout connection: the _io_write
+// header rides iov[0] and the payload rides iov[1]; the kernel resolves the
+// message type (0x102) through the msgtype table and delegates to the posix
+// write — the fixture pre-seeds the iov/hdr/data cells and asserts the
+// returned byte count
+//   00: mov r0, #1        ; coid = 1 (the stdout conn)
+//   04: mov r1, #0x2100   ; smsg = the iov array
+//   08: mov r2, #2        ; sparts = 2
+//   0C: mov r3, #0x2200   ; rmsg (unused by io_write)
+//   10: mov r4, #0        ; rparts
+//   14: mov r12, #11      ; msg_sendv
+//   18: swi 0
+//   1C: mov r4, #0x2100 ; 20: add r4, r4, #0x30
+//   24: str r0, [r4]         ; -> 0x2130
+//   28: mvn r0, #0 ; 2C: mvn r1, #0 ; 30: mov r2, #42
+//   34: mov r12, #47 ; 38: swi 0
+TEST(QnxOs, MsgSendvIoWriteDelegatesToPosixWrite) {
+    const std::vector<std::uint8_t> code = {
+        0x01, 0x00, 0xA0, 0xE3,  // 00: mov r0, #1
+        0x21, 0x1C, 0xA0, 0xE3,  // 04: mov r1, #0x2100
+        0x02, 0x20, 0xA0, 0xE3,  // 08: mov r2, #2
+        0x00, 0x3C, 0xA0, 0xE3,  // 0C: mov r3, #0x2200
+        0x00, 0x40, 0xA0, 0xE3,  // 10: mov r4, #0
+        0x0B, 0xC0, 0xA0, 0xE3,  // 14: mov r12, #11
+        0x00, 0x00, 0x00, 0xEF,  // 18: swi 0
+        0x21, 0x4C, 0xA0, 0xE3,  // 1C: mov r4, #0x2100
+        0x30, 0x40, 0x84, 0xE2,  // 20: add r4, r4, #0x30
+        0x00, 0x00, 0x84, 0xE5,  // 24: str r0, [r4]
+        0x00, 0x00, 0xE0, 0xE3,  // 28: mvn r0, #0
+        0x00, 0x10, 0xE0, 0xE3,  // 2C: mvn r1, #0
+        0x2A, 0x20, 0xA0, 0xE3,  // 30: mov r2, #42
+        0x2F, 0xC0, 0xA0, 0xE3,  // 34: mov r12, #47
+        0x00, 0x00, 0x00, 0xEF,  // 38: swi 0
+    };
+    auto ql = make_qnx_qiling(code);
+
+    ql.mem().map(kScratch, 0x1000, UC_PROT_ALL, "[qnx-scratch]");
+
+    // the iov array: iov[0] = (the _io_write header, 16 bytes), iov[1] = (the
+    // payload, 4 bytes)
+    ql.mem().write_ptr(0x2100, 0x2110, 4);
+    ql.mem().write_ptr(0x2104, 16, 4);
+    ql.mem().write_ptr(0x2108, 0x2120, 4);
+    ql.mem().write_ptr(0x210C, 4, 4);
+    // the _io_write header: type=0x102, combine_len=16, nbytes=4, xtype=0,
+    // zero=0
+    ql.mem().write_ptr(0x2110, 0x102, 2);
+    ql.mem().write_ptr(0x2112, 16, 2);
+    ql.mem().write_ptr(0x2114, 4, 4);
+    ql.mem().write_ptr(0x2118, 0, 4);
+    ql.mem().write_ptr(0x211C, 0, 4);
+    // the payload
+    ql.mem().write(0x2120, std::vector<std::uint8_t>{'Q', 'N', 'X', '!'});
+
+    ql.run();
+
+    EXPECT_EQ(ql.os().exit_code(), 42);
+    // io_write returns the written byte count through the dispatcher
+    EXPECT_EQ(ql.mem().read_ptr(0x2130, 4), 4u);
+}
+
 // the clock_cycles flow: the kernel returns the core's free-running counter
 // as the nanosecond wall clock (the upstream's simplification) in R0, which
 // the fixture stores into a second scratch cell — the pre-poisoned marker

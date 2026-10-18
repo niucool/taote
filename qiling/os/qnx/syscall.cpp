@@ -6,6 +6,8 @@
 #include "qiling/core.hpp"
 #include "qiling/os/posix/posix.hpp"
 #include "qiling/os/qnx/const.hpp"
+#include "qiling/os/qnx/helpers.hpp"
+#include "qiling/os/qnx/message.hpp"
 #include "qiling/os/qnx/qnx.hpp"
 #include "qiling/os/qnx/structs.hpp"
 
@@ -235,6 +237,48 @@ std::optional<std::int64_t> syscall_sync_mutex_unlock(Qiling& ql, const std::vec
     return EOK;
 }
 
+namespace {
+
+// the msg-send argument unpacking (the coid, the send iov, the reply iov)
+std::optional<std::int64_t> msg_sendv_impl(Qiling& ql, std::uint64_t coid, std::uint64_t smsg, std::int32_t sparts,
+                                           std::uint64_t rmsg, std::int32_t rparts) {
+    auto& os = static_cast<QlOsQnx&>(ql.os());
+
+    // syscall.py _msg_sendv: the connection must exist and target the sysmgr
+    const auto it = os.connections().find(static_cast<std::uint32_t>(coid));
+    if (it == os.connections().end()) {
+        throw QlErrorBase("qnx msg_sendv: the connection id must exist in the connections mapping");
+    }
+    if (it->second.pid != SYSMGR_PID || it->second.chid != SYSMGR_CHID) {
+        ql.log().warn("qnx msg_sendv: unhandled message for pid/chid (only the sysmgr channel rides)");
+        return -1;
+    }
+
+    const auto sbody = get_message_body(ql, smsg, sparts);
+    const auto type = static_cast<std::uint16_t>(sbody[0] | (sbody[1] << 8));
+
+    const auto hook = find_message_handler(type);
+    if (hook == nullptr) {
+        ql.log().warn("qnx msg_sendv: no hook for the message type");
+        return -1;
+    }
+    return hook(ql, coid, smsg, sparts, rmsg, rparts);
+}
+
+}  // namespace
+
+// syscall.py ql_syscall_msg_sendv: the resource-manager message send
+std::optional<std::int64_t> syscall_msg_sendv(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    return msg_sendv_impl(ql, params[0], params[1], static_cast<std::int32_t>(params[2]), params[3],
+                          static_cast<std::int32_t>(params[4]));
+}
+
+// syscall.py ql_syscall_msg_sendvnc: the non-blocking shape shares the path
+std::optional<std::int64_t> syscall_msg_sendvnc(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    return msg_sendv_impl(ql, params[0], params[1], static_cast<std::int32_t>(params[2]), params[3],
+                          static_cast<std::int32_t>(params[4]));
+}
+
 // syscall.py ql_syscall_thread_destroy: the (-1, -1, status) request
 // terminates the process with the status as the exit code
 std::optional<std::int64_t> syscall_thread_destroy(Qiling& ql, const std::vector<std::uint64_t>& params) {
@@ -312,6 +356,12 @@ void register_qnx_syscalls() {
     registry.register_syscall({"sync_create", {PARAM_INTN, PARAM_PTRX, PARAM_PTRX}, syscall_sync_create});
     registry.register_syscall({"sync_mutex_lock", {PARAM_PTRX}, syscall_sync_mutex_lock});
     registry.register_syscall({"sync_mutex_unlock", {PARAM_PTRX}, syscall_sync_mutex_unlock});
+    registry.register_syscall({"msg_sendv",
+                               {PARAM_INTN, PARAM_PTRX, PARAM_INTN, PARAM_PTRX, PARAM_INTN},
+                               syscall_msg_sendv});
+    registry.register_syscall({"msg_sendvnc",
+                               {PARAM_INTN, PARAM_PTRX, PARAM_INTN, PARAM_PTRX, PARAM_INTN},
+                               syscall_msg_sendvnc});
     registry.register_syscall({"thread_destroy", {PARAM_INTN, PARAM_INTN, PARAM_INTN},
                                syscall_thread_destroy});
 }

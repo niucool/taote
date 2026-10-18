@@ -470,11 +470,54 @@ of the gevent hub.
   not a port defect — the encoding difference is unexplained, the P5-style
   probe did not chase it).
 
+## Phase 5.6 - the os/qnx dialect (the ARM32 kercall slice)
+
+| File | Python counterpart | Status | Notes |
+|---|---|---|---|
+| `QlOsQnx` | `os/qnx/qnx.py` | Ported | the QNX type over the posix base; the R12 id-register ABI override (`QlSyscallABIArmQnx`, the upstream `QlAArch32QNX` shape); the interrupt-2 kernel-entry hook (`hook_intno(hook_syscall, 2)`, installed unconditionally — the upstream early-returns for `ql.code` and its hooks then never install; the port installs so the shellcode fixtures ride it) |
+| the ARM kercalls table | `os/qnx/map_syscall.py` | Ported | the 101-entry verbatim table (the kercalls.h numbers); the dispatcher resolves through the virtual `map_syscall` |
+| `const.hpp` | `os/qnx/const.py` | Ported | the NTO_*/SYSMGR_*/pthread sync constants; the EINVAL/S_IFMT names guarded behind the windows.h macro collisions |
+| `structs.hpp` | `os/qnx/structs.py` | Ported | the _sync/_sync_attr/_thread_local_storage layouts (all 32-bit cells) + the SYNC_OWNER_BITS helper |
+| `helpers.hpp` | `os/qnx/helpers.py` | Ported | the QnxConn record + the get_message_body (the iov form rides the first entry only — the upstream shape verbatim) |
+| the run() prelude | `qnx.py run()` | Ported | the OS32 profile addresses, the syspage map + the rootfs syspage.bin image, the TLS seed (errptr/pid/tid + the derived owner), the cpupage cells |
+| the handlers | `os/qnx/syscall.py` | Ported (slice) | channel_create (the counter), thread_destroy (the (-1,-1,status) exit), clock_time (the CLOCK_REALTIME ns read; the set-time warn+(-1)), clock_cycles (the 0xFE000000 id, the ns simplification), sys_cpupage_get/set (the ADDR/PLS/SYSPAGE indexes), connect_attach/detach (the ND+CLOEXEC pins, the coid counters), connect_flags, connect_client_info (the scoid=-1 record), sync_create/sync_mutex_lock/sync_mutex_unlock (the ker_sync.c stamps + the stubs), msg_sendv/msg_sendvnc (the type dispatch → the message.py handlers) + `message.cpp` io_write (the iov[0] header + the iov[1] payload, the posix write delegate) |
+| `qnx.ql` | `qiling/profiles/qnx.ql` | Ported (deviation) | the verbatim copy + the [CODE] load_address (the same deviation as freebsd.ql) |
+| `tests/Qnx_Test.cpp` | the fixture flows | Ported | 7 fixtures: the channel_create + the thread_destroy exit; the clock_time read; the clock_cycles (the literal-pool blob for the 0xFE000000 id + the ARM32 return-register truncation pin); the cpupage set/get PLS roundtrip; the connect attach/detach (the side-channel coid); the flags + the client_info record (the KERNEL pid 1996); the sync create/lock stamps (the TLS owner (pid<<16\|tid), the WAITING bit clear); the msg_sendv io_write (the iov form, the byte-count return) |
+
+### Findings
+
+- **the ARM32 fixture encodings** (the session's tripped-over points, pinned):
+  the MOV immediate puts Rd at bits 15-12 (a misplaced nibble silently targets
+  the Rn field); the rotate field is bits 11-8 (the `#0x30` written with the
+  rotate nibble set became `#0x30000000`); the 0xFE000000 kercall id does not
+  fit a rotimm — the fixture pools it via `ldr r12, [pc, #imm]` with the
+  little-endian literal.
+- **the ARM32 return register truncation**: the dispatcher's set_return_value
+  writes R0 (32-bit) — a 64-bit ns return truncates to its low 32 bits (the
+  upstream's r0 write has the same shape; the clock_cycles fixture pins it).
+- **the `QlSyscallABIArm` lost its `final`** to let the QNX ABI derive — the
+  upstream models the inheritance (QlAArch32QNX(QlAArch32)) the same way.
+- **the mem-unmapped hook retry semantics (open port deviation)**: the port's
+  `dispatch_mem` returns handled=true whenever a hook is merely registered,
+  regardless of the hook's return — with a UC_HOOK_MEM_* callback returning 0,
+  unicorn then retries the unmapped access forever (the observed infinite
+  retry during the msg fixture debugging). The upstream's `_hook_mem_cb`
+  raises QlErrorCoreHook when the hook does not handle the access. Needs the
+  unhandled-raise (or the block-and-stop) alignment before the mem hooks are
+  used for real.
+- **the Qiling-facade UC_HOOK_CODE on ARM did not fire in the session probe**
+  (the same blob ran fine — the INTR hook fired, the code hook never did; the
+  CoreHooks unit tests pass on the raw path). Open observation, not chased
+  further in-session.
+
 ## Deferred (tracked, not built)
 
-`os/qnx/`, `os/macos/`, `os/uefi/`, `os/dos/`, `qiling/hw/`,
+`os/macos/`, `os/uefi/`, `os/dos/`, `qiling/hw/`,
 `qiling/extensions/mcu/` — resume criteria in PORT_PLAN.md §10 (OQ 9); the
-remaining profile files (dos/macos/qnx/uefi `.ql`) defer with them.
+remaining profile files (dos/macos/uefi `.ql`) defer with them. The qnx
+remainder (the message.py io_connect/io_read/io_lseek/stat/mem_map/sys_conf
+handlers + the channel_destroy/connect_client_info other-process raise) resumes
+with the next qnx slice.
 
 ### Resume-criteria reassessment (post-Phase-5)
 

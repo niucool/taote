@@ -39,6 +39,8 @@ add_library(qiling STATIC
     os/freebsd/syscall.cpp
     os/qnx/qnx.cpp
     os/qnx/syscall.cpp
+    os/qnx/helpers.cpp
+    os/qnx/message.cpp
     os/windows/handle.cpp
     os/windows/fncc.cpp
     os/windows/windows.cpp

@@ -5,6 +5,9 @@
 
 #include <cstdint>
 #include <optional>
+#include <vector>
+
+#include "qiling/core.hpp"
 
 namespace qiling {
 namespace os {
@@ -20,6 +23,11 @@ struct QnxConn {
     QnxConn(std::uint32_t pid_, std::uint32_t chid_, std::optional<int> fd_ = std::nullopt)
         : pid(pid_), chid(chid_), fd(fd_) {}
 };
+
+// helpers.py get_message_body: the positive parts count rides the iov form
+// (only the first iov entry is walked, verbatim); the negative count is the
+// flat byte length
+std::vector<std::uint8_t> get_message_body(Qiling& ql, std::uint64_t msg, std::int32_t parts);
 
 }  // namespace qnx
 }  // namespace os
