@@ -79,6 +79,12 @@ public:
     // and run it (the abi supplies the id and the parameters)
     void load_syscall();
 
+    // posix.py __get_syscall_mapper: the os-specific map_syscall module
+    // supplies the per-arch number→name mapper; the default resolves the
+    // posix tables, the os dialects override (the freebsd table carries the
+    // freebsd numbers)
+    virtual std::string_view map_syscall(QL_ARCH archtype, unsigned num) const;
+
     // the per-arch syscall entry hooks (the single-shot run and the
     // multithread driver share the install; idempotent)
     void install_syscall_hooks();

@@ -20,10 +20,9 @@ namespace qiling {
 namespace os {
 namespace posix {
 
-namespace {
-
-// map_syscall.py get_syscall_mapper: the per-arch number-to-name tables
-std::string_view lookup_syscall_table(QL_ARCH arch, unsigned num) {
+std::string_view QlOsPosix::map_syscall(QL_ARCH arch, unsigned num) const {
+    // map_syscall.py get_syscall_mapper: the per-arch number-to-name tables
+    // (the posix default; the os dialects override the table source)
     const std::pair<unsigned, std::string_view>* table = nullptr;
     std::size_t count = 0;
 
@@ -67,8 +66,6 @@ std::string_view lookup_syscall_table(QL_ARCH arch, unsigned num) {
     }
     return {};
 }
-
-}  // namespace
 
 QlOsPosix::QlOsPosix(Qiling* ql) : QlOs(ql) {
     init_paths_if_managed();
@@ -266,7 +263,7 @@ void QlOsPosix::load_syscall() {
     const auto raw_params = syscall_abi_->get_params(count);
 
     // resolve the syscall name (unknown ids keep the numeric spelling)
-    const auto table_name = lookup_syscall_table(ql().arch().type(), static_cast<unsigned>(syscall_id));
+    const auto table_name = map_syscall(ql().arch().type(), static_cast<unsigned>(syscall_id));
     std::string syscall_name(table_name);
 
     // the user override (posix.py posix_syscall_hooks[QL_INTERCEPT.CALL])

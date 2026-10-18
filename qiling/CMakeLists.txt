@@ -35,6 +35,8 @@ add_library(qiling STATIC
     os/posix/const_mapping.cpp
     os/posix/syscall.cpp
     os/posix/syscall/abi.cpp
+    os/freebsd/freebsd.cpp
+    os/freebsd/syscall.cpp
     os/windows/handle.cpp
     os/windows/fncc.cpp
     os/windows/windows.cpp

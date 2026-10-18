@@ -9,6 +9,7 @@
 #include <tuple>
 
 #include "qiling/arch/x86.hpp"
+#include "qiling/os/freebsd/freebsd.hpp"
 #include "qiling/arch/arm.hpp"
 #include "qiling/arch/arm64.hpp"
 #include "qiling/arch/mips.hpp"
@@ -260,9 +261,11 @@ LoaderFactory select_loader(QL_OS ostype, bool libcache) {
                 return std::make_unique<loader::QlLoaderPE>(ql, libcache);
             };
         case QL_OS::LINUX:
+        case QL_OS::FREEBSD:
             // QlLoaderELF covers both paths: the shellcode branch (the
             // loader/elf.py `if self.ql.code` blob mapping) and the ET_EXEC/
-            // ET_DYN container parsing
+            // ET_DYN container parsing. The freebsd dialect shares it; the
+            // qnx/macos loaders land with their phases.
             return [](Qiling* ql) -> std::unique_ptr<loader::QlLoader> {
                 return std::make_unique<loader::QlLoaderELF>(ql);
             };
@@ -286,6 +289,10 @@ OsFactory select_os(QL_OS ostype) {
         case QL_OS::LINUX:
             return [](Qiling* ql) -> std::unique_ptr<QlOs> {
                 return std::make_unique<os::linux::QlOsLinux>(ql);
+            };
+        case QL_OS::FREEBSD:
+            return [](Qiling* ql) -> std::unique_ptr<QlOs> {
+                return std::make_unique<os::freebsd::QlOsFreebsd>(ql);
             };
         default:
             throw QlErrorNotImplemented("os layer for this os type is not implemented");

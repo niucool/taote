@@ -77,11 +77,19 @@ TEST(SelectLoader, BlobFactoryAvailable) {
 }
 
 TEST(SelectLoader, NonBlobRaisesNotImplemented) {
-    // PE landed with Phase 4; the remaining per-format loaders degrade
-    // (PORT_PLAN.md Phase 5+)
-    for (const auto os : {QL_OS::MACOS, QL_OS::FREEBSD, QL_OS::UEFI, QL_OS::DOS, QL_OS::QNX}) {
+    // PE landed with Phase 4; the ELF-backed oses (linux/freebsd) resolve the
+    // QlLoaderELF; the remaining per-format loaders degrade (PORT_PLAN.md
+    // Phase 5+)
+    for (const auto os : {QL_OS::MACOS, QL_OS::UEFI, QL_OS::DOS, QL_OS::QNX}) {
         EXPECT_THROW(select_loader(os, false), QlErrorNotImplemented) << static_cast<int>(os);
     }
+}
+
+TEST(SelectLoader, FreebsdResolvesElfLoader) {
+    // the freebsd dialect rides the QlLoaderELF (the shellcode + the ET_EXEC
+    // branches, the linux shape verbatim)
+    const auto factory = select_loader(QL_OS::FREEBSD, false);
+    EXPECT_NE(factory, nullptr);
 }
 
 TEST(SelectOs, BlobFactoryAvailable) {
@@ -90,9 +98,15 @@ TEST(SelectOs, BlobFactoryAvailable) {
 }
 
 TEST(SelectOs, NonBlobRaisesNotImplemented) {
-    for (const auto os : {QL_OS::MACOS, QL_OS::FREEBSD, QL_OS::UEFI, QL_OS::DOS, QL_OS::QNX}) {
+    // the freebsd dialect landed (this slice); the remaining os trees defer
+    for (const auto os : {QL_OS::MACOS, QL_OS::UEFI, QL_OS::DOS, QL_OS::QNX}) {
         EXPECT_THROW(select_os(os), QlErrorNotImplemented) << static_cast<int>(os);
     }
+}
+
+TEST(SelectOs, FreebsdResolvesFreebsdOs) {
+    const auto factory = select_os(QL_OS::FREEBSD);
+    EXPECT_NE(factory, nullptr);
 }
 
 // ---- select_component: the memory manager factory over an arch's uc ----
