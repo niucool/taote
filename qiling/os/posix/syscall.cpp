@@ -75,6 +75,9 @@ namespace {
 constexpr int NR_OPEN = 1024;
 constexpr std::int64_t kEBADF = 9;
 constexpr std::int64_t kEIO = 5;
+// posix/const.py: the *at-family dirfd/flag constants
+constexpr std::int64_t kATFDCWD = -100;
+constexpr std::uint64_t kATEMPTYPATH = 0x1000;
 constexpr std::int64_t kEFAULT = 14;
 constexpr std::int64_t kEMFILE = 24;
 constexpr std::int64_t kENOENT = 2;
@@ -225,6 +228,75 @@ std::optional<std::int64_t> syscall_stat(Qiling& ql, const std::vector<std::uint
 // (the pack_stat64_struct choice is the verbatim quirk)
 std::optional<std::int64_t> syscall_lstat(Qiling& ql, const std::vector<std::uint64_t>& params) {
     return stat_family(ql, params[0], params[1], /*follow_symlinks=*/false, /*pack64=*/true);
+}
+
+// stat.py transform_path: the dirfd/path/flags resolution — the absolute
+// path joins the rootfs directly (the os.path.join verbatim), the AT_FDCWD
+// relative path resolves through the path manager, the empty path with
+// AT_EMPTY_PATH names the open fd, and the plain relative path rides the
+// open directory fd (the host fstatat dirfd); the fall-through (the
+// negative/unknown dirfd with a non-empty path) mirrors the upstream's
+// implicit None return — the port throws so the emulation stops visibly
+std::pair<int, std::string> transform_path(Qiling& ql, std::uint64_t dirfd_raw, std::uint64_t path_ptr,
+                                           std::uint64_t flags) {
+    // the unpack32s verbatim: the dirfd truncates to the 32-bit signed cell
+    const auto dirfd = static_cast<int>(static_cast<std::int32_t>(dirfd_raw & 0xffffffffu));
+    const auto path = read_cstring(ql, path_ptr);
+
+    if (!path.empty() && path.front() == '/') {
+        // os.path.join(ql.rootfs, path.lstrip('/'))
+        return {-1, (std::filesystem::path(ql.rootfs()) / path.substr(1)).string()};
+    }
+    if (dirfd == kATFDCWD) {
+        return {-1, ql.os().path()->virtual_to_host_path(path)};
+    }
+    if (path.empty() && (flags & kATEMPTYPATH) != 0) {
+        auto* f = fd_get(ql, dirfd).get();
+        if (f == nullptr) {
+            // the upstream's fd[dirfd].name AttributeError → the emulation stop
+            throw QlErrorBase("transform_path: the AT_EMPTY_PATH fd is not open");
+        }
+        return {-1, f->name()};
+    }
+    if (dirfd > 0 && dirfd < NR_OPEN) {
+        auto* f = fd_get(ql, dirfd).get();
+        if (f == nullptr) {
+            throw QlErrorBase("transform_path: the dirfd is not open");
+        }
+        return {f->fileno(), path};
+    }
+    // the verbatim fall-through: transform_path returns None and the caller
+    // crashes — the port stops the emulation instead
+    throw QlErrorBase("transform_path: the dirfd/path pair fell through the ladder");
+}
+
+// stat.py ql_syscall_newfstatat / ql_syscall_fstatat64: the *at stat family —
+// the transform, then the host statat; the pack choice: newfstatat rides
+// pack_stat_struct, fstatat64 rides pack_stat64_struct. The
+// AT_SYMLINK_NOFOLLOW flag is ignored verbatim (the upstream's os.stat
+// always follows; only AT_EMPTY_PATH reaches the transform)
+std::optional<std::int64_t> fstatat_family(Qiling& ql, std::uint64_t dirfd_raw, std::uint64_t path_ptr,
+                                           std::uint64_t buf, std::uint64_t flags, bool pack64) {
+    const auto [host_dirfd, host_path] = transform_path(ql, dirfd_raw, path_ptr, flags);
+
+    QlFileStat info{};
+    int host_errno = 0;
+    if (!host_statat(host_path, host_dirfd, /*follow_symlinks=*/true, info, &host_errno)) {
+        return -host_errno;
+    }
+
+    const auto& layout = pack64 ? get_stat64_layout(ql.os().type(), ql.arch().type())
+                                : get_stat_layout(ql.os().type(), ql.arch().type());
+    ql.mem().write(buf, pack_stat_struct(info, layout));
+    return 0;
+}
+
+std::optional<std::int64_t> syscall_newfstatat(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    return fstatat_family(ql, params[0], params[1], params[2], params[3], /*pack64=*/false);
+}
+
+std::optional<std::int64_t> syscall_fstatat64(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    return fstatat_family(ql, params[0], params[1], params[2], params[3], /*pack64=*/true);
 }
 
 std::optional<std::int64_t> syscall_uname(Qiling& ql, const std::vector<std::uint64_t>& params) {
@@ -860,6 +932,11 @@ void register_builtin_syscalls() {
     registry.register_syscall({"lstat", {PARAM_PTRX, PARAM_PTRX}, syscall_lstat});
     registry.register_syscall({"stat64", {PARAM_PTRX, PARAM_PTRX}, syscall_stat});
     registry.register_syscall({"lstat64", {PARAM_PTRX, PARAM_PTRX}, syscall_lstat});
+    // the *at family (stat.py ql_syscall_newfstatat / ql_syscall_fstatat64 —
+    // the (dirfd, path, buf, flags) ABI; newfstatat is the x8664 id 262,
+    // fstatat64 rides the x86/arm tables)
+    registry.register_syscall({"newfstatat", {PARAM_INTN, PARAM_PTRX, PARAM_PTRX, PARAM_INTN}, syscall_newfstatat});
+    registry.register_syscall({"fstatat64", {PARAM_INTN, PARAM_PTRX, PARAM_PTRX, PARAM_INTN}, syscall_fstatat64});
     registry.register_syscall({"write", {PARAM_INTN, PARAM_PTRX, PARAM_INTN}, syscall_write});
     registry.register_syscall({"uname", {PARAM_PTRX}, syscall_uname});
 

@@ -157,6 +157,15 @@ QlFileStat host_fstat_fd(int host_fd);
 bool host_stat_path(const std::filesystem::path& host_path, bool follow_symlinks,
                     QlFileStat& out, int* out_errno);
 
+// the *at variant (transform_path's dirfd branch): the host stat relative to
+// an already-open descriptor — the POSIX fstatat(host_dirfd, path, follow ?
+// 0 : AT_SYMLINK_NOFOLLOW); the _WIN32 deviation: the MSVC CRT has no
+// fstatat, so only the AT_FDCWD-ish requests resolve (the real-dirfd
+// requests throw QlErrorNotImplemented, mirroring Python's win32 dir_fd
+// NotImplementedError)
+bool host_statat(const std::filesystem::path& host_path, int host_dirfd, bool follow_symlinks,
+                 QlFileStat& out, int* out_errno);
+
 }  // namespace qiling
 
 #endif  // QILING_OS_FILESTRUCT_HPP

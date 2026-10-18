@@ -19,6 +19,12 @@
 
 namespace qiling {
 
+namespace {
+// posix/const.py: AT_FDCWD (the cwd-relative dirfd marker) — the host-side
+// fstatat passing convention
+constexpr int kATFDCWD = -100;
+}  // namespace
+
 // ---- QlFsMappedObject (os/mapper.py base) ----
 
 std::vector<std::uint8_t> QlFsMappedObject::read(std::size_t) {
@@ -209,9 +215,19 @@ QlFileStat host_fstat_fd(int host_fd) {
 
 bool host_stat_path(const std::filesystem::path& host_path, bool follow_symlinks,
                     QlFileStat& out, int* out_errno) {
+    return host_statat(host_path, kATFDCWD, follow_symlinks, out, out_errno);
+}
+
+bool host_statat(const std::filesystem::path& host_path, int host_dirfd, bool follow_symlinks,
+                 QlFileStat& out, int* out_errno) {
     errno = 0;
 #if defined(_WIN32)
-    (void)follow_symlinks;  // the MSVC CRT has no lstat — the deviation note
+    if (host_dirfd != kATFDCWD && host_dirfd != -1) {
+        // the MSVC CRT has no fstatat — the verbatim Python shape raises
+        // NotImplementedError for the dir_fd stats on win32; the -1 sentinel
+        // is transform_path's no-dirfd marker (the plain-path stat)
+        throw QlErrorNotImplemented("host_statat: the dir_fd stats are POSIX-only");
+    }
     struct _stat64 st{};
     if (::_wstat64(host_path.wstring().c_str(), &st) != 0) {
         if (out_errno != nullptr) {
@@ -221,8 +237,8 @@ bool host_stat_path(const std::filesystem::path& host_path, bool follow_symlinks
     }
 #else
     struct stat st{};
-    const int rc = follow_symlinks ? ::stat(host_path.c_str(), &st) : ::lstat(host_path.c_str(), &st);
-    if (rc != 0) {
+    const int stat_flags = follow_symlinks ? 0 : AT_SYMLINK_NOFOLLOW;
+    if (::fstatat(host_dirfd, host_path.c_str(), &st, stat_flags) != 0) {
         if (out_errno != nullptr) {
             *out_errno = errno;
         }

@@ -262,6 +262,77 @@ TEST(PosixFileDes, StatAndLstatRideTheStatFamily) {
     EXPECT_EQ(ql.mem().read_ptr(0x1002218, 8), 0xFFFFFFFFFFFFFFFEull);
 }
 
+// the stat.py transform_path + ql_syscall_newfstatat flow: the absolute
+// path (the rootfs join), the AT_EMPTY_PATH flow through the open fd (the
+// fd's name — the verbatim quirk where only AT_EMPTY_PATH reaches the
+// transform, AT_SYMLINK_NOFOLLOW is ignored), and the missing path -ENOENT
+//   open("/tmpfile", O_RDONLY) → newfstatat(AT_FDCWD, "/tmpfile", bufA, 0)
+//   → newfstatat(fd, "", bufB, AT_EMPTY_PATH) → newfstatat(-100, "/missing", bufC, 0)
+TEST(PosixFileDes, NewfstatatRidesTheTransformLadder) {
+    const std::string payload = "hello fd";
+    const std::vector<std::uint8_t> code = {
+        // open("/tmpfile", O_RDONLY)
+        0x48, 0xC7, 0xC0, 0x02, 0x00, 0x00, 0x00,  // mov rax, 2 (open)
+        0x48, 0xC7, 0xC7, 0x00, 0x20, 0x00, 0x01,  // mov rdi, 0x1002000
+        0x48, 0xC7, 0xC6, 0x00, 0x00, 0x00, 0x00,  // mov rsi, 0
+        0x48, 0xC7, 0xC2, 0x00, 0x00, 0x00, 0x00,  // mov rdx, 0
+        0x0F, 0x05,                                 // syscall
+        0x48, 0x89, 0x04, 0x25, 0x00, 0x22, 0x00, 0x01,  // mov [0x1002200], rax
+        // newfstatat(AT_FDCWD, "/tmpfile", 0x1002500, 0)
+        0x48, 0xC7, 0xC0, 0x06, 0x01, 0x00, 0x00,  // mov rax, 262 (newfstatat)
+        0x48, 0xC7, 0xC7, 0x9C, 0xFF, 0xFF, 0xFF,  // mov rdi, -100 (AT_FDCWD)
+        0x48, 0xC7, 0xC6, 0x00, 0x20, 0x00, 0x01,  // mov rsi, 0x1002000
+        0x48, 0xC7, 0xC2, 0x00, 0x25, 0x00, 0x01,  // mov rdx, 0x1002500
+        0x45, 0x31, 0xC0,                           // xor r8d, r8d
+        0x0F, 0x05,                                 // syscall
+        0x48, 0x89, 0x04, 0x25, 0x08, 0x22, 0x00, 0x01,  // mov [0x1002208], rax
+        // newfstatat(fd, "", 0x1002600, AT_EMPTY_PATH)
+        0x48, 0xC7, 0xC0, 0x06, 0x01, 0x00, 0x00,  // mov rax, 262
+        0x48, 0x8B, 0x3C, 0x25, 0x00, 0x22, 0x00, 0x01,  // mov rdi, [0x1002200]
+        0x48, 0xC7, 0xC6, 0x50, 0x20, 0x00, 0x01,  // mov rsi, 0x1002050 (the empty cell)
+        0x48, 0xC7, 0xC2, 0x00, 0x26, 0x00, 0x01,  // mov rdx, 0x1002600
+        0x41, 0xBA, 0x00, 0x10, 0x00, 0x00,         // mov r10d, 0x1000 (AT_EMPTY_PATH — the 4th
+                                                    // syscall arg rides r10, not r8)
+        0x0F, 0x05,                                 // syscall
+        0x48, 0x89, 0x04, 0x25, 0x10, 0x22, 0x00, 0x01,  // mov [0x1002210], rax
+        // newfstatat(AT_FDCWD, "/missing", 0x1002700, 0) — the ENOENT branch
+        0x48, 0xC7, 0xC0, 0x06, 0x01, 0x00, 0x00,  // mov rax, 262
+        0x48, 0xC7, 0xC7, 0x9C, 0xFF, 0xFF, 0xFF,  // mov rdi, -100
+        0x48, 0xC7, 0xC6, 0x90, 0x20, 0x00, 0x01,  // mov rsi, 0x1002090 ("/missing")
+        0x48, 0xC7, 0xC2, 0x00, 0x27, 0x00, 0x01,  // mov rdx, 0x1002700
+        0x45, 0x31, 0xC0,                           // xor r8d, r8d
+        0x0F, 0x05,                                 // syscall
+        0x48, 0x89, 0x04, 0x25, 0x18, 0x22, 0x00, 0x01,  // mov [0x1002218], rax
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00,  // mov rax, 60 (exit)
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00,  // mov rdi, 0
+        0x0F, 0x05,                                 // syscall
+    };
+
+    QilingOptions options = posix_options(code);
+    Qiling ql(options);
+
+    ql.mem().write(0x1002000, std::vector<std::uint8_t>{'/', 't', 'm', 'p', 'f', 'i', 'l', 'e', 0});
+    ql.mem().write(0x1002050, std::vector<std::uint8_t>{0x00});
+    ql.mem().write(0x1002090, std::vector<std::uint8_t>{'/', 'm', 'i', 's', 's', 'i', 'n', 'g', 0});
+    {
+        std::ofstream f(ensure_rootfs() / "tmpfile", std::ios::binary);
+        f << payload;
+    }
+
+    ql.run();
+
+    EXPECT_EQ(ql.os().exit_code(), 0);
+    // the absolute-path stat: 0, the x86-64 image with the payload size
+    EXPECT_EQ(ql.mem().read_ptr(0x1002208, 8), 0u);
+    EXPECT_EQ(ql.mem().read_ptr(0x1002500 + 48, 8), payload.size());
+    EXPECT_EQ(ql.mem().read_ptr(0x1002500 + 24, 4) & 0xF000u, 0x8000u);
+    // the AT_EMPTY_PATH flow: 0 and the same stat through the fd's name
+    EXPECT_EQ(ql.mem().read_ptr(0x1002210, 8), 0u);
+    EXPECT_EQ(ql.mem().read_ptr(0x1002600 + 48, 8), payload.size());
+    // the missing path: -ENOENT
+    EXPECT_EQ(ql.mem().read_ptr(0x1002218, 8), 0xFFFFFFFFFFFFFFFEull);
+}
+
 // the procfs slice (os/linux/procfs.py): the /proc/self pseudo files resolve
 // through the fd flow — open("/proc/self/cmdline") reads the argv bytes; the
 // shellcode run carries the empty placeholder argv, so the read yields the
