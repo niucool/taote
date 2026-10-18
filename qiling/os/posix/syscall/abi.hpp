@@ -29,11 +29,12 @@ public:
     // get_id — the syscall number register
     std::uint64_t get_id() const;
 
-    // get_params — the first `count` argument registers
-    std::vector<std::uint64_t> get_params(std::size_t count) const;
+    // get_params — the first `count` argument registers (the mips O32
+    // override reads the stack args beyond the 4 registers)
+    virtual std::vector<std::uint64_t> get_params(std::size_t count) const;
 
     // set_return_value
-    void set_return_value(std::uint64_t value);
+    virtual void set_return_value(std::uint64_t value);
 
 protected:
     virtual int id_reg() const = 0;
@@ -78,6 +79,22 @@ protected:
 class QlSyscallABIArm64 final : public QlSyscallABI {
 public:
     using QlSyscallABI::QlSyscallABI;
+
+protected:
+    int id_reg() const override;
+    const std::vector<int>& arg_regs() const override;
+    int ret_reg() const override;
+};
+
+// abi/mips.py QlMipsO32 - the O32 passes the first 4 args in a0-a3 and the
+// rest on the stack; the return convention: the error flag rides a3
+// (a negative value inverts onto a3=1 / v0=-value)
+class QlSyscallABIMipsO32 final : public QlSyscallABI {
+public:
+    using QlSyscallABI::QlSyscallABI;
+
+    std::vector<std::uint64_t> get_params(std::size_t count) const override;
+    void set_return_value(std::uint64_t value) override;
 
 protected:
     int id_reg() const override;

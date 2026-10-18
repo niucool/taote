@@ -555,6 +555,126 @@ std::optional<std::int64_t> syscall_sched_yield(Qiling& ql, const std::vector<st
     return 0;
 }
 
+// ---- the clone dispatch (os/posix/syscall/sched.py) ----
+
+std::optional<std::int64_t> syscall_clone(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    // sched.py ql_syscall_clone: the flag constants (verbatim)
+    constexpr std::uint64_t CLONE_VM = 0x00000100;
+    constexpr std::uint64_t CLONE_CHILD_SETTID = 0x01000000;
+    constexpr std::uint64_t CLONE_CHILD_CLEARTID = 0x00200000;
+
+    const auto flags = params[0];
+    const auto child_stack = params[1];
+    const auto parent_tidptr = params[2];
+    // the raw 4th/5th params; the x86-64 swap below relabels them (the
+    // python's newtls/child_tidptr swap - the raw clone order is flags,
+    // stack, ptid, ctid, tls)
+    auto newtls = params[4];
+    auto child_tidptr = params[3];
+
+    // Shared virtual memory (sched.py, verbatim branch shape)
+    if ((flags & CLONE_VM) == 0) {
+        // sched.py: the fork path - the windows branch constructs a
+        // multiprocessing.Process object without ever starting it and runs
+        // the child code in the caller's greenlet (a broken placeholder); the
+        // port surfaces the fork as not-implemented (the documented deviation)
+        throw QlErrorNotImplemented(
+            "clone without CLONE_VM (fork emulation) is not supported on this host");
+    }
+
+    auto* tm = ql.os().thread_management();
+    if (tm == nullptr || tm->cur_thread() == nullptr) {
+        // the python would AttributeError on the missing management
+        return -kEINVAL;
+    }
+
+    std::uint64_t set_child_tid_addr = 0;
+    if ((flags & CLONE_CHILD_SETTID) != 0) {
+        set_child_tid_addr = child_tidptr;
+    }
+
+    // the child's start: the instruction after the syscall (the x86-64
+    // syscall insn = 2 bytes, the upstream's +2)
+    const std::uint64_t after_syscall = ql.arch().regs().arch_pc() + 2;
+    std::fprintf(stderr, "[clone-pc] hook_pc=%llx after=%llx\n",
+                 (unsigned long long)ql.arch().regs().arch_pc(), (unsigned long long)after_syscall);
+    auto th = os::linux::QlLinuxThread::spawn(&ql, after_syscall,
+                                          ql.os().exit_point(), nullptr, set_child_tid_addr);
+    const auto th_id = static_cast<std::int64_t>(th->get_id());
+
+    if ((flags & 0x00100000) != 0 && parent_tidptr != 0) {
+        // CLONE_PARENT_SETTID: the parent's tid pointer write
+        ql.mem().write_ptr(parent_tidptr, th_id, 4);
+    }
+
+    // the parent's context snapshot; the pc advances past the clone syscall
+    // so the parent's resume continues after it (the unicorn's INSN-hook pc
+    // still points at the syscall)
+    ql.arch().regs().set_arch_pc(after_syscall);
+    const auto parent_ctx = ql.arch().save();
+
+    // the new tls (sched.py: CLONE_SETTLS)
+    if ((flags & 0x00080000) != 0) {
+        th->set_thread_tls(newtls);
+    }
+
+    if ((flags & CLONE_CHILD_CLEARTID) != 0) {
+        th->set_clear_child_tid_address(child_tidptr);
+    }
+
+    // the child's context: the pc past the clone syscall, the child's stack
+    // and the child's return value 0 (the child resumes after the syscall)
+    ql.arch().regs().set_arch_pc(after_syscall);
+    ql.arch().regs().set_arch_sp(child_stack);
+    ql.os<posix::QlOsPosix>().syscall_abi_mut().set_return_value(0);
+    th->save();
+
+    // the parent's context back (sched.py: ql.restore(ctx))
+    ql.arch().restore(*parent_ctx);
+
+    // register the thread + break the parent's slice (the add-thread event
+    // lands through the management; the upstream sets the dead stop_event
+    // fields nothing consumes)
+    tm->add_thread(std::move(th));
+    ql.emu_stop();
+
+    return th_id;
+}
+
+std::optional<std::int64_t> syscall_clone3(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    // sched.py ql_syscall_clone3: the clone_args struct (all __aligned_u64)
+    //   0:flags 8:pidfd 16:child_tid 24:parent_tid 32:exit_signal
+    //   40:stack 48:stack_size 56:tls
+    const auto cl_args = params[0];
+
+    const auto flags = static_cast<std::uint64_t>(ql.mem().read_ptr(cl_args + 0, 8));
+    const auto child_tid = static_cast<std::uint64_t>(ql.mem().read_ptr(cl_args + 16, 8));
+    const auto parent_tid = static_cast<std::uint64_t>(ql.mem().read_ptr(cl_args + 24, 8));
+    const auto exit_signal = static_cast<std::uint64_t>(ql.mem().read_ptr(cl_args + 32, 8));
+    const auto stack = static_cast<std::uint64_t>(ql.mem().read_ptr(cl_args + 40, 8));
+    const auto stack_size = static_cast<std::uint64_t>(ql.mem().read_ptr(cl_args + 48, 8));
+    const auto tls = static_cast<std::uint64_t>(ql.mem().read_ptr(cl_args + 56, 8));
+
+    // the legacy clone takes the highest stack address; clone3 gives the
+    // base + size (the upstream translation, verbatim)
+    const std::uint64_t child_stack = stack != 0 ? stack + stack_size : 0;
+
+    // clone3 keeps the exit signal in its own field; the legacy clone packs
+    // it into the low CSIGNAL byte of the flags
+    const auto merged_flags = flags | (exit_signal & 0xff);
+
+    // clone3 hands the already-logical args; on the x86-64 the pre-swap
+    // cancels the clone's newtls/child_tidptr swap (the upstream shape)
+    if (ql.arch().type() == QL_ARCH::X8664) {
+        // the clone reads (flags, stack, parent_tid, the 4th, the 5th) and
+        // swaps the 4th/5th; feed the logical values in the swapped order
+        const std::vector<std::uint64_t> args{merged_flags, child_stack, parent_tid, tls, child_tid};
+        return syscall_clone(ql, args);
+    }
+    const std::vector<std::uint64_t> args{merged_flags, child_stack, parent_tid, child_tid, tls};
+    return syscall_clone(ql, args);
+}
+
 // unistd.py read_cstring (os/utils.py read_cstring): the char-stepped NUL
 // scan (the log_string record lands with the string-slice)
 std::string read_cstring(Qiling& ql, std::uint64_t addr) {
@@ -689,6 +809,10 @@ void register_builtin_syscalls() {
     registry.register_syscall({"futex", {PARAM_INTN, PARAM_INTN, PARAM_INTN, PARAM_INTN, PARAM_INTN, PARAM_INTN}, syscall_futex});
     registry.register_syscall({"set_robust_list", {PARAM_INTN, PARAM_INTN}, syscall_set_robust_list});
     registry.register_syscall({"sched_yield", {}, syscall_sched_yield});
+
+    // the clone dispatch (os/posix/syscall/sched.py) + clone3
+    registry.register_syscall({"clone", {PARAM_INTN, PARAM_INTN, PARAM_INTN, PARAM_INTN, PARAM_INTN}, syscall_clone});
+    registry.register_syscall({"clone3", {PARAM_PTRX, PARAM_INTN}, syscall_clone3});
 }
 
 }  // namespace posix

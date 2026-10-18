@@ -86,6 +86,49 @@ const std::vector<int>& QlSyscallABIArm64::arg_regs() const {
 
 int QlSyscallABIArm64::ret_reg() const { return UC_ARM64_REG_X0; }
 
+// ---- abi/mips.py QlMipsO32 ----
+
+int QlSyscallABIMipsO32::id_reg() const { return UC_MIPS_REG_V0; }
+
+const std::vector<int>& QlSyscallABIMipsO32::arg_regs() const {
+    static const std::vector<int> regs{
+        UC_MIPS_REG_A0, UC_MIPS_REG_A1, UC_MIPS_REG_A2, UC_MIPS_REG_A3,
+    };
+    return regs;
+}
+
+int QlSyscallABIMipsO32::ret_reg() const { return UC_MIPS_REG_V0; }
+
+std::vector<std::uint64_t> QlSyscallABIMipsO32::get_params(std::size_t count) const {
+    // mips.py get_params: the first 4 args from a0-a3, the rest from the stack
+    // (the shadow-store space above the args)
+    const auto& regs = arg_regs();
+    const std::size_t num_reg_args = regs.size();
+
+    std::vector<std::uint64_t> values;
+    values.reserve(count);
+
+    const auto reg_part = std::min(count, num_reg_args);
+    for (std::size_t i = 0; i < reg_part; ++i) {
+        values.push_back(arch_.regs().read(regs[i]));
+    }
+    for (std::size_t i = reg_part; i < count; ++i) {
+        // mips.py __get_stack_params: stack_read(pointersize * (i + shadowed))
+        const auto offset = arch_.pointersize() * (i + num_reg_args);
+        values.push_back(static_cast<std::uint64_t>(arch_.stack_read(static_cast<std::int64_t>(offset))));
+    }
+    return values;
+}
+
+void QlSyscallABIMipsO32::set_return_value(std::uint64_t value) {
+    // mips.py set_return_value: a3 carries the error flag; the negative value
+    // inverts onto (a3=1, v0=-value)
+    const auto sv = static_cast<std::int64_t>(value);
+    const bool is_error = sv < 0 && sv > -1134;
+    arch_.regs().write("v0", is_error ? static_cast<std::uint64_t>(-sv) : value);
+    arch_.regs().write("a3", is_error ? 1u : 0u);
+}
+
 // the factory (posix.py __get_syscall_mapper's abi selection)
 std::unique_ptr<QlSyscallABI> make_syscall_abi(QL_ARCH archtype, QlArch& arch) {
     switch (archtype) {
@@ -98,6 +141,8 @@ std::unique_ptr<QlSyscallABI> make_syscall_abi(QL_ARCH archtype, QlArch& arch) {
             return std::make_unique<QlSyscallABIArm>(arch);
         case QL_ARCH::ARM64:
             return std::make_unique<QlSyscallABIArm64>(arch);
+        case QL_ARCH::MIPS:
+            return std::make_unique<QlSyscallABIMipsO32>(arch);
         default:
             throw QlErrorArch("unsupported syscall abi architecture");
     }

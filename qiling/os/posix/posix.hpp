@@ -105,6 +105,9 @@ public:
     static std::size_t params_count_for_id(std::uint64_t syscall_id, QL_ARCH archtype);
 
     const QlSyscallABI& syscall_abi() const noexcept { return *syscall_abi_; }
+    // the mutable access for the cross-thread context writes (the clone
+    // handler seeds the child's return register before its context save)
+    QlSyscallABI& syscall_abi_mut() noexcept { return *syscall_abi_; }
 
     // the KERNEL profile identity (posix.py: uid/euid/gid/egid/pid)
     int uid() const noexcept { return uid_; }

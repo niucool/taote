@@ -6,6 +6,8 @@
 
 #include "qiling/core.hpp"
 #include "qiling/arch/x86.hpp"
+#include "qiling/arch/arm.hpp"
+#include "qiling/arch/arm64.hpp"
 #include "qiling/os/linux/futex.hpp"
 #include "qiling/os/memory.hpp"
 #include "qiling/os/os.hpp"
@@ -51,28 +53,44 @@ std::unique_ptr<QlLinuxThread> QlLinuxThread::spawn(Qiling* ql, std::uint64_t st
                                                     std::uint64_t exit_point, void* context,
                                                     std::uint64_t set_child_tid_addr,
                                                     std::int64_t thread_id) {
-    // the per-arch factory: the x86-64 variant carries the FS_BASE TLS (the
-    // other arch subclasses land with their slices)
-    if (ql->arch().type() == QL_ARCH::X8664) {
-        return std::make_unique<QlLinuxX8664Thread>(ql, start_address, exit_point, context,
-                                                    set_child_tid_addr, thread_id);
+    switch (ql->arch().type()) {
+        case QL_ARCH::X8664:
+            return std::make_unique<QlLinuxX8664Thread>(ql, start_address, exit_point, context,
+                                                        set_child_tid_addr, thread_id);
+        case QL_ARCH::ARM:
+            return std::make_unique<QlLinuxARMThread>(ql, start_address, exit_point, context,
+                                                      set_child_tid_addr, thread_id);
+        case QL_ARCH::ARM64:
+            return std::make_unique<QlLinuxARM64Thread>(ql, start_address, exit_point, context,
+                                                        set_child_tid_addr, thread_id);
+        case QL_ARCH::MIPS:
+            return std::make_unique<QlLinuxMIPS32Thread>(ql, start_address, exit_point, context,
+                                                         set_child_tid_addr, thread_id);
+        default:
+            break;
     }
     return std::make_unique<QlLinuxThread>(ql, start_address, exit_point, context,
                                            set_child_tid_addr, thread_id);
 }
 
 void QlLinuxThread::save() {
-    // thread.py save_context: the uc context snapshot
+    // thread.py save_context: the uc context snapshot plus the arch TLS
     saved_context_ = ql_->arch().save().release();
+    save_impl();
 }
 
 void QlLinuxThread::restore() {
-    // thread.py restore_context: the uc context replay
+    // thread.py restore_context: the uc context replay plus the arch TLS
     const auto* ctx = static_cast<const UcContext*>(saved_context_);
     if (ctx != nullptr) {
         ql_->arch().restore(*ctx);
     }
+    restore_impl();
 }
+
+void QlLinuxThread::save_impl() {}
+
+void QlLinuxThread::restore_impl() {}
 
 void QlLinuxThread::on_stop() {
     // thread.py _on_stop: the CLONE_CHILD_CLEARTID semantics
@@ -103,6 +121,9 @@ bool QlLinuxThread::run_slice(std::uint64_t exit_point, std::uint64_t count) {
     if (saved_context_ == nullptr) {
         ql_->arch().regs().set_arch_pc(start_address_);
         save();
+        std::fprintf(stderr, "[slice-first-arm] tid=%llu ctx_pc=%llx\n", (unsigned long long)thread_id_,
+                     (unsigned long long)ql_->arch().regs().arch_pc());
+        std::fflush(stderr);
     }
 
     // restore the context of the currently executing thread
@@ -113,6 +134,9 @@ bool QlLinuxThread::run_slice(std::uint64_t exit_point, std::uint64_t count) {
     // original start address)
     const auto start_address = ql_->arch().adjust_emu_start(ql_->arch().regs().arch_pc());
     sched_cb_ = nullptr;  // the default sched_cb: give up control (yield)
+    std::fprintf(stderr, "[slice] tid=%llu begin=%llx\n", (unsigned long long)thread_id_,
+                 (unsigned long long)start_address);
+    std::fflush(stderr);
 
     try {
         // the known unicorn timeout issue (issue #1355) noted upstream; the
@@ -125,6 +149,9 @@ bool QlLinuxThread::run_slice(std::uint64_t exit_point, std::uint64_t count) {
 
     // thread.py save()
     save();
+    std::fprintf(stderr, "[slice-end] tid=%llu pc=%llx\n", (unsigned long long)thread_id_,
+                 (unsigned long long)ql_->arch().regs().arch_pc());
+    std::fflush(stderr);
 
     // note that the callback may be set by the uc callbacks; never give up
     // control during one (the port's switch happens here, after emu_start)
@@ -237,17 +264,6 @@ void QlLinuxThreadManagement::run() {
 }
 
 bool QlLinuxThreadManagement::run_ready() {
-    {
-        static int rr_count = 0;
-        if (++rr_count > 200) {
-            std::fprintf(stderr, "[probe-rr] TOO MANY ROUNDS - bailing\n");
-            std::fflush(stderr);
-            std::abort();
-        }
-        std::fprintf(stderr, "[probe-rr] round=%d threads=%zu stopped=%d\n", rr_count, threads_.size(), (int)stopped_);
-        std::fflush(stderr);
-    }
-    std::fflush(stderr);
     // retire the threads parked by the previous slice's callbacks - outside
     // any thread's stack frame (the exit closure parks its own thread while
     // run_slice is still on the stack; the destruction must wait)
@@ -295,17 +311,65 @@ void QlLinuxX8664Thread::set_thread_tls(std::uint64_t tls_addr) {
     intel.msr().write(IA32_FS_BASE_MSR, tls_);
 }
 
-void QlLinuxX8664Thread::save() {
+void QlLinuxX8664Thread::save_impl() {
     // thread.py save: the context plus the fsbase
-    QlLinuxThread::save();
     constexpr std::uint32_t IA32_FS_BASE_MSR = 0xC0000100;
     auto& intel = dynamic_cast<QlArchIntel&>(ql_->arch());
     tls_ = intel.msr().read(IA32_FS_BASE_MSR);
 }
 
-void QlLinuxX8664Thread::restore() {
+void QlLinuxX8664Thread::restore_impl() {
     // thread.py restore: the context then the fsbase
-    QlLinuxThread::restore();
+    set_thread_tls(tls_);
+}
+
+// thread.py QlLinuxARMThread: the TPIDRURO coprocessor register
+void QlLinuxARMThread::set_thread_tls(std::uint64_t tls_addr) {
+    tls_ = static_cast<std::uint32_t>(tls_addr);
+    auto& arm = dynamic_cast<QlArchARM&>(ql_->arch());
+    arm.cpr().write("TPIDRURO", tls_);
+}
+
+void QlLinuxARMThread::save_impl() {
+    auto& arm = dynamic_cast<QlArchARM&>(ql_->arch());
+    tls_ = static_cast<std::uint32_t>(arm.cpr().read("TPIDRURO"));
+}
+
+void QlLinuxARMThread::restore_impl() {
+    set_thread_tls(tls_);
+}
+
+// thread.py QlLinuxARM64Thread: the TPIDR_EL0 coprocessor register
+void QlLinuxARM64Thread::set_thread_tls(std::uint64_t tls_addr) {
+    tls_ = tls_addr;
+    auto& arm64 = dynamic_cast<QlArchARM64&>(ql_->arch());
+    arm64.cpr().write("TPIDR_EL0", tls_);
+}
+
+void QlLinuxARM64Thread::save_impl() {
+    auto& arm64 = dynamic_cast<QlArchARM64&>(ql_->arch());
+    tls_ = arm64.cpr().read("TPIDR_EL0");
+}
+
+void QlLinuxARM64Thread::restore_impl() {
+    set_thread_tls(tls_);
+}
+
+// thread.py QlLinuxMIPS32Thread: the cp0_userlocal register (the
+// CONFIG3_ULR bit enables the userlocal addressing)
+void QlLinuxMIPS32Thread::set_thread_tls(std::uint64_t tls_addr) {
+    tls_ = static_cast<std::uint32_t>(tls_addr);
+    constexpr std::uint32_t CONFIG3_ULR = 1u << 13;
+    auto& regs = ql_->arch().regs();
+    regs.write("cp0_config3", CONFIG3_ULR);
+    regs.write("cp0_userlocal", tls_);
+}
+
+void QlLinuxMIPS32Thread::save_impl() {
+    tls_ = static_cast<std::uint32_t>(ql_->arch().regs().read("cp0_userlocal"));
+}
+
+void QlLinuxMIPS32Thread::restore_impl() {
     set_thread_tls(tls_);
 }
 

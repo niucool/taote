@@ -108,7 +108,8 @@ public:
     void set_clear_child_tid_address(std::uint64_t addr) { clear_child_tid_address_ = addr; }
 
     // thread.py spawn: the per-arch thread factory (the x86-64 variant
-    // carries the FS_BASE TLS; the other arches land with their slices)
+    // carries the FS_BASE MSR TLS; the ARM/ARM64/MIPS32 variants carry their
+    // own TLS surfaces)
     static std::unique_ptr<QlLinuxThread> spawn(Qiling* ql, std::uint64_t start_address,
                                                 std::uint64_t exit_point, void* context = nullptr,
                                                 std::uint64_t set_child_tid_addr = 0,
@@ -119,11 +120,19 @@ public:
     // thread finished (TERMINATED or the pc reached the exit point).
     bool run_slice(std::uint64_t exit_point, std::uint64_t count);
 
+    // thread.py save/restore (public there: the clone handler snapshots the
+    // child's context through th.save())
+    void save();
+    void restore();
+
+    // thread.py set_thread_tls (the per-arch overrides: the FS_BASE msr, the
+    // TPIDRURO, the TPIDR_EL0, the cp0_userlocal; the base no-op)
+    virtual void set_thread_tls(std::uint64_t tls_addr) {}
+
 protected:
-    // thread.py save/restore: the uc context plus the per-arch TLS. The base
-    // covers the context only; the per-arch subclasses extend.
-    virtual void save();
-    virtual void restore();
+    // the per-arch extension point: the uc context plus the arch TLS
+    virtual void save_impl();
+    virtual void restore_impl();
 
     // thread.py _on_stop: the CLONE_CHILD_CLEARTID semantics - zero the
     // clear_child_tid word and wake one futex waiter on it (the notify runs
@@ -156,11 +165,60 @@ public:
     void set_thread_tls(std::uint64_t tls_addr);
 
 protected:
-    void save() override;
-    void restore() override;
+    void save_impl() override;
+    void restore_impl() override;
 
 private:
     std::uint64_t tls_ = 0;
+};
+
+// thread.py QlLinuxARMThread - the TLS rides the TPIDRURO coprocessor register
+class QlLinuxARMThread final : public QlLinuxThread {
+public:
+    using QlLinuxThread::QlLinuxThread;
+
+    std::uint32_t tls() const noexcept { return tls_; }
+    void set_thread_tls(std::uint64_t tls_addr);
+
+protected:
+    void save_impl() override;
+    void restore_impl() override;
+
+private:
+    std::uint32_t tls_ = 0;
+};
+
+// thread.py QlLinuxARM64Thread - the TLS rides the TPIDR_EL0 coprocessor register
+class QlLinuxARM64Thread final : public QlLinuxThread {
+public:
+    using QlLinuxThread::QlLinuxThread;
+
+    std::uint64_t tls() const noexcept { return tls_; }
+    void set_thread_tls(std::uint64_t tls_addr);
+
+protected:
+    void save_impl() override;
+    void restore_impl() override;
+
+private:
+    std::uint64_t tls_ = 0;
+};
+
+// thread.py QlLinuxMIPS32Thread - the TLS rides the cp0_userlocal register
+// (the CONFIG3_ULR bit enables the userlocal addressing)
+class QlLinuxMIPS32Thread final : public QlLinuxThread {
+public:
+    using QlLinuxThread::QlLinuxThread;
+
+    std::uint32_t tls() const noexcept { return tls_; }
+    void set_thread_tls(std::uint64_t tls_addr);
+
+protected:
+    void save_impl() override;
+    void restore_impl() override;
+
+private:
+    std::uint32_t tls_ = 0;
 };
 
 // thread.py QlLinuxThreadManagement - the cooperative driver-loop scheduler
