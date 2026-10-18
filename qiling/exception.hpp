@@ -33,6 +33,13 @@ class QlErrorNotImplemented : public QlErrorBase { public: using QlErrorBase::Ql
 class QlErrorELFFormat : public QlErrorBase { public: using QlErrorBase::QlErrorBase; };
 class QlErrorMACHOFormat : public QlErrorBase { public: using QlErrorBase::QlErrorBase; };
 class QlErrorModuleFunctionNotFound : public QlErrorBase { public: using QlErrorBase::QlErrorBase; };
+
+// the os-error translations (fcntl.py __do_open catches the FileExistsError /
+// IsADirectoryError / PermissionError python types; the port mirrors them as
+// the exception types carrying the errno meaning)
+class QlErrorFileExists : public QlErrorBase { public: using QlErrorBase::QlErrorBase; };
+class QlErrorIsADirectory : public QlErrorBase { public: using QlErrorBase::QlErrorBase; };
+class QlErrorAccessDenied : public QlErrorBase { public: using QlErrorBase::QlErrorBase; };
 class QlErrorModuleNotFound : public QlErrorBase { public: using QlErrorBase::QlErrorBase; };
 class QlErrorExecutionStop : public QlErrorBase { public: using QlErrorBase::QlErrorBase; };
 class QlErrorSyscallError : public QlErrorBase { public: using QlErrorBase::QlErrorBase; };

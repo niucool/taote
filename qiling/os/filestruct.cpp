@@ -1,5 +1,9 @@
 #include "qiling/os/filestruct.hpp"
 
+#include <cerrno>
+#include <fcntl.h>
+#include <io.h>
+
 #include <sys/stat.h>
 
 // portable stdio extensions (MSVC names; POSIX equivalents below)
@@ -61,40 +65,48 @@ const std::string& QlFsMappedObject::name() const {
     throw QlErrorNotImplemented("QlFsMappedObject property not implemented: name");
 }
 
+int QlFsMappedObject::fcntl(int, int) {
+    // the base no-op: the windows host has no fcntl (the QlFile override
+    // tracks the flags; the QlPipe swallows, the python fcntl returns None)
+    return 0;
+}
+
 // ---- QlFile ----
 
 std::shared_ptr<QlFile> QlFile::open(const std::string& path, int host_flags, int guest_mode) {
     // the flags arrive already mapped through ql_open_flag_mapping (fcntl.py
     // __do_open maps before the fs_mapper open) — the constants below are the
-    // HOST (windows CRT) spellings: O_RDONLY=0, O_WRONLY=1, O_RDWR=2,
-    // O_CREAT=0x100, O_TRUNC=0x200, O_APPEND=0x8
-    constexpr int HOST_RDONLY = 0;
-    constexpr int HOST_WRONLY = 1;
-    constexpr int HOST_RDWR = 2;
-    constexpr int HOST_CREAT = 0x100;      // _O_CREAT
-    constexpr int HOST_TRUNC = 0x200;      // _O_TRUNC
-    constexpr int HOST_APPEND = 0x8;       // _O_APPEND
-
-    const char* mode = nullptr;
-    const int access = host_flags & 3;
-    if (access == HOST_RDONLY) {
-        mode = "rb";
-    } else if (access == HOST_WRONLY) {
-        mode = (host_flags & HOST_APPEND) ? "ab" : ((host_flags & (HOST_TRUNC | HOST_CREAT)) ? "wb" : "r+b");
-    } else if (access == HOST_RDWR) {
-        mode = (host_flags & HOST_APPEND) ? "ab+"
-             : ((host_flags & (HOST_TRUNC | HOST_CREAT)) ? "w+b" : "r+b");
-    } else {
-        throw QlErrorBase("invalid host open flags");
-    }
-    (void)guest_mode;  // the permission bits only matter for the host create
-
-    std::FILE* f = std::fopen(path.c_str(), mode);
-    if (f == nullptr) {
-        throw QlErrorBase("failed to open: " + path);
+    // HOST (windows CRT) spellings, passed straight to _open so the create /
+    // excl / trunc / append semantics stay exact
+    int pmode = _S_IREAD | _S_IWRITE;
+    if ((guest_mode & 0x80) == 0) {
+        // the guest mode without the owner-write bit (e.g. 0o444) denies the
+        // host write bit (os.open passes the mode through)
+        pmode = _S_IREAD;
     }
 
-    return std::shared_ptr<QlFile>(new QlFile(path, f, true));
+    const int fd = _open(path.c_str(), host_flags | _O_BINARY, pmode);
+    if (fd == -1) {
+        // fcntl.py __do_open catches the typed python os errors; the CRT
+        // errno maps onto the same vocabulary
+        switch (errno) {
+            case ENOENT:
+                throw QlErrorFileNotFound("file not found: " + path);
+            case EEXIST:
+                throw QlErrorFileExists("file exists: " + path);
+            case EISDIR:
+                throw QlErrorIsADirectory("is a directory: " + path);
+            case EACCES:
+            case EPERM:
+                throw QlErrorAccessDenied("access denied: " + path);
+            default:
+                throw QlErrorBase("failed to open: " + path);
+        }
+    }
+
+    auto file = std::shared_ptr<QlFile>(new QlFile(path, _fdopen(fd, "rb+"), true));
+    file->open_flags_ = host_flags;
+    return file;
 }
 
 std::shared_ptr<QlFile> QlFile::open_mode(const std::string& path, std::string_view mode) {
@@ -216,6 +228,66 @@ std::vector<std::uint8_t> QlFile::readline(std::uint8_t end) {
 
 void PersistentQlFile::close() {
     // silently dropped (filestruct.py PersistentQlFile.close)
+}
+
+int QlFile::fcntl(int fcntl_cmd, int fcntl_arg) {
+    // fcntl.py F_GETFL: the real host-side flags; F_SETFL re-records them
+    // (the actual host mutation — O_NONBLOCK etc. — has no windows fcntl)
+    if (fcntl_cmd == 3) {  // F_GETFL
+        return open_flags_;
+    }
+    if (fcntl_cmd == 4) {  // F_SETFL
+        open_flags_ = fcntl_arg;
+    }
+    return 0;
+}
+
+// ---- QlPipe (os/posix/filestruct.py ql_pipe) ----
+
+std::pair<std::shared_ptr<QlPipe>, std::shared_ptr<QlPipe>> QlPipe::open() {
+    int fds[2] = {-1, -1};
+    if (_pipe(fds, 4096, _O_BINARY) != 0) {
+        throw QlErrorBase("pipe creation failed");
+    }
+    return {std::shared_ptr<QlPipe>(new QlPipe(fds[0])),
+            std::shared_ptr<QlPipe>(new QlPipe(fds[1]))};
+}
+
+std::vector<std::uint8_t> QlPipe::read(std::size_t read_len) {
+    std::vector<std::uint8_t> out(read_len, 0);
+    const auto n = _read(fd_, out.data(), static_cast<unsigned>(read_len));
+    out.resize(n > 0 ? static_cast<std::size_t>(n) : 0);
+    return out;
+}
+
+std::size_t QlPipe::write(const std::vector<std::uint8_t>& write_buf) {
+    const auto n = _write(fd_, write_buf.data(), static_cast<unsigned>(write_buf.size()));
+    return n > 0 ? static_cast<std::size_t>(n) : 0;
+}
+
+int QlPipe::fileno() {
+    return fd_;
+}
+
+void QlPipe::close() {
+    if (fd_ != -1) {
+        _close(fd_);
+        fd_ = -1;
+    }
+}
+
+std::uint64_t QlPipe::ioctl(std::uint64_t, std::uint64_t) {
+    // the python ql_pipe.ioctl swallows every failure (returns None)
+    return 0;
+}
+
+std::shared_ptr<QlFsMappedObject> QlPipe::dup() {
+    return std::shared_ptr<QlPipe>(new QlPipe(_dup(fd_)));
+}
+
+int QlPipe::fcntl(int, int) {
+    // the python ql_pipe.fcntl swallows every failure (returns None)
+    return 0;
 }
 
 }  // namespace qiling

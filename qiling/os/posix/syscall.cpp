@@ -8,6 +8,7 @@
 
 #include "qiling/core.hpp"
 #include "qiling/os/os.hpp"
+#include "qiling/os/filestruct.hpp"
 #include "qiling/os/memory.hpp"
 
 namespace qiling {
@@ -52,14 +53,15 @@ constexpr std::int64_t kEFAULT = 14;
 constexpr std::int64_t kEMFILE = 24;
 constexpr std::int64_t kENOENT = 2;
 constexpr std::int64_t kEISDIR = 21;
+constexpr std::int64_t kEEXIST = 17;
+constexpr std::int64_t kEACCES = 13;
+constexpr std::int64_t kEINVAL = 22;
 
-// unistd.py get_opened_fd — the fd bounds check only (the fd table wires the
 // QlFile objects in the posix os layer)
 bool fd_in_range(std::int64_t fd) {
     return fd >= 0 && fd < NR_OPEN;
 }
 
-// unistd.py get_opened_fd — the fd-table entry (nullptr when out of range or
 // empty)
 std::shared_ptr<QlFsMappedObject> fd_get(Qiling& ql, std::int64_t fd);
 std::string read_cstring(Qiling& ql, std::uint64_t addr);
@@ -81,7 +83,6 @@ std::optional<std::int64_t> syscall_exit(Qiling& ql, const std::vector<std::uint
 }
 
 std::optional<std::int64_t> syscall_exit_group(Qiling& ql, const std::vector<std::uint64_t>& params) {
-    // unistd.py ql_syscall_exit_group: unimplemented without multithreading —
     // falls through to the plain exit semantics
     return syscall_exit(ql, params);
 }
@@ -179,9 +180,16 @@ std::optional<std::int64_t> do_open(Qiling& ql, const std::string& absvpath, int
         }
         auto file = fs->open_ql_file(absvpath, mapped, mode);
         fd_table.set(idx, std::move(file));
+    } catch (const QlErrorFileNotFound&) {
+        return -kENOENT;
+    } catch (const QlErrorFileExists&) {
+        return -kEEXIST;
+    } catch (const QlErrorIsADirectory&) {
+        return -kEISDIR;
+    } catch (const QlErrorAccessDenied&) {
+        return -kEACCES;
     } catch (const QlErrorBase&) {
-        // fcntl.py: the FileNotFoundError/IsADirectoryError/... translations
-        // collapse onto ENOENT in this slice (the typed errors refine them)
+        // fcntl.py: the unclassified os errors collapse onto ENOENT
         return -kENOENT;
     }
 
@@ -299,10 +307,16 @@ std::optional<std::int64_t> syscall_dup2(Qiling& ql, const std::vector<std::uint
 }
 
 std::optional<std::int64_t> syscall_dup3(Qiling& ql, const std::vector<std::uint64_t>& params) {
-    // unistd.py ql_syscall_dup3: the target slot with the flags (the O_CLOEXEC
-    // handling lands with its slice)
+    // unistd.py ql_syscall_dup3: the target slot with the flags (the EINVAL
+    // self-dup guard, the O_CLOEXEC propagation)
     const auto oldfd = static_cast<std::int64_t>(params[0]);
     const auto newfd = static_cast<std::int64_t>(params[1]);
+    const auto flags = static_cast<int>(params[2]);
+
+    constexpr int O_CLOEXEC = 02000000;
+    if (oldfd == newfd) {
+        return -kEINVAL;
+    }
 
     auto f = fd_get(ql, oldfd);
     if (f == nullptr) {
@@ -312,9 +326,151 @@ std::optional<std::int64_t> syscall_dup3(Qiling& ql, const std::vector<std::uint
         return -kEBADF;
     }
 
+    auto newf = f->dup();
+    if ((flags & O_CLOEXEC) != 0) {
+        newf->close_on_exec = true;
+    }
+
     auto& fd_table = ql.os<posix::QlOsPosix>().fd();
-    fd_table.set(static_cast<int>(newfd), f->dup());
+    fd_table.set(static_cast<int>(newfd), std::move(newf));
     return newfd;
+}
+
+std::optional<std::int64_t> syscall_pipe(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    // unistd.py ql_syscall_pipe: the host-pipe pair into the fd table; the
+    // result fds land in the guest buffer (the MIPS v1 quirk lands with its
+    // arch slice)
+    const auto pipefd = params[0];
+
+    auto rd_wd = QlPipe::open();
+
+    auto& fd_table = ql.os<posix::QlOsPosix>().fd();
+    int idx1 = -1, idx2 = -1;
+    for (int i = 0; i < NR_OPEN; ++i) {
+        if (fd_table.at(i) == nullptr) {
+            if (idx1 == -1) {
+                idx1 = i;
+            } else {
+                idx2 = i;
+                break;
+            }
+        }
+    }
+    if (idx1 == -1 || idx2 == -1) {
+        return -kEMFILE;
+    }
+
+    fd_table.set(idx1, std::move(rd_wd.first));
+    fd_table.set(idx2, std::move(rd_wd.second));
+
+    ql.mem().write_ptr(pipefd + 0, idx1, 4);
+    ql.mem().write_ptr(pipefd + 4, idx2, 4);
+    return 0;
+}
+
+std::optional<std::int64_t> syscall_pipe2(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    // unistd.py registers pipe2 through the same body (the flags handling
+    // unistd pipe body is shared verbatim)
+    (void)params;
+    return syscall_pipe(ql, params);
+}
+
+std::optional<std::int64_t> syscall_fcntl(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    // fcntl.py ql_syscall_fcntl: F_DUPFD / F_GETFD / F_SETFD / F_GETFL / F_SETFL
+    const auto fd = static_cast<std::int64_t>(params[0]);
+    const auto cmd = static_cast<int>(params[1]);
+    const auto arg = static_cast<int>(params[2]);
+
+    constexpr int F_DUPFD = 0;
+    constexpr int F_GETFD = 1;
+    constexpr int F_SETFD = 2;
+    constexpr int F_GETFL = 3;
+    constexpr int F_SETFL = 4;
+    constexpr int FD_CLOEXEC = 1;
+
+    auto f = fd_get(ql, fd);
+    if (f == nullptr) {
+        return -kEBADF;
+    }
+
+    switch (cmd) {
+        case F_DUPFD: {
+            if (!fd_in_range(arg)) {
+                return -kEINVAL;
+            }
+            auto& fd_table = ql.os<posix::QlOsPosix>().fd();
+            for (int idx = static_cast<int>(arg); idx < NR_OPEN; ++idx) {
+                if (fd_table.at(idx) == nullptr) {
+                    fd_table.set(idx, f->dup());
+                    return idx;
+                }
+            }
+            return -kEMFILE;
+        }
+        case F_GETFD:
+            return f->close_on_exec ? 1 : 0;
+        case F_SETFD:
+            f->close_on_exec = (arg & FD_CLOEXEC) != 0;
+            return 0;
+        case F_GETFL:
+            return f->fcntl(cmd, arg);
+        case F_SETFL: {
+            const auto mapped = ql_open_flag_mapping(ql.arch().type(), arg);
+            f->fcntl(cmd, mapped);
+            return 0;
+        }
+        default:
+            return -kEINVAL;
+    }
+}
+
+std::optional<std::int64_t> syscall_fcntl64(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    // fcntl.py ql_syscall_fcntl64: the degraded x86-32 form (the out-of-range
+    // fd returns -1, F_GETFL/F_GETFD return 2, everything else 0)
+    const auto fd = static_cast<std::int64_t>(params[0]);
+    const auto cmd = static_cast<int>(params[1]);
+    const auto arg = static_cast<int>(params[2]);
+
+    constexpr int F_DUPFD = 0;
+    if (!fd_in_range(fd)) {
+        return -1;
+    }
+    auto f = fd_get(ql, fd);
+    if (f == nullptr) {
+        return -1;
+    }
+
+    if (cmd == F_DUPFD) {
+        if (!fd_in_range(arg)) {
+            return -1;
+        }
+        auto& fd_table = ql.os<posix::QlOsPosix>().fd();
+        for (int idx = static_cast<int>(arg); idx < NR_OPEN; ++idx) {
+            if (fd_table.at(idx) == nullptr) {
+                fd_table.set(idx, f->dup());
+                return idx;
+            }
+        }
+        return -1;
+    }
+    if (cmd == 3) {   // F_GETFL
+        return 2;
+    }
+    if (cmd == 4) {   // F_SETFL
+        return 0;
+    }
+    if (cmd == 1) {   // F_GETFD
+        return 2;
+    }
+    if (cmd == 2) {   // F_SETFD
+        return 0;
+    }
+    return 0;
+}
+
+std::optional<std::int64_t> syscall_flock(Qiling&, const std::vector<std::uint64_t>&) {
+    // fcntl.py ql_syscall_flock: should always return 0 (the comment, verbatim)
+    return 0;
 }
 
 // unistd.py read_cstring (os/utils.py read_cstring): the char-stepped NUL
@@ -440,7 +596,12 @@ void register_builtin_syscalls() {
     registry.register_syscall({"_llseek", {PARAM_INTN, PARAM_INTN, PARAM_INTN, PARAM_PTRX, PARAM_INTN}, syscall__llseek});
     registry.register_syscall({"dup", {PARAM_INTN}, syscall_dup});
     registry.register_syscall({"dup2", {PARAM_INTN, PARAM_INTN}, syscall_dup2});
-    registry.register_syscall({"dup3", {PARAM_INTN, PARAM_INTN, PARAM_INTN}, syscall_dup2});
+    registry.register_syscall({"dup3", {PARAM_INTN, PARAM_INTN, PARAM_INTN}, syscall_dup3});
+    registry.register_syscall({"pipe", {PARAM_PTRX}, syscall_pipe});
+    registry.register_syscall({"pipe2", {PARAM_PTRX, PARAM_INTN}, syscall_pipe2});
+    registry.register_syscall({"fcntl", {PARAM_INTN, PARAM_INTN, PARAM_INTN}, syscall_fcntl});
+    registry.register_syscall({"fcntl64", {PARAM_INTN, PARAM_INTN, PARAM_INTN}, syscall_fcntl64});
+    registry.register_syscall({"flock", {PARAM_INTN, PARAM_INTN}, syscall_flock});
 }
 
 }  // namespace posix
