@@ -12,6 +12,7 @@
 #include "qiling/arch/utils.hpp"
 
 #include "qiling/os/posix/posix.hpp"
+#include "qiling/os/posix/map_syscall.hpp"
 
 namespace qiling {
 namespace loader {
@@ -22,6 +23,8 @@ namespace {
 constexpr std::uint16_t ET_REL = 1;
 constexpr std::uint16_t ET_EXEC = 2;
 constexpr std::uint16_t ET_DYN = 3;
+
+}  // namespace
 
 // the parsed container (the ELFFile analogue) — LIEF-backed (decision D17:
 // one parsing dependency for PE/ELF/…; the qiling-specific consolidation and
@@ -86,6 +89,8 @@ int seg_perm_to_uc_prot(LIEF::ELF::Segment::FLAGS perm) {
     return prot;
 }
 
+namespace {
+
 // the segment's file bytes (elf.py seg.data(); LIEF hands back the raw view)
 std::vector<std::uint8_t> segment_data(const LIEF::ELF::Segment& seg) {
     const auto content = seg.content();
@@ -128,24 +133,37 @@ void QlLoaderELF::run() {
 
     ElfImage elf = ElfImage::parse(bytes);
 
+    const std::string ossection = ql_->arch().bits() == 64 ? "OS64" : "OS32";
+    auto& profile = ql_->profile();
+
+    // setup program stack (elf.py load: the map happens before the type
+    // dispatch, covering the driver and the executable paths alike)
+    std::uint64_t stack_address = static_cast<std::uint64_t>(profile.get_int(ossection, "stack_address"));
+    const std::uint64_t stack_size = static_cast<std::uint64_t>(profile.get_int(ossection, "stack_size"));
+    const std::uint64_t top_of_stack = stack_address + stack_size;
+
+    ql_->mem().map(stack_address, stack_size, UC_PROT_ALL, "[stack]");
+
     if (elf.type() == ET_REL) {
-        // the LKM driver path lands with the kernel-module slice
-        throw QlErrorNotImplemented("the ET_REL driver path lands with the kernel-module slice");
+        // elf.py run: the driver path + the kernel api dispatch hook
+        load_driver(elf, bytes, top_of_stack, 0x8000000);
+
+        // the shared run() tail lands the sp on the (aligned) stack top
+        ql_->arch().regs().set_arch_sp(stack_address_);
+
+        // elf.py run: self.ql.hook_code(hook_kernel_api) — the hook lives on
+        // the os so the uc-after-close discipline releases it with the other
+        // os-owned handles
+        if (auto* os_posix = dynamic_cast<os::posix::QlOsPosix*>(&ql_->os()); os_posix != nullptr) {
+            os_posix->enable_kernel_api_hooks();
+        }
+        return;
     }
 
     const bool is_dyn = elf.type() == ET_DYN;
     if (elf.type() != ET_EXEC && !is_dyn) {
         throw QlErrorBase("unexpected elf type value");
     }
-
-    const std::string ossection = ql_->arch().bits() == 64 ? "OS64" : "OS32";
-    auto& profile = ql_->profile();
-
-    std::uint64_t stack_address = static_cast<std::uint64_t>(profile.get_int(ossection, "stack_address"));
-    const std::uint64_t stack_size = static_cast<std::uint64_t>(profile.get_int(ossection, "stack_size"));
-    const std::uint64_t top_of_stack = stack_address + stack_size;
-
-    ql_->mem().map(stack_address, stack_size, UC_PROT_ALL, "[stack]");
 
     // ET_DYN relocates to the profile load_address; ET_EXEC stays at its base
     const std::uint64_t load_address = is_dyn
@@ -446,6 +464,335 @@ void QlLoaderELF::run() {
     mmap_address_ = static_cast<std::uint64_t>(profile.get_int(ossection, "mmap_address"));
 
     skip_exit_check = (elf_entry_ != entry_point_final);
+}
+
+// ---- the ET_REL driver path (elf.py load_driver / lkm_get_init / lkm_dynlinker) ----
+
+void QlLoaderELF::load_driver(const ElfImage& elf, const std::vector<std::uint8_t>& bytes,
+                              std::uint64_t stack_addr, std::uint64_t loadbase) {
+    // get_elfdata_mapping: the elf header followed by every SHF_ALLOC section
+    // at its file offset (the relocatable object is presumed relocated to 0 —
+    // the sections land at their sh_offset positions, verbatim comment)
+    std::vector<std::uint8_t> elfdata_mapping;
+    elfdata_mapping.assign(bytes.begin(), bytes.begin() + 64);  // the ehdr
+    for (const LIEF::ELF::Section& sec : elf.binary->sections()) {
+        if ((sec.flags() & 0x2u) == 0) {
+            continue;  // SHF_ALLOC
+        }
+        if (sec.offset() > elfdata_mapping.size()) {
+            elfdata_mapping.resize(static_cast<std::size_t>(sec.offset()), 0);
+        }
+        const auto content = sec.content();
+        const auto have = std::min<std::uint64_t>(content.size(), sec.size());
+        elfdata_mapping.insert(elfdata_mapping.end(), content.begin(), content.begin() + static_cast<std::ptrdiff_t>(have));
+        if (have < sec.size()) {
+            // SHT_NOBITS (the .bss family) contributes zeros
+            elfdata_mapping.insert(elfdata_mapping.end(), static_cast<std::size_t>(sec.size() - have), 0);
+        }
+    }
+
+    const std::uint64_t mem_start = ql_->mem().align(loadbase);
+    const std::uint64_t mem_end = ql_->mem().align_up(loadbase + elfdata_mapping.size());
+
+    // map some memory to intercept external functions of the Linux kernel
+    ql_->mem().map(API_HOOK_MEM, API_HOOK_SIZE, UC_PROT_ALL, "[api_mem]");
+
+    const std::string label = std::filesystem::path(ql_->path()).filename().string();
+    ql_->mem().map(mem_start, mem_end - mem_start, UC_PROT_ALL, label);
+    ql_->mem().write(loadbase, elfdata_mapping);
+
+    images.push_back(Image{mem_start, mem_end, ql_->path()});
+
+    const std::uint64_t init_module = loadbase + lkm_get_init(elf);
+
+    brk_address_ = mem_end;
+
+    // there is no interpreter so the emulation entry point is also the elf
+    // entry (elf.py, verbatim)
+    elf_entry_ = init_module;
+    entry_point = init_module;
+    ql_->os().set_entry_point(init_module);
+
+    stack_address_ = ql_->mem().align(stack_addr, ql_->arch().bits() / 8);
+
+    // set up the syscall table
+    ql_->mem().map(SYSCALL_MEM, SYSCALL_SIZE, UC_PROT_ALL, "[syscall_mem]");
+    ql_->mem().write(SYSCALL_MEM, std::vector<std::uint8_t>(SYSCALL_SIZE, 0));
+
+    lkm_dynlinker(elf, loadbase);
+
+    const auto ptrsize = ql_->arch().bits() / 8;
+
+    // iterate over the relocatable symbols, but pick only those starting with
+    // 'sys_' (elf.py, verbatim)
+    for (const auto& [name, addr] : rev_reloc_symbols_) {
+        if (name.rfind("sys_", 0) == 0 && name != "sys_call_table") {
+            const std::string tmp_sc = name.substr(4);
+            const auto syscall_id = os::posix::syscall_id_for_name(ql_->arch().type(), tmp_sc);
+            if (!syscall_id) {
+                continue;  // not a known syscall name (the hasattr check)
+            }
+            const std::uint64_t dest = SYSCALL_MEM + *syscall_id * ptrsize;
+            ql_->mem().write_ptr(dest, static_cast<std::int64_t>(addr), ptrsize);
+        }
+    }
+
+    // write the syscall addresses into the syscall table (the read/write/open
+    // api slots, elf.py verbatim)
+    for (std::size_t i = 0; i < 3; ++i) {
+        const std::uint64_t dest = SYSCALL_MEM + i * ptrsize;
+        ql_->mem().write_ptr(dest, static_cast<std::int64_t>(hook_addr_ + i * ptrsize), ptrsize);
+    }
+    // set up the hooks for the read/write/open syscalls — the port keys the
+    // import table by name (the hook.py dispatch resolves hook_sys_read etc.
+    // through the kernel api registry)
+    import_symbols_[hook_addr_ + 0 * ptrsize] = ImportSymbol{hook_addr_ + 0 * ptrsize, "sys_read"};
+    import_symbols_[hook_addr_ + 1 * ptrsize] = ImportSymbol{hook_addr_ + 1 * ptrsize, "sys_write"};
+    import_symbols_[hook_addr_ + 2 * ptrsize] = ImportSymbol{hook_addr_ + 2 * ptrsize, "sys_open"};
+}
+
+std::uint64_t QlLoaderELF::lkm_get_init(const ElfImage& elf) const {
+    // lkm_get_init: the file offset of the init_module function
+    for (const LIEF::ELF::Symbol& sym_ref : elf.binary->symtab_symbols()) {
+        const auto* sym = &sym_ref;
+        if (sym == nullptr || sym->name() != "init_module") {
+            continue;
+        }
+        // the section at st_shndx: walk the section table by index (the LIEF
+        // section list preserves the raw table order)
+        std::uint16_t idx = 0;
+        for (const LIEF::ELF::Section& sec : elf.binary->sections()) {
+            if (idx++ == sym->shndx()) {
+                return sym->value() + sec.offset();
+            }
+        }
+    }
+    throw QlErrorELFFormat("invalid module: symbol init_module not found");
+}
+
+void QlLoaderELF::lkm_dynlinker(const ElfImage& elf, std::uint64_t mem_start) {
+    // lkm_dynlinker: walk the object relocations, patch the mapped data, and
+    // collect the api/syscall hook addresses (elf.py, verbatim)
+    hook_addr_ = API_HOOK_MEM;
+    import_symbols_.clear();
+    rev_reloc_symbols_.clear();
+    std::vector<std::string> all_symbols;
+
+    const auto ptrsize = ql_->arch().bits() / 8;
+    const auto machine = elf.binary->header().machine_type();
+
+    for (const LIEF::ELF::Relocation& rel_ref : elf.binary->object_relocations()) {
+        const auto& rel = rel_ref;
+        const auto* target = rel.section();
+        if (target == nullptr) {
+            continue;
+        }
+        if ((target->flags() & 0x2u) == 0) {
+            continue;  // SHF_ALLOC
+        }
+        if (target->name() == ".gnu.linkonce.this_module") {
+            continue;  // the module's own metadata needs no relocation
+        }
+
+        const auto* sym = rel.symbol();
+        if (sym == nullptr) {
+            // the r_info_sym==0 relocs resolve against the section itself; the
+            // upstream asserts a symbol here and would fault on the null one —
+            // the port skips them (the documented deviation)
+            continue;
+        }
+
+        std::string symbol_name;
+        std::uint64_t sym_offset = 0;
+
+        if (sym->name().empty()) {
+            // some symbols have zero st_name; the name of the section they
+            // point at is used instead (elf.py, verbatim)
+            const LIEF::ELF::Section* symsec = nullptr;
+            std::uint16_t idx = 0;
+            for (const LIEF::ELF::Section& sec : elf.binary->sections()) {
+                if (idx++ == sym->shndx()) {
+                    symsec = &sec;
+                    break;
+                }
+            }
+            if (symsec == nullptr) {
+                continue;
+            }
+            symbol_name = symsec->name();
+            sym_offset = symsec->offset();
+            rev_reloc_symbols_[symbol_name] = sym_offset + mem_start;
+        } else {
+            symbol_name = sym->name();
+            sym_offset = target->offset();
+            if (std::find(all_symbols.begin(), all_symbols.end(), symbol_name) != all_symbols.end()) {
+                sym_offset = rev_reloc_symbols_[symbol_name] - mem_start;
+            } else {
+                all_symbols.push_back(symbol_name);
+                if (sym->shndx() == 0) {  // SHN_UNDEF: an external symbol
+                    if (symbol_name.rfind("sys_", 0) == 0) {
+                        // the syscall hooks must sit pointer-aligned so the
+                        // table lookups find the right callback (elf.py)
+                        hook_addr_ = ql_->mem().align_up(hook_addr_, ptrsize);
+                    }
+                    import_symbols_[hook_addr_] = ImportSymbol{hook_addr_, symbol_name};
+
+                    // the rootkit scan shortcut: the syscall table address in
+                    // the page_offset_base slot (elf.py FIXME, verbatim)
+                    if (symbol_name == "page_offset_base") {
+                        ql_->mem().write_ptr(hook_addr_, static_cast<std::int64_t>(SYSCALL_MEM), ptrsize);
+                    }
+                    rev_reloc_symbols_[symbol_name] = hook_addr_;
+                    sym_offset = hook_addr_ - mem_start;
+                    hook_addr_ += ptrsize;
+                } else if (sym->shndx() == 0xfff1) {  // SHN_ABS
+                    rev_reloc_symbols_[symbol_name] = sym->value();
+                } else {
+                    // a local symbol: the defining section's offset
+                    const LIEF::ELF::Section* def_sec = nullptr;
+                    std::uint16_t idx2 = 0;
+                    for (const LIEF::ELF::Section& sec : elf.binary->sections()) {
+                        if (idx2++ == sym->shndx()) {
+                            def_sec = &sec;
+                            break;
+                        }
+                    }
+                    if (def_sec == nullptr) {
+                        continue;
+                    }
+                    rev_reloc_symbols_[symbol_name] = def_sec->offset() + sym->value() + mem_start;
+                }
+            }
+        }
+
+        // the patch location: the target section's file offset + the reloc
+        // offset, mapped into memory (elf.py, verbatim)
+        const std::uint64_t loc = target->offset() + rel.address() + mem_start;
+        const auto rtype = LIEF::ELF::Relocation::to_value(rel.type());
+
+        switch (machine) {
+            case LIEF::ELF::ARCH::X86_64: {
+                switch (rtype) {
+                    case 11:  // R_X86_64_32S
+                    case 10:  // R_X86_64_32
+                    {
+                        std::uint64_t val = 0;
+                        if (rel.addend() != 0) {
+                            val = sym_offset + static_cast<std::uint64_t>(rel.addend());
+                            val += mem_start;
+                        } else {
+                            val = rev_reloc_symbols_[symbol_name];
+                        }
+                        ql_->mem().write_ptr(loc, static_cast<std::int64_t>(val & 0xFFFFFFFFu), 4);
+                        break;
+                    }
+                    case 1: {  // R_X86_64_64
+                        // the +0x2000000 init_module position FIXME, verbatim
+                        std::uint64_t val = sym_offset + static_cast<std::uint64_t>(rel.addend());
+                        val += 0x2000000;
+                        ql_->mem().write_ptr(loc, static_cast<std::int64_t>(val), 8);
+                        break;
+                    }
+                    case 24: {  // R_X86_64_PC64
+                        std::uint64_t val = static_cast<std::uint64_t>(rel.addend()) - loc;
+                        val += rev_reloc_symbols_[symbol_name];
+                        ql_->mem().write_ptr(loc, static_cast<std::int64_t>(val), 8);
+                        break;
+                    }
+                    case 2:    // R_X86_64_PC32
+                    case 4: {  // R_X86_64_PLT32
+                        std::uint64_t val = static_cast<std::uint64_t>(rel.addend()) - loc;
+                        val += rev_reloc_symbols_[symbol_name];
+                        ql_->mem().write_ptr(loc, static_cast<std::int64_t>(val & 0xFFFFFFFFu), 4);
+                        break;
+                    }
+                    default:
+                        throw QlErrorNotImplemented("Relocation type not implemented (x86-64: " +
+                                                    std::to_string(rtype) + ")");
+                }
+                break;
+            }
+            case LIEF::ELF::ARCH::I386: {
+                switch (rtype) {
+                    case 2:    // R_386_PC32
+                    case 4: {  // R_386_PLT32
+                        const auto cur = static_cast<std::uint64_t>(ql_->mem().read_ptr(loc, 4));
+                        std::uint64_t val = cur + rev_reloc_symbols_[symbol_name] - loc;
+                        ql_->mem().write_ptr(loc, static_cast<std::int64_t>(val & 0xFFFFFFFFu), 4);
+                        break;
+                    }
+                    case 1: {  // R_386_32
+                        const auto cur = static_cast<std::uint64_t>(ql_->mem().read_ptr(loc, 4));
+                        const std::uint64_t val = cur + rev_reloc_symbols_[symbol_name];
+                        ql_->mem().write_ptr(loc, static_cast<std::int64_t>(val & 0xFFFFFFFFu), 4);
+                        break;
+                    }
+                    default:
+                        throw QlErrorNotImplemented("Relocation type not implemented (i386: " +
+                                                    std::to_string(rtype) + ")");
+                }
+                break;
+            }
+            case LIEF::ELF::ARCH::MIPS: {
+                // the mips pairs walk in relocation order (HI16 then LO16)
+                switch (rtype) {
+                    case 2: {  // R_MIPS_32
+                        const auto cur = static_cast<std::uint64_t>(ql_->mem().read_ptr(loc, 4));
+                        const std::uint64_t val = cur + rev_reloc_symbols_[symbol_name];
+                        ql_->mem().write_ptr(loc, static_cast<std::int64_t>(val & 0xFFFFFFFFu), 4);
+                        prev_mips_hi16_loc_.reset();
+                        break;
+                    }
+                    case 5:  // R_MIPS_HI16: the actual relocation happens at LO16
+                        prev_mips_hi16_loc_ = loc;
+                        break;
+                    case 6: {  // R_MIPS_LO16
+                        if (!prev_mips_hi16_loc_) {
+                            throw QlErrorNotImplemented("R_MIPS_LO16 without a preceding R_MIPS_HI16");
+                        }
+                        const auto hi_loc = *prev_mips_hi16_loc_;
+                        std::uint64_t val = static_cast<std::uint64_t>(ql_->mem().read_ptr(hi_loc + 2, 2)) << 16 |
+                                            static_cast<std::uint64_t>(ql_->mem().read_ptr(loc + 2, 2));
+                        val = rev_reloc_symbols_[symbol_name] + val;
+                        if ((val & 0xFFFF) >= 0x8000) {
+                            val += (1ull << 16);
+                        }
+                        ql_->mem().write_ptr(hi_loc + 2, static_cast<std::int64_t>((val >> 16) & 0xFFFF), 2);
+                        ql_->mem().write_ptr(loc + 2, static_cast<std::int64_t>(val & 0xFFFF), 2);
+                        prev_mips_hi16_loc_.reset();
+                        break;
+                    }
+                    default:
+                        throw QlErrorNotImplemented("Relocation type not implemented (mips: " +
+                                                    std::to_string(rtype) + ")");
+                }
+                break;
+            }
+            case LIEF::ELF::ARCH::ARM: {
+                switch (rtype) {
+                    case 28:   // R_ARM_CALL
+                    case 29: { // R_ARM_JUMP24
+                        std::uint64_t val = (rev_reloc_symbols_[symbol_name] - loc - 8) >> 2;
+                        val = (val & 0xFFFFFF) | (static_cast<std::uint64_t>(ql_->mem().read_ptr(loc, 4)) & 0xFF000000u);
+                        ql_->mem().write_ptr(loc, static_cast<std::int64_t>(val & 0xFFFFFFFFu), 4);
+                        break;
+                    }
+                    case 2: {  // R_ARM_ABS32
+                        const auto cur = static_cast<std::uint64_t>(ql_->mem().read_ptr(loc, 4));
+                        const std::uint64_t val = rev_reloc_symbols_[symbol_name] + cur;
+                        ql_->mem().write_ptr(loc, static_cast<std::int64_t>(val & 0xFFFFFFFFu), 4);
+                        break;
+                    }
+                    default:
+                        throw QlErrorNotImplemented("Relocation type not implemented (arm: " +
+                                                    std::to_string(rtype) + ")");
+                }
+                break;
+            }
+            default:
+                throw QlErrorNotImplemented("Relocation walk not implemented for this architecture");
+        }
+    }
 }
 
 }  // namespace loader

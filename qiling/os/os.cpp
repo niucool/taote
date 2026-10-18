@@ -1,3 +1,5 @@
+#include <cstdio>
+
 #include "qiling/os/os.hpp"
 
 #include "qiling/arch/arch.hpp"
@@ -92,12 +94,21 @@ void QlOs::set_stderr(std::shared_ptr<QlFile> stream) {
     stderr_ = std::move(stream);
 }
 
-void QlOs::set_api(std::uint64_t target, void* handler, QL_INTERCEPT intercept) {
-    user_defined_api_[intercept][std::to_string(target)] = handler;
+void QlOs::set_api(std::uint64_t target, UserApiHandler handler, QL_INTERCEPT intercept) {
+    user_defined_api_[intercept][std::to_string(target)] = std::move(handler);
 }
 
-void QlOs::set_api(std::string_view target, void* handler, QL_INTERCEPT intercept) {
-    user_defined_api_[intercept][std::string(target)] = handler;
+void QlOs::set_api(std::string_view target, UserApiHandler handler, QL_INTERCEPT intercept) {
+    user_defined_api_[intercept][std::string(target)] = std::move(handler);
+}
+
+const QlOs::UserApiHandler* QlOs::find_user_api(const std::string& name, QL_INTERCEPT intercept) const {
+    const auto table = user_defined_api_.find(intercept);
+    if (table == user_defined_api_.end()) {
+        return nullptr;
+    }
+    const auto it = table->second.find(name);
+    return it == table->second.end() ? nullptr : &it->second;
 }
 
 std::vector<std::uint64_t> QlOs::resolve_fcall_params(const std::vector<std::pair<std::string, int>>& params) const {
@@ -110,7 +121,8 @@ std::vector<std::uint64_t> QlOs::resolve_fcall_params(const std::vector<std::pai
         types.push_back(typ);
     }
 
-    return fcall().read_params(types);
+    const auto out = fcall().read_params(types);
+    return out;
 }
 
 std::vector<std::string> QlOs::process_fcall_params(const std::vector<FcallArg>& targs) const {
@@ -127,36 +139,38 @@ std::vector<std::string> QlOs::process_fcall_params(const std::vector<FcallArg>&
     return out;
 }
 
-std::optional<std::uint64_t> QlOs::call(std::uint64_t pc, const std::string& name,
+std::optional<std::uint64_t> QlOs::call(std::uint64_t pc, const std::string& name, const QlFunctionCall::CallHook& func,
                                         const std::vector<std::pair<std::string, int>>& proto,
-                                        const std::vector<std::uint64_t>& args_raw) {
-    // os.py call: resolve the arguments, run the fcall orchestration, log the
-    // syscall and set the pc back to the return address
+                                        const QlFunctionCall::OnEnterHook& onenter,
+                                        const QlFunctionCall::OnExitHook& onexit, bool passthru) {
+    // os.py call: resolve the arguments according to their types, call the
+    // hooked function through the fcall orchestration, post-process, print,
+    // log, and set the pc to the return address
     const auto resolved = resolve_fcall_params(proto);
 
     std::vector<std::pair<std::string, std::uint64_t>> args;
-    args.reserve(args_raw.size());
-    for (std::size_t i = 0; i < args_raw.size(); ++i) {
-        args.emplace_back(i < proto.size() ? proto[i].first : "arg" + std::to_string(i), args_raw[i]);
+    args.reserve(proto.size());
+    for (std::size_t i = 0; i < proto.size(); ++i) {
+        args.emplace_back(proto[i].first, i < resolved.size() ? resolved[i] : 0);
     }
 
-    // the fcall call() returns the CallResult; the OS-level wrapper only
-    // forwards the orchestration (the hook invocation is handled by the
-    // caller-provided closures in the Phase 4 syscall glue)
-    const auto result = fcall().call(
-        [&name](std::uint64_t, const std::vector<std::pair<std::string, std::uint64_t>>& params)
-            -> std::optional<std::uint64_t> {
-            (void)name;
-            (void)params;
-            return std::nullopt;  // no implementation: the api hook decides
-        },
-        proto, args, {}, {}, false);
+    const auto result = fcall().call(func, proto, args, onenter, onexit, passthru);
+
+    // post-process the argument values (the display strings); the TypedArg
+    // triples map 1:1 onto the FcallArg shape the display resolver takes
+    std::vector<FcallArg> targs;
+    targs.reserve(result.params.size());
+    for (const auto& t : result.params) {
+        targs.push_back(FcallArg{t.name, t.type, t.value});
+    }
+    const auto pargs = process_fcall_params(targs);
+    (void)pargs;  // the verbose print_function surface lands with its slice
 
     stats_.log_api_call(pc, name, result.retval.value_or(0), result.retval.has_value(), result.retaddr);
 
     // os.py: avoid modifying the pc when the emulation has stopped (unicorn
     // issue #1579)
-    if (ql().emu_state() != QL_STATE::STOPPED) {
+    if (!passthru && ql().emu_state() != QL_STATE::STOPPED) {
         ql().arch().regs().set_arch_pc(result.retaddr);
     }
 

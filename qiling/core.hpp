@@ -153,6 +153,10 @@ public:
     void emu_stop();
     void stop();
 
+    // core.py debug_stop — raise on unimplemented kernel apis / syscalls
+    bool debug_stop() const noexcept { return debug_stop_; }
+    void set_debug_stop(bool value) noexcept { debug_stop_ = value; }
+
     // stack delegation (core.py stack_push/pop/read/write)
     std::uint64_t stack_push(std::uint64_t data);
     std::uint64_t stack_pop();
@@ -195,6 +199,7 @@ private:
     std::shared_ptr<spdlog::logger> log_;
 
     QL_STATE state_ = QL_STATE::NOT_SET;
+    bool debug_stop_ = false;
 
     // patching records (core.py _patch_bin/_patch_lib)
     struct BinPatch { std::uint64_t offset; std::vector<std::uint8_t> data; };

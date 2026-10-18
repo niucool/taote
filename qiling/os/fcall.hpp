@@ -30,7 +30,23 @@ public:
     // fcall.py __init__(ql, cc, accessors): the ql dependency is carried by
     // the cc (which holds the arch). The default accessors are built from the
     // calling convention's raw parameter accessors.
+    //
+    // OWNERSHIP: the port owns the cc through cc_owner_ — the borrowed-
+    // reference form left the cc object freed at the end of the constructing
+    // full expression (the caller's make_unique temporary), a use-after-free
+    // the tests only surfaced through heap-layout luck.
+    explicit QlFunctionCall(std::unique_ptr<cc::QlCC> cc) : cc_owner_(std::move(cc)), cc_(cc_owner_.get()) {
+        build_default_accessors();
+    }
+
+    // the borrowed form stays available for the os-managed cc objects (the
+    // windows fcall_table_ entries own their cc through the same table)
     explicit QlFunctionCall(cc::QlCC& cc) : cc_(&cc) {
+        build_default_accessors();
+    }
+
+private:
+    void build_default_accessors() {
         const auto bind = [this](int nbits) {
             Access a;
             a.reader = [this, nbits](int slot) { return cc_->getRawParam(slot, nbits); };
@@ -45,6 +61,8 @@ public:
         accessors_.emplace_back(os::PARAM_INT64, bind(64));
         accessors_.emplace_back(os::PARAM_INTN, bind(0));
     }
+
+public:
 
     // Concrete-convention construction: binds the static getNumSlots of the
     // concrete convention into the default accessors (Python resolves
@@ -125,6 +143,9 @@ private:
 
     const Access& access_for(int type) const;
 
+    // the owner must precede the borrowed pointer: the mem-init list runs in
+    // declaration order, and cc_ reads cc_owner_.get()
+    std::unique_ptr<cc::QlCC> cc_owner_;
     cc::QlCC* cc_ = nullptr;
     std::vector<std::pair<int, Access>> accessors_;  // insertion-ordered override map
 };

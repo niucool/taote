@@ -140,8 +140,14 @@ public:
 
     // ---- user-defined api surface (os.py set_api / user_defined_api) ----
 
-    void set_api(std::uint64_t target, void* handler, QL_INTERCEPT intercept = QL_INTERCEPT::CALL);
-    void set_api(std::string_view target, void* handler, QL_INTERCEPT intercept = QL_INTERCEPT::CALL);
+    // hook.py: the CALL-intercept callables run raw with (ql, address, name)
+    using UserApiHandler = std::function<void(Qiling&, std::uint64_t, const std::string&)>;
+
+    void set_api(std::uint64_t target, UserApiHandler handler, QL_INTERCEPT intercept = QL_INTERCEPT::CALL);
+    void set_api(std::string_view target, UserApiHandler handler, QL_INTERCEPT intercept = QL_INTERCEPT::CALL);
+
+    // hook.py: user_defined_api[intercept].get(name) — null when unregistered
+    const UserApiHandler* find_user_api(const std::string& name, QL_INTERCEPT intercept = QL_INTERCEPT::CALL) const;
 
     // resolve_fcall_params — name->type mapping resolved through the fcall
     // layer and the resolvers table; returns the resolved values in order
@@ -150,10 +156,14 @@ public:
     // process_fcall_params — the display strings for the typed args
     std::vector<std::string> process_fcall_params(const std::vector<FcallArg>& targs) const;
 
-    // os.py call — resolve, invoke through fcall, print, log to stats, set pc
-    std::optional<std::uint64_t> call(std::uint64_t pc, const std::string& name,
+    // os.py call — resolve the proto through the cc, run the handler via the
+    // fcall orchestration (onenter/onexit/passthru included), log, and set the
+    // pc to the return address (skipped when the emulation already stopped;
+    // unicorn issue #1579, verbatim)
+    std::optional<std::uint64_t> call(std::uint64_t pc, const std::string& name, const QlFunctionCall::CallHook& func,
                                       const std::vector<std::pair<std::string, int>>& proto,
-                                      const std::vector<std::uint64_t>& args_raw);
+                                      const QlFunctionCall::OnEnterHook& onenter = {},
+                                      const QlFunctionCall::OnExitHook& onexit = {}, bool passthru = false);
 
     // os.py emu_error — dump the cpu context, the pc neighborhood and the map
     void emu_error() const;
@@ -185,7 +195,7 @@ protected:
     std::uint64_t code_ram_size_ = 0;
 
     std::map<std::string, Resolver> resolvers_;
-    std::map<QL_INTERCEPT, std::map<std::string, void*>> user_defined_api_;
+    std::map<QL_INTERCEPT, std::map<std::string, UserApiHandler>> user_defined_api_;
     std::unique_ptr<QlOsPath> path_;
     std::unique_ptr<QlFsMapper> fs_mapper_;
 };

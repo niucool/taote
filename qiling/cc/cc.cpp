@@ -1,3 +1,5 @@
+#include <cstdio>
+
 #include "qiling/cc/cc.hpp"
 
 #include <stdexcept>

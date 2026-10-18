@@ -1,5 +1,7 @@
 #include "qiling/os/fcall.hpp"
 
+#include <cstdio>
+
 namespace qiling {
 
 void QlFunctionCall::set_accessor(int type, Accessor accessor) {

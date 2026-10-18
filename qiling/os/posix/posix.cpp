@@ -1,5 +1,8 @@
 #include "qiling/os/posix/posix.hpp"
 
+#include "qiling/os/posix/kernel_api.hpp"
+#include "qiling/loader/elf.hpp"
+
 #include <unicorn/x86.h>
 #include "qiling/loader/loader.hpp"
 
@@ -82,7 +85,7 @@ QlOsPosix::QlOsPosix(Qiling* ql) : QlOs(ql) {
 
     // fcall: the posix convention (the syscall layer goes through the abi, but
     // the os-level fcall remains available for API hooks)
-    set_fcall(std::make_unique<QlFunctionCall>(*make_cc_default(ql->arch().type(), ql->arch())));
+    set_fcall(std::make_unique<QlFunctionCall>(make_cc_default(ql->arch().type(), ql->arch())));
 
     register_builtin_syscalls();
 }
@@ -112,12 +115,68 @@ std::unique_ptr<cc::QlCC> QlOsPosix::make_cc_default(QL_ARCH archtype, QlArch& a
 }
 
 void QlOsPosix::shutdown() {
-    // release the syscall-entry hook while the uc engine is alive (the
+    // release the os-owned hooks while the uc engine is alive (the
     // composition root calls this before the arch's uc handle closes)
     if (syscall_hook_.has_value()) {
         syscall_hook_->remove();
         syscall_hook_.reset();
     }
+    if (kernel_api_hook_.has_value()) {
+        kernel_api_hook_->remove();
+        kernel_api_hook_.reset();
+    }
+}
+
+void QlOsPosix::enable_kernel_api_hooks() {
+    // elf.py run: self.ql.hook_code(hook_kernel_api)
+    auto* self = this;
+    kernel_api_hook_ = ql().hook_code([self](std::uint64_t address, std::uint32_t size) -> int {
+        self->hook_kernel_api(address, size);
+        return 0;
+    });
+}
+
+void QlOsPosix::hook_kernel_api(std::uint64_t address, std::uint32_t size) {
+    (void)size;
+
+    // hook.py hook_kernel_api: call the kernel api at the stub address
+    const auto* loader_elf = dynamic_cast<const loader::QlLoaderELF*>(&ql().loader());
+    if (loader_elf == nullptr) {
+        return;
+    }
+    const auto* imported = loader_elf->import_symbols_at(address);
+    if (imported == nullptr) {
+        return;
+    }
+    const auto& api_name = imported->name;
+
+    // the user override runs raw with (ql, address, api_name) — no param
+    // resolution (hook.py, verbatim)
+    if (const auto* user = find_user_api(api_name)) {
+        (*user)(ql(), address, api_name);
+        return;
+    }
+
+    const auto* entry = KernelApiRegistry::instance().find(api_name);
+    if (entry == nullptr) {
+        // hook.py: a warning; the debug_stop surfaces raise
+        // QlErrorSyscallNotFound
+        if (ql().debug_stop()) {
+            throw QlErrorSyscallNotFound("Linux kernel API implementation not found: " + api_name);
+        }
+        return;
+    }
+
+    // the @linux_kernel_api wrapper body: os.call(pc, func, params, onenter,
+    // onexit, passthru)
+    const auto* entry_ptr = entry;
+    auto* self_ql = &ql();
+    const auto func = [entry_ptr, self_ql](std::uint64_t pc,
+                                           const std::vector<std::pair<std::string, std::uint64_t>>& params)
+        -> std::optional<std::uint64_t> {
+        return entry_ptr->handler(*self_ql, pc, params);
+    };
+    call(address, api_name, func, entry->params, {}, {}, entry->passthru);
 }
 
 void QlOsPosix::set_syscall(std::string_view name, SyscallHandler handler) {

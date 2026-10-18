@@ -42,6 +42,14 @@ public:
 
     void shutdown() override;
 
+    // hook.py hook_kernel_api — the code hook dispatching the loader's import
+    // stubs through the user overrides and the kernel api registry
+    void hook_kernel_api(std::uint64_t address, std::uint32_t size);
+
+    // elf.py run: ql.hook_code(hook_kernel_api) — the handle lives on the os
+    // so the shutdown discipline releases it with the other hook owners
+    void enable_kernel_api_hooks();
+
     // the raw parameter count the dispatcher reads for a syscall id
     static std::size_t params_count_for_id(std::uint64_t syscall_id, QL_ARCH archtype);
 
@@ -60,6 +68,7 @@ private:
     std::unique_ptr<QlSyscallABI> syscall_abi_;
     std::map<std::string, SyscallHandler> user_syscalls_;
     std::optional<HookRet> syscall_hook_;
+    std::optional<HookRet> kernel_api_hook_;
     int uid_ = 1000;
     int euid_ = 1000;
     int gid_ = 1000;

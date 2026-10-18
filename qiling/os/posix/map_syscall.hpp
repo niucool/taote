@@ -1,10 +1,11 @@
-// Ported from qiling/os/linux/map_syscall.py ¡ª the per-arch syscall number to
+// Ported from qiling/os/linux/map_syscall.py ï¿½ï¿½ the per-arch syscall number to
 // name tables (verbatim data; generated from the Python source).
 #ifndef QILING_OS_LINUX_MAP_SYSCALL_HPP
 #define QILING_OS_LINUX_MAP_SYSCALL_HPP
 
 #include <array>
 #include <cstdint>
+#include <optional>
 #include <string_view>
 #include <utility>
 
@@ -784,6 +785,53 @@ inline constexpr std::array<std::pair<unsigned, std::string_view>, 444> ppc_sysc
     {455, "futex_wait"}, {456, "futex_requeue"}, {457, "statmount"}, {458, "listmount"},
     {459, "lsm_get_self_attr"}, {460, "lsm_set_self_attr"}, {461, "lsm_list_modules"}, {462, "mseal"},
 }};
+
+// the reverse lookup (elf.py: hasattr(SYSCALL_NR, tmp_sc) + getattr value);
+// linear scan over the per-arch table
+inline std::optional<unsigned> syscall_id_for_name(QL_ARCH arch, std::string_view name) {
+    const std::pair<unsigned, std::string_view>* table = nullptr;
+    std::size_t count = 0;
+
+    switch (arch) {
+        case QL_ARCH::X8664:
+            table = x8664_syscall_table.data();
+            count = x8664_syscall_table.size();
+            break;
+        case QL_ARCH::X86:
+            table = x86_syscall_table.data();
+            count = x86_syscall_table.size();
+            break;
+        case QL_ARCH::ARM64:
+            table = arm64_syscall_table.data();
+            count = arm64_syscall_table.size();
+            break;
+        case QL_ARCH::ARM:
+            table = arm_syscall_table.data();
+            count = arm_syscall_table.size();
+            break;
+        case QL_ARCH::RISCV:
+            table = riscv32_syscall_table.data();
+            count = riscv32_syscall_table.size();
+            break;
+        case QL_ARCH::RISCV64:
+            table = riscv64_syscall_table.data();
+            count = riscv64_syscall_table.size();
+            break;
+        case QL_ARCH::PPC:
+            table = ppc_syscall_table.data();
+            count = ppc_syscall_table.size();
+            break;
+        default:
+            break;
+    }
+
+    for (std::size_t i = 0; i < count; ++i) {
+        if (table[i].second == name) {
+            return table[i].first;
+        }
+    }
+    return std::nullopt;
+}
 
 }  // namespace posix
 }  // namespace os

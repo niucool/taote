@@ -18,16 +18,16 @@ QlOsWindows::QlOsWindows(Qiling* ql) : QlOs(ql) {
     // 64-bit is always MS64)
     auto& arch = ql->arch();
     if (arch.bits() == 64) {
-        fcall_table_[WinCc::Ms64] = std::make_unique<QlFunctionCall>(cc::ms64(arch));
-        fcall_table_[WinCc::Stdcall] = std::make_unique<QlFunctionCall>(cc::ms64(arch));
-        fcall_table_[WinCc::Cdecl] = std::make_unique<QlFunctionCall>(cc::ms64(arch));
+        fcall_table_[WinCc::Ms64] = std::make_unique<QlFunctionCall>(std::make_unique<cc::ms64>(arch));
+        fcall_table_[WinCc::Stdcall] = std::make_unique<QlFunctionCall>(std::make_unique<cc::ms64>(arch));
+        fcall_table_[WinCc::Cdecl] = std::make_unique<QlFunctionCall>(std::make_unique<cc::ms64>(arch));
     } else {
-        fcall_table_[WinCc::Stdcall] = std::make_unique<QlFunctionCall>(cc::QlStdcall(arch));
-        fcall_table_[WinCc::Cdecl] = std::make_unique<QlFunctionCall>(cc::QlCdecl(arch));
-        fcall_table_[WinCc::Ms64] = std::make_unique<QlFunctionCall>(cc::QlStdcall(arch));
+        fcall_table_[WinCc::Stdcall] = std::make_unique<QlFunctionCall>(std::make_unique<cc::QlStdcall>(arch));
+        fcall_table_[WinCc::Cdecl] = std::make_unique<QlFunctionCall>(std::make_unique<cc::QlCdecl>(arch));
+        fcall_table_[WinCc::Ms64] = std::make_unique<QlFunctionCall>(std::make_unique<cc::QlStdcall>(arch));
     }
 
-    set_fcall(std::make_unique<QlFunctionCall>(cc::QlCdecl(arch)));
+    set_fcall(std::make_unique<QlFunctionCall>(std::make_unique<cc::QlCdecl>(arch)));
 
     // the heap from the OS{bits} profile section
     const auto heap_base = static_cast<std::uint64_t>(profile().get_int(os_section_name(), "heap_address"));
