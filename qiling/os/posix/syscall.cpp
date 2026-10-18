@@ -1,5 +1,6 @@
 #include <cstdio>
 #include "qiling/os/posix/syscall.hpp"
+#include "qiling/os/posix/mman.hpp"
 
 #include <algorithm>
 
@@ -1029,6 +1030,14 @@ void register_builtin_syscalls() {
     registry.register_syscall({"fcntl", {PARAM_INTN, PARAM_INTN, PARAM_INTN}, syscall_fcntl});
     registry.register_syscall({"fcntl64", {PARAM_INTN, PARAM_INTN, PARAM_INTN}, syscall_fcntl64});
     registry.register_syscall({"flock", {PARAM_INTN, PARAM_INTN}, syscall_flock});
+    // mman.py: the mmap family (the shared impl; the x86 tables map
+    // old_mmap at 90 / mmap2 at 192, the x8664 maps mmap at 9)
+    registry.register_syscall({"mmap", {PARAM_PTRX, PARAM_INTN, PARAM_INTN, PARAM_INTN, PARAM_INTN, PARAM_INTN}, syscall_mmap});
+    registry.register_syscall({"mmap2", {PARAM_PTRX, PARAM_INTN, PARAM_INTN, PARAM_INTN, PARAM_INTN, PARAM_INTN}, syscall_mmap2});
+    registry.register_syscall({"old_mmap", {PARAM_PTRX}, syscall_old_mmap});
+    registry.register_syscall({"munmap", {PARAM_PTRX, PARAM_INTN}, syscall_munmap});
+    registry.register_syscall({"mprotect", {PARAM_PTRX, PARAM_INTN, PARAM_INTN}, syscall_mprotect});
+    registry.register_syscall({"madvise", {PARAM_PTRX, PARAM_INTN, PARAM_INTN}, syscall_madvise});
 
     // the futex dispatch (os/posix/syscall/futex.py) + the yield (sched.py)
     registry.register_syscall({"futex", {PARAM_INTN, PARAM_INTN, PARAM_INTN, PARAM_INTN, PARAM_INTN, PARAM_INTN}, syscall_futex});

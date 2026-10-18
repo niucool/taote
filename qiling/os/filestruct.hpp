@@ -77,6 +77,13 @@ public:
 
     bool closed() const noexcept { return closed_; }
 
+    // informational fields for syscall mmap (filestruct.py) — the public
+    // accessors ride the mman family's flush-on-unmap flow
+    void set_map_shared(bool shared) { is_map_shared_ = shared; }
+    void set_mapped_offset(std::int64_t off) { mapped_offset_ = off; }
+    bool is_map_shared() const { return is_map_shared_; }
+    std::int64_t mapped_offset() const { return mapped_offset_; }
+
 private:
     std::string path_;
     std::FILE* file_ = nullptr;
@@ -90,7 +97,6 @@ private:
     // the host open flags (fcntl.py F_GETFL: the real host-side flags)
     int open_flags_ = 0;
 };
-
 // os/posix/filestruct.py ql_pipe — the host-pipe pair wrapped in the
 // mapped-object interface (the read/write/close/dup over the CRT fds)
 class QlPipe final : public QlFsMappedObject {

@@ -851,6 +851,23 @@ number 1 and through the fixup'd 0x2000000+1 (both terminate with the code
   policy emit without a registered listener silently no-ops (the fixture
   pins the listener-registration path first).
 
+## Phase 9 - the posix mman family (the mmap/munmap/mprotect/madvise slice)
+
+The `mman.py` port lands the memory-management syscall family on the
+existing memory-manager surface — the slice that unblocks the real-ELF
+flow (every loader and allocator rides mmap).
+
+| file | upstream | state | notes |
+|---|---|---|---|
+| `qiling/os/posix/mman.hpp/.cpp` | `syscall/mman.py` | Ported | the `select_mmap_flags` dispatch (the linux/mips/freebsd/macos/qnx tables verbatim — the mips arm keys on the arch inside the LINUX entry, the freebsd MAP_FIXED_NOREPLACE=MAP_EXCL alias verbatim); the `syscall_mmap_impl` boundary walk verbatim (the unaligned-fixed-base -EINVAL off-QNX, the find_free_space hint at max(addr, the ELF loader's mmap_address), the MAP_FIXED_NOREPLACE -EEXIST / the MAP_FIXED unmap_between, the ANON zero-fill skipping on MAP_UNINITIALIZED, the file-backed fd walk with the `[mmap] <basename>` label); the QlFile gained the public `is_map_shared`/`mapped_offset` accessors for the flush-on-unmap flow; `munmap` (the enclosing-[mmap] range walk via get_mapinfo, the basename fd match, the shared flush writing the FULL read(addr, length) — the verbatim NUL-padding growth, the clip-to-ubound unmap), `mprotect` (the verbatim "Error: change protection at" rethrow), `madvise` (the MADV_DONTNEED zero-fill) |
+| the registrations | `syscall.cpp` | ✅ | mmap (9) / mmap2 (192) / old_mmap (90, the ia32 struct form) / munmap (11) / mprotect (10) / madvise (28) |
+| the fixtures | `tests/Posix_Test.cpp` | ✅ 3 green | the fixed-anon mmap + the madvise DONTNEED zero-fill; the file-backed mapping reading the payload through the fd; the shared munmap flush growing the host file to the munmap length (the verbatim pad) |
+
+Findings: the blob-arg wiring gotcha re-confirmed (the mmap fd rides r8 —
+the first pass put it in rdi/addr and the unaligned-base EINVAL masked the
+dispatch), and the flush-on-unmap verbatim pads the host file with NULs to
+the munmap length (the upstream reads the full length and writes it back).
+
 ## Deferred (tracked, not built)
 
 `os/macos/` (the remaining surface: the syscall handlers, the kernel_api
