@@ -17,6 +17,8 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <arpa/inet.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <netdb.h>
 #include <unistd.h>
 #endif
@@ -142,25 +144,60 @@ int host_socket_level(int vsock_level) {
 }
 
 int host_socket_option(int vsock_level, int vsock_opt) {
-    // the linux_x86_socket_options table → the host constants (the winsock
-    // values differ from the linux ones; the POSIX hosts match verbatim)
-    switch (vsock_opt) {
-        case 0x0001: return SO_DEBUG;
-        case 0x0002: return SO_REUSEADDR;
-        case 0x0003: return SO_TYPE;
-        case 0x0004: return SO_ERROR;
-        case 0x0005: return SO_DONTROUTE;
-        case 0x0006: return SO_BROADCAST;
-        case 0x0007: return SO_SNDBUF;
-        case 0x0008: return SO_RCVBUF;
-        case 0x0009: return SO_KEEPALIVE;
-        case 0x000a: return SO_OOBINLINE;
-        case 0x000d: return SO_LINGER;
-        default:
-            throw QlErrorBase("Could not convert emulated socket option " +
-                              std::to_string(vsock_opt) +
-                              " to a host socket option");
+    // the linux_x86_socket_options / linux_socket_ip_options /
+    // linux_socket_tcp_options tables → the host constants (the winsock
+    // values differ from the linux ones; the POSIX hosts match verbatim).
+    // The host-undefined options throw (the NotImplementedError shape).
+    if (vsock_level == 0x0000) {  // IPPROTO_IP — the linux_socket_ip_options
+        switch (vsock_opt) {
+            case 0x0001: return IP_TOS;
+            case 0x0002: return IP_TTL;
+            case 0x0003: return IP_HDRINCL;
+            case 0x0004: return IP_OPTIONS;
+            case 0x0008: return IP_PKTINFO;
+            case 0x0020: return IP_MULTICAST_IF;
+            case 0x0021: return IP_MULTICAST_TTL;
+            case 0x0022: return IP_MULTICAST_LOOP;
+            case 0x0023: return IP_ADD_MEMBERSHIP;
+            case 0x0024: return IP_DROP_MEMBERSHIP;
+            case 0x0027: return IP_ADD_SOURCE_MEMBERSHIP;
+            case 0x0028: return IP_DROP_SOURCE_MEMBERSHIP;
+            default:
+                break;  // the linux-only names (IP_MTU_DISCOVER, IP_RECVERR,
+                        // ...) have no host constant — the throw below
+        }
+    } else if (vsock_level == 0x0006) {  // IPPROTO_TCP — linux_socket_tcp_options
+        switch (vsock_opt) {
+            case 0x01: return TCP_NODELAY;
+            case 0x02: return TCP_MAXSEG;
+            case 0x04: return TCP_KEEPIDLE;
+            case 0x05: return TCP_KEEPINTVL;
+            case 0x06: return TCP_KEEPCNT;
+            default:
+                break;  // the linux-only names (TCP_CORK, TCP_INFO, ...) —
+                        // the throw below
+        }
+    } else {
+        // the SOL_SOCKET table (the linux_x86_socket_options walk)
+        switch (vsock_opt) {
+            case 0x0001: return SO_DEBUG;
+            case 0x0002: return SO_REUSEADDR;
+            case 0x0003: return SO_TYPE;
+            case 0x0004: return SO_ERROR;
+            case 0x0005: return SO_DONTROUTE;
+            case 0x0006: return SO_BROADCAST;
+            case 0x0007: return SO_SNDBUF;
+            case 0x0008: return SO_RCVBUF;
+            case 0x0009: return SO_KEEPALIVE;
+            case 0x000a: return SO_OOBINLINE;
+            case 0x000d: return SO_LINGER;
+            default:
+                break;
+        }
     }
+    throw QlErrorBase("Could not convert emulated socket option " +
+                      std::to_string(vsock_opt) +
+                      " to a host socket option");
 }
 
 

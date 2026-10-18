@@ -987,6 +987,16 @@ sa layout gotcha: the dotted-quad addr rides at sa+4 (right after the
 family+port words) — preloading the port+addr as 6 bytes at +4 shifts the
 addr to +6 and the parse reads 0.0.127.0.
 
+### Phase 12 sub-slice 7 — the IPPROTO_IP/TCP option tables
+
+| piece | upstream | state | notes |
+|---|---|---|---|
+| host_socket_option tables | `const_mapping.py socket_ip/tcp_option_mapping` + `const.py linux_socket_ip_options/linux_socket_tcp_options` | ✅ | the level dispatch in the two-stage walk: the IPPROTO_IP (0x0) and IPPROTO_TCP (0x6) tables land alongside the SOL_SOCKET walk; the IP table carries TOS/TTL/HDRINCL/OPTIONS/PKTINFO + the multicast set, the TCP table NODELAY/MAXSEG/KEEPIDLE/KEEPINTVL/KEEPCNT; the host constants resolve via the host macros (the winsock IP_TTL=4 vs the linux 2, the winsock TCP_MAXSEG=4 vs the linux 2); the linux-only names (IP_MTU_DISCOVER, TCP_CORK, ...) throw the NotImplementedError shape (the caller's -22 ride) |
+| the fixture | `tests/Posix_Test.cpp` | ✅ | IP_TTL (set 64 + the get-back 64) at the IPPROTO_IP level and TCP_NODELAY at the IPPROTO_TCP level |
+
+The socket-option mapping surface is now complete for the levels the linux
+apps touch (the SOL_SOCKET + the IP + the TCP walks).
+
 ### Phase 12 sub-slice 3 — socketpair + the send/recv family
 
 | piece | upstream | state | notes |
