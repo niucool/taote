@@ -201,10 +201,15 @@ void QlOsPosix::set_syscall(std::string_view name, SyscallHandler handler) {
     user_syscalls_[std::string(SYSCALL_PREF) + std::string(name)] = std::move(handler);
 }
 
-void QlOsPosix::run() {
+void QlOsPosix::install_syscall_hooks() {
     // linux.py load: the per-arch syscall entry hooks (x86-64 hooks the
     // `syscall` instruction; x86 hooks int 0x80; the other arches hook their
-    // interrupt numbers)
+    // interrupt numbers). Idempotent: the multithread and the single-shot run
+    // paths share it.
+    if (hooks_installed_) {
+        return;
+    }
+    hooks_installed_ = true;
     switch (ql().arch().type()) {
         case QL_ARCH::X8664: {
             auto* self = this;
@@ -225,6 +230,10 @@ void QlOsPosix::run() {
         default:
             break;  // the other arch hooks land with their slices
     }
+}
+
+void QlOsPosix::run() {
+    install_syscall_hooks();
 
     // the emulation entry comes from the loader (posix.py: ql.os.entry_point
     // set by the loader's run)
@@ -239,6 +248,8 @@ void QlOsPosix::run() {
     }
 }
 
+// posix.py load_syscall: resolve the syscall by id through the per-arch
+// table, then dispatch through the user overrides, then the registry
 void QlOsPosix::load_syscall() {
     // posix.py load_syscall: resolve the syscall by id through the per-arch
     // table, then dispatch through the user overrides, then the registry

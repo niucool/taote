@@ -50,10 +50,10 @@ int QlLinuxFutexManagement::futex_wait(Qiling& ql, std::uint64_t uaddr, QlLinuxT
     auto& queue = wait_list_[uaddr];
     queue.push_back(WaitEntry{bitset, &t, event});
 
-    // the wait sched_cb: block the thread until the event notifies
-    t.set_sched_cb([event]() {
-        event->wait();
-    });
+    // the wait sched_cb: the upstream blocks the greenlet (gevent event.wait
+    // yields to the hub); the driver model parks the thread on the event -
+    // the management skips it until the event sets (the OQ 10 adaptation)
+    t.block_on(event.get());
 
     return 0;
 }

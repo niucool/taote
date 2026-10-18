@@ -9,6 +9,7 @@
 #include "qiling/core.hpp"
 #include "qiling/os/os.hpp"
 #include "qiling/os/filestruct.hpp"
+#include "qiling/os/linux/thread.hpp"
 #include "qiling/os/memory.hpp"
 
 namespace qiling {
@@ -74,16 +75,32 @@ std::shared_ptr<QlFsMappedObject> fd_get(Qiling& ql, std::int64_t fd) {
 }
 
 std::optional<std::int64_t> syscall_exit(Qiling& ql, const std::vector<std::uint64_t>& params) {
-    // unistd.py ql_syscall_exit: child_process/_exit and the multithread
-    // scheduling branches land with their slices; the plain path stops
+    // unistd.py ql_syscall_exit: the child-process and the multithread
+    // branches; the plain path stops
     const auto code = static_cast<int>(params.empty() ? 0 : params[0]);
+
+    if (ql.os().thread_management() != nullptr) {
+        // the multithread branch (_sched_cb_exit): terminate the current
+        // thread through the scheduler; the main thread's stop ends the world
+        auto* td = ql.os().thread_management()->cur_thread();
+        ql.emu_stop();
+        if (td != nullptr) {
+            td->set_sched_cb([&ql, td, code] {
+                ql.os().thread_management()->stop_thread(td);
+                td->set_exit_code(code);
+            });
+        }
+        return std::nullopt;
+    }
+
     ql.os().set_exit_code(code);
     ql.os().stop();
     return std::nullopt;
 }
 
 std::optional<std::int64_t> syscall_exit_group(Qiling& ql, const std::vector<std::uint64_t>& params) {
-    // falls through to the plain exit semantics
+    // the multithread branch shares the _sched_cb_exit shape (unistd.py
+    // ql_syscall_exit_group); the plain path falls through to the exit
     return syscall_exit(ql, params);
 }
 
@@ -473,6 +490,71 @@ std::optional<std::int64_t> syscall_flock(Qiling&, const std::vector<std::uint64
     return 0;
 }
 
+// ---- the futex dispatch (os/posix/syscall/futex.py) ----
+
+// futex.py ql_syscall_futex: the FUTEX_* op constants (the PRIVATE_FLAG
+// masks out of the op comparison, verbatim)
+std::optional<std::int64_t> syscall_futex(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    constexpr int FUTEX_WAIT = 0;
+    constexpr int FUTEX_WAKE = 1;
+    constexpr int FUTEX_WAIT_BITSET = 9;
+    constexpr int FUTEX_WAKE_BITSET = 10;
+    constexpr int FUTEX_PRIVATE_FLAG = 128;
+
+    const auto uaddr = params[0];
+    const auto op_raw = static_cast<int>(params[1]);
+    const auto val = static_cast<std::uint32_t>(params[2]);
+    const auto val3 = params.size() > 5 ? static_cast<std::uint32_t>(params[5]) : 0xffffffffu;
+    const auto op = op_raw & (FUTEX_PRIVATE_FLAG - 1);
+
+    std::fflush(stderr);
+    auto* futexm = ql.os().futexm();
+    auto* tm = ql.os().thread_management();
+    if (futexm == nullptr || tm == nullptr || tm->cur_thread() == nullptr) {
+        return 0;
+    }
+    auto* cur = tm->cur_thread();
+
+    if (op == FUTEX_WAIT) {
+        return futexm->futex_wait(ql, uaddr, *cur, val);
+    }
+    if (op == FUTEX_WAIT_BITSET) {
+        return futexm->futex_wait(ql, uaddr, *cur, val, val3);
+    }
+    if (op == FUTEX_WAKE) {
+        return futexm->futex_wake(ql, uaddr, *cur, static_cast<int>(val));
+    }
+    if (op == FUTEX_WAKE_BITSET) {
+        return futexm->futex_wake(ql, uaddr, *cur, static_cast<int>(val), val3);
+    }
+
+    // the unhandled op: the debug + the emu stop (futex.py, verbatim shape)
+    ql.emu_stop();
+    return 0;
+}
+
+// futex.py ql_syscall_set_robust_list: the current thread's robust-list
+// bookkeeping
+std::optional<std::int64_t> syscall_set_robust_list(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    auto* tm = ql.os().thread_management();
+    if (tm != nullptr && tm->cur_thread() != nullptr) {
+        tm->cur_thread()->set_robust_list(params[0], params[1]);
+    }
+    return 0;
+}
+
+// sched.py ql_syscall_sched_yield: the emu stop plus the yield callback (the
+// gevent sleep(0) analogue: the driver loop reschedules the thread)
+std::optional<std::int64_t> syscall_sched_yield(Qiling& ql, const std::vector<std::uint64_t>&) {
+    auto* tm = ql.os().thread_management();
+    if (tm != nullptr && tm->cur_thread() != nullptr) {
+        ql.emu_stop();
+        // the default sched_cb: give up control (thread.py _default_sched_cb)
+        tm->cur_thread()->set_sched_cb([] {});
+    }
+    return 0;
+}
+
 // unistd.py read_cstring (os/utils.py read_cstring): the char-stepped NUL
 // scan (the log_string record lands with the string-slice)
 std::string read_cstring(Qiling& ql, std::uint64_t addr) {
@@ -602,6 +684,11 @@ void register_builtin_syscalls() {
     registry.register_syscall({"fcntl", {PARAM_INTN, PARAM_INTN, PARAM_INTN}, syscall_fcntl});
     registry.register_syscall({"fcntl64", {PARAM_INTN, PARAM_INTN, PARAM_INTN}, syscall_fcntl64});
     registry.register_syscall({"flock", {PARAM_INTN, PARAM_INTN}, syscall_flock});
+
+    // the futex dispatch (os/posix/syscall/futex.py) + the yield (sched.py)
+    registry.register_syscall({"futex", {PARAM_INTN, PARAM_INTN, PARAM_INTN, PARAM_INTN, PARAM_INTN, PARAM_INTN}, syscall_futex});
+    registry.register_syscall({"set_robust_list", {PARAM_INTN, PARAM_INTN}, syscall_set_robust_list});
+    registry.register_syscall({"sched_yield", {}, syscall_sched_yield});
 }
 
 }  // namespace posix

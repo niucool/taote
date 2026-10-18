@@ -114,6 +114,10 @@ void QlLoaderELF::run() {
         ql_->os().set_entry_point(shellcode_base);
         entry_point = shellcode_base;
         load_address = shellcode_base;
+        // the thread machinery reads elf_entry for the interp hand-off: the
+        // shellcode has no interpreter (elf_entry == entry_point keeps the
+        // management's _prepare_lib_patch from spawning a bogus loader pass)
+        elf_entry_ = shellcode_base;
         return;
     }
 

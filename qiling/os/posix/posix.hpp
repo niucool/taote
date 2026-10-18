@@ -79,6 +79,10 @@ public:
     // and run it (the abi supplies the id and the parameters)
     void load_syscall();
 
+    // the per-arch syscall entry hooks (the single-shot run and the
+    // multithread driver share the install; idempotent)
+    void install_syscall_hooks();
+
     void shutdown() override;
 
     // posix.py: the fd table (self._fd, exposed as self.fd) — the std streams
@@ -119,6 +123,7 @@ private:
     std::unique_ptr<QlMemoryHeap> heap_;
     std::map<std::string, SyscallHandler> user_syscalls_;
     std::optional<HookRet> syscall_hook_;
+    bool hooks_installed_ = false;
     std::optional<HookRet> kernel_api_hook_;
     int uid_ = 1000;
     int euid_ = 1000;

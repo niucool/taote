@@ -1,6 +1,9 @@
 #include <cstdio>
+#include <cstdint>
 
 #include "qiling/os/os.hpp"
+
+#include "qiling/os/linux/thread.hpp"
 
 #include "qiling/arch/arch.hpp"
 #include "qiling/cc/cc.hpp"
@@ -77,9 +80,21 @@ void QlOs::set_fcall(std::unique_ptr<QlFunctionCall> fcall) {
     fcall_ = std::move(fcall);
 }
 
+void QlOs::set_thread_management(std::unique_ptr<os::linux::QlLinuxThreadManagement> tm) {
+    thread_management_ = std::move(tm);
+}
+
+void QlOs::set_futexm(std::unique_ptr<os::linux::QlLinuxFutexManagement> fm) {
+    futexm_ = std::move(fm);
+}
+
 void QlOs::stop() {
-    // os.py stop: thread management lands with the guest-thread slices; the
-    // default stops the emulation
+    // os.py stop: the multithreaded path stops the world through the thread
+    // management; the plain path stops the emulation
+    if (ql().multithread() && thread_management_ != nullptr) {
+        thread_management_->stop();
+        return;
+    }
     ql().emu_stop();
 }
 

@@ -31,6 +31,14 @@ class QlFunctionCall;
 class QlCC;
 class IniConfig;
 
+// the linux thread/futex subsystems (the linux os installs them; the syscall
+// handlers reach them through the base accessors)
+namespace os::linux {
+class QlLinuxThreadManagement;
+class QlLinuxFutexManagement;
+class QlFutexEvent;
+}  // namespace os::linux
+
 // os/os.py — TypedArg view of the fcall results (name/type/value)
 struct FcallArg {
     std::string name;
@@ -65,6 +73,15 @@ public:
 
     // os.py stop — multithreaded derivatives install thread_management
     virtual void stop();
+
+    // os.py thread_management / linux.py futexm: the nullable os-level access
+    // the syscall handlers reach (the linux os installs them; the accessors
+    // return raw pointers, nullptr when absent; the setters live in os.cpp -
+    // the unique_ptr deleter needs the complete types there)
+    os::linux::QlLinuxThreadManagement* thread_management() noexcept { return thread_management_.get(); }
+    void set_thread_management(std::unique_ptr<os::linux::QlLinuxThreadManagement> tm);
+    os::linux::QlLinuxFutexManagement* futexm() noexcept { return futexm_.get(); }
+    void set_futexm(std::unique_ptr<os::linux::QlLinuxFutexManagement> fm);
 
     // the path helpers exist for the path-managed os families; derived ctors
     // invoke this after their type is bound (the C++ base ctor cannot dispatch
@@ -188,7 +205,8 @@ protected:
     QlFunctionCall* fcall_nonowning_ = nullptr;
 
     bool child_processes_ = false;
-    void* thread_management_ = nullptr;  // QlThread* (thread management slice)
+    std::unique_ptr<os::linux::QlLinuxThreadManagement> thread_management_;
+    std::unique_ptr<os::linux::QlLinuxFutexManagement> futexm_;
     IniConfig* profile_ = nullptr;
     int exit_code_ = 0;
     std::uint32_t last_error_ = 0;

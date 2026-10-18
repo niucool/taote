@@ -53,25 +53,25 @@ TEST(FutexManagement, WaitQueuesEntryAndWakeNotifies) {
     os::linux::QlLinuxThread waiter(&ql, 0, 0);
     os::linux::QlLinuxFutexManagement futexm;
 
-    // the value matches: the emu stop fires and the entry queues
+    // the wait queued the entry and parked the thread on the event (the
+    // driver-model adaptation of the gevent wait)
     EXPECT_EQ(futexm.futex_wait(ql, uaddr, waiter, 1234), 0);
     ASSERT_EQ(futexm.wait_list().size(), 1u);
     EXPECT_EQ(futexm.wait_list().at(uaddr).size(), 1u);
-
-    // the wait thread got its sched callback (the event wait closure)
-    ASSERT_NE(waiter.sched_cb(), nullptr);
+    EXPECT_EQ(waiter.status(), os::linux::THREAD_STATUS_BLOCKING);
+    EXPECT_NE(waiter.block_event(), nullptr);
 
     // the waker thread's sched_cb notifies the queued events
     os::linux::QlLinuxThread waker(&ql, 0, 0);
     EXPECT_EQ(futexm.futex_wake(ql, uaddr, waker, 1), 1);
     ASSERT_NE(waker.sched_cb(), nullptr);
 
-    // the future thread-management run loop invokes the sched callbacks
+    // the future thread-management run loop invokes the sched callbacks:
+    // the wake notify sets the event, the parked waiter re-admits (the
+    // driver-model readiness check is the event is_set poll)
     waker.sched_cb()();
-
-    // the wake entry's event is now set; the waiter unblocks when the
-    // management runs its wait closure
-    waiter.sched_cb()();
+    EXPECT_TRUE(waiter.block_event()->is_set());
+    EXPECT_TRUE(waiter.ready());
 }
 
 TEST(FutexManagement, WakeCountAndBitsetFiltering) {

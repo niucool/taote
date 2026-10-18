@@ -200,6 +200,12 @@ QlArchIntel::QlArchIntel(Qiling* ql, int bits, std::optional<X86_CPU_MODEL> cput
 
     cs_ = Cs(CS_ARCH_X86, mode == UC_MODE_16 ? CS_MODE_16 : (mode == UC_MODE_32 ? CS_MODE_32 : CS_MODE_64));
     ks_ = Ks(KS_ARCH_X86, mode == UC_MODE_16 ? KS_MODE_16 : (mode == UC_MODE_32 ? KS_MODE_32 : KS_MODE_64));
+    msr_.emplace(*uc_);
+}
+
+QlMsrManager& QlArchIntel::msr() {
+    // x86.py cached_property msr
+    return *msr_;
 }
 
 // ---- QlArchA8086 (bits = 16; regs_map = 8 + 16 + misc) ----

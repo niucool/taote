@@ -9,6 +9,7 @@
 
 #include "qiling/arch/arch.hpp"
 #include "qiling/arch/models.hpp"
+#include "qiling/arch/msr.hpp"
 #include "qiling/arch/utils.hpp"
 
 namespace qiling {
@@ -25,12 +26,16 @@ public:
 
     QL_ENDIAN endian() const noexcept override { return QL_ENDIAN::EL; }
 
+    // x86.py msr cached property: the model-specific register access
+    QlMsrManager& msr();
+
 protected:
     int bits_;
     UcHandle uc_;
     std::optional<QlRegisterManager> regs_;
     std::optional<Cs> cs_;
     std::optional<Ks> ks_;
+    std::optional<QlMsrManager> msr_;
 };
 
 class QlArchA8086 final : public QlArchIntel {
