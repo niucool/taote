@@ -17,6 +17,8 @@
 #ifndef QILING_LOADER_MACHO_HPP
 #define QILING_LOADER_MACHO_HPP
 
+#include "qiling/const.hpp"
+
 #include <cstdint>
 #include <filesystem>
 #include <map>
@@ -49,7 +51,17 @@ constexpr std::uint32_t X86_THREAD_STATE64 = 0x00000004;
 
 constexpr std::uint32_t CPU_ARCH_ABI64 = 0x01000000;
 constexpr std::uint32_t CPU_TYPE_X8664 = CPU_ARCH_ABI64 | 7;
+constexpr std::uint32_t CPU_TYPE_ARM64 = CPU_ARCH_ABI64 | 12;
 constexpr std::uint32_t MH_EXECUTE = 0x2;
+
+// header.py FatInfo (the big-endian slice record; the align is 2**shift)
+struct FatSlice {
+    std::uint32_t cpu_type = 0;
+    std::uint32_t cpu_subtype = 0;
+    std::uint32_t offset = 0;
+    std::uint32_t size = 0;
+    std::uint32_t align_shift = 0;
+};
 
 // header.py BinaryHeader (the 64-bit shape; the 32-byte header with the
 // reserved cell)
@@ -149,10 +161,14 @@ struct Dysymtab {
 // symbol/string tables for the kernel-api dispatch)
 class MachoImage {
 public:
-    explicit MachoImage(const std::filesystem::path& path);
+    explicit MachoImage(const std::filesystem::path& path, QL_ARCH arch = QL_ARCH::X8664);
 
     bool valid() const { return header_.magic != 0; }
     const Header& header() const { return header_; }
+
+    // header.py FatHeader.binarys (the raw slice records — populated only
+    // when the container rides the FAT magic)
+    const std::vector<FatSlice>& fat_slices() const { return fat_slices_; }
 
     const std::vector<Segment>& segments() const { return segments_; }
     const std::vector<Command>& commands() const { return commands_; }
@@ -168,6 +184,8 @@ private:
 
     std::vector<std::uint8_t> binary_file_;
     Header header_;
+    std::vector<FatSlice> fat_slices_;
+    QL_ARCH arch_ = QL_ARCH::X8664;
     std::vector<Segment> segments_;
     std::vector<Command> commands_;
     std::vector<Symbol> symbols_;

@@ -701,9 +701,12 @@ the load-command stage walks the cmd_id/cmd_size pairs.
 | the LC_UNIXTHREAD/LC_MAIN entries | `qiling/loader/macho.hpp/.cpp` | ✅ 119a801 | the X86_THREAD_STATE64 state (the entry = the rip, the 16th state slot after the 16 GPRs) and the LC_MAIN entry_offset/stack_size pair |
 | the remaining commands (LC_UUID, LC_SYMTAB, LC_DYLD_INFO…) | — | defer | the loader slices add them per need |
 | the fat-header branch + parseData | — | defer | the FatHeader slice + the data.py stage |
+| the fat-header branch | `macho.hpp/.cpp` | ✅ | the MAGIC_FAT dispatch: the big-endian arch_num + the 20-byte FatInfo records (the getBinary verbatim quirk — the archtype parameter is IGNORED, the scan takes the first x8664 slice then the first arm64), the picked slice re-sliced into the container and re-parsed through the 64-bit header + the load-command walk; the no-match case degrades to the invalid image (the deviation: the upstream would crash on the None slice) |
 
-Fixture-driven throughout (`tests/Loader_Macho_Test.cpp`, 7 tests): the
-minimal in-memory MH_EXECUTE blobs with hand-encoded command records.
+Fixture-driven throughout (`tests/Loader_Macho_Test.cpp`, 9 tests): the
+minimal in-memory MH_EXECUTE blobs with hand-encoded command records, the
+fat-container fixtures riding the CAFEBABE wrapper with a decoy ARM64
+slice + the thin x8664 blob.
 
 ### Phase 7 findings (upstream-parity notes)
 - **the section_64 stride is 0x50 with a reserved3 tail** — the Apple

@@ -29,6 +29,13 @@ std::uint32_t get_u32(const std::vector<std::uint8_t>& v, std::size_t off) {
     return x;
 }
 
+std::uint32_t get_be32(const std::vector<std::uint8_t>& v, std::size_t off) {
+    std::uint32_t x = 0;
+    std::memcpy(&x, v.data() + off, 4);
+    // the big-endian byte order (the struct.unpack('>L') reads)
+    return ((x & 0xFFu) << 24) | ((x & 0xFF00u) << 8) | ((x >> 8) & 0xFF00u) | (x >> 24);
+}
+
 std::uint64_t get_u64(const std::vector<std::uint8_t>& v, std::size_t off) {
     std::uint64_t x = 0;
     std::memcpy(&x, v.data() + off, 8);
@@ -37,7 +44,7 @@ std::uint64_t get_u64(const std::vector<std::uint8_t>& v, std::size_t off) {
 
 }  // namespace
 
-MachoImage::MachoImage(const std::filesystem::path& path) {
+MachoImage::MachoImage(const std::filesystem::path& path, QL_ARCH arch) : arch_(arch) {
     binary_file_ = read_file(path);
     if (binary_file_.empty() || !parse_header()) {
         return;
@@ -47,9 +54,10 @@ MachoImage::MachoImage(const std::filesystem::path& path) {
 }
 
 // parser.py parseHeader: the magic dispatch — MAGIC_64 -> the 64-bit
-// BinaryHeader, else invalid (the fat branch lands with its slice)
+// BinaryHeader, MAGIC_FAT -> the FatHeader slice walk + the re-parse of the
+// picked slice, else invalid
 bool MachoImage::parse_header() {
-    const std::uint32_t magic = get_u32(binary_file_, 0);
+    std::uint32_t magic = get_u32(binary_file_, 0);
     bool is_64 = false;
     for (std::uint32_t m : MAGIC_64) {
         if (magic == m) {
@@ -57,8 +65,84 @@ bool MachoImage::parse_header() {
             break;
         }
     }
+
     if (!is_64) {
-        return false;
+        bool is_fat = false;
+        for (std::uint32_t m : MAGIC_FAT) {
+            if (magic == m) {
+                is_fat = true;
+                break;
+            }
+        }
+        if (!is_fat) {
+            return false;
+        }
+
+        // header.py FatHeader: the big-endian arch_num + the 20-byte
+        // FatInfo records (cpu_type/cpu_subtype/offset/size/align, all
+        // big-endian; the align = 2**shift)
+        if (binary_file_.size() < 8) {
+            return false;
+        }
+        const std::uint32_t arch_num = get_be32(binary_file_, 4);
+        std::size_t cur = 8;
+        for (std::uint32_t i = 0; i < arch_num; ++i) {
+            if (cur + 20 > binary_file_.size()) {
+                return false;
+            }
+            FatSlice slice;
+            slice.cpu_type = get_be32(binary_file_, cur);
+            slice.cpu_subtype = get_be32(binary_file_, cur + 4);
+            slice.offset = get_be32(binary_file_, cur + 8);
+            slice.size = get_be32(binary_file_, cur + 12);
+            slice.align_shift = get_be32(binary_file_, cur + 16);
+            fat_slices_.push_back(slice);
+            cur += 20;
+        }
+
+        // getBinary: the verbatim scan — the archtype parameter is IGNORED
+        // upstream (the quirk preserved): the first x8664 slice wins, else
+        // the first arm64 slice
+        const FatSlice* picked = nullptr;
+        for (const auto& slice : fat_slices_) {
+            if (slice.cpu_type == CPU_TYPE_X8664) {
+                picked = &slice;
+                break;
+            }
+        }
+        if (picked == nullptr) {
+            for (const auto& slice : fat_slices_) {
+                if (slice.cpu_type == CPU_TYPE_ARM64) {
+                    picked = &slice;
+                    break;
+                }
+            }
+        }
+        if (picked == nullptr) {
+            // the deviation: the upstream would crash on the None slice
+            // (file_info.offset); the port degrades to the invalid image
+            return false;
+        }
+        if (static_cast<std::size_t>(picked->offset) + picked->size > binary_file_.size()) {
+            return false;
+        }
+
+        // the re-parse: the slice data becomes the container (the upstream
+        // re-slices binary_file and rides BinaryHeader on it)
+        binary_file_.erase(binary_file_.begin(),
+                           binary_file_.begin() + static_cast<std::ptrdiff_t>(picked->offset));
+        binary_file_.resize(picked->size);
+        magic = get_u32(binary_file_, 0);
+        bool slice_is_64 = false;
+        for (std::uint32_t m : MAGIC_64) {
+            if (magic == m) {
+                slice_is_64 = true;
+                break;
+            }
+        }
+        if (!slice_is_64) {
+            return false;
+        }
     }
 
     // the little-endian unpack of the 32-byte 64-bit header
