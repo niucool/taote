@@ -15,6 +15,7 @@
 #include "qiling/core_hooks_types.hpp"
 #include "qiling/os/os.hpp"
 #include "qiling/os/posix/syscall.hpp"
+#include "qiling/os/memory.hpp"
 #include "qiling/os/posix/syscall/abi.hpp"
 
 namespace qiling {
@@ -84,6 +85,10 @@ public:
     // occupy the first three slots (the property setters, verbatim)
     QlFileDes& fd() noexcept { return fd_; }
 
+    // the kmalloc hook's heap (kernel_api.py ql.heap.alloc; the linux profile
+    // carries no heap fields — the port creates the default region lazily)
+    QlMemoryHeap& heap();
+
     // hook.py hook_kernel_api — the code hook dispatching the loader's import
     // stubs through the user overrides and the kernel api registry
     void hook_kernel_api(std::uint64_t address, std::uint32_t size);
@@ -111,6 +116,7 @@ private:
 
     std::unique_ptr<QlSyscallABI> syscall_abi_;
     QlFileDes fd_;
+    std::unique_ptr<QlMemoryHeap> heap_;
     std::map<std::string, SyscallHandler> user_syscalls_;
     std::optional<HookRet> syscall_hook_;
     std::optional<HookRet> kernel_api_hook_;

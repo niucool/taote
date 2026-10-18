@@ -97,6 +97,16 @@ QlOsPosix::QlOsPosix(Qiling* ql) : QlOs(ql) {
     register_builtin_syscalls();
 }
 
+QlMemoryHeap& QlOsPosix::heap() {
+    // the default region: above the 0x8000000 LKM loadbase, below the stack
+    constexpr std::uint64_t HEAP_BASE = 0x2000000;
+    constexpr std::uint64_t HEAP_SIZE = 0x1000000;  // 16 MiB
+    if (heap_ == nullptr) {
+        heap_ = std::make_unique<QlMemoryHeap>(ql().mem(), HEAP_BASE, HEAP_BASE + HEAP_SIZE);
+    }
+    return *heap_;
+}
+
 std::unique_ptr<cc::QlCC> QlOsPosix::make_cc_default(QL_ARCH archtype, QlArch& arch) {
     // the posix os layers use the arch's native convention for API calls
     switch (archtype) {
