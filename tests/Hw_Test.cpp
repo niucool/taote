@@ -15,6 +15,7 @@
 #include "qiling/hw/peripheral.hpp"
 #include "qiling/hw/cm_systick.hpp"
 #include "qiling/hw/cm_scb.hpp"
+#include "qiling/hw/stm32f1xx_gpio.hpp"
 #include "qiling/exception.hpp"
 
 using namespace qiling;
@@ -77,7 +78,7 @@ TEST(HwManager, CreateFindsAndDispatchesMmio) {
     auto ql = make_hw_ql();
     qiling::hw::QlHwManager hw(ql);
 
-    hw.register_struct("stub", [](Qiling& q, const std::string& label) {
+    hw.register_struct("stub", [](Qiling& q, const std::string& label, const qiling::hw::QlHwManager::PeripheralKwargs&) {
         return std::make_unique<StubPeripheral>(q, label);
     });
     auto* peripheral = hw.create("uart0", "stub", kMmioBase);
@@ -106,7 +107,7 @@ TEST(HwManager, HookWalkEntersCallsExits) {
     auto ql = make_hw_ql();
     qiling::hw::QlHwManager hw(ql);
 
-    hw.register_struct("stub", [](Qiling& q, const std::string& label) {
+    hw.register_struct("stub", [](Qiling& q, const std::string& label, const qiling::hw::QlHwManager::PeripheralKwargs&) {
         return std::make_unique<StubPeripheral>(q, label);
     });
     auto* peripheral = hw.create("uart1", "stub", kMmioBase);
@@ -165,7 +166,7 @@ TEST(HwManager, NonMappedMmioRidesHandlerBuffer) {
 TEST(HwManager, StepWalksPeripheralsAndSaveRestore) {    auto ql = make_hw_ql();
     qiling::hw::QlHwManager hw(ql);
 
-    hw.register_struct("stub", [](Qiling& q, const std::string& label) {
+    hw.register_struct("stub", [](Qiling& q, const std::string& label, const qiling::hw::QlHwManager::PeripheralKwargs&) {
         return std::make_unique<StubPeripheral>(q, label);
     });
     auto* peripheral = hw.create("timer0", "stub", kMmioBase);
@@ -213,7 +214,7 @@ TEST(HwManager, GuestBlobStoresThroughMmioToSysTick) {
     Qiling ql(options);
 
     qiling::hw::QlHwManager hw(ql);
-    hw.register_struct("cm3_systick", [](Qiling& q, const std::string& label) {
+    hw.register_struct("cm3_systick", [](Qiling& q, const std::string& label, const qiling::hw::QlHwManager::PeripheralKwargs&) {
         return std::make_unique<qiling::hw::CortexMSysTick>(q, label);
     });
     auto* systick = hw.create("systick", "cm3_systick", 0xE000E010);
@@ -347,4 +348,65 @@ TEST(HwManager, CortexMIntcDispatchesSysTickThroughNvic) {
     EXPECT_EQ(ql.mem().read_ptr(0x20000000, 4), 42u);
     // the pending cleared after the dispatch (the SCB's ICSR walk)
     EXPECT_EQ(dynamic_cast<qiling::hw::CortexMScb*>(scb)->get_pending(static_cast<int>(qiling::IRQ::SYSTICK)), 0u);
+}
+
+// ---- the board-profile slices: the STM32F1xx peripheral families ----
+
+// The Gpio family: the guest x86-64 blob stores to the GPIOA BSRR (the set
+// bits 0/1 + the reset bit 16+2) and the ODR through the mmio; the pin hooks
+// fire on the flips.
+TEST(HwManager, Stm32f1xxGpioBsrrOdrWalkRidesPinHooks) {
+    const std::vector<std::uint8_t> code = {
+        // mov eax, 3; mov [0x40010810], eax   -- the BSRR low half: the set the pins 0/1
+        0xB8, 0x03, 0x00, 0x00, 0x00,
+        0xA3, 0x10, 0x08, 0x01, 0x40, 0x00, 0x00, 0x00, 0x00,
+        // mov eax, 0x10000; mov [0x40010810], eax -- the BSRR high half: the reset the pin 0
+        0xB8, 0x00, 0x00, 0x01, 0x00,
+        0xA3, 0x10, 0x08, 0x01, 0x40, 0x00, 0x00, 0x00, 0x00,
+        // exit(0)
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00,
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00,
+        0x0F, 0x05,
+    };
+
+    QilingOptions options;
+    options.code = code;
+    options.rootfs = ensure_hw_rootfs().string();
+    options.ostype = QL_OS::LINUX;
+    options.archtype = QL_ARCH::X8664;
+    Qiling ql(options);
+
+    qiling::hw::QlHwManager hw(ql);
+    auto* gpioa = hw.create("gpioa", "STM32F1xxGpio", 0x40010800);
+    ASSERT_NE(gpioa, nullptr);
+    // the PERIP mmio block rides the board's 1MB region (the stm32f103 env)
+    hw.setup_mmio(0x40000000, 0x100000, "[perip]");
+
+    // the hook markers ride the pins
+    int set0 = 0, set1 = 0, reset0 = 0, reset1 = 0;
+    auto* gpio = static_cast<qiling::hw::STM32F1xxGpio*>(gpioa);
+    gpio->hook_set(0, [&] { ++set0; });
+    gpio->hook_set(1, [&] { ++set1; });
+    gpio->hook_reset(0, [&] { ++reset0; });
+    gpio->hook_reset(1, [&] { ++reset1; });
+
+    ql.run();
+
+    // the BSRR walk: the low half set the pins 0/1, the high half reset the pin 0
+    EXPECT_EQ(set0, 1);
+    EXPECT_EQ(set1, 1);
+    EXPECT_EQ(reset0, 1);
+    EXPECT_EQ(gpio->pin(0), 0u);
+    EXPECT_EQ(gpio->pin(1), 1u);
+    // the BSRR reads as 0 (the write-only register)
+    EXPECT_EQ(gpioa->read(16, 4), 0u);
+    // the IDR write is ignored (the store to the IDR leaves the bits)
+    gpio->write_body(8, 4, 0);
+    EXPECT_EQ(gpio->pin(1), 1u);
+    // the ODR diff walk: the store of 0 resets the set pins and fires the
+    // reset hooks (the pin 0 was already low, only the pin 1 flips)
+    gpio->write_body(12, 4, 0);
+    EXPECT_EQ(gpio->pin(0), 0u);
+    EXPECT_EQ(gpio->pin(1), 0u);
+    EXPECT_EQ(reset1, 1);
 }

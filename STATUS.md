@@ -1129,6 +1129,21 @@ the [10:8] bits (the earlier `0x2102` was the mov r1, #2 — the 0x2120 form
 is the mov r1, #0x20), and the msp/sp registers alias (the msp write
 reflects the sp read).
 
+### Phase 13.4 — the board-profile slice 1: the Gpio family (the STM32F1xxGpio + the GpioHooks + the Afio)
+
+| piece | upstream | state | notes |
+|---|---|---|---|
+| GpioHooks | `hw/gpio/hooks.py` | ✅ | the per-pin set/reset hook tables (the 16 pins); the upstream stores the (func, args, kwargs) tuples — the port rides the std::function captures (documented) |
+| STM32F1xxGpio | `hw/gpio/stm32f1xx_gpio.py` | ✅ | the 28-byte image (CRL/CRH/IDR/ODR/BSRR/BRR/LCKR), the BSRR reads 0, the IDR writes ignored, the BSRR bit walk (the low half sets / the high half resets), the ODR diff walk firing the flip hooks, the set/reset pin rides (the ODR + the IDR + the hooks); the verbatim quirk: the BRR is a plain raw store (the upstream write never drives the pins from it) |
+| STM32F1xxAfio | `hw/gpio/stm32f1xx_afio.py` | ✅ | the 32-byte image (EVCR/MAPR/EXTICR[4]/pad/MAPR2), the exti(index) nibble walk over the EXTICR → the gpio{a..g} entity lookup; the verbatim unmasked nibble shift (the out-of-range port throws — the upstream's IndexError analogue) |
+| the factory kwargs | (the port-side) | ✅ | the PeripheralFactory rides the kwargs map (the upstream's **kwargs create flow) — the create(label, struct, base, kwargs) |
+| the fixture | `tests/Hw_Test.cpp` | ✅ | the guest x86-64 blob stores to the GPIOA BSRR (the low + the high halves) through the 1MB PERIP mmio; the pin hooks fire per the flips, the ODR diff walk resets the set pins, the BRR/IDR no-ops pinned |
+
+Findings: the PERIP mmio region rides the board's 1MB span (the fixture's
+first 4KB map missed the GPIOA at 0x40010800 — the write-unmapped caught it);
+the BSRR/ODR bit walks only drive the pins from the BSRR and the ODR — the
+BRR write is the verbatim no-op.
+
 ### Phase 12 sub-slice 3 — socketpair + the send/recv family
 
 | piece | upstream | state | notes |

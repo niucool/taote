@@ -2,8 +2,10 @@
 #include "qiling/hw/cm_nvic.hpp"
 #include "qiling/hw/cm_scb.hpp"
 #include "qiling/hw/cm_systick.hpp"
+#include "qiling/hw/stm32f1xx_gpio.hpp"
 
 #include <algorithm>
+#include <map>
 
 namespace qiling {
 namespace hw {
@@ -12,14 +14,20 @@ QlHwManager::QlHwManager(Qiling& ql) : ql_(&ql) {
     // the built-in struct factories (the upstream rides the dynamic
     // ql_get_module_function('qiling.hw', struct) import over the qiling.hw
     // package; the port registers the ported peripherals at construction)
-    register_struct("cm3_systick", [](Qiling& q, const std::string& label) {
+    register_struct("cm3_systick", [](Qiling& q, const std::string& label, const PeripheralKwargs&) {
         return std::make_unique<CortexMSysTick>(q, label);
     });
-    register_struct("cm_nvic", [](Qiling& q, const std::string& label) {
+    register_struct("cm_nvic", [](Qiling& q, const std::string& label, const PeripheralKwargs&) {
         return std::make_unique<CortexMNvic>(q, label);
     });
-    register_struct("cm4_scb", [](Qiling& q, const std::string& label) {
+    register_struct("cm4_scb", [](Qiling& q, const std::string& label, const PeripheralKwargs&) {
         return std::make_unique<CortexM4Scb>(q, label);
+    });
+    register_struct("STM32F1xxGpio", [](Qiling& q, const std::string& label, const PeripheralKwargs&) {
+        return std::make_unique<STM32F1xxGpio>(q, label);
+    });
+    register_struct("STM32F1xxAfio", [](Qiling& q, const std::string& label, const PeripheralKwargs&) {
+        return std::make_unique<STM32F1xxAfio>(q, label);
     });
 }
 
@@ -63,7 +71,7 @@ void QlPripheralHandler::write(std::uint64_t offset, std::uint32_t size, std::ui
 }
 
 QlPeripheral* QlHwManager::create(const std::string& label, const std::string& struct_name,
-                                  std::uint64_t base) {
+                                  std::uint64_t base, const PeripheralKwargs& kwargs) {
     const auto it = factories_.find(struct_name);
     if (it == factories_.end()) {
         // the upstream's QlErrorModuleFunctionNotFound catch: the warn +
@@ -71,7 +79,7 @@ QlPeripheral* QlHwManager::create(const std::string& label, const std::string& s
         return nullptr;
     }
 
-    auto entity = it->second(*ql_, label);
+    auto entity = it->second(*ql_, label, kwargs);
     entity->base_ = base;  // the manager-assigned base (the upstream rides
                            // the base property over the region map)
 

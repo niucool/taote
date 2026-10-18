@@ -54,6 +54,7 @@ add_library(qiling STATIC
     os/mcu.cpp
     hw/cm_nvic.cpp
     hw/cm_scb.cpp
+    hw/stm32f1xx_gpio.cpp
     loader/mcu.cpp
     os/macos/mach_msg.cpp
     os/macos/subsystems.cpp

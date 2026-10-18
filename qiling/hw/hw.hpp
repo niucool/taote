@@ -42,8 +42,11 @@ public:
 
     // the peripheral factory: the concrete struct is resolved by the
     // registered name (the upstream's ql_get_module_function('qiling.hw',
-    // struct) ride)
-    using PeripheralFactory = std::function<std::unique_ptr<QlPeripheral>(Qiling&, const std::string& label)>;
+    // struct) ride); the kwargs carry the per-board create arguments (the
+    // upstream's **kwargs flow — the intn/exti0_intn/... tables)
+    using PeripheralKwargs = std::map<std::string, std::uint64_t>;
+    using PeripheralFactory = std::function<std::unique_ptr<QlPeripheral>(
+        Qiling&, const std::string& label, const PeripheralKwargs& kwargs)>;
 
     void register_struct(const std::string& struct_name, PeripheralFactory factory) {
         factories_.insert_or_assign(struct_name, std::move(factory));
@@ -53,7 +56,8 @@ public:
     // upstream's dynamic import walk); the base defaults ride the
     // struct-registered defaults upstream — the port carries the explicit
     // base (the env-driven load_env defers with the env-dict machinery)
-    QlPeripheral* create(const std::string& label, const std::string& struct_name, std::uint64_t base);
+    QlPeripheral* create(const std::string& label, const std::string& struct_name, std::uint64_t base,
+                         const PeripheralKwargs& kwargs = {});
     void destroy(const std::string& label);
 
     // find: the peripheral owning the address, or nullptr
