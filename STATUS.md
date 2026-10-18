@@ -353,6 +353,81 @@ The ELF container parsing, the interpreter loading, the vsyscall page, the ET_RE
 - **the moved-from bug class**: the wake collects the entries then moves them into the sched_cb lambda - the return count must be computed BEFORE the move (a C++-specific pitfall the python closure semantics do not have).
 - **the gevent dependency boundary**: futex.py imports gevent only for the Event; the port's mutex+cv pair covers the surface. The thread.py machinery (628 lines) imports the greenlets wholesale - the port needs a design decision (std::thread + cv, or cooperative slices) before that slice starts (OQ 10).
 
+## OQ 10 - D18: the concurrency model for the thread.py port
+
+**Decision: a cooperative driver-loop scheduler; no host threads, no fibers.**
+
+The weighing:
+
+1. **std::thread per guest thread + one shared uc engine** - impossible: a
+   unicorn engine executes single-threaded; concurrent uc_emu_start on one
+   handle is unsupported.
+2. **std::thread + per-thread uc engines with shared guest memory** -
+   unicorn has no shared-memory abstraction across engines; each uc maps its
+   own RAM. Dead end.
+3. **Windows fibers (the real host-stack switching)** - viable (the port
+   carries a Fiber primitive) but buys nothing semantically: unicorn's
+   execution is single-threaded regardless, the switch points are always
+   exactly "after uc_emu_start returns", and fibers complicate the SEH +
+   exception-unwinding interplay across switches.
+4. **The cooperative driver loop (chosen)** - the management owns the
+   schedule; each thread runs in count-bounded emu_start slices
+   (count=32337, the upstream constant); the futex/yield/exit callbacks only
+   RECORD the post-slice state (the block event, the termination). This
+   matches the upstream semantics exactly: gevent greenlets are cooperative
+   greenlets on one host thread, the upstream design note itself says
+   "within both contexts, our program is single thread" and "never give up
+   control in unicorn context" - the port keeps that invariant trivially.
+
+What upstream's gevent actually does (the semantics the port mirrors):
+the greenlets interleave emu_start slices round-robin (each _run loop
+iteration = one bounded slice + the sched_cb, which may park the greenlet on
+a gevent Event or yield); the futex wait queues (bitset, thread, event) and
+blocks the greenlet; the wake sets the events; the events' set() un-parks
+the waiters through the hub. The port's driver loop replicates all of it
+with the uc context save/restore + the per-arch TLS carrying the thread
+state, and the management's readiness predicate polling `is_set()` in place
+of the gevent hub.
+
+## Phase 5 - the thread management slice + the futex dispatch (260/260 gtest green)
+
+| File | Python counterpart | Status | Notes |
+|---|---|---|---|
+| `qiling/os/linux/thread.*` (QlLinuxThreadManagement) | `os/linux/thread.py` | Ported (core) | run() (the _prepare_lib_patch loader pass + the main spawn + the driver loop), run_ready (the round-robin ready-scan, the slice + the retire sweep), stop()/stop_thread (the world stop, the LINUX_THREAD_ID reset), the deferred destruction (the exit closures park their own thread mid-slice; the retire runs outside any run_slice stack), the all-blocked QlErrorExecutionStop (the gevent LoopExit analogue) |
+| QlLinuxThread (the run machinery) | thread.py _run | Ported | the first-entry pc arm + the context save, the restore-then-resume-from-the-current-pc (the upstream emu_start reads the arch_pc after the restore), the count=32337 slices, the sched_cb fire, the block_on driver state, the _on_stop (the CLONE_CHILD_CLEARTID futex wake, the direct event set for the stopped thread) |
+| QlLinuxX8664Thread | thread.py | Ported | the TLS over the IA32_FS_BASE MSR (the set_thread_tls/save/restore); the QlArchIntel::msr accessor added (the x86.py cached_property); the other arch subclasses defer with their slices |
+| the futex dispatch (`syscall_futex`) | `os/posix/syscall/futex.py` | Ported | the WAIT/WAIT_BITSET/WAKE/WAKE_BITSET ops (the PRIVATE_FLAG mask, the val3 bitset), the cur_thread handoff to the futexm, the unhandled-op emu stop; the syscall registration (futex/set_robust_list/sched_yield) |
+| `syscall_set_robust_list` / `syscall_sched_yield` | futex.py / sched.py | Ported | the robust-list bookkeeping onto the cur_thread; the yield = the emu stop + the empty sched_cb (the gevent sleep(0) analogue) |
+| the exit/exit_group multithread branches | `unistd.py ql_syscall_exit` | Ported | the _sched_cb_exit closure (stop_thread + the thread exit code), the plain path unchanged |
+| `install_syscall_hooks` | posix.py load | Ported (refactor) | the per-arch hook install extracted from the single-shot run; the multithread and the plain paths share it (idempotent) |
+| the loader shellcode elf_entry | elf.py | Ported (fix) | the shellcode path sets elf_entry = the shellcode base (the management's interp check stays honest; the python sets the os entry_point only - the port keeps the loader field consistent) |
+| `tests/Thread_Test.cpp` | the management flows | Ported | the round-robin wake (the child's store+wake loop interleaves with the main's futex wait; the main exits 42; the wake's emu_stop bounds the slices), the all-blocked deadlock surfacing, the sched_yield continuation |
+
+### Findings
+
+- **the TB-boundary stop semantics**: uc_emu_stop from a UC_HOOK_INSN
+  callback aborts at the next TB boundary, not immediately - a linear guest
+  body runs past its emu_stop into whatever follows; the child bodies end
+  with `jmp $` (the branch ends the TB) or rely on the syscall resume pc.
+  The upstream gevent flow tolerates the same slop (the pc lands past the
+  syscall and the resume re-checks).
+- **the resume pc reads the restored context** (the upstream emu_start reads
+  the arch_pc AFTER the restore, not the original start address) - the first
+  slice arms the pc from the start address and saves.
+- **the deferred destruction pitfall**: the exit closure parks its own
+  thread in the retire list while run_slice is still on the stack - the
+  destruction must wait for the slice to unwind (the moved-from/std::thread
+  style use-after-free class, the second instance after the cc ownership).
+- **the HookRet RAII struck again**: a discarded hook_mem_unmapped temporary
+  unregisters immediately - the held-handle rule applies to every hook.
+- **the futex wait's block = the driver-model park** (the thread records the
+  event pointer; the management polls is_set) - the gevent event.wait's cv
+  blocking would hang the single host thread (the driver loop has nowhere to
+  yield to).
+- **the child-thread exit uses exit(60)** (the plain thread termination -
+  stop_thread, no world stop); exit_group from the main stops the world
+  (unistd.py verbatim).
+
 ## Deferred (tracked, not built)
 
 `os/freebsd/`, `os/qnx/`, `os/macos/`, `os/uefi/`, `os/dos/`, `qiling/hw/`,
