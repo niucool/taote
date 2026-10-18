@@ -428,6 +428,21 @@ of the gevent hub.
   stop_thread, no world stop); exit_group from the main stops the world
   (unistd.py verbatim).
 
+## Phase 5 - the TLS variants + the clone/clone3 dispatch (266 passed + 1 skipped)
+
+| File | Python counterpart | Status | Notes |
+|---|---|---|---|
+| `QlLinuxARMThread` / `QlLinuxARM64Thread` / `QlLinuxMIPS32Thread` | `os/linux/thread.py` | Ported | the TLS over the TPIDRURO / TPIDR_EL0 coprocessor registers (the QlCprManager/QlCpr64Manager named access) and the cp0_userlocal (the CONFIG3_ULR bit 13 set); the save/restore ride the uc context + the explicit TLS; the spawn factory dispatches per the arch |
+| `QlSyscallABIMipsO32` | `os/posix/syscall/abi/mips.py` | Ported | the a0-a3 args + the stack args beyond (the stack_read at the pointersize offsets), the a3/v0 error-flag return convention (the negative value inverts onto a3=1/v0=-value, the -1134 bound) |
+| the clone/clone3 dispatch | `os/posix/syscall/sched.py` | Ported (core) | the CLONE_VM thread spawn through the management: the child's context (the pc past the clone syscall, the child's stack, the return 0), the CHILD_SETTID (the ctor's tid write), the SETTLS, the CHILD_CLEARTID (the _on_stop zeroing + the futex wake), the PARENT_SETTID, the emu stop + the add-thread event; clone3: the clone_args struct translation (the flags/stack/stack_size/tls/child_tid/parent_tid/exit_signal), the x86-64 arg pre-swap (the cancellation of the clone's swap) |
+| the fork path (no CLONE_VM) | sched.py | Ported (deviation) | QlErrorNotImplemented: the upstream windows branch constructs the multiprocessing.Process object without ever starting it and runs the child code in the caller's greenlet (a broken placeholder); the port surfaces it as not-implemented |
+
+### Findings
+
+- **the child's context save must advance the pc past the clone syscall first**: the unicorn's INSN-hook pc still points at the syscall when the handler runs; the save before the set_arch_pc would snapshot the syscall address and the child would re-execute the clone.
+- **the pc drift after the INSN-hook emu_stop (the open issue)**: the round that ends inside a TB continuing past the stop lands at the syscall + 4 (the TB's tail executed); the child's resume pc (the explicit set) is correct, but the parent's next-slice resume pc needs the exact unicorn accounting. The join-flow test is DISABLED_ until pinned; the round-robin wake flow (the futex interleave without clone) is green.
+- **the mips O32 return convention** inverts the negative returns onto the a3 flag pair - the same shape as the real kernel ABI.
+
 ## Deferred (tracked, not built)
 
 `os/freebsd/`, `os/qnx/`, `os/macos/`, `os/uefi/`, `os/dos/`, `qiling/hw/`,
