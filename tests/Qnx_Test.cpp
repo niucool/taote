@@ -1041,6 +1041,35 @@ TEST(QnxOs, MsgMemMapAnonymousPage) {
     EXPECT_EQ(ql.mem().read_ptr(mapped, 4), 0u);
 }
 
+// the channel_destroy kercall is absent from the upstream's handled set (no
+// ql_syscall_channel_destroy in os/qnx/syscall.py) — the dispatcher falls
+// through to the not-implemented path and the emulation continues; the
+// fixture pins that (the unhandled kercall neither stops nor hangs, the
+// process still exits through thread_destroy)
+//   00: mov r0, #0        ; flags
+//   04: mov r12, #36      ; channel_destroy (unhandled upstream)
+//   08: swi 0
+//   0C: mov r12, #47      ; thread_destroy
+//   10: mvn r0, #0 ; 14: mvn r1, #0 ; 18: mov r2, #42
+//   1C: swi 0
+TEST(QnxOs, ChannelDestroyIsUnhandledUpstream) {
+    const std::vector<std::uint8_t> code = {
+        0x00, 0x00, 0xA0, 0xE3,  // 00: mov r0, #0
+        0x24, 0xC0, 0xA0, 0xE3,  // 04: mov r12, #36
+        0x00, 0x00, 0x00, 0xEF,  // 08: swi 0
+        0x2F, 0xC0, 0xA0, 0xE3,  // 0C: mov r12, #47
+        0x00, 0x00, 0xE0, 0xE3,  // 10: mvn r0, #0
+        0x00, 0x10, 0xE0, 0xE3,  // 14: mvn r1, #0
+        0x2A, 0x20, 0xA0, 0xE3,  // 18: mov r2, #42
+        0x00, 0x00, 0x00, 0xEF,  // 1C: swi 0
+    };
+    auto ql = make_qnx_qiling(code);
+
+    ql.run();
+
+    EXPECT_EQ(ql.os().exit_code(), 42);
+}
+
 // the clock_cycles flow: the kernel returns the core's free-running counter
 // as the nanosecond wall clock (the upstream's simplification) in R0, which
 // the fixture stores into a second scratch cell — the pre-poisoned marker

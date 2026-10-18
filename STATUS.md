@@ -482,7 +482,7 @@ of the gevent hub.
 | the run() prelude | `qnx.py run()` | Ported | the OS32 profile addresses, the syspage map + the rootfs syspage.bin image, the TLS seed (errptr/pid/tid + the derived owner), the cpupage cells |
 | the handlers | `os/qnx/syscall.py` | Ported (slice) | channel_create (the counter), thread_destroy (the (-1,-1,status) exit), clock_time (the CLOCK_REALTIME ns read; the set-time warn+(-1)), clock_cycles (the 0xFE000000 id, the ns simplification), sys_cpupage_get/set (the ADDR/PLS/SYSPAGE indexes), connect_attach/detach (the ND+CLOEXEC pins, the coid counters), connect_flags, connect_client_info (the scoid=-1 record), sync_create/sync_mutex_lock/sync_mutex_unlock (the ker_sync.c stamps + the stubs), msg_sendv/msg_sendvnc (the type dispatch → the message.py handlers) + `message.cpp` io_write (the iov[0] header + the iov[1] payload, the posix write delegate) |
 | `qnx.ql` | `qiling/profiles/qnx.ql` | Ported (deviation) | the verbatim copy + the [CODE] load_address (the same deviation as freebsd.ql) |
-| `tests/Qnx_Test.cpp` | the fixture flows | Ported | 7 fixtures: the channel_create + the thread_destroy exit; the clock_time read; the clock_cycles (the literal-pool blob for the 0xFE000000 id + the ARM32 return-register truncation pin); the cpupage set/get PLS roundtrip; the connect attach/detach (the side-channel coid); the flags + the client_info record (the KERNEL pid 1996); the sync create/lock stamps (the TLS owner (pid<<16\|tid), the WAITING bit clear); the msg_sendv io_write (the iov form, the byte-count return) |
+| `tests/Qnx_Test.cpp` | the fixture flows | Ported | 12 fixtures: the channel_create + the thread_destroy exit; the clock_time read; the clock_cycles (the literal-pool blob for the 0xFE000000 id + the ARM32 return-register truncation pin); the cpupage set/get PLS roundtrip; the connect attach/detach (the side-channel coid); the flags + the client_info record (the KERNEL pid 1996); the sync create/lock stamps (the TLS owner (pid<<16\|tid), the WAITING bit clear); the msg_sendv io_write (the iov form, the byte-count return); the sys_conf both sub-paths (the _CONF_NUM pagesize reply + the _CONF_STR libpath iov string); the io_connect OPEN (the 40-byte header, the fd into the connection, the link reply umask); the io_read (the flat form, the nbytes==-rparts pin); the io_lseek (the 8-byte position reply); the io_stat (the QNXARMStat 18-cell packing); the mem_map (the anon private page, the prot>>=8, the <QQQ> reply); the channel_destroy (the upstream-absent fall-through pin) |
 
 ### Findings
 
@@ -516,9 +516,12 @@ of the gevent hub.
 `os/macos/`, `os/uefi/`, `os/dos/`, `qiling/hw/`,
 `qiling/extensions/mcu/` — resume criteria in PORT_PLAN.md §10 (OQ 9); the
 remaining profile files (dos/macos/uefi `.ql`) defer with them. The qnx
-remainder (the message.py io_connect/io_read/io_lseek/stat/mem_map/sys_conf
-handlers + the channel_destroy/connect_client_info other-process raise) resumes
-with the next qnx slice.
+remainder after the Phase 5.6 completion: the io_connect COMBINE subpaths
+(the extra-iov walk for _IO_STAT/_IO_PATHCONF — the upstream's
+connect-combine branch), the io_close/io_devctl and the interrupt/sched
+message families, and the connect_client_info other-process raise. The
+upstream-absent kercalls (channel_destroy among them) resolve through the
+dispatcher's not-implemented fall-through (the pinned fixture behavior).
 
 ### Resume-criteria reassessment (post-Phase-5)
 
