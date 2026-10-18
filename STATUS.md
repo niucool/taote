@@ -517,11 +517,47 @@ of the gevent hub.
   CoreHooks unit tests pass on the raw path). Open observation, not chased
   further in-session.
 
+## Phase 6 - the os/dos dialect (the real-mode interrupt slice)
+
+| File | Python counterpart | Status | Notes |
+|---|---|---|---|
+| `QlLoaderDOS` | `loader/dos.py` | Ported | the bare COM (the profile [COM] start_cs/ip/sp), the MZ-headered COM (the ComParser over the MZ header fields), the MBR (the 0x7C00 entry, the dx=0x80 BIOS handoff, the QlDisk mapping on the "0x80" drive key) + the full 1MB map; the curses excepthook plumbing is a TUI artifact and is not ported |
+| `QlDisk` | `os/disk.py` | Ported | the CHS/LBA wrapper over QlFsMappedObject (the 1-head/1-cylinder raw-file shape, the lba/read_sectors/read_chs/write_chs surface) — the disk.py's only consumer is the dos slice |
+| `QlOsDos` | `os/dos/dos.py` | Ported | the FLAGS register bits + the set/test flag helpers, the (intno, ah) interrupt dispatch with the user CALL/ENTER/EXIT api maps keyed by the leaf tuple (the set_api shape verbatim), the handles/handle_next for int21, the [KERNEL] version/ticks_per_second, the run() prelude |
+| the utils | `os/dos/utils.py` | Ported | bin2bcd/bcd2bin, linaddr, read_dos_string ($-terminated), read_dos_string_from_ds_dx |
+| the handlers | `os/dos/interrupts/*.py` | Ported (complete) | int10 (the console-detached shape: the resolution map verbatim, the cursor/scroll no-ops, the null-stdscr attr read ax=0x0720, the teletype echo via console_out), int13 (the reset, the CHS read, the drive params, the extensions check, the LBA read/write over QlDisk), int15 (the APM leaves — the shutdown-request stop — and the us-wait), int16 (the blocking key read over the injected stdin + the SCANCODES table; the poll throws NotImplemented), int19 (the MBR reload + the cs=0x07C0 transfer), int1a (the elapsed ticks, the BCD RTC time/date, the days-since-1980), int20 (the ah=13h no-op), int21 (the full leaf set: the char/string print, the version, the file open/close/read/write/delete, the alloc stubs, the 4c exit) |
+| `dos.ql` | `qiling/profiles/dos.ql` | Ported | the verbatim copy |
+| `tests/Dos_Test.cpp` | the fixture flows | Ported | 7 fixtures: the HI.COM ride (the 09 print + the 4c exit + the user ENTER/EXIT api hooks — the upstream test_dos shape); the int1a clock (the BCD ranges + the ticks al=0); the MBR two-pass boot through int19 (the dl=0x80 handoff + the QlDisk reload); the int13 LBA read (the DAP + the marker sector over the mapped image); the int15 APM shutdown stop; the int16 key read ('A' → al=0x41/ah=0x1e via the injected stdin); the int10 mode set + the null-stdscr attr read |
+
+### Phase 6 findings (upstream-parity notes)
+
+- **the `hook_intr`/`hook_intno` HookRet is RAII** — discarding the returned
+  handle unregisters the hook silently (the dos int dispatch initially never
+  fired; the posix/freebsd/qnx slices store their hooks in members, the dos
+  now does too). Pinned by the debugging trail.
+- **the raw-unicorn 16-bit INTR probe** (`TbSemantics.RealModeIntHookRawProbe`,
+  DISABLED_-prefixed with the measured note) — int 0x21 + a UC_HOOK_INTR
+  handler + emu_stop works at the raw 16-bit level; the port-level failure
+  was the RAII unregister, not a unicorn quirk.
+- **the ARM/x86 fixture encoding pins** (the session's tripped-over points):
+  the modrm reg field for the byte stores (AL=0x06 CL=0x0E DL=0x16 BL=0x1E
+  AH=0x26 CH=0x2E DH=0x36 BH=0x3E) — the earlier CL/DL stores rode the BL/CH
+  encodings and passed by the value coincidence; the je rel8 displacement is
+  measured from the instruction END (the +5-vs-+4 off-by-one).
+- **the python-heredoc escape mangling** struck again on the C++ char
+  literals (`'\b'`/`'\t'`/`'\r'`/`'\''` became the control bytes) — the
+  established rule stands: the escape-bearing edits go through the edit
+  tool, never the python heredoc.
+
 ## Deferred (tracked, not built)
 
-`os/macos/`, `os/uefi/`, `os/dos/`, `qiling/hw/`,
+`os/macos/`, `os/uefi/`, `qiling/hw/`,
 `qiling/extensions/mcu/` — resume criteria in PORT_PLAN.md §10 (OQ 9); the
-remaining profile files (dos/macos/uefi `.ql`) defer with them. The qnx
+remaining profile files (macos/uefi `.ql`) defer with them. The dos dialect is
+complete as of the Phase 6 close-out (the loader branch, the disk dependency
+and all 8 interrupt handlers); the dos deferrals: the curses console surface
+is detached (documented in the Phase 6 findings), and the int16 poll leaf
+throws NotImplemented. The qnx
 dialect is complete as of the Phase 5.6 close-out: every handler in the
 upstream's `os/qnx/message.py` and `syscall.py` is ported (io_close, mem_ctrl
 and the COMBINE extra-iov walk landed in the final slice; io_devctl has **no**
@@ -558,10 +594,14 @@ dispatcher's not-implemented fall-through (the pinned fixture behavior).
 
 Priority order adopted: **freebsd → qnx → dos → uefi → macos** (the dialects
 first: the marginal cost per dialect shrinks as the POSIX base stabilises).
-Status: freebsd ✅ (Phase 5.5), qnx ✅ (Phase 5.6) — **os/dos is the next major
-item** (~1,500 lines + `os/disk.py`, its only consumer; the interrupt phase,
-needing the COM/MBR loader branch on top of the done MZ sniffing), then uefi,
-then macos. The freebsd/qnx carry-overs into later slices: the posix
-`pack_stat_struct` family (the linux stat-layout packer — unblocks the qnx
-COMBINE `_IO_STAT` branch and the posix fstat/fstatat/stat delegates) and the
-connect_client_info full-body-vs-stub upstream oddity (documented above).
+Status: freebsd ✅ (Phase 5.5), qnx ✅ (Phase 5.6), dos ✅ (Phase 6) — **os/uefi
+is the next major item** (~13,300 lines + `loader/pe_uefi.py`, the
+service-table phase over the done PE path; the largest single slice of the
+reachable set — plan as its own phase), then macos (the biggest lift: the
+Mach-O parser + the OS). The dos carry-overs into later slices: the posix
+`pack_stat_struct` family (unchanged) and the connect_client_info
+full-body-vs-stub upstream oddity (unchanged). The dos deferrals: the
+int10/int16 curses surface is console-detached (the resolution map and the
+null-stdscr branches stay verbatim; the cursor/scroll leaves are no-ops, the
+int16 poll throws NotImplemented), and the curses color-pair machinery rides
+the state shell without a terminal.
