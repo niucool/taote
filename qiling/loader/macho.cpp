@@ -417,6 +417,24 @@ void QlLoaderMachO::run() {
     }
     is_driver_ = image.header().file_type == 0xb;  // MH_KEXT_BUNDLE
 
+    // kernel_func.py map_commpage: the comm-page map + the time-lock stamp
+    // (the FIXME'd-out vm_shared_region_enter stays out — the upstream
+    // comment: "Not working due to overlarge mapping")
+    std::uint64_t comm_base = 0;
+    std::uint64_t comm_size = 0;
+    if (ql_->arch().type() == QL_ARCH::X8664) {
+        comm_base = 0x7FFFFFE00000;  // X8664_COMM_PAGE_START_ADDRESS
+        comm_size = 0x100000;
+    } else if (ql_->arch().type() == QL_ARCH::ARM64) {
+        comm_base = 0x0000000FFFFFC000ull;  // ARM64_COMM_PAGE_START_ADDRESS
+        comm_size = 0x1000;
+    }
+    if (comm_base != 0) {
+        ql_->mem().map(comm_base, comm_size, UC_PROT_ALL, "[commpage]");
+        constexpr std::uint64_t time_lock_slide = 0x68;
+        ql_->mem().write_ptr(comm_base + time_lock_slide, 0x1, 4);  // ql.pack32(0x1)
+    }
+
     // the stack (macho.py loadStack: the argv/env pushes ride their slices —
     // the sp lands at the region top verbatim)
     const auto sp = stack_address + stack_size;
