@@ -57,6 +57,7 @@ add_library(qiling STATIC
     loader/blob.cpp
     loader/pe.cpp
     loader/elf.cpp
+    loader/macho.cpp
     loader/dos.cpp
     loader/pe_uefi.cpp
     os/uefi/context.cpp
