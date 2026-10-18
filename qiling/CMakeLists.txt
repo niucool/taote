@@ -37,6 +37,8 @@ add_library(qiling STATIC
     os/posix/syscall/abi.cpp
     os/freebsd/freebsd.cpp
     os/freebsd/syscall.cpp
+    os/qnx/qnx.cpp
+    os/qnx/syscall.cpp
     os/windows/handle.cpp
     os/windows/fncc.cpp
     os/windows/windows.cpp

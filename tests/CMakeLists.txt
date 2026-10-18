@@ -1,5 +1,5 @@
 add_executable(qiling_tests
-    Util_Test.cpp Util_Factory_Test.cpp Qiling_Test.cpp Path_Test.cpp FsMapper_Test.cpp Loader_Test.cpp Arch_Utils_Test.cpp Loader_Pe_Test.cpp Windows_Handle_Test.cpp Posix_Test.cpp Loader_Elf_Test.cpp Loader_Elf_Interp_Test.cpp Loader_Elf_Driver_Test.cpp Tb_Semantics_Test.cpp Freebsd_Test.cpp Windows_Registry_Test.cpp Kernel_Api_Test.cpp Futex_Test.cpp Thread_Test.cpp Thread_Tls_Test.cpp Thread_Clone_Test.cpp Windows_Subsystems_Test.cpp Windows_Api_Test.cpp
+    Util_Test.cpp Util_Factory_Test.cpp Qiling_Test.cpp Path_Test.cpp FsMapper_Test.cpp Loader_Test.cpp Arch_Utils_Test.cpp Loader_Pe_Test.cpp Windows_Handle_Test.cpp Posix_Test.cpp Loader_Elf_Test.cpp Loader_Elf_Interp_Test.cpp Loader_Elf_Driver_Test.cpp Tb_Semantics_Test.cpp Freebsd_Test.cpp Qnx_Test.cpp Windows_Registry_Test.cpp Kernel_Api_Test.cpp Futex_Test.cpp Thread_Test.cpp Thread_Tls_Test.cpp Thread_Clone_Test.cpp Windows_Subsystems_Test.cpp Windows_Api_Test.cpp
     Log_Test.cpp
     Profile_Test.cpp
     Exception_Test.cpp

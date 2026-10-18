@@ -114,6 +114,9 @@ public:
     // the mutable access for the cross-thread context writes (the clone
     // handler seeds the child's return register before its context save)
     QlSyscallABI& syscall_abi_mut() noexcept { return *syscall_abi_; }
+    // the ABI replacement for the dialects that override it (qnx.py: the
+    // QlAArch32QNX swap in the ctor)
+    void set_syscall_abi(std::unique_ptr<QlSyscallABI> abi) { syscall_abi_ = std::move(abi); }
 
     // the KERNEL profile identity (posix.py: uid/euid/gid/egid/pid)
     int uid() const noexcept { return uid_; }

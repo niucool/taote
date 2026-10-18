@@ -75,6 +75,9 @@ const std::vector<int>& QlSyscallABIArm::arg_regs() const {
 
 int QlSyscallABIArm::ret_reg() const { return UC_ARM_REG_R0; }
 
+// abi/arm.py QlAArch32QNX: the QNX id register (R12)
+int QlSyscallABIArmQnx::id_reg() const { return UC_ARM_REG_R12; }
+
 int QlSyscallABIArm64::id_reg() const { return UC_ARM64_REG_X8; }
 
 const std::vector<int>& QlSyscallABIArm64::arg_regs() const {

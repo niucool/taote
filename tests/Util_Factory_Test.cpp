@@ -77,10 +77,10 @@ TEST(SelectLoader, BlobFactoryAvailable) {
 }
 
 TEST(SelectLoader, NonBlobRaisesNotImplemented) {
-    // PE landed with Phase 4; the ELF-backed oses (linux/freebsd) resolve the
-    // QlLoaderELF; the remaining per-format loaders degrade (PORT_PLAN.md
+    // PE landed with Phase 4; the ELF-backed oses (linux/freebsd/qnx) resolve
+    // the QlLoaderELF; the remaining per-format loaders degrade (PORT_PLAN.md
     // Phase 5+)
-    for (const auto os : {QL_OS::MACOS, QL_OS::UEFI, QL_OS::DOS, QL_OS::QNX}) {
+    for (const auto os : {QL_OS::MACOS, QL_OS::UEFI, QL_OS::DOS}) {
         EXPECT_THROW(select_loader(os, false), QlErrorNotImplemented) << static_cast<int>(os);
     }
 }
@@ -92,20 +92,32 @@ TEST(SelectLoader, FreebsdResolvesElfLoader) {
     EXPECT_NE(factory, nullptr);
 }
 
+TEST(SelectLoader, QnxResolvesElfLoader) {
+    // the qnx dialect shares the ELF loader (the upstream's loader table maps
+    // QNX to QlLoaderELF)
+    const auto factory = select_loader(QL_OS::QNX, false);
+    EXPECT_NE(factory, nullptr);
+}
+
 TEST(SelectOs, BlobFactoryAvailable) {
     const auto factory = select_os(QL_OS::BLOB);
     EXPECT_NE(factory, nullptr);
 }
 
 TEST(SelectOs, NonBlobRaisesNotImplemented) {
-    // the freebsd dialect landed (this slice); the remaining os trees defer
-    for (const auto os : {QL_OS::MACOS, QL_OS::UEFI, QL_OS::DOS, QL_OS::QNX}) {
+    // the qnx dialect landed (this slice); the remaining os trees defer
+    for (const auto os : {QL_OS::MACOS, QL_OS::UEFI, QL_OS::DOS}) {
         EXPECT_THROW(select_os(os), QlErrorNotImplemented) << static_cast<int>(os);
     }
 }
 
 TEST(SelectOs, FreebsdResolvesFreebsdOs) {
     const auto factory = select_os(QL_OS::FREEBSD);
+    EXPECT_NE(factory, nullptr);
+}
+
+TEST(SelectOs, QnxResolvesQnxOs) {
+    const auto factory = select_os(QL_OS::QNX);
     EXPECT_NE(factory, nullptr);
 }
 

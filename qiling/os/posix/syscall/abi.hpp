@@ -66,7 +66,7 @@ protected:
 };
 
 // abi/arm.py
-class QlSyscallABIArm final : public QlSyscallABI {
+class QlSyscallABIArm : public QlSyscallABI {
 public:
     using QlSyscallABI::QlSyscallABI;
 
@@ -74,6 +74,15 @@ protected:
     int id_reg() const override;
     const std::vector<int>& arg_regs() const override;
     int ret_reg() const override;
+};
+
+// abi/arm.py QlAArch32QNX - the QNX ABI override: the syscall number rides
+// R12 instead of the linux R7
+struct QlSyscallABIArmQnx final : public QlSyscallABIArm {
+    using QlSyscallABIArm::QlSyscallABIArm;
+
+protected:
+    int id_reg() const override;
 };
 
 class QlSyscallABIArm64 final : public QlSyscallABI {
