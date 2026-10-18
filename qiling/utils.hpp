@@ -23,7 +23,7 @@ class Qiling;
 class QlArch;
 class QlOs;
 class QlMemoryManager;
-class QlHwManager;
+namespace hw { class QlHwManager; }
 
 namespace loader { class QlLoader; }
 

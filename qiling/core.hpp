@@ -31,7 +31,8 @@ namespace qiling {
 
 class QlArch;
 class QlOs;
-class QlHwManager;
+namespace hw { class QlHwManager; }
+using QlHwManager = hw::QlHwManager;
 class UcContext;
 namespace loader { class QlLoader; }
 namespace os { class QlOsBlob; }

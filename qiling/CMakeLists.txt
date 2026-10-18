@@ -50,6 +50,7 @@ add_library(qiling STATIC
     os/macos/kernel_func.cpp
     os/macos/kernel_api.cpp
     os/macos/ev.cpp
+    hw/hw.cpp
     os/macos/mach_msg.cpp
     os/macos/subsystems.cpp
     os/macos/utils.cpp

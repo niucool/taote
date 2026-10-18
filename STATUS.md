@@ -1059,6 +1059,25 @@ the vlen/timeout walk) was wrong — the handler bodies exist only for
 recvmsg; and the x86 recvmmsg id is 337 (the 365 hit was the ARM table —
 the table-array boundaries matter when pinning ids across arches).
 
+### Phase 13 — the qiling/hw groundwork (the QlHwManager + the QlPeripheral base)
+
+| piece | upstream | state | notes |
+|---|---|---|---|
+| QlPeripheral | `hw/peripheral.py` | ✅ | the instance-bytes register image, the raw_read/raw_write, the **monitor-decorator shape** (the ENTER/CALL/EXIT hook walk with the CALL replacing the body, the read_body/write_body overrides replacing the decorated read/write); the region/size/base walk; the save/restore pair; the step hook (the hasattr walk as the virtual default no-op) |
+| QlPeripheralUtils + Access | `hw/peripheral.py` + `hw/utils/access.py` | ✅ | the hook_read/hook_write/hook_del (the ENTER/CALL/EXIT intercepts), the Access equality (the value only on the writes — the verbatim __eq__), the AccessSequence ring |
+| QlHwManager | `hw/hw.py` | ✅ core | the entity/region maps, the create over the register_struct factory registry (the upstream rides the dynamic module lookup — the port's registry is the explicit map), the find walk, the step walk, the setup_mmio over the port's existing map_mmio, the save/restore; the env-driven load_env/load_all defer with the env-dict machinery |
+| QlPripheralHandler | `hw/hw.py` | ✅ | the MMIO trampoline: the find-or-buffer dispatch (the verbatim non-mapped read/write onto the handler's byte buffer), the has_read/has_write prot derivation already in the port's map_mmio |
+| the fixture | `tests/Hw_Test.cpp` | ✅ | the 4 tests: the mmio write dispatch + the find walk, the hook walk (the CALL intercept replacing the body verbatim), the non-mapped buffer ride, the step + the save/restore |
+
+Findings: the host-side uc_mem_read/write DO route through the uc_mmio_map
+callbacks (the fixture rides the mem API directly, no guest blob needed);
+the mmio regions must be **page-aligned in size** (uc_mmio_map answers
+UC_ERR_ARG 15 for the sub-page sizes); and the QlPeripheral ctor cannot
+dispatch the virtual struct_size — the image size rides the ctor arg (the
+base-ctor virtual call lands on the base body — the classic CTOR-virtual
+order). The guest-side blob ride (the load/store instructions against the
+mmio) is the next slice's first fixture.
+
 ### Phase 12 sub-slice 3 — socketpair + the send/recv family
 
 | piece | upstream | state | notes |
@@ -1070,30 +1089,22 @@ the table-array boundaries matter when pinning ids across arches).
 
 ## Deferred (tracked, not built)
 
-`os/macos/` (the remaining surface: the syscall handlers, the kernel_api
-fncc surface, the events/policy managers, the kext path — the dialect
-skeleton + the container parser are done as of Phases 7-8), `qiling/hw/`,
-`qiling/extensions/mcu/` — resume criteria in PORT_PLAN.md §10 (OQ 9); the
-remaining profile files (macos `.ql`) defer with them. The uefi phase is
-complete as of the RT slice (the ST/BS/RT surface; the two multi-call-blob
-dispatch anomalies stay documented with their DISABLED_ fixtures in the
-Phase 6.5 findings). The dos dialect is
-complete as of the Phase 6 close-out (the loader branch, the disk dependency
-and all 8 interrupt handlers); the dos deferrals: the curses console surface
-is detached (documented in the Phase 6 findings), and the int16 poll leaf
-throws NotImplemented. The qnx
-dialect is complete as of the Phase 5.6 close-out: every handler in the
-upstream's `os/qnx/message.py` and `syscall.py` is ported (io_close, mem_ctrl
-and the COMBINE extra-iov walk landed in the final slice; io_devctl has **no**
-upstream handler — the 0x106 type rides the dispatcher's no-hook fall-through,
-pinned by a fixture; the earlier "interrupt/sched message families" note was
-speculative — no such handlers exist upstream). The port-side deferrals inside
-qnx: the COMBINE `_IO_STAT` branch throws NotImplemented pending the posix
-`pack_stat_struct` family (the linux stat-layout packer — its own future
-slice), and the connect_client_info other-process raise rides the
-upstream-verbatim stub (the full body is upstream dead code). The
-upstream-absent kercalls (channel_destroy among them) resolve through the
-dispatcher's not-implemented fall-through (the pinned fixture behavior).
+`qiling/hw/` (the peripheral tree: the manager + the peripheral base landed
+as the Phase 13 groundwork; the `const/` register tables and the concrete
+peripherals land with their consumer slices), `qiling/extensions/mcu/` +
+`os/mcu` (the bare-metal half — the MCU os class is absent; the hw manager
+wires into the core when the MCU dialect lands), `qiling/extensions/afl|r2
+|tracing|sanitizers|coverage` (the optional-integration surface), the
+kernel-module paths (`.ko` rides the ET_REL elf branch — the branch is in
+due to the elf driver; `.kext` rides the macho loader; `.sys` rides pe.py +
+ntoskrnl.exe emulation), the known-loop-trigger studies (the cached-TB
+restart family: the Tb_Semantics/Thread_Clone DISABLED_ probes + the uefi
+two multi-call anomalies + the MacosOs DISABLED_KextDriverRelocationsBridge
+Calls uc INSN-hook-after-stub interaction — each its own dedicated session),
+and the macos **net_send/net_recv** emitters (the upstream bodies exist but
+have **no callers anywhere in the upstream** — the scapy-coupled wire build
+is dead code there; the port skips them verbatim-absent until a consumer
+appears).
 
 ### Resume-criteria reassessment (post-Phase-5)
 
@@ -1118,18 +1129,24 @@ dispatcher's not-implemented fall-through (the pinned fixture behavior).
 
 Priority order adopted: **freebsd → qnx → dos → uefi → macos** (the dialects
 first: the marginal cost per dialect shrinks as the POSIX base stabilises).
-Status: freebsd ✅ (Phase 5.5), qnx ✅ (Phase 5.6), dos ✅ (Phase 6), uefi ✅
-(the loader + the service-table + the RT slices; the two multi-call anomalies
-stay DISABLED_ + documented) — **os/macos is in progress** (Phase 7 the
-container parser ✅, Phase 8 the dialect skeleton ✅, the syscall.py surface
-✅ (except mach_msg), the kernel_api fncc surface ✅, the QlLoaderMachO
-container load + the end-to-end kernel_api dispatch ✅, the events/policy
-slice ✅ — the remaining deferrals: the loadDriver kernel-symbol walk, the
-mach_msg machinery, the socket/ipf event emitters + the trigger stack-push
-path). The dos carry-overs into later slices: the posix
-`pack_stat_struct` family (unchanged) and the connect_client_info
-full-body-vs-stub upstream oddity (unchanged). The dos deferrals: the
-int10/int16 curses surface is console-detached (the resolution map and the
-null-stdscr branches stay verbatim; the cursor/scroll leaves are no-ops, the
-int16 poll throws NotImplemented), and the curses color-pair machinery rides
-the state shell without a terminal.
+Status: freebsd ✅ (Phase 5.5), qnx ✅ (Phase 5.6, the COMBINE _IO_STAT branch
+unparked green at 4aa66dd), dos ✅ (Phase 6), uefi ✅ (the loader + the
+service-table + the RT slices; the two multi-call anomalies stay DISABLED_ +
+documented), **macos ✅** (Phase 7 the container parser, Phase 8 the dialect
+skeleton, the syscall.py surface, the kernel_api fncc surface, the
+QlLoaderMachO container load + the end-to-end kernel_api dispatch, the
+events/policy slice, the mach_msg message-path machinery (d147dec/e246444),
+the loadDriver kernel-symbol walk + the kext import resolution (c127763),
+the socket/ipf emitters (bec6e48), the ev stack-push emit path + the trigger
+(f168bca) — the remaining macos surface: the DISABLED_ kext-relocs
+insn-hook study + the upstream-dead net_send/net_recv emitters, both
+tracked in the Deferred section) — **qiling/hw is in progress** (Phase 13:
+the groundwork landed as this slice) and the socket family closed at Phase
+12 (the sub-slices 1-10). The dos carry-overs all landed: the posix
+`pack_stat_struct` family (0fc59a8 — and it unblocked the qnx COMBINE
+_IO_STAT happy path at 4aa66dd), the connect_client_info full-body-vs-stub
+oddity stays the upstream-verbatim stub (the full body is upstream dead
+code). The dos int10/int16 curses surface stays console-detached (the
+resolution map and the null-stdscr branches verbatim; the cursor/scroll
+leaves are no-ops, the int16 poll throws NotImplemented) and the curses
+color-pair machinery rides the state shell without a terminal.
