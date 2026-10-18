@@ -4,12 +4,17 @@
 // through the mmio callbacks).
 #include <gtest/gtest.h>
 
+#include <cstdio>
+#include <filesystem>
+#include <fstream>
 #include <string>
+#include <vector>
 
 #include "qiling/core.hpp"
 #include "qiling/hw/hw.hpp"
 #include "qiling/hw/peripheral.hpp"
 #include "qiling/hw/cm_systick.hpp"
+#include "qiling/hw/cm_scb.hpp"
 #include "qiling/exception.hpp"
 
 using namespace qiling;
@@ -189,8 +194,9 @@ TEST(HwManager, GuestBlobStoresThroughMmioToSysTick) {
         0xB8, 0x03, 0x00, 0x00, 0x00,
         // mov [0xE000E014], eax   -- the moffs store (the 8-byte abs64 LE)
         0xA3, 0x14, 0xE0, 0x00, 0xE0, 0x00, 0x00, 0x00, 0x00,
-        // mov eax, 7
-        0xB8, 0x07, 0x00, 0x00, 0x00,
+        // mov eax, 5   -- CTRL = ENABLE|CLKSOURCE (no TICKINT: this fixture
+        // carries no nvic, the upstream would raise on the set_pending walk)
+        0xB8, 0x05, 0x00, 0x00, 0x00,
         // mov [0xE000E010], eax
         0xA3, 0x10, 0xE0, 0x00, 0xE0, 0x00, 0x00, 0x00, 0x00,
         // exit(0)
@@ -225,9 +231,9 @@ TEST(HwManager, GuestBlobStoresThroughMmioToSysTick) {
 
     ql.run();
 
-    // the guest stores landed: the LOAD cell carries 3, the CTRL the mask 7
+    // the guest stores landed: the LOAD cell carries 3, the CTRL the mask 5
     EXPECT_EQ(systick->raw_read(4, 4), 3u);
-    EXPECT_EQ(systick->raw_read(0, 4), 7u);
+    EXPECT_EQ(systick->raw_read(0, 4), 5u);
 
     // the step walk: 3 -> 2 -> 1 -> 0 -> (the COUNTFLAG set + the reload to 3)
     hw.step();  // 3 -> 2
@@ -236,7 +242,109 @@ TEST(HwManager, GuestBlobStoresThroughMmioToSysTick) {
     hw.step();  // 1 -> 0
     hw.step();  // the zero reload: COUNTFLAG | VAL = LOAD(3)
     EXPECT_EQ(systick->raw_read(0, 4),
-              (qiling::hw::systick_ctrl::ENABLE | qiling::hw::systick_ctrl::TICKINT |
-               qiling::hw::systick_ctrl::CLKSOURCE | qiling::hw::systick_ctrl::COUNTFLAG));
+              (qiling::hw::systick_ctrl::ENABLE | qiling::hw::systick_ctrl::CLKSOURCE |
+               qiling::hw::systick_ctrl::COUNTFLAG));
     EXPECT_EQ(systick->raw_read(8, 4), 3u);
+}
+
+// ---- the intc slice: the CORTEX_M walk over the nvic/scb/systick trio ----
+
+namespace {
+
+// the ihex record builder (the proper LL/AAAA/TT + the two's-complement CC)
+std::string ihex_line(std::uint16_t addr, std::uint8_t type, const std::vector<std::uint8_t>& data) {
+    auto hex8 = [](std::uint32_t v, int width) {
+        std::string out;
+        for (int shift = (width - 1) * 4; shift >= 0; shift -= 4) {
+            const auto nibble = (v >> shift) & 0xF;
+            out += static_cast<char>(nibble < 10 ? '0' + nibble : 'A' + nibble - 10);
+        }
+        return out;
+    };
+
+    std::string body;
+    body += hex8(data.size(), 2);
+    body += hex8(addr, 4);
+    body += hex8(type, 2);
+    int sum = static_cast<int>(data.size()) + (addr >> 8) + (addr & 0xff) + type;
+    for (const auto b : data) {
+        body += hex8(b, 2);
+        sum += b;
+    }
+    body += hex8((-sum) & 0xFF, 2);
+    return ":" + body;
+}
+
+std::string write_ihex_fixture() {
+    const auto base = std::filesystem::temp_directory_path() / "ql_hw_intc.hex";
+    {
+        std::ofstream out(base, std::ios::binary | std::ios::trunc);
+
+        std::vector<std::uint8_t> vec(0x40, 0);
+        const auto put32 = [&vec](std::size_t at, std::uint32_t v) {
+            vec[at] = v & 0xff;
+            vec[at + 1] = (v >> 8) & 0xff;
+            vec[at + 2] = (v >> 16) & 0xff;
+            vec[at + 3] = (v >> 24) & 0xff;
+        };
+        put32(0, 0x20000400);   // the initial MSP (inside the SRAM region)
+        put32(4, 0x00000041);   // the reset handler (the thumb bit rides the lsb)
+        put32(0x3C, 0x00001001);  // the SysTick handler (vector 15)
+
+        // the main loop at 0x40: b . (the thumb 0xE7FE)
+        std::vector<std::uint8_t> main_code = {0xFE, 0xE7};
+        // the handler at 0x1000: movs r0,#42; movs r1,#0x20; lsls r1,r1,#24;
+        // str r0,[r1]; bx lr (the marker store at 0x20000000)
+        std::vector<std::uint8_t> handler = {0x2A, 0x20, 0x20, 0x21, 0x09, 0x06, 0x08, 0x60, 0x70, 0x47};
+
+        out << ihex_line(0x0000, 0x00, vec) << "\n";
+        out << ihex_line(0x0040, 0x00, main_code) << "\n";
+        out << ihex_line(0x1000, 0x00, handler) << "\n";
+        out << ":00000001FF\n";  // the EOF record
+    }
+    return base.string();
+}
+
+}  // namespace
+
+// The TICKINT dispatch ride: the SysTick's downcount crosses zero with the
+// TICKINT set, the pending rides the nvic (the SCB's ICSR internally), and the
+// nvic step dispatches the vector[15] handler through the interrupt context.
+TEST(HwManager, CortexMIntcDispatchesSysTickThroughNvic) {
+    const auto hex_path = write_ihex_fixture();
+
+    QilingOptions options;
+    options.argv = {hex_path};
+    options.rootfs = ensure_hw_rootfs().string();
+    options.ostype = QL_OS::MCU;
+    options.archtype = QL_ARCH::CORTEX_M;
+    options.env = {
+        {"FLASH", "memory;0x0;0x2000"},
+        {"SRAM", "memory;0x20000000;0x1000"},
+        {"PPB", "mmio;0xE000E000;0x1000"},
+        {"SYSTICK", "core;cm3_systick;0xE000E010"},
+        {"NVIC", "core;cm_nvic;0xE000E100"},
+        {"SCB", "core;cm4_scb;0xE000ED00"},
+    };
+    Qiling ql(options);
+
+    auto* systick = ql.hw()->peripheral("systick");
+    auto* nvic = ql.hw()->peripheral("nvic");
+    auto* scb = ql.hw()->peripheral("scb");
+    ASSERT_NE(systick, nullptr);
+    ASSERT_NE(nvic, nullptr);
+    ASSERT_NE(scb, nullptr);
+
+    // the load: LOAD=3, CTRL=ENABLE|TICKINT|CLKSOURCE
+    systick->write(4, 4, 3);
+    systick->write(0, 4, 7);
+
+    // the bounded walk: the slices cross zero on the third step and the
+    // dispatch rides the fourth hw.step()
+    ql.run(std::nullopt, std::nullopt, 0, 12);
+
+    // the handler stored 42 at the SRAM marker
+    EXPECT_EQ(ql.mem().read_ptr(0x20000000, 4), 42u);
+    // the pending cleared after the dispatch (the SCB's ICSR walk)
+    EXPECT_EQ(dynamic_cast<qiling::hw::CortexMScb*>(scb)->get_pending(static_cast<int>(qiling::IRQ::SYSTICK)), 0u);
 }

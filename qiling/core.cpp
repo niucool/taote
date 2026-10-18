@@ -260,6 +260,10 @@ void Qiling::stop() {
     if (multithread()) {
         // thread management lands with the guest-thread slices
         emu_stop();
+    } else if (baremetal()) {
+        // core.py: the baremetal stop routes to the os (the mcu.py stop sets
+        // runable=false so the os walk exits)
+        os().stop();
     } else {
         emu_stop();
     }

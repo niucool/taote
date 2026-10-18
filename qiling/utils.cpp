@@ -18,6 +18,7 @@
 #include "qiling/os/mcu.hpp"
 #include "qiling/os/uefi/uefi.hpp"
 #include "qiling/loader/pe_uefi.hpp"
+#include "qiling/loader/mcu.hpp"
 #include "qiling/arch/arm.hpp"
 #include "qiling/arch/arm64.hpp"
 #include "qiling/arch/mips.hpp"
@@ -291,6 +292,10 @@ LoaderFactory select_loader(QL_OS ostype, bool libcache) {
         case QL_OS::UEFI:
             return [](Qiling* ql) -> std::unique_ptr<loader::QlLoader> {
                 return std::make_unique<loader::QlLoaderPE_UEFI>(ql);
+            };
+        case QL_OS::MCU:
+            return [](Qiling* ql) -> std::unique_ptr<loader::QlLoader> {
+                return std::make_unique<loader::QlLoaderMCU>(ql);
             };
         default:
             // the remaining per-format loaders (ELF/Mach-O/DOS/UEFI/...) land

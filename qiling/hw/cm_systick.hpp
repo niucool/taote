@@ -9,6 +9,7 @@
 // replacing the body — the decorator's if/else verbatim).
 #pragma once
 
+#include "qiling/hw/cm_nvic.hpp"
 #include "qiling/hw/peripheral.hpp"
 #include "qiling/exception.hpp"
 
@@ -86,8 +87,14 @@ public:
             raw_write(8, 4, next);
 
             if (static_cast<std::int64_t>(next) <= 0) {
-                // the TICKINT branch: the NVIC pending walk lands with the
-                // intc slice (the upstream's set_pending(IRQ.SYSTICK))
+                // cm_systick.py: the TICKINT branch — the pending rides the
+                // nvic entity (the negative IRQn delegates to the SCB inside)
+                if ((static_cast<std::uint32_t>(raw_read(0, 4)) & systick_ctrl::TICKINT) != 0) {
+                    auto* nvic = ql().hw() != nullptr ? ql().hw()->peripheral("nvic") : nullptr;
+                    if (nvic != nullptr) {
+                        dynamic_cast<CortexMNvic&>(*nvic).set_pending(static_cast<int>(IRQ::SYSTICK));
+                    }
+                }
             }
         }
     }

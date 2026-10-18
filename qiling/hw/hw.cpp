@@ -1,9 +1,27 @@
 #include "qiling/hw/hw.hpp"
+#include "qiling/hw/cm_nvic.hpp"
+#include "qiling/hw/cm_scb.hpp"
+#include "qiling/hw/cm_systick.hpp"
 
 #include <algorithm>
 
 namespace qiling {
 namespace hw {
+
+QlHwManager::QlHwManager(Qiling& ql) : ql_(&ql) {
+    // the built-in struct factories (the upstream rides the dynamic
+    // ql_get_module_function('qiling.hw', struct) import over the qiling.hw
+    // package; the port registers the ported peripherals at construction)
+    register_struct("cm3_systick", [](Qiling& q, const std::string& label) {
+        return std::make_unique<CortexMSysTick>(q, label);
+    });
+    register_struct("cm_nvic", [](Qiling& q, const std::string& label) {
+        return std::make_unique<CortexMNvic>(q, label);
+    });
+    register_struct("cm4_scb", [](Qiling& q, const std::string& label) {
+        return std::make_unique<CortexM4Scb>(q, label);
+    });
+}
 
 QlPripheralHandler::QlPripheralHandler(QlHwManager& hwman, std::uint64_t base, std::uint64_t size,
                                        std::string label)

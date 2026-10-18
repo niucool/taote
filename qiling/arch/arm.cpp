@@ -1,7 +1,10 @@
 #include "qiling/arch/arm.hpp"
 
+#include "qiling/hw/cm_nvic.hpp"
+#include "qiling/hw/hw.hpp"
 #include "qiling/os/memory.hpp"
 
+#include <map>
 #include <unicorn/arm.h>
 #include <unicorn/unicorn.h>
 
@@ -191,8 +194,12 @@ void QlInterruptContext::exit() {
 
     const auto retval = arch_.effective_pc();
     if ((retval & static_cast<std::uint64_t>(EXC_RETURN::MASK)) != static_cast<std::uint64_t>(EXC_RETURN::MASK)) {
-        // Interrupt Crash — stopping the emulation needs the Qiling facade
-        // (ql.stop); degrades to an error until the composition root exists
+        // Interrupt Crash — the upstream logs the warning and rides ql.stop()
+        // (the baremetal os stop ends the mcu walk); the frame is left as-is
+        if (ql_ != nullptr) {
+            ql_->stop();
+            return;
+        }
         throw QlErrorBase("interrupt crash (EXC_RETURN without the magic value)");
     }
 
@@ -262,10 +269,95 @@ void QlArchCORTEX_M::init_context() {
 }
 
 void QlArchCORTEX_M::unicorn_exception_handler(int intno) {
-    // forwards to ql.hw.nvic — the hw peripheral tree is deferred with the
-    // bare-metal path (PORT_PLAN.md §10, OQ 9)
-    (void)intno;
-    throw QlErrorNotImplemented("cortex-m exception forwarding requires ql.hw.nvic (deferred bare-metal path)");
+    if (ql_ == nullptr) {
+        throw QlErrorNotImplemented("the cortex-m exception handling requires the Qiling (the baremetal composition)");
+    }
+
+    // cortex_m.py: emu_stop first, then the forward-map set_pending ride
+    ql_->emu_stop();
+
+    if (intno == static_cast<int>(EXCP::EXCEPTION_EXIT)) {
+        // the unicorn 2.1.4's do_v7m_exception_exit is the `return; // FIXME`
+        // stub — the bx-to-EXC_RETURN magic cannot complete inside the engine
+        // and re-raises forever. The port stops here; the surrounding
+        // QlInterruptContext::exit() reads the magic pc off the regs and
+        // performs the frame restore (the verbatim exit walk).
+        return;
+    }
+
+    static const std::map<int, IRQ> kForward = {
+        {static_cast<int>(EXCP::UDEF), IRQ::HARD_FAULT},             // undefined instruction
+        {static_cast<int>(EXCP::SWI), IRQ::SVCALL},                  // software interrupt
+        {static_cast<int>(EXCP::PREFETCH_ABORT), IRQ::HARD_FAULT},
+        {static_cast<int>(EXCP::DATA_ABORT), IRQ::HARD_FAULT},
+        {static_cast<int>(EXCP::EXCEPTION_EXIT), IRQ::NOTHING},
+        {static_cast<int>(EXCP::NOCP), IRQ::USAGE_FAULT},            // v7M NOCP UsageFault
+        {static_cast<int>(EXCP::INVSTATE), IRQ::USAGE_FAULT},        // v7M INVSTATE UsageFault
+        {static_cast<int>(EXCP::STKOF), IRQ::USAGE_FAULT},           // v8M STKOF UsageFault
+        {static_cast<int>(EXCP::UNALIGNED), IRQ::USAGE_FAULT},       // v7M UNALIGNED UsageFault
+    };
+
+    const auto it = kForward.find(intno);
+    if (it == kForward.end()) {
+        // the upstream raises QlErrorNotImplemented for the unhandled numbers
+        throw QlErrorNotImplemented("Unhandled interrupt number (" + std::to_string(intno) + ")");
+    }
+
+    if (it->second != IRQ::NOTHING) {
+        auto* p = ql_->hw() != nullptr ? ql_->hw()->peripheral("nvic") : nullptr;
+        if (p == nullptr) {
+            throw QlErrorBase("the cortex-m exception forwarding requires the nvic peripheral");
+        }
+        dynamic_cast<hw::CortexMNvic&>(*p).set_pending(static_cast<int>(it->second));
+    }
+}
+
+void QlArchCORTEX_M::interrupt_handler(int intno) {
+    if (ql_ == nullptr) {
+        throw QlErrorNotImplemented("the cortex-m interrupt handler requires the Qiling (the baremetal composition)");
+    }
+
+    // cortex_m.py interrupt_handler: the priority/mask gates ride the nvic
+    // entity (the upstream reads ql.hw.nvic.get_priority(intno))
+    auto* nvic_ptr = ql_->hw() != nullptr ? ql_->hw()->peripheral("nvic") : nullptr;
+    if (nvic_ptr == nullptr) {
+        throw QlErrorBase("the cortex-m interrupt handler requires the nvic peripheral");
+    }
+    auto& nvic = dynamic_cast<hw::CortexMNvic&>(*nvic_ptr);
+
+    const auto basepri = regs().read("basepri") & 0xf0;
+    if (basepri != 0 && basepri <= nvic.get_priority(intno)) {
+        return;
+    }
+
+    if (intno > static_cast<int>(IRQ::HARD_FAULT) && (regs().read("primask") & 0x1)) {
+        return;
+    }
+
+    if (intno != static_cast<int>(IRQ::NMI) && (regs().read("faultmask") & 0x1)) {
+        return;
+    }
+
+    QlInterruptContext ctx(*this, ql_);
+    ctx.enter();
+
+    const auto isr = static_cast<std::uint64_t>(intno + 16);
+    const auto offset = isr * 4;
+
+    const auto entry = mem_->read_ptr(offset, 4);
+    const auto exc_return = using_psp() ? 0xFFFFFFFDull : 0xFFFFFFF9ull;
+
+    regs().write("ipsr", isr);
+    regs().write("pc", entry);
+    regs().write("lr", exc_return);
+
+    // cortex_m.py: the raw uc.emu_start (the nested-slice walk — the os run
+    // loop has returned when the nvic step drives this)
+    uc_engine& u = uc();
+    const uc_err err = uc_emu_start(&u, effective_pc(), 0, 0, 0xffffff);
+    if (err != UC_ERR_OK) {
+        throw QlErrorBase(std::string("interrupt handler emulation error: ") + uc_strerror(err));
+    }
 }
 
 }  // namespace qiling

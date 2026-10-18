@@ -1104,9 +1104,30 @@ handler's offset math.
 | the core wiring | `core.py` `if self.baremetal` | ✅ | the Qiling ctor creates the QlHwManager for the baremetal os (the MCU) — the hw() accessor returns the live manager; the select_os MCU case lands |
 | the loader | `loader/mcu.py` | defers | the QlLoaderMCU (the elf/bin/hex reset walks + the ihex parser) rides the next slice; until then the MCU emulations go through the blob-style code path |
 
-The hw phase resumes at the intc slice (the CortexMNvic + the SCB — the
-SysTick's TICKINT branch needs the set_pending walk) or the first real MCU
-board profile (the stm32f4xx/gd32vf103 const tables).
+The hw phase resumes at the board-profile slice (the stm32f4xx/gd32vf103
+const tables) — the intc slice landed below.
+
+### Phase 13.3 — the intc slice (the CortexMNvic + the SCB + the TICKINT completion)
+
+| piece | upstream | state | notes |
+|---|---|---|---|
+| CortexMNvic | `hw/intc/cm_nvic.py` | ✅ | the 3616-byte image (the ISER/ICER/ISPR/ICPR/IABR/IPR/STIR layout), the IRQN_MAX/MASK/OFFSET derivations verbatim, the enable/disable/pending/priority walks with the negative-IRQn SCB delegation, the byte-level write triggers (the set-bit fires the per-bit walk verbatim), the IPR reserved-low-nibble mask, the step's priority sort + the basepri/primask/faultmask gates + the dispatch, the region [(0, 1008), (3584, 3616)]; the verbatim quirks ported: the enable sets the ICER bit too, the clear mask is `MASK ^ (1 << bit)` (the low-5-bits-only AND), the get_pending reads the ISER |
+| CortexMScb + CortexM4Scb | `hw/misc/cm_scb.py` + `cm4_scb.py` | ✅ | the SHCSR/ICSR walks for the negative IRQn (the enable/pending/priority), the ICSR write with the PENDSVSET (the bit 28) riding back into the nvic, the CM4 seed (CPUID 0x410FC241, AIRCR 0xFA050000, CCR 0x200) |
+| the arch interrupt_handler | `arch/cortex_m.py` | ✅ | the priority/mask gates + the QlInterruptContext frame walk + the vector-table entry (isr*4) + the ipsr/pc/lr set + the raw uc emu_start; the unhandled-exception forward map (the EXCP → the IRQ) with the nvic set_pending ride |
+| the exception-return completion | (the port-side) | ✅ deviation | **the unicorn 2.1.4's `do_v7m_exception_exit` is a `return; // FIXME` stub** — the bx to the EXC_RETURN magic raises EXCP_EXCEPTION_EXIT in a loop (the INTR hook fires with the intno 8). The port's unicorn_exception_handler stops the emu on the EXCEPTION_EXIT and lets the QlInterruptContext::exit() perform the frame restore from the magic pc (the verbatim exit walk) |
+| QlOsMcu | `os/mcu/mcu.py` | ✅ core | (from the earlier slice) the non-fast walk with the hw.step() per slice |
+| QlLoaderMCU | `loader/mcu.py` | ✅ core | the IhexParser (the 00/02/04 records + the coalescing walk verbatim), the bin/hex reset walks, the arch init_context + the entry_point from the pc; the elf branch throws (the pyelftools' PT_LOAD paddr walk rides the board-profile slice); the load_env rides the port's encoded env records (`type;arg1;arg2`) — the deviation from the upstream dict-of-dicts env documented in the header |
+| the fixture | `tests/Hw_Test.cpp` | ✅ | the CORTEX_M hex fixture: the vector table (the MSP + the reset loop + the SysTick handler at the vector 15), the env-driven memory/mmio/core walks creating the systick/nvic/scb trio, the host-side LOAD/CTRL writes, the bounded run, and the handler's marker store at the SRAM asserted |
+
+Findings: (1) the discarded `HookRet` RAII-unregisters the hook at the
+temporary's destruction — the loader holds the intr-hook handle in a member
+(the python's wrapper has no destroying-dtor semantics, so the upstream
+discards freely — a port deviation that keeps the hook alive). (2) the
+unicorn 2.1.4 v7m exception return is the FIXME stub (see above). (3) the
+cortex_m fixture blob gotchas: the `movs r1, #imm` encoding puts the Rd in
+the [10:8] bits (the earlier `0x2102` was the mov r1, #2 — the 0x2120 form
+is the mov r1, #0x20), and the msp/sp registers alias (the msp write
+reflects the sp read).
 
 ### Phase 12 sub-slice 3 — socketpair + the send/recv family
 

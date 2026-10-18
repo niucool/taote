@@ -36,7 +36,7 @@ private:
 // hw.py QlHwManager — the peripheral registry + the MMIO wiring
 class QlHwManager {
 public:
-    explicit QlHwManager(Qiling& ql) : ql_(&ql) {}
+    explicit QlHwManager(Qiling& ql);
 
     Qiling& ql() noexcept { return *ql_; }
 
@@ -58,6 +58,13 @@ public:
 
     // find: the peripheral owning the address, or nullptr
     QlPeripheral* find(std::uint64_t address) const;
+
+    // the label lookup (the upstream __getattr__: ql.hw.nvic / ql.hw.scb ride
+    // the entity map by the label; nullptr when the label is not registered)
+    QlPeripheral* peripheral(const std::string& label) {
+        const auto it = entity_.find(label);
+        return it == entity_.end() ? nullptr : it->second.get();
+    }
 
     // step: the peripheral state updates (the hasattr(ent, 'step') walk)
     void step();

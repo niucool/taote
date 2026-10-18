@@ -151,16 +151,19 @@ enum class EXCP : int {
 // frame around an interrupt handler (the ContextDecorator analogue).
 class QlInterruptContext {
 public:
-    explicit QlInterruptContext(QlArchARM& arch) : arch_(arch) {}
+    explicit QlInterruptContext(QlArchARM& arch, Qiling* ql = nullptr)
+        : arch_(arch), ql_(ql) {}
     ~QlInterruptContext() { exit(); }
 
     // pushes xpsr, pc, lr, r12, r3, r2, r1, r0 (verbatim order); requires mem
     void enter();
-    // restores the frame; EXC_RETURN handling requires mem
+    // restores the frame; the EXC_RETURN crash path rides ql.stop() (the
+    // baremetal os stop ends the mcu walk) when the Qiling is available
     void exit();
 
 private:
     QlArchARM& arch_;
+    Qiling* ql_;
     bool entered_ = false;
 };
 
@@ -186,8 +189,12 @@ public:
     // requires the Phase 2 memory manager)
     void init_context();
 
-    // cortex_m.py unicorn_exception_handler forwards to ql.hw.nvic — deferred
-    // with the bare-metal path
+    // cortex_m.py interrupt_handler: the vector-table dispatch with the
+    // priority/mask gates (requires the hw manager's nvic entity)
+    void interrupt_handler(int intno);
+
+    // cortex_m.py unicorn_exception_handler: the emu_stop + the forward-map
+    // set_pending ride (requires the hw manager's nvic entity)
     void unicorn_exception_handler(int intno);
 };
 
