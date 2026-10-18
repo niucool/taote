@@ -47,7 +47,9 @@ QlLinuxThread::QlLinuxThread(Qiling* ql, std::uint64_t start_address, std::uint6
     // first thing a CLONE_CHILD_SETTID thread does)
     if (set_child_tid_addr != 0) {
         set_child_tid_address_ = set_child_tid_addr;
-        ql->mem().write_ptr(set_child_tid_addr, static_cast<std::int64_t>(thread_id_), 4);
+        // BISECT cycle 2 (b1): the in-hook CHILD_SETTID write removed for the
+        // deletion bisect — restore when the study closes
+        // ql->mem().write_ptr(set_child_tid_addr, static_cast<std::int64_t>(thread_id_), 4);
     }
 }
 
