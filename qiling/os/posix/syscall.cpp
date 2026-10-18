@@ -596,8 +596,7 @@ std::optional<std::int64_t> syscall_clone(Qiling& ql, const std::vector<std::uin
     // the child's start: the instruction after the syscall (the x86-64
     // syscall insn = 2 bytes, the upstream's +2)
     const std::uint64_t after_syscall = ql.arch().regs().arch_pc() + 2;
-    std::fprintf(stderr, "[clone-pc] hook_pc=%llx after=%llx\n",
-                 (unsigned long long)ql.arch().regs().arch_pc(), (unsigned long long)after_syscall);
+
     auto th = os::linux::QlLinuxThread::spawn(&ql, after_syscall,
                                           ql.os().exit_point(), nullptr, set_child_tid_addr);
     const auto th_id = static_cast<std::int64_t>(th->get_id());
@@ -631,6 +630,14 @@ std::optional<std::int64_t> syscall_clone(Qiling& ql, const std::vector<std::uin
 
     // the parent's context back (sched.py: ql.restore(ctx))
     ql.arch().restore(*parent_ctx);
+
+    // the pinned TB semantics (the TbSemantics probe): the unicorn post-hook
+    // advance adds the hooked instruction's size onto the live pc, even when
+    // the hook stopped the emu or set the pc itself. The in-hook restore
+    // leaves the live pc at after_syscall, so the advance would land the
+    // parent's slice-end pc at after_syscall + 2 (mid-instruction). The
+    // pre-advance compensation makes the post-advance land on after_syscall.
+    ql.arch().regs().set_arch_pc(after_syscall - 2);
 
     // register the thread + break the parent's slice (the add-thread event
     // lands through the management; the upstream sets the dead stop_event

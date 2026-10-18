@@ -405,12 +405,11 @@ of the gevent hub.
 
 ### Findings
 
-- **the TB-boundary stop semantics**: uc_emu_stop from a UC_HOOK_INSN
-  callback aborts at the next TB boundary, not immediately - a linear guest
-  body runs past its emu_stop into whatever follows; the child bodies end
-  with `jmp $` (the branch ends the TB) or rely on the syscall resume pc.
-  The upstream gevent flow tolerates the same slop (the pc lands past the
-  syscall and the resume re-checks).
+- **the TB-boundary stop semantics (CORRECTED by the TbSemantics probes)**:
+  the earlier note claimed the INSN-hook stop defers to the next TB boundary;
+  the probe evidence (P1/P2/P3) pins the opposite - the stop is immediate
+  (the pc = the hooked instruction + its size, the TB tail does not run).
+  See the Phase 5 findings for the pinned accounting.
 - **the resume pc reads the restored context** (the upstream emu_start reads
   the arch_pc AFTER the restore, not the original start address) - the first
   slice arms the pc from the start address and saves.
@@ -440,7 +439,12 @@ of the gevent hub.
 ### Findings
 
 - **the child's context save must advance the pc past the clone syscall first**: the unicorn's INSN-hook pc still points at the syscall when the handler runs; the save before the set_arch_pc would snapshot the syscall address and the child would re-execute the clone.
-- **the pc drift after the INSN-hook emu_stop (the open issue)**: the round that ends inside a TB continuing past the stop lands at the syscall + 4 (the TB's tail executed); the child's resume pc (the explicit set) is correct, but the parent's next-slice resume pc needs the exact unicorn accounting. The join-flow test is DISABLED_ until pinned; the round-robin wake flow (the futex interleave without clone) is green.
+- **the pc drift after the INSN-hook emu_stop (PINNED by the TbSemantics probe suite)**: the earlier TB-boundary guess is overturned by the probe evidence. The pinned semantics (the raw-unicorn probes, unicorn 2.x):
+  - **P1 - the stop is immediate**: uc_emu_stop inside a UC_HOOK_INSN callback takes effect right after the hooked instruction - the TB tail does NOT run past the stop; the pc lands at the hooked instruction + its size (the natural post-instruction advance).
+  - **P2 - the in-hook pc set gets the instruction's size re-added**: a set_arch_pc inside the INSN hook survives, but unicorn's post-instruction advance adds the hooked instruction's length onto it afterward (the effective resume pc = set + insn size). This is the drift mechanism: the clone handler's in-hook child-pc set + the parent's in-hook restore each had the +2 (the syscall's size) re-applied onto the live pc.
+  - **P3 - no syscall re-fire on the resume**: a fresh emu_start after the stop does not re-execute the hooked instruction.
+  - **the fix applied**: the clone handler compensates the parent's in-hook restore with the pre-advance (the set to after_syscall - 2 so the post-advance lands on after_syscall); the parent's slice-end pc now lands exactly at the clone's continuation (the trace evidence).
+- **the mid-TB restart on a CACHED TB (the remaining open issue)**: the child thread's restart address (the clone's continuation) can sit inside a TB the parent already executed (the parent's wait-loop slice translated it); the raw-unicorn reproduction (the TbSemantics.MidTbRestartThenAbsoluteStore passes on a fresh TB, DISABLED_MidTbRestartOnCachedTb faults on the cached one) shows the taken-path store after the cached-TB mid-TB restart mis-executes. The fix directions: the fresh-TB start addresses for the spawned threads or the tb flush on the spawn. The clone-join test stays DISABLED_ on this; the round-robin wake flow (the futex interleave without clone) is green.
 - **the mips O32 return convention** inverts the negative returns onto the a3 flag pair - the same shape as the real kernel ABI.
 
 ## Deferred (tracked, not built)

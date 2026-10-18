@@ -121,9 +121,6 @@ bool QlLinuxThread::run_slice(std::uint64_t exit_point, std::uint64_t count) {
     if (saved_context_ == nullptr) {
         ql_->arch().regs().set_arch_pc(start_address_);
         save();
-        std::fprintf(stderr, "[slice-first-arm] tid=%llu ctx_pc=%llx\n", (unsigned long long)thread_id_,
-                     (unsigned long long)ql_->arch().regs().arch_pc());
-        std::fflush(stderr);
     }
 
     // restore the context of the currently executing thread
@@ -134,9 +131,6 @@ bool QlLinuxThread::run_slice(std::uint64_t exit_point, std::uint64_t count) {
     // original start address)
     const auto start_address = ql_->arch().adjust_emu_start(ql_->arch().regs().arch_pc());
     sched_cb_ = nullptr;  // the default sched_cb: give up control (yield)
-    std::fprintf(stderr, "[slice] tid=%llu begin=%llx\n", (unsigned long long)thread_id_,
-                 (unsigned long long)start_address);
-    std::fflush(stderr);
 
     try {
         // the known unicorn timeout issue (issue #1355) noted upstream; the
@@ -149,9 +143,6 @@ bool QlLinuxThread::run_slice(std::uint64_t exit_point, std::uint64_t count) {
 
     // thread.py save()
     save();
-    std::fprintf(stderr, "[slice-end] tid=%llu pc=%llx\n", (unsigned long long)thread_id_,
-                 (unsigned long long)ql_->arch().regs().arch_pc());
-    std::fflush(stderr);
 
     // note that the callback may be set by the uc callbacks; never give up
     // control during one (the port's switch happens here, after emu_start)

@@ -93,9 +93,11 @@ const std::vector<std::uint8_t>& join_body() {
         0x48, 0xC7, 0xC0, 0xCA, 0x00, 0x00, 0x00,          // 45: mov rax, 202 (futex)
         0x0F, 0x05,                                         // 4C: syscall
         0x48, 0x85, 0xC0,                                   // 4E: test rax, rax
-        0x74, 0x03,                                         // 51: jz +3 -> parent_done (0x56)
-        0xEB, 0xD4,                                         // 53: jmp parent_wait (0x28)
-        0x90,                                               // 55: (the alignment pad)
+        0xEB, 0xD6,                                         // 50: jmp parent_wait (0x28)
+                                                                    // (both the EAGAIN and the woken
+                                                                    //  paths re-check the ctid - the
+                                                                    //  glibc join shape)
+        0x90, 0x90,                                         // 52: (the alignment pads)
         // parent_done (0x56):
         0x48, 0xC7, 0xC0, 0xE7, 0x00, 0x00, 0x00,          // 56: mov rax, 231 (exit_group)
         0x48, 0xC7, 0xC7, 0x2A, 0x00, 0x00, 0x00,          // 5D: mov rdi, 42
@@ -125,13 +127,18 @@ const std::vector<std::uint8_t>& join_body() {
 // stores 42, wakes the futex and exits; its _on_stop zeroes the ctid word
 // and wakes the futex waiter (the parent); the parent's join loop observes
 // the zero and exits with 42
-// KNOWN ISSUE (the pc drift after the emu_stop inside the syscall INSN
-// hook): the child's resume pc is correct (the syscall's addr + 2), but the
-// parent's next-slice resume pc lands at the syscall + 4 for the TB shapes
-// that continue past the stop (the round 1's end: the pc = the syscall + 4).
-// The unicorn's INSN-hook emu_stop semantics need the upstream-alignment
-// study (the python tolerates the same drift through the -EAGAIN re-check
-// loops). Disabled until the resume-pc accounting is pinned down.
+// KNOWN ISSUE (the mid-TB cached-TB restart, the TbSemantics probe): the
+// parent's slice-end pc drift is FIXED (the clone handler compensates the
+// unicorn post-hook pc re-advance - see the TbSemantics.PcSetInHookGets-
+// InsnSizeAdded finding); the remaining blocker is the CHILD's restart at
+// the clone's continuation pc: that address sits inside the parent's CACHED
+// TB (the parent executed it in its wait-loop slice), and the mid-TB
+// restart on a cached TB mis-executes the child's body (the TbSemantics.
+// DISABLED_MidTbRestartOnCachedTb raw-unicorn reproduction: the taken-path
+// store after the cached-TB restart faults/skips). The upstream tolerates
+// this through the gevent scheduling (the child never restarts mid-TB).
+// Disabled until the restart semantics are pinned (a fresh-TB start for the
+// spawned threads, or the uc tb_flush on the spawn).
 TEST(ThreadClone, DISABLED_CloneSpawnsChildAndJoinWakes) {
     const auto rootfs = std::filesystem::temp_directory_path() / "ql_clone_rootfs";
     std::filesystem::create_directories(rootfs);
