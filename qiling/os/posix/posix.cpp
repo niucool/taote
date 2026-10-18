@@ -220,11 +220,36 @@ void QlOsPosix::install_syscall_hooks() {
     hooks_installed_ = true;
     switch (ql().arch().type()) {
         case QL_ARCH::X8664: {
-            auto* self = this;
-            syscall_hook_ = ql().hook_insn([self](const std::vector<std::uint64_t>&) -> int {
-                self->load_syscall();
-                return 0;
-            }, UC_X86_INS_SYSCALL);
+            // BISECT cycle 6 (b6): the DIRECT raw INSN registration bypassing
+            // the facade's trampoline_insn/dispatch_insn/HookCtx/std::function
+            // indirection — the callback rides the raw uc_cb_insn_syscall_t
+            // shape and calls the same load_syscall (the full real path: the
+            // spawn, the management, the interleave stay active). The (b6b)
+            // minimal-dispatcher variant degenerated (no child spawn, no
+            // interleave) and was reverted. Restore the facade registration
+            // when the study closes.
+            uc_hook h = 0;
+            uc_hook_add(&ql().arch().uc(), &h, UC_HOOK_INSN,
+                        reinterpret_cast<void*>(+[](uc_engine*, void* user_data) {
+                            // the hookcallback discipline (the exception never
+                            // crosses the unicorn C frame — the pinned rule):
+                            // catch, record on the FACADE (the Qiling owns the
+                            // internal-exception state, not the os), let
+                            // emu_start rethrow
+                            try {
+                                static_cast<QlOsPosix*>(user_data)->load_syscall();
+                            } catch (...) {
+                                static_cast<QlOsPosix*>(user_data)->ql().internal_exception_from_hook(
+                                    std::current_exception());
+                            }
+                        }),
+                        this, 1, 0, UC_X86_INS_SYSCALL);
+            (void)h;
+            // auto* self = this;
+            // syscall_hook_ = ql().hook_insn([self](const std::vector<std::uint64_t>&) -> int {
+            //     self->load_syscall();
+            //     return 0;
+            // }, UC_X86_INS_SYSCALL);
             break;
         }
         case QL_ARCH::X86: {

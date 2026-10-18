@@ -322,14 +322,19 @@ void QlLinuxX8664Thread::set_thread_tls(std::uint64_t tls_addr) {
 
 void QlLinuxX8664Thread::save_impl() {
     // thread.py save: the context plus the fsbase
-    constexpr std::uint32_t IA32_FS_BASE_MSR = 0xC0000100;
-    auto& intel = dynamic_cast<QlArchIntel&>(ql_->arch());
-    tls_ = intel.msr().read(IA32_FS_BASE_MSR);
+    // BISECT cycle 7 (b7): the in-hook FS_BASE MSR read removed for the
+    // deletion bisect — restore when the study closes
+    // constexpr std::uint32_t IA32_FS_BASE_MSR = 0xC0000100;
+    // auto& intel = dynamic_cast<QlArchIntel&>(ql_->arch());
+    // tls_ = intel.msr().read(IA32_FS_BASE_MSR);
 }
 
 void QlLinuxX8664Thread::restore_impl() {
     // thread.py restore: the context then the fsbase
-    set_thread_tls(tls_);
+    // BISECT cycle 7 (b7): the per-slice FS_BASE MSR write removed — the
+    // bisect pairs with the save_impl removal above (one logical unit: the
+    // thread's TLS/FS_BASE bookkeeping, which no raw probe ever exercised)
+    // set_thread_tls(tls_);
 }
 
 // thread.py QlLinuxARMThread: the TPIDRURO coprocessor register
