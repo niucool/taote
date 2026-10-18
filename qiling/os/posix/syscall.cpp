@@ -1319,6 +1319,8 @@ void register_builtin_syscalls() {
     registry.register_syscall({"sendto", {PARAM_INTN, PARAM_PTRX, PARAM_INTN, PARAM_INTN, PARAM_PTRX, PARAM_INTN}, syscall_sendto});
     registry.register_syscall({"recvfrom", {PARAM_INTN, PARAM_PTRX, PARAM_INTN, PARAM_INTN, PARAM_PTRX, PARAM_INTN}, syscall_recvfrom});
     // the option pair (the SOL_SOCKET level + the SO_* names pass through)
+    registry.register_syscall({"getsockname", {PARAM_INTN, PARAM_PTRX, PARAM_PTRX}, syscall_getsockname});
+    registry.register_syscall({"getpeername", {PARAM_INTN, PARAM_PTRX, PARAM_PTRX}, syscall_getpeername});
     registry.register_syscall({"getsockopt", {PARAM_INTN, PARAM_INTN, PARAM_INTN, PARAM_PTRX, PARAM_PTRX}, syscall_getsockopt});
     registry.register_syscall({"setsockopt", {PARAM_INTN, PARAM_INTN, PARAM_INTN, PARAM_PTRX, PARAM_INTN}, syscall_setsockopt});
     // the socketpair ride (the AF_UNIX pairs; the loopback accept walk on

@@ -954,6 +954,22 @@ NULL-addr bodies), getsockopt/setsockopt. The remaining surface: the
 datagram sendto/recvfrom dest/src paths, socketcall (the x86 multiplexer),
 the IPPROTO_IP/TCP option tables — each its own slice.
 
+### Phase 12 sub-slice 5 — getsockname/getpeername
+
+| piece | upstream | state | notes |
+|---|---|---|---|
+| getsockname/getpeername | `syscall/socket.py` | ✅ | the shared local/peer host-name walk (the AF_UNIX path or the AF_INET (host, port)); the write-back over the **write_sockaddr helper** (the upstream's getsockname/accept addr-body shapes: the AF_UNIX host→virtual transform + the addrlen truncation (the `[:addrlen - 2 - 1]` verbatim), the AF_INET family/BE-port/dotted-quad triple, the save gated on `objsize <= addrlen` while the addrlen cell ALWAYS updates when set) |
+| the fixture | `tests/Posix_Test.cpp` | ✅ | getsockname after the INADDR_ANY bind (the family word 2, the BE ephemeral port nonzero, the addrlen cell 16) + the getpeername -ENOTCONN ride |
+
+Findings: the upstream has **no bare accept4 handler** (the SYS_ACCEPT4=18
+socketcall slot raises NotImplementedError in net.py — the bare accept is
+the only accept handler upstream); the upstream getpeername on the
+unconnected socket raises uncaught — the port answers -1 (the same
+documented ENOTCONN deviation shape as the shutdown slice); the port's
+accept peer write-back predates the helper and still writes the fixed
+110-byte unix sockaddr (the verbatim dynamic-size walk lands when the
+accept body rides the shared write_sockaddr helper — a small follow-up).
+
 ### Phase 12 sub-slice 3 — socketpair + the send/recv family
 
 | piece | upstream | state | notes |

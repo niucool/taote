@@ -347,6 +347,70 @@ bool QlSocket::shutdown(int how) {
     return host_socket_shutdown(host_handle_, how) == 0;
 }
 
+namespace {
+
+// the shared local/peer-name walk (the getsockname/getpeername bodies):
+// the AF_UNIX path or the AF_INET (host, port) from the host name call
+bool host_name_lookup(std::uintptr_t host_handle, bool peer,
+                      std::string& path, std::string& host, std::uint16_t& port) {
+#ifdef _WIN32
+    sockaddr_storage ss{};
+    int slen = sizeof(ss);
+    const int rc = peer ? ::getpeername(static_cast<SOCKET>(host_handle),
+                                        reinterpret_cast<sockaddr*>(&ss), &slen)
+                        : ::getsockname(static_cast<SOCKET>(host_handle),
+                                        reinterpret_cast<sockaddr*>(&ss), &slen);
+    if (rc != 0) {
+        return false;
+    }
+#else
+    sockaddr_storage ss{};
+    socklen_t slen = sizeof(ss);
+    const int rc = peer ? ::getpeername(static_cast<int>(host_handle),
+                                        reinterpret_cast<sockaddr*>(&ss), &slen)
+                        : ::getsockname(static_cast<int>(host_handle),
+                                        reinterpret_cast<sockaddr*>(&ss), &slen);
+    if (rc != 0) {
+        return false;
+    }
+#endif
+    if (ss.ss_family == static_cast<decltype(ss.ss_family)>(kAfInet)) {
+        const auto* in = reinterpret_cast<const sockaddr_in*>(&ss);
+        char buf[INET_ADDRSTRLEN] = {0};
+        if (::inet_ntop(AF_INET, &in->sin_addr, buf, sizeof(buf)) == nullptr) {
+            return false;
+        }
+        host = buf;
+        port = ntohs(in->sin_port);
+        return true;
+    }
+#ifdef _WIN32
+    if (ss.ss_family == static_cast<decltype(ss.ss_family)>(kAfUnix)) {
+        const auto* un = reinterpret_cast<const sockaddr_un*>(&ss);
+        const auto plen = slen > 2 ? static_cast<std::size_t>(slen) - 2 : 0;
+        path.assign(un->sun_path, std::min(plen, sizeof(un->sun_path)));
+        return true;
+    }
+#else
+    if (ss.ss_family == static_cast<decltype(ss.ss_family)>(kAfUnix)) {
+        const auto* un = reinterpret_cast<const sockaddr_un*>(&ss);
+        path.assign(un->sun_path, strnlen(un->sun_path, sizeof(un->sun_path)));
+        return true;
+    }
+#endif
+    return false;
+}
+
+}  // namespace
+
+bool QlSocket::getsockname(std::string& path, std::string& host, std::uint16_t& port) {
+    return host_name_lookup(host_handle_, false, path, host, port);
+}
+
+bool QlSocket::getpeername(std::string& path, std::string& host, std::uint16_t& port) {
+    return host_name_lookup(host_handle_, true, path, host, port);
+}
+
 bool QlSocket::connect_unix(const std::string& hpath) {
 #ifdef _WIN32
     sockaddr_un addr{};
@@ -756,6 +820,98 @@ std::optional<std::int64_t> syscall_send(Qiling& ql, const std::vector<std::uint
 
     const auto content = ql.mem().read(params[1], static_cast<std::size_t>(params[2]));
     return sock->send(content, static_cast<int>(params[3]));
+}
+
+namespace {
+
+// the shared sockaddr write-back (the upstream getsockname/getpeername and
+// the accept addr-body shapes): the AF_UNIX path (the host→virtual transform
+// + the addrlen truncation) or the AF_INET triple; the save happens when
+// objsize <= addrlen while the addrlen cell ALWAYS updates when set
+std::size_t write_sockaddr(Qiling& ql, int family, std::uint64_t addr,
+                           std::uint64_t addrlenptr, const std::string& path,
+                           const std::string& host, std::uint16_t port) {
+    const auto addrlen = addrlenptr != 0 ? ql.mem().read_ptr(addrlenptr) : 0;
+    std::size_t objsize = 0;
+    std::vector<std::uint8_t> obj;
+
+    if (family == kAfUnix) {
+        auto vpath = ql.os().path()->host_to_virtual_path(path);
+        if (addrlen != 0) {
+            // the addrlen indicates the total obj size allowed to be
+            // written — that already includes the family field (2) and the
+            // path null terminator (1) (the comment verbatim)
+            const auto keep = addrlen >= 3 ? static_cast<std::size_t>(addrlen - 3) : 0;
+            if (vpath.size() > keep) {
+                vpath.resize(keep);
+            }
+        }
+        objsize = 2 + vpath.size() + 1;
+        obj.assign(objsize, 0);
+        obj[0] = 0x01;
+        obj[1] = 0x00;
+        std::memcpy(obj.data() + 2, vpath.data(), vpath.size());
+    } else if (family == kAfInet) {
+        objsize = 16;
+        obj.assign(16, 0);
+        obj[0] = 0x02;
+        obj[1] = 0x00;
+        obj[2] = static_cast<std::uint8_t>(port >> 8);
+        obj[3] = static_cast<std::uint8_t>(port & 0xff);
+        unsigned a = 0, b = 0, c = 0, d = 0;
+        std::sscanf(host.c_str(), "%u.%u.%u.%u", &a, &b, &c, &d);
+        obj[4] = static_cast<std::uint8_t>(a);
+        obj[5] = static_cast<std::uint8_t>(b);
+        obj[6] = static_cast<std::uint8_t>(c);
+        obj[7] = static_cast<std::uint8_t>(d);
+    }
+
+    if (objsize != 0) {
+        if (objsize <= addrlen) {
+            ql.mem().write(addr, obj);
+        }
+        if (addrlenptr != 0) {
+            ql.mem().write_ptr(addrlenptr, objsize);
+        }
+    }
+    return objsize;
+}
+
+// the getsockname/getpeername common body (the peer flag picks the walk)
+std::optional<std::int64_t> syscall_getsockname_impl(Qiling& ql,
+                                                     const std::vector<std::uint64_t>& params,
+                                                     bool peer) {
+    const auto sockfd = static_cast<std::int64_t>(params[0]);
+
+    auto* sock = dynamic_cast<QlSocket*>(fd_get(ql, sockfd).get());
+    if (sock == nullptr) {
+        return -88;  // -ENOTSOCK
+    }
+
+    std::string path, host;
+    std::uint16_t port = 0;
+    const bool ok = peer ? sock->getpeername(path, host, port)
+                         : sock->getsockname(path, host, port);
+    if (!ok) {
+        return -1;  // the OSError branch rides -1
+    }
+
+    write_sockaddr(ql, sock->family(), params[1], params[2], path, host, port);
+    return 0;
+}
+
+}  // namespace
+
+std::optional<std::int64_t> syscall_getsockname(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    // ql_syscall_getsockname(sockfd, addr, addrlenptr): the name write-back
+    // over the shared helper (the AF_UNIX path with the host→virtual
+    // transform + the addrlen truncation; the AF_INET triple)
+    return syscall_getsockname_impl(ql, params, false);
+}
+
+std::optional<std::int64_t> syscall_getpeername(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    // ql_syscall_getpeername(sockfd, addr, addrlenptr): the peer name
+    return syscall_getsockname_impl(ql, params, true);
 }
 
 std::optional<std::int64_t> syscall_sendto(Qiling& ql, const std::vector<std::uint64_t>& params) {

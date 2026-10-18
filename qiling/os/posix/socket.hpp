@@ -81,6 +81,12 @@ public:
     std::vector<std::uint8_t> getsockopt(int level, int optname, std::size_t buflen);
     bool setsockopt(int level, int optname, const std::vector<std::uint8_t>& value);
 
+    // getsockname/getpeername: the local/peer name (the path string for the
+    // AF_UNIX, the (host, port) for the AF_INET); false when the host call
+    // errors
+    bool getsockname(std::string& path, std::string& host, std::uint16_t& port);
+    bool getpeername(std::string& path, std::string& host, std::uint16_t& port);
+
     int family() const noexcept { return family_; }
     int socktype() const noexcept { return socktype_; }
     int protocol() const noexcept { return protocol_; }
@@ -109,7 +115,8 @@ std::optional<std::int64_t> syscall_connect(Qiling& ql, const std::vector<std::u
 std::optional<std::int64_t> syscall_bind(Qiling& ql, const std::vector<std::uint64_t>& params);
 std::optional<std::int64_t> syscall_listen(Qiling& ql, const std::vector<std::uint64_t>& params);
 std::optional<std::int64_t> syscall_accept(Qiling& ql, const std::vector<std::uint64_t>& params);
-
+std::optional<std::int64_t> syscall_getsockname(Qiling& ql, const std::vector<std::uint64_t>& params);
+std::optional<std::int64_t> syscall_getpeername(Qiling& ql, const std::vector<std::uint64_t>& params);
 }  // namespace posix
 }  // namespace os
 }  // namespace qiling
