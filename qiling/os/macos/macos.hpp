@@ -14,7 +14,9 @@
 #include <string_view>
 
 #include "qiling/os/posix/posix.hpp"
+#include "qiling/os/macos/mach_msg.hpp"
 #include "qiling/os/macos/mach_port.hpp"
+#include "qiling/os/macos/subsystems.hpp"
 #include "qiling/os/macos/kernel_func.hpp"
 #include "qiling/os/macos/ev.hpp"
 
@@ -45,6 +47,15 @@ public:
     const MachPortManager& macho_port_manager() const { return *macho_port_manager_; }
     const MachoTask& macho_task() const { return *macho_task_; }
     MachoTask& macho_task_mut() { return *macho_task_; }
+
+    // mach_port.py MachPortManager.deal_with_msg: the message-trap dispatch —
+    // the msgh_id routes to the host/task servers and the reply writes back
+    // over the request buffer (in place). The ids: 200 host_info, 206
+    // host_get_clock_service, 3418 semaphore_create, 3409 get_special_port;
+    // anything else throws (the upstream "Mach Msgid Not Found" Exception).
+    // NOTE: the upstream parses NO MACH_SEND/MACH_RCV option flags here —
+    // the trap's `opt` argument is only logged (the port is verbatim)
+    void deal_with_msg(const MachMsg& msg, std::uint64_t addr);
 
     // loader/macho.py seeds macho_vmmap_end from the profile's
     // vmmap_trap_address (the ctor-seeded deviation, same as the mach
@@ -82,6 +93,11 @@ private:
     std::unique_ptr<MachoTask> macho_task_;
     std::unique_ptr<MachoThread> macho_thread_;
     std::unique_ptr<FileSystem> macho_fs_;
+    // subsystems.py MachHostServer/MachTaskServer (the upstream seeds them
+    // in the macho loader's run(); the port seeds them in the ctor — the
+    // same deviation note as the mach surfaces)
+    std::unique_ptr<MachHostServer> macho_host_server_;
+    std::unique_ptr<MachTaskServer> macho_task_server_;
     std::uint64_t macho_vmmap_end_ = 0;
     std::unique_ptr<QlEvManager> ev_manager_;
     std::unique_ptr<QlOsPolicy> policy_manager_;

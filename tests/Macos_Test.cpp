@@ -144,6 +144,111 @@ TEST(MacosOs, SelfTrapFamilyReturnsPortNames) {
     EXPECT_EQ(ql.mem().read_ptr(kScratch + 0x18, 4), 0x303u);
 }
 
+// ---- the mach_msg message-trap family ----
+//
+// The trap: eax=0x1f (mach_msg_trap), rdi = the message address, rsi = the
+// option (the upstream parses NO MACH_SEND/MACH_RCV flags — it is only
+// logged), rdx = ssize. The dispatch reads the message, routes on the
+// msgh_id and writes the reply over the request buffer in place.
+TEST(MacosOs, MachMsgHostInfoReplyReturnsSuccess) {
+    // craft the id-200 HOST_BASIC_INFO message at 0x2100: the 24-byte header
+    // + NDR(8) + flavor(4) + outCnt(4) = ssize 40
+    std::vector<std::uint8_t> msg(40, 0);
+    const auto u32 = [&msg](std::size_t at, std::uint32_t v) {
+        msg[at] = static_cast<std::uint8_t>(v);
+        msg[at + 1] = static_cast<std::uint8_t>(v >> 8);
+        msg[at + 2] = static_cast<std::uint8_t>(v >> 16);
+        msg[at + 3] = static_cast<std::uint8_t>(v >> 24);
+    };
+    u32(0, 0x1200);   // msgh_bits
+    u32(4, 40);       // msgh_size (the trap overrides it with ssize)
+    u32(8, 0);        // msgh_remote_port
+    u32(0xc, 0);      // msgh_local_port
+    u32(0x10, 0);     // msgh_voucher_port
+    u32(0x14, 200);   // msgh_id = host_info
+    msg[24] = 1;      // NDR (the low byte; the server only parses it)
+    u32(32, 1);       // flavor = HOST_BASIC_INFO
+    u32(36, 6);       // host_info_outCnt = 6 (the >5 branch)
+
+    // the trap blob: rdi = the msg addr, rsi = 0 (opt), rdx = 40 (ssize),
+    // eax = 0x1f; store the return; exit(42)
+    std::vector<std::uint8_t> code = {
+        0xBB, 0x40, 0x21, 0x00, 0x00,  // mov ebx, 0x2140
+        0xBF, 0x00, 0x21, 0x00, 0x00,  // mov edi, 0x2100
+        0x31, 0xF6,                    // xor esi, esi
+        0xBA, 0x28, 0x00, 0x00, 0x00,  // mov edx, 40
+        0xB8, 0x1F, 0x00, 0x00, 0x01,  // mov eax, 0x100001f (mach_msg_trap)
+        0x0F, 0x05,                    // syscall
+        0x48, 0x89, 0x03,              // mov [rbx], rax
+        0xBF, 0x2A, 0x00, 0x00, 0x00,  // mov edi, 42
+        0xB8, 0x01, 0x00, 0x00, 0x00,  // mov eax, 1
+        0x0F, 0x05,
+    };
+    auto ql = make_macos_qiling(code);
+    ql.mem().map(0x2000, 0x1000, UC_PROT_ALL, "[macos-scratch]");
+    ql.mem().write(0x2100, msg);
+    ql.run();
+
+    EXPECT_EQ(ql.os().exit_code(), 42);
+    EXPECT_EQ(ql.mem().read_ptr(0x2140, 4), 0u);  // KERN_SUCCESS
+    // the reply header (the bits 4608, the size 88, the local port 2187)
+    const auto hdr = ql.mem().read(0x2100, 24);
+    EXPECT_EQ(hdr[0], 0x00); EXPECT_EQ(hdr[1], 0x12);  // msgh_bits = 4608 LE
+    EXPECT_EQ(hdr[4], 88);                             // msgh_size
+    EXPECT_EQ(hdr[12], 0x8B); EXPECT_EQ(hdr[13], 0x08);  // local port 2187
+    EXPECT_EQ(hdr[20], 0x2C);                          // msgh_id = 300
+    // the reply content: NDR 0x100000000, retcode 0, outCnt 6, then the
+    // basic-info cells
+    const auto content = ql.mem().read(0x2118, 64);
+    EXPECT_EQ(content[4], 1);  // the NDR's high byte (0x100000000)
+    EXPECT_EQ(content[8], 0);  // the retcode = KERN_SUCCESS
+    EXPECT_EQ(content[12], 6); // the outCnt echoed
+    EXPECT_EQ(content[16], 2); // max_cpus
+    EXPECT_EQ(content[20], 2); // avail_cpus
+    // memory_size = 0x80000000 (the high byte at +27)
+    EXPECT_EQ(content[27], 0x80);
+    EXPECT_EQ(content[28], 7); // cpu_type
+    EXPECT_EQ(content[32], 4); // cpu_subtype
+    EXPECT_EQ(content[36], 1); // cpu_threadtype (the >5 branch)
+    EXPECT_EQ(content[48], 4); // logic_cpu
+    EXPECT_EQ(content[52], 4); // logic_cpu_max
+    EXPECT_EQ(content[56], 0); // max_mem = 0x400000000 (the low byte 0)
+    EXPECT_EQ(content[60], 4); // max_mem byte 4
+}
+
+TEST(MacosOs, MachMsgUnknownIdThrows) {
+    // the id 999 rides the not-found branch (the upstream's plain Exception)
+    std::vector<std::uint8_t> msg(40, 0);
+    const auto u32 = [&msg](std::size_t at, std::uint32_t v) {
+        msg[at] = static_cast<std::uint8_t>(v);
+        msg[at + 1] = static_cast<std::uint8_t>(v >> 8);
+        msg[at + 2] = static_cast<std::uint8_t>(v >> 16);
+        msg[at + 3] = static_cast<std::uint8_t>(v >> 24);
+    };
+    u32(0x14, 999);
+    u32(32, 1);
+    u32(36, 6);
+
+    auto ql = make_macos_qiling(csops_body());
+    ql.mem().map(0x2000, 0x1000, UC_PROT_ALL, "[macos-scratch]");
+    ql.mem().write(0x2100, msg);
+    // the trap blob again (the same code shape as the reply fixture)
+    std::vector<std::uint8_t> code = {
+        0xBF, 0x00, 0x21, 0x00, 0x00,  // mov edi, 0x2100
+        0x31, 0xF6,                    // xor esi, esi
+        0xBA, 0x28, 0x00, 0x00, 0x00,  // mov edx, 40
+        0xB8, 0x1F, 0x00, 0x00, 0x01,  // mov eax, 0x100001f
+        0x0F, 0x05,                    // syscall
+        0xBF, 0x2A, 0x00, 0x00, 0x00,  // mov edi, 42
+        0xB8, 0x01, 0x00, 0x00, 0x00,  // mov eax, 1
+        0x0F, 0x05,
+    };
+    auto ql2 = make_macos_qiling(code);
+    ql2.mem().map(0x2000, 0x1000, UC_PROT_ALL, "[macos-scratch]");
+    ql2.mem().write(0x2100, msg);
+    EXPECT_THROW(ql2.run(), qiling::QlErrorBase);
+}
+
 TEST(MacosOs, CsopsWritesFlagAndReturnsSuccess) {
     auto ql = make_macos_qiling(csops_body());
     ql.mem().map(0x2000, 0x1000, UC_PROT_ALL, "[macos-scratch]");  // the page-aligned base (the 0x2100 cells ride inside)

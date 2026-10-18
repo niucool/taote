@@ -82,6 +82,10 @@ QlOsMacos::QlOsMacos(Qiling* ql) : QlOsPosix(ql) {
     macho_task_ = std::make_unique<MachoTask>();
     macho_thread_ = std::make_unique<MachoThread>();
     macho_fs_ = std::make_unique<FileSystem>(*ql);
+    // the MIG servers (the upstream seeds them in loader/macho.py run();
+    // the port seeds here with the same deviation note as the mach surfaces)
+    macho_host_server_ = std::make_unique<MachHostServer>(*ql);
+    macho_task_server_ = std::make_unique<MachTaskServer>(*ql);
 
     // macos.py __init__: self.ev_manager = QlMacOSEvManager(self.ql);
     // self.policy_manager = QlMacOSPolicy(self.ql, self.ev_manager). The
@@ -238,6 +242,31 @@ void QlOsMacos::run() {
     // macos.py: the normal return clears RUN (the post-run emits queue for
     // the trigger drain)
     RUN = false;
+}
+
+// mach_port.py MachPortManager.deal_with_msg: the msgh_id dispatch with the
+// reply written back over the request buffer (in place)
+void QlOsMacos::deal_with_msg(const MachMsg& msg, std::uint64_t addr) {
+    MachMsg out_msg;
+    switch (msg.header.msgh_id) {
+    case 200:
+        // host info
+        out_msg = macho_host_server_->host_info(msg.header, msg.content);
+        break;
+    case 206:
+        out_msg = macho_host_server_->host_get_clock_service(msg.header, msg.content);
+        break;
+    case 3418:
+        out_msg = macho_task_server_->semaphore_create(msg.header, msg.content);
+        break;
+    case 3409:
+        out_msg = macho_task_server_->get_special_port(msg.header, msg.content);
+        break;
+    default:
+        // "Error Mach Msgid {} can not handled" + the upstream's Exception
+        throw QlErrorBase("Mach Msgid Not Found");
+    }
+    out_msg.write_msg_to_mem(*ql_, addr);
 }
 
 }  // namespace macos

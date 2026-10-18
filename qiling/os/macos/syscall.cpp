@@ -1,7 +1,8 @@
 // Ported from qiling/os/macos/syscall.py — the macos-specific handlers.
 // The first slice: the mach self-trap family (mach_reply_port 0x1a,
 // thread_self_trap 0x1b, task_self_trap 0x1c, host_self_trap 0x1d) + the
-// simple stubs (csops, getentropy).
+// simple stubs (csops, getentropy). The message-trap family (mach_msg_trap
+// 0x1f) rides the mach_msg/subsystems ports.
 #include "qiling/os/macos/syscall.hpp"
 
 #include <cstdio>
@@ -10,6 +11,7 @@
 #include "qiling/core.hpp"
 #include "qiling/os/macos/const.hpp"
 #include "qiling/os/macos/macos.hpp"
+#include "qiling/os/macos/mach_msg.hpp"
 #include "qiling/os/macos/kernel_func.hpp"
 #include "qiling/os/posix/syscall.hpp"
 #include "qiling/arch/x86.hpp"
@@ -378,6 +380,21 @@ std::optional<std::int64_t> syscall_getrlimit(Qiling& ql, const std::vector<std:
     return std::nullopt;
 }
 
+// syscall.py ql_syscall_mach_msg_trap(ql, args, opt, ssize, rsize, rname,
+// timeout): read the message at args with ssize, then the port-manager
+// dispatch (the reply overwrites the request buffer in place). NOTE: the
+// upstream parses NO MACH_SEND/MACH_RCV flags — the opt argument is only
+// logged; every trap rides the id dispatch verbatim
+std::optional<std::int64_t> syscall_mach_msg_trap(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    const auto args = params[0];
+    const auto ssize = params[2];
+    auto& os_macos = dynamic_cast<QlOsMacos&>(ql.os());
+    MachMsg mach_msg;
+    mach_msg.read_msg_from_mem(ql, args, ssize);
+    os_macos.deal_with_msg(mach_msg, args);
+    return KERN_SUCCESS;
+}
+
 }  // namespace
 
 void register_macos_syscalls() {
@@ -386,6 +403,10 @@ void register_macos_syscalls() {
     registry.register_syscall({"thread_self_trap", {}, syscall_thread_self_trap});
     registry.register_syscall({"task_self_trap", {}, syscall_task_self_trap});
     registry.register_syscall({"host_self_trap", {}, syscall_host_self_trap});
+    registry.register_syscall({"mach_msg_trap",
+                               {PARAM_PTRX, PARAM_INTN, PARAM_INTN, PARAM_INTN, PARAM_INTN,
+                                PARAM_INTN},
+                               syscall_mach_msg_trap});
     registry.register_syscall({"csops", {PARAM_INTN, PARAM_INTN, PARAM_PTRX, PARAM_INTN}, syscall_csops});
     registry.register_syscall({"getentropy", {PARAM_PTRX, PARAM_INTN}, syscall_getentropy});
     registry.register_syscall({"access_macos", {PARAM_PTRX, PARAM_INTN}, syscall_access_macos});
