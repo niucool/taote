@@ -2755,3 +2755,119 @@ TEST(WinApiWinnls, UiLanguagesRideProfileSections) {
     ASSERT_TRUE(rgs.has_value());
     EXPECT_EQ(*rgs, 1093u);
 }
+
+TEST(WinApiWinbase, LegacyStubsAndFatalExitRideVerbatim) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    // WinExec: the verbatim 33
+    const auto* we = ApiRegistry::instance().find("WinExec");
+    ASSERT_NE(we, nullptr);
+    const auto rw = we->handler(ql, 0, ResolvedParams{{"lpCmdLine", std::string("anything")}, {"uCmdShow", 0ull}});
+    ASSERT_TRUE(rw.has_value());
+    EXPECT_EQ(*rw, 33u);
+
+    // SetHandleCount: the verbatim uNumber passthrough
+    const auto* shc = ApiRegistry::instance().find("SetHandleCount");
+    ASSERT_NE(shc, nullptr);
+    const auto rs = shc->handler(ql, 0, ResolvedParams{{"uNumber", 20ull}});
+    ASSERT_TRUE(rs.has_value());
+    EXPECT_EQ(*rs, 20u);
+
+    // FindResourceA: the TODO verbatim 0
+    const auto* fr = ApiRegistry::instance().find("FindResourceA");
+    ASSERT_NE(fr, nullptr);
+    const auto rf = fr->handler(ql, 0, ResolvedParams{{"hModule", 0ull}, {"lpName", std::string("r")}, {"lpType", std::string("t")}});
+    ASSERT_TRUE(rf.has_value());
+    EXPECT_EQ(*rf, 0u);
+
+    // the IsBad* pair: the verbatim 0 (ACCESS_TRUE)
+    const auto* ibr = ApiRegistry::instance().find("IsBadReadPtr");
+    ASSERT_NE(ibr, nullptr);
+    const auto rr = ibr->handler(ql, 0, ResolvedParams{{"lp", kScratch}, {"ucb", 0x10ull}});
+    ASSERT_TRUE(rr.has_value());
+    EXPECT_EQ(*rr, 0u);
+
+    const auto* ibw = ApiRegistry::instance().find("IsBadWritePtr");
+    ASSERT_NE(ibw, nullptr);
+    const auto rbw = ibw->handler(ql, 0, ResolvedParams{{"lp", kScratch}, {"ucb", 0x10ull}});
+    ASSERT_TRUE(rbw.has_value());
+    EXPECT_EQ(*rbw, 0u);
+}
+
+TEST(WinApiWinbase, LFileFamilyRidesRealDescriptors) {
+    register_dlls();
+
+    // the stage file under the rootfs so the mapper's virtual path resolves
+    const auto rootfs = std::filesystem::temp_directory_path() / "ql_winbase_rootfs";
+    std::filesystem::create_directories(rootfs);
+    const auto stage = rootfs / "stage.txt";
+    {
+        std::ofstream out(stage, std::ios::binary);
+        out << "hello files";
+    }
+
+    QilingOptions options;
+    options.code = std::vector<std::uint8_t>{0xC3};
+    options.rootfs = rootfs.string();
+    options.ostype = QL_OS::WINDOWS;
+    options.archtype = QL_ARCH::X8664;
+    Qiling ql(options);
+
+    // _lcreat: the verbatim w+b mode walk; the dup'd descriptor rides back
+    const auto* lc = ApiRegistry::instance().find("_lcreat");
+    ASSERT_NE(lc, nullptr);
+    const auto rc = lc->handler(ql, 0, ResolvedParams{{"lpPathName", std::string("stage.txt")}, {"iAttribute", 0ull}});
+    ASSERT_TRUE(rc.has_value());
+    ASSERT_NE(*rc, static_cast<std::uint64_t>(-1));
+    const auto fd_create = static_cast<int>(*rc);
+
+    // _lwrite over that descriptor
+    const auto* lw = ApiRegistry::instance().find("_lwrite");
+    ASSERT_NE(lw, nullptr);
+    ql.mem().write(kScratch, std::vector<std::uint8_t>{'A', 'B'});
+    const auto rw = lw->handler(ql, 0, ResolvedParams{{"hFile", static_cast<std::uint64_t>(fd_create)}, {"lpBuffer", kScratch}, {"uBytes", 2ull}});
+    ASSERT_TRUE(rw.has_value());
+    EXPECT_EQ(*rw, 2u);
+
+    // _lclose: the verbatim fileno return
+    const auto* lcl = ApiRegistry::instance().find("_lclose");
+    ASSERT_NE(lcl, nullptr);
+    const auto rcl = lcl->handler(ql, 0, ResolvedParams{{"hFile", static_cast<std::uint64_t>(fd_create)}});
+    ASSERT_TRUE(rcl.has_value());
+    EXPECT_EQ(*rcl, static_cast<std::uint64_t>(fd_create));
+
+    // _lopen: the read mode
+    const auto* lo = ApiRegistry::instance().find("_lopen");
+    ASSERT_NE(lo, nullptr);
+    const auto ro = lo->handler(ql, 0, ResolvedParams{{"lpPathName", std::string("stage.txt")}, {"iReadWrite", 0ull}});
+    ASSERT_TRUE(ro.has_value());
+    ASSERT_NE(*ro, static_cast<std::uint64_t>(-1));
+    const auto fd_open = static_cast<int>(*ro);
+
+    // _lread: the written 'AB' bytes ride back (the w+b truncation happened)
+    const auto* lr = ApiRegistry::instance().find("_lread");
+    ASSERT_NE(lr, nullptr);
+    ql.mem().write(kScratch + 0x100, std::vector<std::uint8_t>(8, 0x7E));
+    const auto rr = lr->handler(ql, 0, ResolvedParams{{"hFile", static_cast<std::uint64_t>(fd_open)}, {"lpBuffer", kScratch + 0x100}, {"uBytes", 4ull}});
+    ASSERT_TRUE(rr.has_value());
+    EXPECT_EQ(*rr, 2u);
+    const auto got = ql.mem().read(kScratch + 0x100, 2);
+    EXPECT_EQ(got, (std::vector<std::uint8_t>{'A', 'B'}));
+
+    // _llseek to 0 then re-read
+    const auto* ls = ApiRegistry::instance().find("_llseek");
+    ASSERT_NE(ls, nullptr);
+    const auto rsk = ls->handler(ql, 0, ResolvedParams{{"hFile", static_cast<std::uint64_t>(fd_open)}, {"lOffset", 0ull}, {"iOrigin", 0ull}});
+    ASSERT_TRUE(rsk.has_value());
+    EXPECT_EQ(*rsk, 0u);
+
+    const auto* lcl2 = ApiRegistry::instance().find("_lclose");
+    const auto rcl2 = lcl2->handler(ql, 0, ResolvedParams{{"hFile", static_cast<std::uint64_t>(fd_open)}});
+    ASSERT_TRUE(rcl2.has_value());
+
+    // the negative handle rides the verbatim HFILE_ERROR (-1) on every arm
+    const auto rerr = lr->handler(ql, 0, ResolvedParams{{"hFile", static_cast<std::uint64_t>(-1)}, {"lpBuffer", kScratch}, {"uBytes", 4ull}});
+    ASSERT_TRUE(rerr.has_value());
+    EXPECT_EQ(*rerr, static_cast<std::uint64_t>(-1));
+}
