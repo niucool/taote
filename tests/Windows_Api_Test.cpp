@@ -2259,3 +2259,25 @@ TEST(WinApiErrhandling, RaiseExceptionPassthruOnX64) {
     });
     EXPECT_FALSE(r.has_value());
 }
+
+TEST(WinApiProfileapi, QueryPerformancePairRideVerbatimShapes) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    // the counter: the verbatim 0 with NO write into the caller's cell
+    ql.mem().write(kCells, std::vector<std::uint8_t>(8, 0x7E));
+    const auto* qpc = ApiRegistry::instance().find("QueryPerformanceCounter");
+    ASSERT_NE(qpc, nullptr);
+    const auto r = qpc->handler(ql, 0, ResolvedParams{{"lpPerformanceCount", kCells}});
+    ASSERT_TRUE(r.has_value());
+    EXPECT_EQ(*r, 0u);
+    EXPECT_EQ(ql.mem().read_ptr(kCells, 8), 0x7E7E7E7E7E7E7E7Eull);  // untouched
+
+    // the frequency: the verbatim 10000000 write + the 1 return
+    const auto* qpf = ApiRegistry::instance().find("QueryPerformanceFrequency");
+    ASSERT_NE(qpf, nullptr);
+    const auto rf = qpf->handler(ql, 0, ResolvedParams{{"lpFrequency", kCells + 0x100}});
+    ASSERT_TRUE(rf.has_value());
+    EXPECT_EQ(*rf, 1u);
+    EXPECT_EQ(ql.mem().read_ptr(kCells + 0x100, 8), 10000000ull);
+}

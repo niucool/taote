@@ -17,6 +17,7 @@
 #include "qiling/os/windows/dlls/kernel32/processenv.cpp"
 #include "qiling/os/windows/dlls/kernel32/interlockedapi.cpp"
 #include "qiling/os/windows/dlls/kernel32/errhandlingapi.cpp"
+#include "qiling/os/windows/dlls/kernel32/profileapi.cpp"
 
 namespace qiling {
 namespace os {
@@ -33,6 +34,7 @@ void register_dlls() {
     win::register_processenv_family();
     win::register_interlockedapi_family();
     win::register_errhandlingapi_family();
+    win::register_profileapi_family();
 }
 
 // the static-init registration (the python module-import side effect)
