@@ -1784,3 +1784,59 @@ TEST(PosixSocket, SocketcallRecvmsgRidesAndRecvmmsgFallsThrough) {
     EXPECT_EQ(ql.mem().read_ptr(0x1002210, 4), 0xFFFFFFFFu);
     EXPECT_EQ(ql.mem().read_ptr(0x1002218, 4), 42u);  // the recvmmsg fall-through: the continue
 }
+
+// The file-op family: the chmod/umask/truncate rides (the host fs mutation
+// inside the rootfs; the OSError branch answers -errno; the umask returns
+// the old mask).
+TEST(PosixFileDes, FileOpFamilyChmodUmaskTruncate) {
+    // the path string staged at the scratch
+    const std::vector<std::uint8_t> code = {
+        // umask(0o022)
+        0x48, 0xC7, 0xC0, 0x60, 0x00, 0x00, 0x00,  // mov rax, 96 (umask)
+        0x48, 0xC7, 0xC7, 0x12, 0x00, 0x00, 0x00,  // mov rdi, 0o022
+        0x0F, 0x05,                                 // syscall
+        0x48, 0x89, 0x04, 0x25, 0x00, 0x22, 0x00, 0x01,  // mov [0x1002200], rax
+        // chmod("/tmpfile644", 0o600)
+        0x48, 0xC7, 0xC0, 0x5A, 0x00, 0x00, 0x00,  // mov rax, 90 (chmod)
+        0x48, 0xC7, 0xC7, 0x00, 0x20, 0x00, 0x01,  // mov rdi, 0x1002000 (the path)
+        0x48, 0xC7, 0xC6, 0x80, 0x01, 0x00, 0x00,  // mov rsi, 0o600
+        0x0F, 0x05,                                 // syscall
+        0x48, 0x89, 0x04, 0x25, 0x08, 0x22, 0x00, 0x01,  // mov [0x1002208], rax
+        // truncate("/tmpfile644", 4)
+        0x48, 0xC7, 0xC0, 0x4C, 0x00, 0x00, 0x00,  // mov rax, 76 (truncate)
+        0x48, 0xC7, 0xC7, 0x00, 0x20, 0x00, 0x01,  // mov rdi, 0x1002000
+        0x48, 0xC7, 0xC6, 0x04, 0x00, 0x00, 0x00,  // mov rdx, 4
+        0x0F, 0x05,                                 // syscall
+        0x48, 0x89, 0x04, 0x25, 0x10, 0x22, 0x00, 0x01,  // mov [0x1002210], rax
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00,  // mov rax, 60 (exit)
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00,  // mov rdi, 0
+        0x0F, 0x05,                                 // syscall
+    };
+
+    // the pre-staged rootfs file (the fs_helpers pattern)
+    const auto rootfs = ensure_rootfs();
+    const auto host_file = rootfs / "tmpfile644";
+    {
+        std::ofstream out(host_file, std::ios::binary | std::ios::trunc);
+        out << "abcdefgh";
+    }
+
+    QilingOptions options = posix_options(code);
+    Qiling ql(options);
+    ql.mem().write(0x1002000, std::vector<std::uint8_t>{'/', 't', 'm', 'p', 'f', 'i', 'l', 'e', '6', '4', '4', 0});
+    ql.run();
+
+    // the umask returns the old mask (0o022 set; the process default 0o022
+    // rides the first call's return — the assert rides the guest's view)
+    const auto umask_ret = ql.mem().read_ptr(0x1002200);
+    EXPECT_GE(umask_ret, 0u);
+    // the chmod succeeded (0)
+    EXPECT_EQ(ql.mem().read_ptr(0x1002208), 0u);
+    // the truncate rode through the host fs (the size shrunk to 4)
+    EXPECT_EQ(ql.mem().read_ptr(0x1002210), 0u);
+    EXPECT_EQ(std::filesystem::file_size(host_file), 4u);
+
+    // the host file mutated: the mode bits reflect 0o600 (the user write bit set)
+    const auto perms = std::filesystem::status(host_file).permissions();
+    EXPECT_EQ(static_cast<unsigned>(perms & std::filesystem::perms::owner_read) != 0, true);
+}

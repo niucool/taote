@@ -1,4 +1,9 @@
 #include <cstdio>
+#include <sys/stat.h>
+#include <sys/types.h>
+#ifdef _WIN32
+#include <io.h>
+#endif
 #include "qiling/os/posix/syscall.hpp"
 #include "qiling/os/posix/mman.hpp"
 #include "qiling/os/posix/signal.hpp"
@@ -98,6 +103,108 @@ bool fd_in_range(std::int64_t fd) {
 
 // empty)
 std::string read_cstring(Qiling& ql, std::uint64_t addr);
+
+// stat.py ql_syscall_chmod: the virtual path, the host chmod inside the
+// rootfs (the OSError branch answers -errno)
+std::optional<std::int64_t> syscall_chmod(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    const auto vpath = read_cstring(ql, params[0]);
+    const auto mode = static_cast<unsigned>(params[1]);
+    const auto hpath = ql.os().path()->virtual_to_host_path(vpath);
+
+    if (!ql.os().path()->is_safe_host_path(hpath)) {
+        throw QlErrorBase("unsafe path: " + hpath);
+    }
+
+    std::error_code ec;
+    std::filesystem::permissions(hpath, static_cast<std::filesystem::perms>(mode), ec);
+    return ec ? -ec.value() : 0;
+}
+
+// stat.py ql_syscall_fchmod: the fd range/table check, the host fchmod via
+// the fd's fileno (the OSError branch answers -errno)
+std::optional<std::int64_t> syscall_fchmod(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    const auto fd = static_cast<std::int64_t>(params[0]);
+    const auto mode = static_cast<unsigned>(params[1]);
+
+    if (!fd_in_range(fd)) {
+        return -kEBADF;
+    }
+    auto f = fd_get(ql, fd);
+    if (f == nullptr) {
+        return -kEBADF;
+    }
+
+    std::error_code ec;
+    std::filesystem::permissions(std::filesystem::path(f->name()), static_cast<std::filesystem::perms>(mode), ec);
+    return ec ? -ec.value() : 0;
+}
+
+// stat.py ql_syscall_mkdir: the virtual path, the host mkdir inside the
+// rootfs (the OSError branch answers -errno)
+std::optional<std::int64_t> syscall_mkdir(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    const auto vpath = read_cstring(ql, params[0]);
+    const auto mode = static_cast<unsigned>(params[1]);
+    const auto hpath = ql.os().path()->virtual_to_host_path(vpath);
+
+    if (!ql.os().path()->is_safe_host_path(hpath)) {
+        throw QlErrorBase("unsafe path: " + hpath);
+    }
+
+    std::error_code ec;
+    std::filesystem::create_directory(hpath, ec);
+    return ec ? -ec.value() : 0;
+}
+
+// stat.py ql_syscall_rmdir: the virtual path, the host rmdir (the OSError
+// branch answers -errno)
+std::optional<std::int64_t> syscall_rmdir(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    const auto vpath = read_cstring(ql, params[0]);
+    const auto hpath = ql.os().path()->virtual_to_host_path(vpath);
+
+    if (!ql.os().path()->is_safe_host_path(hpath)) {
+        throw QlErrorBase("unsafe path: " + hpath);
+    }
+
+    std::error_code ec;
+    std::filesystem::remove(hpath, ec);
+    return ec ? -ec.value() : 0;
+}
+
+// stat.py ql_syscall_umask: the plain os.umask ride (the old mask returns)
+std::optional<std::int64_t> syscall_umask(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    const auto mode = static_cast<unsigned>(params[0]);
+#ifdef _WIN32
+    const auto oldmask = ::_umask(static_cast<int>(mode));
+#else
+    const auto oldmask = ::umask(static_cast<mode_t>(mode));
+#endif
+    return oldmask;
+}
+
+// unistd.py __do_truncate + ql_syscall_truncate/ftruncate: the host
+// truncate inside the rootfs (the OSError branch answers -errno)
+std::optional<std::int64_t> do_truncate(Qiling& ql, const std::string& hpath, std::uint64_t length) {
+    std::error_code ec;
+    std::filesystem::resize_file(hpath, length, ec);
+    return ec ? -ec.value() : 0;
+}
+
+std::optional<std::int64_t> syscall_truncate(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    const auto vpath = read_cstring(ql, params[0]);
+    const auto hpath = ql.os().path()->virtual_to_host_path(vpath);
+    return do_truncate(ql, hpath, params[1]);
+}
+
+std::optional<std::int64_t> syscall_ftruncate(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    const auto fd = static_cast<std::int64_t>(params[0]);
+    const auto length = params[1];
+
+    auto f = fd_get(ql, fd);
+    if (f == nullptr) {
+        return -kEBADF;
+    }
+    return do_truncate(ql, f->name(), length);
+}
 
 std::optional<std::int64_t> syscall_exit(Qiling& ql, const std::vector<std::uint64_t>& params) {
     // unistd.py ql_syscall_exit: the child-process and the multithread
@@ -1266,6 +1373,13 @@ void register_builtin_syscalls() {
     registry.register_syscall({"close", {PARAM_INTN}, syscall_close});
 
     // the fd-table set (fcntl.py + unistd.py)
+    registry.register_syscall({"chmod", {PARAM_PTRX, PARAM_INTN}, syscall_chmod});
+    registry.register_syscall({"fchmod", {PARAM_INTN, PARAM_INTN}, syscall_fchmod});
+    registry.register_syscall({"mkdir", {PARAM_PTRX, PARAM_INTN}, syscall_mkdir});
+    registry.register_syscall({"rmdir", {PARAM_PTRX}, syscall_rmdir});
+    registry.register_syscall({"umask", {PARAM_INTN}, syscall_umask});
+    registry.register_syscall({"truncate", {PARAM_PTRX, PARAM_INTN}, syscall_truncate});
+    registry.register_syscall({"ftruncate", {PARAM_INTN, PARAM_INTN}, syscall_ftruncate});
     registry.register_syscall({"open", {PARAM_PTRX, PARAM_INTN, PARAM_INTN}, syscall_open});
     registry.register_syscall({"openat", {PARAM_INTN, PARAM_PTRX, PARAM_INTN, PARAM_INTN}, syscall_open});
     registry.register_syscall({"creat", {PARAM_PTRX, PARAM_INTN}, syscall_creat});

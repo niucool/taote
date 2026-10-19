@@ -284,7 +284,7 @@ The ELF container parsing, the interpreter loading, the vsyscall page, the ET_RE
 
 - **upstream bug kept visible**: the Python hook_strncmp reads `params["str"]` (a KeyError away from working); the port resolves str1.
 - **the STRING params arrive as raw pointers** (the resolver machinery defers): the string-touching handlers read the guest cstrings through a helper (read_cstring_helper).
-- **kernel_api.py's handler surface is 64 hook_ functions**; the port carries ~50 (the typed-struct handlers - the cred/filp field accessors - defer with the struct slices).
+- **kernel_api.py's handler surface is 64 hook_ functions**; the port carries all 64 (the full-surface count verified by the registry-name diff at the close of the hw phase — the earlier ~50 note was stale).
 
 ## Phase 5 - the os/linux tree slice: QlOsLinux + procfs (250/250 gtest green)
 
