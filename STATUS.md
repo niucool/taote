@@ -1188,6 +1188,27 @@ Crc/Usb/Can/Bkp/Pwr/Wwdg/Iwdg classes (the mk64f12/sam3/gd32 boards ride the
 same slice pattern); the stm32f103 board table + the load_env 'peripheral'
 items ride the board-assembly slice once the peripheral classes land.
 
+### Phase 13.8 — the board-profile batches 1-2 + the stm32f103 board assembly
+
+| piece | upstream | state | notes |
+|---|---|---|---|
+| STM32F1xxRcc | `hw/misc/stm32f1xx_rcc.py` | ✅ | the 40-byte image (the CR/CFGR/CIR/APB2RSTR/APB1RSTR/AHBENR/APB2ENR/APB1ENR/BDCR/CSR), the CR/CFGR/CSR seeds (0x83/0x14/0x0C000000), the rdyon step walk (the on-bits reflect into the ready bits over the CR HSI/HSE/PLL/PLLI2S + the CFGR SWS/SW + the CSR LSI tables) |
+| STM32F1xxFlash | `hw/flash/stm32f1xx_flash.py` | ✅ | the plain 36-byte image (the ACR..WRPR monitor bodies) |
+| STM32F1xxAdc | `hw/analog/stm32f1xx_adc.py` (+ the const tables) | ✅ | the 80-byte image (the SR..DR), the DR 0x7ff seed, the CR2 write with the RSTCAL/CAL/SWSTART self-clearing walks (the SWSTART sets the EOS) |
+| STM32F1xxSpi | `hw/spi/stm32f1xx_spi.py` | ✅ | the 32-byte tube-paired image (the CR1..I2SCFGR), the seed (the SR 0x0B, the DR 0x0C, the CRCPR 7), the DR read riding the input tube, the DR write to the output tube, the send_interrupt (the nvic pending) |
+| CortexMBitband | `hw/mem/cm_bitband.py` | ✅ | the bit-banding bridge (the base|((offset&0x1ffffff)>>5) walk, the read/write through the aliased word with the bit pick/set) |
+| MemoryRemap | `hw/mem/remap.py` | ✅ | the mem-backed pass-through region |
+| STM32F1xxDma | `hw/dma/stm32f1xx_dma.py` | ✅ | the Stream record (CR/NDTR/PAR/MAR) + the one-unit step walk (the mem copy with the PSIZE/MSIZE alignments + the MINC/PINC), the last transfer clearing the EN + the transfer_complete (the ISR TC bit table + the nvic pending), the ISR-write-ignore + the IFCR-clear walks, the stream-intn table |
+| STM32F4xxI2c/F1xx | `hw/i2c/stm32f4xx_i2c.py` | ✅ | the 9-register image, the recorder-driven SR1/SR2 pair ADDR clear, the CR1 START/STOP generation walks (the SB + the master/slave modes), the DR master walk (the OAR1 match + the ADDR/TXE/AF + the TRA + the send_data tube ride), the send_event_interrupt (the BUF/SLAVE/MASTER SR1 walks) |
+| stm32f103 board table | `extensions/mcu/stm32f1/stm32f103.py` | ✅ | the full board env (the memory/mmio/core/peripheral items with the kwargs) as the port's encoded records; the loader's load_env creates the peripheral items (the port-side fold-in of the upstream's load_all — the upstream load_env ignores them); the upstream-missing classes (the Wwdg/Iwdg/Bkp/Pwr/Usb/Can/Crc/Rtc/Dbgmcu) degrade to absent entities mirroring the upstream's module-not-found warn |
+| the fixtures | `tests/Hw_Test.cpp` | ✅ | the batch-1 fixture (the rcc rdyon, the adc SWSTART self-clear, the spi tube round trip, the bitband SRAM bit flip), the batch-2 fixture (the dma1 mem-to-mem copy + the stream-1 TC pend + the i2c1 START/DR address-match walk), the board fixture (the 25-entry assembly + the missing-class degradation + the exti0 pend through the board table) |
+
+Findings: the std::vector .data() vs &vector gotcha (the bitband's memcpy
+copied the vector object's internals into the write buffer — the segfault
+bisected to the write walk); the board table's peripheral items ride the
+load_env create (the deviation documented) — the upstream's load_all exists
+but nothing calls it in the mcu path.
+
 ### Phase 12 sub-slice 3 — socketpair + the send/recv family
 
 | piece | upstream | state | notes |

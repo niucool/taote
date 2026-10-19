@@ -167,9 +167,25 @@ void QlLoaderMCU::load_env() {
                     return static_cast<char>(std::tolower(c));
                 });
                 ql_->hw()->create(lower, parts[1], number(parts[2]), kwargs);
-            } else if (type == "peripheral") {
-                // the peripheral items ride the explicit create calls (the
-                // upstream load_all path — the test harness creates them)
+            } else if (type == "peripheral" && parts.size() >= 3) {
+                // the peripheral items ride the create walk (the port-side
+                // fold-in of the upstream's load_all — the upstream load_env
+                // ignores them with a debug log and the harnesses create the
+                // peripherals explicitly); the upstream-missing struct names
+                // degrade to null (the entity stays absent — the upstream's
+                // "implementation not found" warn shape)
+                QlHwManager::PeripheralKwargs kwargs;
+                for (std::size_t i = 3; i < parts.size(); ++i) {
+                    const auto eq = parts[i].find('=');
+                    if (eq != std::string::npos) {
+                        kwargs[parts[i].substr(0, eq)] = number(parts[i].substr(eq + 1));
+                    }
+                }
+                auto lower = name;
+                std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) {
+                    return static_cast<char>(std::tolower(c));
+                });
+                (void)ql_->hw()->create(lower, parts[1], number(parts[2]), kwargs);
             } else {
                 // the unknown types log-and-ignore (the upstream debug walk)
             }

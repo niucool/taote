@@ -21,6 +21,7 @@
 #include "qiling/hw/stm32f1xx_exti.hpp"
 #include "qiling/hw/stm32f1xx_simple.hpp"
 #include "qiling/hw/stm32f1xx_interactive.hpp"
+#include "qiling/hw/stm32f103_board.hpp"
 #include "qiling/hw/stm32f1xx_gpio.hpp"
 #include "qiling/hw/stm32f4xx_usart.hpp"
 #include "qiling/exception.hpp"
@@ -743,4 +744,60 @@ TEST(HwManager, Stm32f1xxDmaStreamTransfersAndI2cMasterWalk) {
     const auto out = i2c1->recv(2);
     ASSERT_EQ(out.size(), 1u);
     EXPECT_EQ(out[0], 0x77);
+}
+
+// The stm32f103 board-table assembly: the full board env rides the loader's
+// load_env walk (the memory/mmio/core/peripheral items); the implemented
+// families instantiate, the upstream-missing classes degrade to absent
+// entities, and the mmio walk resolves the gpioa through the board regions.
+TEST(HwManager, Stm32f103BoardAssemblesPeripheralsAndDegradesMissing) {
+    const auto hex_path = write_ihex_fixture();
+
+    QilingOptions options;
+    options.argv = {hex_path};
+    options.rootfs = ensure_hw_rootfs().string();
+    options.ostype = QL_OS::MCU;
+    options.archtype = QL_ARCH::CORTEX_M;
+    options.env = qiling::hw::stm32f103_board_env();
+    Qiling ql(options);
+
+    // the implemented families ride the board table
+    EXPECT_NE(ql.hw()->peripheral("gpioa"), nullptr);
+    EXPECT_NE(ql.hw()->peripheral("gpioe"), nullptr);
+    EXPECT_NE(ql.hw()->peripheral("afio"), nullptr);
+    EXPECT_NE(ql.hw()->peripheral("exti"), nullptr);
+    EXPECT_NE(ql.hw()->peripheral("tim2"), nullptr);
+    EXPECT_NE(ql.hw()->peripheral("usart2"), nullptr);
+    EXPECT_NE(ql.hw()->peripheral("i2c1"), nullptr);
+    EXPECT_NE(ql.hw()->peripheral("spi1"), nullptr);
+    EXPECT_NE(ql.hw()->peripheral("adc1"), nullptr);
+    EXPECT_NE(ql.hw()->peripheral("dma1"), nullptr);
+    EXPECT_NE(ql.hw()->peripheral("rcc"), nullptr);
+    EXPECT_NE(ql.hw()->peripheral("flash interface"), nullptr);
+    EXPECT_NE(ql.hw()->peripheral("systick"), nullptr);
+    EXPECT_NE(ql.hw()->peripheral("nvic"), nullptr);
+    EXPECT_NE(ql.hw()->peripheral("scb"), nullptr);
+
+    // the upstream-missing classes degrade to absent entities
+    EXPECT_EQ(ql.hw()->peripheral("wwdg"), nullptr);
+    EXPECT_EQ(ql.hw()->peripheral("iwdg"), nullptr);
+    EXPECT_EQ(ql.hw()->peripheral("bkp"), nullptr);
+    EXPECT_EQ(ql.hw()->peripheral("pwr"), nullptr);
+    EXPECT_EQ(ql.hw()->peripheral("crc"), nullptr);
+    EXPECT_EQ(ql.hw()->peripheral("rtc"), nullptr);
+
+    // the mmio walk: the BSRR store to the GPIOA through the board's PERIP
+    // region rides the gpio pin walk
+    auto* gpioa = static_cast<qiling::hw::STM32F1xxGpio*>(ql.hw()->peripheral("gpioa"));
+    gpioa->write(16, 4, 1);  // the BSRR sets the pin 0
+    EXPECT_EQ(gpioa->pin(0), 1u);
+
+    // the exti0 intn rides the board table (6)
+    auto* exti = static_cast<qiling::hw::STM32F1xxExti*>(ql.hw()->peripheral("exti"));
+    auto* nvic = static_cast<qiling::hw::CortexMNvic*>(ql.hw()->peripheral("nvic"));
+    nvic->enable(6);
+    exti->write_body(exti->kImrOffset, 4, 1);
+    exti->write_body(exti->kSwierOffset, 4, 1);
+    ASSERT_EQ(nvic->pending_interrupts().size(), 1u);
+    EXPECT_EQ(nvic->pending_interrupts().back(), 6);
 }
