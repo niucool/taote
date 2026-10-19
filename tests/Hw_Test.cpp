@@ -24,6 +24,7 @@
 #include "qiling/hw/sam3xa.hpp"
 #include "qiling/hw/gd32vf1xx.hpp"
 #include "qiling/hw/mk64f12.hpp"
+#include "qiling/os/mcu.hpp"
 #include "qiling/hw/board_env.hpp"
 #include "qiling/hw/stm32f1xx_gpio.hpp"
 #include "qiling/hw/stm32f4xx_usart.hpp"
@@ -1123,4 +1124,46 @@ TEST(HwManager, Stm32f4xxSpiVariantMasksAndContainWalks) {
     (void)f1;
     EXPECT_TRUE(qiling::hw::QlPeripheral::contain(0x0C, 4, 0x0E, 2));
     EXPECT_FALSE(qiling::hw::QlPeripheral::contain(0x0C, 4, 0x10, 4));
+}
+
+// The fast-mode MCUTask walk: the interval-slice emu runs with the hw.step
+// between them (the MCUTask on_interrupted shape); the systick blob rides
+// the same TICKINT dispatch as the non-fast fixture, with the count riding
+// the schedule count.
+TEST(HwManager, FastModeMcuRunDrivesHwStepPerIntervalSlice) {
+    const auto hex_path = write_ihex_fixture();
+    QilingOptions options;
+    options.argv = {hex_path};
+    options.rootfs = ensure_hw_rootfs().string();
+    options.ostype = QL_OS::MCU;
+    options.archtype = QL_ARCH::CORTEX_M;
+    options.env = {
+        {"FLASH", "memory;0x0;0x2000"},
+        {"SRAM", "memory;0x20000000;0x1000"},
+        {"PPB", "mmio;0xE000E000;0x1000"},
+        {"SYSTICK", "core;cm3_systick;0xE000E010"},
+        {"NVIC", "core;cm_nvic;0xE000E100"},
+        {"SCB", "core;cm4_scb;0xE000ED00"},
+    };
+    Qiling ql(options);
+
+    auto* systick = ql.hw()->peripheral("systick");
+    ASSERT_NE(systick, nullptr);
+
+    // the load: LOAD=3, CTRL=ENABLE|TICKINT|CLKSOURCE (the same setup as the
+    // non-fast dispatch fixture)
+    systick->write(4, 4, 3);
+    systick->write(0, 4, 7);
+
+    auto* os_mcu = dynamic_cast<qiling::os::QlOsMcu*>(&ql.os());
+    ASSERT_NE(os_mcu, nullptr);
+    os_mcu->set_fast_mode(true);
+
+    // the count rides the schedule count: 6 slices of the interval walk
+    ql.run(std::nullopt, std::nullopt, 0, 6);
+
+    // the handler stored 42 at the SRAM marker (the dispatch rode the slices)
+    EXPECT_EQ(ql.mem().read_ptr(0x20000000, 4), 42u);
+    // the slices ran (the counter rides the schedule count)
+    EXPECT_EQ(dynamic_cast<qiling::os::QlOsMcu*>(&ql.os())->counter(), 6u);
 }

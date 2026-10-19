@@ -28,6 +28,11 @@ public:
     bool runable() const noexcept { return runable_; }
     std::uint64_t counter() const noexcept { return counter_; }
 
+    // mcu.py fast_mode — the attribute the harnesses set; the fast walk
+    // rides the interval-slice emu runs with the hw.step between them
+    void set_fast_mode(bool on) { fast_mode_ = on; }
+    bool fast_mode() const noexcept { return fast_mode_; }
+
 private:
     bool runable_ = false;
     bool fast_mode_ = false;

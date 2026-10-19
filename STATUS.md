@@ -1325,3 +1325,11 @@ color-pair machinery rides the state shell without a terminal.
 | STM32F4xxSpi | `hw/spi/stm32f4xx_spi.py` | ✅ | the 36-byte image (the CR1..I2SPR — the I2SPR tail the F1xx lacks), the verbatim seeds (the SR 0xB, the DR 0xC, the CRCPR 7, the I2SPR 2), the SR/RXCRCR/TXCRCR write ignores, the CR1/CR2/CRCPR/I2SCFGR/I2SPR RW_MASK stores, the DR store-then-send over the contain span, the device_handler step, the send_interrupt |
 | QlPeripheral::contain | `hw/peripheral.py contain` | ✅ | the access-span check (field <= offset && offset+size <= field+field_size); the STM32F1xxSpi read/write switched from the exact-offset match to the verbatim contain walk |
 | the I2c coverage pin | `hw/i2c/stm32f4xx_i2c.py` | ✅ | the port's STM32F4xxI2c already covers the upstream f4xx i2c shape verbatim (the recorder pair-clear, the CR1 RW_MASK, the DR master walks, the send_event_interrupt, the generate walks, the device_handler step); the fetch_device_address stays stubbed pending the upstream's device-address contract (the upstream reads `device_list[0].address`, an attribute defined only on the external harness chardev objects, not in the hw tree) |
+
+### Phase 13.12 — the mcu fast mode (the interval-slice walk)
+
+| piece | upstream | state | notes |
+|---|---|---|---|
+| QlOsMcu::run fast branch | `os/mcu/mcu.py` (MCUTask + tasks_start) | ✅ | the emu slices per the 100ms interval (the uc timeout in the usec — the uc's interval default rides as the port constant); the hw.step() rides per slice (the on_interrupted body); the fault warns and requests the clean stop (the on_interrupted non-OK shape); the count rides the schedule count; the end/stop checks break the loop |
+| the deviation | — | — | the upstream's fast mode rides the gevent threadpool + the greenlet timeout; the port rides the uc's own emu_start timeout parameter per slice (the same slicing shape without the gevent machinery — the multitask/multi-uc-thread path remains the upstream-only surface) |
+| the fixture | `tests/Hw_Test.cpp` | ✅ | the fast-mode TICKINT dispatch (the systick LOAD=3 + the CTRL TICKINT, the 6 interval slices riding the downcount cross + the handler store through the interrupt context, the counter == 6) |
