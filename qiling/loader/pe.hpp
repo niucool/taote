@@ -20,6 +20,8 @@
 #include <string>
 #include <vector>
 
+#include <LIEF/PE.hpp>
+
 #include "qiling/loader/loader.hpp"
 
 namespace qiling {
@@ -98,6 +100,28 @@ public:
     // TEB/PEB/LDR stack slice wires the real layout
     std::uint64_t peb_address() const noexcept { return peb_address_; }
 
+    // loader/pe.py init_function_tables / lookup_function_entry — the
+    // x64/.pdata RUNTIME_FUNCTION walk (the upstream parses the pefile
+    // DIRECTORY_ENTRY_EXCEPTION objects; the port reads the mapped .pdata
+    // bytes, the same Begin/End fields). The x86 images never populate the
+    // tables (the verbatim arch gate). The Rtl* unwind riders consume these
+    // maps.
+    struct RuntimeFunction {
+        std::uint32_t begin = 0;  // the BeginAddress RVA
+        std::uint32_t end = 0;    // the EndAddress RVA
+    };
+    const std::map<std::uint64_t, std::vector<RuntimeFunction>>& function_tables() const noexcept { return function_tables_; }
+    const std::map<std::uint64_t, std::uint64_t>& function_table_lookup() const noexcept { return function_table_lookup_; }
+
+    // loader/pe.py lookup_function_entry: the (index, entry) whose [begin,
+    // end) range holds control_pc - base_addr, or the {-1, nullptr}
+    std::pair<std::int64_t, const RuntimeFunction*> lookup_function_entry(std::uint64_t base_addr,
+                                                                          std::uint64_t control_pc) const;
+
+    // loader/pe.py init_function_tables — the non-x86 parse over the mapped
+    // .pdata (the exception-table data directory)
+    void init_function_tables(LIEF::PE::Binary* pe, std::uint64_t image_base);
+
     // loader/pe.py init_exports: the main-image exports keyed by the ea
     const std::map<std::uint64_t, ExportSymbol>& export_symbols() const noexcept { return export_symbols_; }
 
@@ -133,6 +157,8 @@ private:
     std::uint64_t dll_last_address_ = 0;
     std::uint8_t peb_being_debugged_ = 0;
     std::uint64_t peb_address_ = 0;
+    std::map<std::uint64_t, std::vector<RuntimeFunction>> function_tables_;
+    std::map<std::uint64_t, std::uint64_t> function_table_lookup_;
     std::uint64_t pe_image_address_ = 0;
     std::map<std::uint64_t, ImportSymbol> import_symbols_;
     std::map<std::uint64_t, ExportSymbol> export_symbols_;

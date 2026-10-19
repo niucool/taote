@@ -16,6 +16,8 @@
 
 #include <spdlog/spdlog.h>
 
+#include <filesystem>
+
 #include "qiling/exception.hpp"
 
 namespace qiling {
@@ -271,6 +273,68 @@ std::optional<std::uint64_t> set_information_process(Qiling& ql, const ResolvedP
     }
 
     return STATUS_SUCCESS;
+}
+
+// ---- the OBJECT_TYPE/OBJECT_ALL_TYPES writers (structs.py
+// make_unicode_string/make_object_type_info/make_object_all_types_info) ----
+// the aligned ctypes layouts: the UNICODE_STRING rides the Length u16 @0,
+// the MaximumLength u16 @2, the Buffer @4 (x86) / @8 (x64). The x64
+// OBJECT_TYPE_INFORMATION: the TypeName @0 (16), the counts @16/@20 — 24
+// bytes; the OBJECT_ALL_TYPES_INFORMATION: the count @0, the array @8 — 32
+// bytes (nobjs = 1)
+constexpr std::size_t UNICODE_STRING_SIZE_64 = 16;
+constexpr std::size_t UNICODE_STRING_SIZE_32 = 8;
+constexpr std::size_t OTI_SIZE_64 = 24;
+constexpr std::size_t OTI_SIZE_32 = 16;
+
+void write_unicode_string(char* dst, int bits, std::uint16_t length, std::uint64_t buffer) {
+    std::memcpy(dst + 0, &length, 2);
+    std::memcpy(dst + 2, &length, 2);
+    const auto off = bits == 64 ? 8 : 4;
+    std::memcpy(dst + off, &buffer, bits / 8);
+}
+
+// the ANSI_STRING read (utils.py read_pansi_string): the Length/Buffer walk
+// over the aligned layout; the empty string rides {}
+std::string read_pansi_string(Qiling& ql, std::uint64_t ptr) {
+    const auto bits = static_cast<int>(ql.arch().bits());
+    const auto raw = ql.mem().read(ptr, bits == 64 ? 16 : 8);
+    std::uint16_t length = 0;
+    std::memcpy(&length, raw.data(), 2);
+    std::uint64_t buffer = 0;
+    const auto off = bits == 64 ? 8 : 4;
+    std::memcpy(&buffer, raw.data() + off, bits / 8);
+
+    if (buffer != 0 && length != 0) {
+        return QlOsUtils::read_cstring(ql, buffer, length);
+    }
+    return {};
+}
+
+// the shared _FindImageBaseAndFunctionTable body (ntdll.py)
+std::pair<std::uint64_t, std::uint64_t> find_image_base_and_function_table(Qiling& ql,
+                                                                          std::uint64_t control_pc,
+                                                                          std::uint64_t image_base_ptr) {
+    const auto* containing_image = ql.loader().find_containing_image(control_pc);
+    const auto base_addr = containing_image != nullptr ? containing_image->base : 0;
+
+    // Write base address to the ImageBase pointer, if provided  (verbatim)
+    if (image_base_ptr != 0) {
+        ql.mem().write_ptr(image_base_ptr, base_addr);
+    }
+
+    // If we don't have a valid base, abort now
+    if (base_addr == 0) {
+        return {0, 0};
+    }
+
+    auto& pe_loader = static_cast<loader::QlLoaderPE&>(ql.loader());
+    const auto& lookup = pe_loader.function_table_lookup();
+    const auto it = lookup.find(base_addr);
+    const auto function_table_rva = it != lookup.end() ? it->second : 0;
+    const auto function_table_addr = function_table_rva != 0 ? base_addr + function_table_rva : 0;
+
+    return {base_addr, function_table_addr};
 }
 
 }  // namespace
@@ -534,6 +598,236 @@ void register_ntdll_family() {
         {"Length", PVOID_},
     }, true) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
         return std::nullopt;
+    };
+
+    // ---- sub-slice 2: the object query, the procedure lookup, the unwind
+    // table riders ----
+
+    // NTSYSCALLAPI NTSTATUS NtQueryObject( ... );
+    WinsdkApi("ZwQueryObject", WinCc::Stdcall, {
+        {"Handle", HANDLE_},
+        {"ObjectInformationClass", PROCESSINFOCLASS_},
+        {"ObjectInformation", PVOID_},
+        {"ObjectInformationLength", DWORD_},
+        {"ReturnLength", PVOID_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto handle = api_get_int(get_param(params, "Handle"));
+        const auto object_information_class = api_get_int(get_param(params, "ObjectInformationClass"));
+        const auto object_information = api_get_int(get_param(params, "ObjectInformation"));
+        const auto object_information_length = api_get_int(get_param(params, "ObjectInformationLength"));
+        const auto return_length = api_get_int(get_param(params, "ReturnLength"));
+
+        const auto bits = static_cast<int>(ql.arch().bits());
+        const bool is64 = bits == 64;
+        const std::size_t oti_size = is64 ? OTI_SIZE_64 : OTI_SIZE_32;
+        const std::size_t uni_size = is64 ? UNICODE_STRING_SIZE_64 : UNICODE_STRING_SIZE_32;
+
+        // s = 'DebugObject'.encode('utf-16le'); the heap-staged name
+        const std::string s = {'D', 0, 'e', 0, 'b', 0, 'u', 0, 'g', 0, 'O', 0, 'b', 0, 'j', 0,
+                               'e', 0, 'c', 0, 't', 0};
+        const auto addr = w(ql).heap().alloc(s.size());
+        ql.mem().write(addr, std::vector<std::uint8_t>(s.begin(), s.end()));
+
+        // TotalNumberOfObjects = 1, TotalNumberOfHandles = 1  (verbatim)
+        std::uint32_t total_handles = 1;
+        if (object_information_class == ObjectTypeInformation ||
+            object_information_class == ObjectAllTypesInformation) {
+            // the arm bodies stage below; the ObjectAllTypesInformation arm
+            // zeroes the handles (the FIXME hack verbatim: al-khaser expects
+            // the closed object to ride 0 handles)
+            if (object_information_class == ObjectAllTypesInformation) {
+                // FIXME: al-khaser refers the object named 'DebugObject' twice: the first time it creates a handle
+                // for it (so number of handles is expected to be higher than 0) and then closes it. the next time
+                // it accesses it (here), it expects the number of handles to be 0.
+                //
+                // ideally we would track the handles for each object, but since we do not - this is a hack to let
+                // it pass.  (verbatim comment)
+                total_handles = 0;
+            }
+        } else {
+            throw QlErrorNotImplemented("API not implemented (ObjectInformationClass=" +
+                                        std::to_string(object_information_class) + ")");
+        }
+
+        // the out size rides the class (the OTI for the ObjectType, the OATI
+        // for the AllTypes)
+        const std::size_t out_size = object_information_class == ObjectTypeInformation
+            ? oti_size
+            : (is64 ? 8u : 8u) + oti_size;  // the u32 count + the padding to the array
+
+        if (return_length != 0) {
+            ql.mem().write_ptr(return_length, out_size, 4);
+        }
+
+        if (static_cast<std::uint64_t>(object_information_length) < out_size) {
+            return STATUS_INFO_LENGTH_MISMATCH;
+        }
+
+        if (object_information != 0 && handle != 0) {
+            // the save_to walk: the staged name + the counts (1, total_handles)
+            char buf[64];
+            std::memset(buf, 0, sizeof(buf));
+            if (object_information_class == ObjectTypeInformation) {
+                write_unicode_string(buf, bits, static_cast<std::uint16_t>(s.size()), addr);
+                const std::uint32_t nobj = 1;
+                std::memcpy(buf + uni_size, &nobj, 4);
+                std::memcpy(buf + uni_size + 4, &total_handles, 4);
+                ql.mem().write(object_information, std::vector<std::uint8_t>(buf, buf + oti_size));
+            } else {
+                // the OATI: the NumberOfObjectTypes @0, the OTI array after
+                // the natural padding (the x64: @8; the x86: @4)
+                const std::size_t array_off = is64 ? 8u : 4u;
+                const std::uint32_t ntypes = 1;
+                std::memcpy(buf, &ntypes, 4);
+                write_unicode_string(buf + array_off, bits, static_cast<std::uint16_t>(s.size()), addr);
+                const std::uint32_t nobj = 1;
+                std::memcpy(buf + array_off + uni_size, &nobj, 4);
+                std::memcpy(buf + array_off + uni_size + 4, &total_handles, 4);
+                ql.mem().write(object_information, std::vector<std::uint8_t>(buf, buf + array_off + oti_size));
+            }
+        }
+
+        return STATUS_SUCCESS;
+    };
+
+    // NTSTATUS LdrGetProcedureAddress( ... );
+    WinsdkApi("LdrGetProcedureAddress", WinCc::Stdcall, {
+        {"ModuleHandle", HMODULE_},
+        {"FunctionName", PVOID_},
+        {"Ordinal", WORD_},
+        {"FunctionAddress", PVOID_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto module_handle = api_get_int(get_param(params, "ModuleHandle"));
+        const auto function_name = api_get_int(get_param(params, "FunctionName"));
+        const auto ordinal = api_get_int(get_param(params, "Ordinal"));
+        const auto function_address = api_get_int(get_param(params, "FunctionAddress"));
+
+        // Check if dll is loaded  (verbatim images walk)
+        std::string dll_name;
+        for (const auto& image : ql.loader().images) {
+            if (image.base == module_handle) {
+                dll_name = std::filesystem::path(image.path).filename().string();
+                for (auto& c : dll_name) {
+                    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                }
+                break;
+            }
+        }
+
+        if (dll_name.empty()) {
+            ql.log().debug("Could not find specified handle " + std::to_string(module_handle) + " in loaded DLL");
+            return STATUS_DLL_NOT_FOUND;
+        }
+
+        auto& pe_loader = static_cast<loader::QlLoaderPE&>(ql.loader());
+        const auto* iat = pe_loader.import_address_table_at(dll_name);
+        if (iat == nullptr) {
+            return STATUS_PROCEDURE_NOT_FOUND;
+        }
+
+        // identifier = read_pansi_string(...) if FunctionName else Ordinal
+        if (function_name != 0) {
+            const auto identifier = read_pansi_string(ql, function_name);
+            if (identifier.empty()) {
+                return STATUS_INVALID_PARAMETER;
+            }
+            if (iat->by_name.find(identifier) == iat->by_name.end()) {
+                return STATUS_PROCEDURE_NOT_FOUND;
+            }
+            ql.mem().write_ptr(function_address, iat->by_name.at(identifier));
+            return STATUS_SUCCESS;
+        }
+
+        if (ordinal == 0) {
+            return STATUS_INVALID_PARAMETER;
+        }
+        if (iat->by_ordinal.find(static_cast<std::uint64_t>(ordinal)) == iat->by_ordinal.end()) {
+            return STATUS_PROCEDURE_NOT_FOUND;
+        }
+        ql.mem().write_ptr(function_address, iat->by_ordinal.at(static_cast<std::uint64_t>(ordinal)));
+        return STATUS_SUCCESS;
+    };
+
+    // NTSYSAPI PVOID RtlPcToFileHeader( ... );
+    WinsdkApi("RtlPcToFileHeader", WinCc::Stdcall, {
+        {"PcValue", PVOID_},
+        {"BaseOfImage", PVOID_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto pc = api_get_int(get_param(params, "PcValue"));
+        const auto base_of_image_ptr = api_get_int(get_param(params, "BaseOfImage"));
+
+        const auto* containing_image = ql.loader().find_containing_image(pc);
+        const auto base_addr = containing_image != nullptr ? containing_image->base : 0;
+
+        ql.mem().write_ptr(base_of_image_ptr, base_addr);
+        return base_addr;
+    };
+
+    // NTSYSAPI PRUNTIME_FUNCTION RtlLookupFunctionEntry( ... );
+    WinsdkApi("RtlLookupFunctionEntry", WinCc::Stdcall, {
+        {"ControlPc", PVOID_},
+        {"ImageBase", PVOID_},
+        {"HistoryTable", PVOID_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto control_pc = api_get_int(get_param(params, "ControlPc"));
+        const auto image_base_ptr = api_get_int(get_param(params, "ImageBase"));
+
+        // TODO: Make use of the history table to optimize this function.  (verbatim)
+        // This function should not be getting called on x86.  (verbatim)
+        if (ql.arch().type() == QL_ARCH::X86) {
+            throw QlErrorNotImplemented("RtlLookupFunctionEntry is not implemented for x86");
+        }
+
+        const auto [base_addr, function_table_addr] = find_image_base_and_function_table(ql, control_pc, image_base_ptr);
+
+        // If no function table was found, abort.
+        if (function_table_addr == 0) {
+            return 0;
+        }
+
+        auto& pe_loader = static_cast<loader::QlLoaderPE&>(ql.loader());
+        const auto [idx, runtime_function] = pe_loader.lookup_function_entry(base_addr, control_pc);
+
+        // If a suitable function entry was found, compute its address and return.
+        if (runtime_function != nullptr) {
+            return static_cast<std::uint64_t>(function_table_addr + static_cast<std::uint64_t>(idx) * 12);  // sizeof(RUNTIME_FUNCTION)
+        }
+
+        return 0;
+    };
+
+    // NTSYSAPI PRUNTIME_FUNCTION RtlLookupFunctionTable( ... );
+    WinsdkApi("RtlLookupFunctionTable", WinCc::Stdcall, {
+        {"ControlPc", PVOID_},
+        {"ImageBase", PVOID_},
+        {"SizeOfTable", PVOID_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto control_pc = api_get_int(get_param(params, "ControlPc"));
+        const auto image_base_ptr = api_get_int(get_param(params, "ImageBase"));
+        const auto size_of_table_ptr = api_get_int(get_param(params, "SizeOfTable"));
+
+        if (ql.arch().type() == QL_ARCH::X86) {
+            throw QlErrorNotImplemented("RtlLookupFunctionTable is not implemented for x86");
+        }
+
+        const auto [base_addr, function_table_addr] = find_image_base_and_function_table(ql, control_pc, image_base_ptr);
+
+        if (function_table_addr == 0) {
+            ql.mem().write_ptr(size_of_table_ptr, 0, 4);
+            return 0;
+        }
+
+        if (size_of_table_ptr != 0) {
+            auto& pe_loader = static_cast<loader::QlLoaderPE&>(ql.loader());
+            const auto& tables = pe_loader.function_tables();
+            const auto& function_table = tables.at(base_addr);
+
+            // compute the total size of the table
+            const auto size_of_table = function_table.size() * 12;  // sizeof(RUNTIME_FUNCTION)
+            ql.mem().write_ptr(size_of_table_ptr, size_of_table, 4);
+        }
+
+        return function_table_addr;
     };
 }
 

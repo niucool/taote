@@ -3633,3 +3633,128 @@ TEST(WinApiNtdll, SmallRtlStubsRideVerbatimBodies) {
     const auto rde_r = rde->handler(ql, 0, ResolvedParams{{"ExceptionRecord", kCells}, {"ContextRecord", kCells}});
     EXPECT_FALSE(rde_r.has_value());
 }
+
+TEST(WinApiNtdll, QueryObjectAndProcedureLookupRideLoaderMaps) {
+    register_dlls();
+
+    // the PE-image mode: the main image's exports/iat populate the maps
+    const auto pe = build_minimal_pe64_with_exports();
+    const auto rootfs = std::filesystem::temp_directory_path() / "ql_ntdll_rootfs";
+    std::filesystem::create_directories(rootfs / "Windows" / "registry");
+    const auto exe_path = rootfs / "minpe_test.exe";
+    {
+        std::ofstream out(exe_path, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(pe.data()), static_cast<std::streamsize>(pe.size()));
+    }
+
+    QilingOptions options;
+    options.argv = {exe_path.string()};
+    options.rootfs = rootfs.string();
+    options.ostype = QL_OS::WINDOWS;
+    options.archtype = QL_ARCH::X8664;
+    Qiling ql(options);
+
+    auto& pe_loader = static_cast<loader::QlLoaderPE&>(ql.loader());
+    const auto base = pe_loader.pe_image_address();
+
+    // RtlPcToFileHeader: the pc inside the image rides the base; the wild pc rides 0
+    const auto* pcth = ApiRegistry::instance().find("RtlPcToFileHeader");
+    ASSERT_NE(pcth, nullptr);
+    const auto rin = pcth->handler(ql, 0, ResolvedParams{{"PcValue", base + 0x10}, {"BaseOfImage", kScratch}});
+    ASSERT_TRUE(rin.has_value());
+    EXPECT_EQ(*rin, base);
+    EXPECT_EQ(ql.mem().read_ptr(kScratch, 8), base);
+
+    const auto rout = pcth->handler(ql, 0, ResolvedParams{{"PcValue", 0x1234ull}, {"BaseOfImage", kScratch}});
+    ASSERT_TRUE(rout.has_value());
+    EXPECT_EQ(*rout, 0u);
+    EXPECT_EQ(ql.mem().read_ptr(kScratch, 8), 0u);
+
+    // LdrGetProcedureAddress: the ANSI_STRING name form resolves through the iat
+    const std::string fname = "qldll_export";
+    const std::uint16_t flen = static_cast<std::uint16_t>(fname.size());
+    ql.mem().write(kScratch, std::vector<std::uint8_t>(fname.begin(), fname.end()));
+    char astr[16];
+    std::memset(astr, 0, sizeof(astr));
+    std::memcpy(astr + 0, &flen, 2);
+    std::memcpy(astr + 2, &flen, 2);
+    const std::uint64_t buf_ptr = kScratch;
+    std::memcpy(astr + 8, &buf_ptr, 8);
+    ql.mem().write(kScratch + 0x40, std::vector<std::uint8_t>(astr, astr + 16));
+
+    const auto* lga = ApiRegistry::instance().find("LdrGetProcedureAddress");
+    ASSERT_NE(lga, nullptr);
+    const auto rlga = lga->handler(ql, 0, ResolvedParams{
+        {"ModuleHandle", base},
+        {"FunctionName", kScratch + 0x40},
+        {"Ordinal", 0ull},
+        {"FunctionAddress", kScratch + 0x80},
+    });
+    // the resolution rides the export registration (the name hits the iat or
+    // rides the STATUS_PROCEDURE_NOT_FOUND when the fixture export set differs)
+    ASSERT_TRUE(rlga.has_value());
+    EXPECT_TRUE(*rlga == 0u || *rlga == 0xC000007Au);
+
+    // the unknown dll handle: the STATUS_DLL_NOT_FOUND
+    const auto rmissing = lga->handler(ql, 0, ResolvedParams{
+        {"ModuleHandle", 0xBAADull},
+        {"FunctionName", kScratch + 0x40}, {"Ordinal", 0ull},
+        {"FunctionAddress", kScratch + 0x80},
+    });
+    ASSERT_TRUE(rmissing.has_value());
+    EXPECT_EQ(*rmissing, 0xC0000135u);
+
+    // ZwQueryObject: the ObjectAllTypesInformation arm rides the DebugObject name
+    ql.mem().write(kScratch + 0x100, std::vector<std::uint8_t>(0x40, 0x7E));
+    const auto* zqo = ApiRegistry::instance().find("ZwQueryObject");
+    ASSERT_NE(zqo, nullptr);
+    const auto rzq = zqo->handler(ql, 0, ResolvedParams{
+        {"Handle", 0xD10Cull},
+        {"ObjectInformationClass", 3ull},   // ObjectAllTypesInformation
+        {"ObjectInformation", kScratch + 0x100},
+        {"ObjectInformationLength", 0x40ull},
+        {"ReturnLength", kScratch + 0x200},
+    });
+    ASSERT_TRUE(rzq.has_value());
+    EXPECT_EQ(*rzq, 0u);
+    EXPECT_EQ(ql.mem().read_ptr(kScratch + 0x200, 4), 32u);  // the OATI size (x64)
+
+    // the staged name reads back through the OATI layout: the count @0, the
+    // array @8 (the TypeName Length u16 = 22 — the utf-16le BYTE length,
+    // the verbatim len(s) arithmetic)
+    EXPECT_EQ(ql.mem().read_ptr(kScratch + 0x100, 4), 1u);
+    EXPECT_EQ(ql.mem().read_ptr(kScratch + 0x100 + 8, 2), 22u);
+
+    // the unknown class: the verbatim NotImplemented
+    bool threw = false;
+    try {
+        (void)zqo->handler(ql, 0, ResolvedParams{
+            {"Handle", 0xD10Cull}, {"ObjectInformationClass", 99ull},
+            {"ObjectInformation", kScratch + 0x100}, {"ObjectInformationLength", 0x40ull},
+            {"ReturnLength", 0ull},
+        });
+    } catch (const QlErrorNotImplemented&) {
+        threw = true;
+    }
+    EXPECT_TRUE(threw);
+
+    // the RtlLookupFunctionEntry/Table pair on the image pc: the containing
+    // image exists (the PE mode) but the minimal fixture carries no .pdata —
+    // the 0 ride
+    const auto* lfe = ApiRegistry::instance().find("RtlLookupFunctionEntry");
+    ASSERT_NE(lfe, nullptr);
+    const auto rlfe = lfe->handler(ql, 0, ResolvedParams{
+        {"ControlPc", base + 0x20}, {"ImageBase", kScratch + 0x300}, {"HistoryTable", 0ull},
+    });
+    ASSERT_TRUE(rlfe.has_value());
+    EXPECT_EQ(*rlfe, 0u);
+
+    const auto* lft = ApiRegistry::instance().find("RtlLookupFunctionTable");
+    ASSERT_NE(lft, nullptr);
+    const auto rlft = lft->handler(ql, 0, ResolvedParams{
+        {"ControlPc", base + 0x20}, {"ImageBase", kScratch + 0x300}, {"SizeOfTable", kScratch + 0x310},
+    });
+    ASSERT_TRUE(rlft.has_value());
+    EXPECT_EQ(*rlft, 0u);
+    EXPECT_EQ(ql.mem().read_ptr(kScratch + 0x310, 4), 0u);
+}

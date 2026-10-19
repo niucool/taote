@@ -123,7 +123,63 @@ std::uint64_t QlLoaderPE::load_image(const std::string& host_path, const std::st
         import_address_table_[dll_name] = ImportTable{std::move(iat_by_name), std::move(iat_by_ordinal)};
     }
 
+    // loader/pe.py init_function_tables — the shared call site covers both
+    // the main image and the load_dll flows (the upstream calls it at both
+    // ends; the port rides one place)
+    init_function_tables(parsed.get(), base);
+
     return base;
+}
+
+void QlLoaderPE::init_function_tables(LIEF::PE::Binary* pe, std::uint64_t image_base) {
+    if (ql_->arch().type() == QL_ARCH::X86) {
+        return;  // the verbatim non-x86 gate
+    }
+
+    // the exception directory: the .pdata image — the port reads the mapped
+    // bytes (the same Begin/End/Unwind triples the pefile objects carry)
+    if (!pe->has(LIEF::PE::DataDirectory::TYPES::EXCEPTION_TABLE)) {
+        ql_->log().debug("Image has no exception directory; skipping exception data");
+        return;
+    }
+
+    const auto& exception_dir = *pe->data_directory(LIEF::PE::DataDirectory::TYPES::EXCEPTION_TABLE);
+    const auto table_rva = exception_dir.RVA();
+    const auto table_size = exception_dir.size();
+
+    function_table_lookup_[image_base] = table_rva;
+
+    auto& table = function_tables_[image_base];
+    const std::size_t entries = table_size / 12;  // sizeof(RUNTIME_FUNCTION)
+    table.reserve(entries);
+    for (std::size_t i = 0; i < entries; ++i) {
+        const auto entry_addr = image_base + table_rva + i * 12;
+        RuntimeFunction rf;
+        rf.begin = static_cast<std::uint32_t>(ql_->mem().read_ptr(entry_addr, 4));
+        rf.end = static_cast<std::uint32_t>(ql_->mem().read_ptr(entry_addr + 4, 4));
+        table.push_back(rf);
+    }
+
+    ql_->log().debug("Parsed " + std::to_string(entries) + " exception directory entries");
+}
+
+std::pair<std::int64_t, const QlLoaderPE::RuntimeFunction*> QlLoaderPE::lookup_function_entry(
+    std::uint64_t base_addr, std::uint64_t control_pc) const {
+    const auto it = function_tables_.find(base_addr);
+    if (it == function_tables_.end()) {
+        return {-1, nullptr};
+    }
+
+    // the first RUNTIME_FUNCTION whose [begin, end) range holds control_pc
+    // - base_addr (the python next() walk verbatim: the None rides -1/nullptr)
+    const auto rva = control_pc - base_addr;
+    for (std::size_t i = 0; i < it->second.size(); ++i) {
+        const auto& rf = it->second[i];
+        if (rf.begin <= rva && rva < rf.end) {
+            return {static_cast<std::int64_t>(i), &rf};
+        }
+    }
+    return {-1, nullptr};
 }
 
 std::pair<std::string, std::string> QlLoaderPE::dll_path_elements(const std::string& name) const {
