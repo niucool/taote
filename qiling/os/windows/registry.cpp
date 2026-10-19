@@ -267,6 +267,49 @@ RegValue RegistryManager::reg_mem_read(int data_type, std::uint64_t data_addr, s
     if (data_type == static_cast<int>(RegType::RegBin)) {
         return ql.mem().read(data_addr, data_size);
     }
+    if (data_type == static_cast<int>(RegType::RegMultiSZ)) {
+        // the multi-string: the NUL-separated strings ending on a double NUL
+        // (the char width follows the A/W call shape); the textual form joins
+        // the entries with '\n' — the store holds one string either way
+        const auto charlen = wide ? std::uint64_t{2} : std::uint64_t{1};
+        std::uint64_t cur = data_addr;
+        const auto end = data_addr + (data_size == 0 ? std::uint64_t{0x10000} : data_size);
+        std::string joined;
+        bool first = true;
+        while (cur < end) {
+            const auto ch = ql.mem().read(cur, static_cast<std::size_t>(charlen));
+            const bool terminator = wide ? (ch.size() < 2 || (ch[0] == 0 && ch[1] == 0))
+                                         : (!ch.empty() && ch[0] == 0);
+            if (terminator) {
+                // the double NUL ends the multi-string; a single one ends an entry
+                const auto next = cur + charlen;
+                bool second = false;
+                if (next < end) {
+                    const auto nch = ql.mem().read(next, static_cast<std::size_t>(charlen));
+                    second = wide ? (nch.size() < 2 || (nch[0] == 0 && nch[1] == 0))
+                                  : (!nch.empty() && nch[0] == 0);
+                }
+                if (second) {
+                    break;
+                }
+                if (!first) {
+                    joined.push_back('\n');
+                }
+                first = false;
+                cur = next;
+                continue;
+            }
+            if (ch.empty()) {
+                break;
+            }
+            joined.push_back(static_cast<char>(ch[0]));
+            if (!first) {
+                // (the entry remains open — the newline lands on the next entry)
+            }
+            cur += charlen;
+        }
+        return joined;
+    }
     throw QlErrorNotImplemented(std::string("registry type ") + reg_type_name(data_type) + " not implemented");
 }
 
@@ -302,6 +345,37 @@ std::uint64_t RegistryManager::reg_mem_write(int data_type, std::uint64_t data_a
         }
     } else if (data_type == static_cast<int>(RegType::RegBin)) {
         data = std::get<std::vector<std::uint8_t>>(data_val);
+    } else if (data_type == static_cast<int>(RegType::RegMultiSZ)) {
+        // the '\n'-joined entries render as the NUL-separated multi-string
+        // (the trailing double NUL rides the char width)
+        std::string joined;
+        if (std::holds_alternative<std::string>(data_val)) {
+            joined = std::get<std::string>(data_val);
+        } else if (std::holds_alternative<std::vector<std::uint8_t>>(data_val)) {
+            const auto& raw = std::get<std::vector<std::uint8_t>>(data_val);
+            joined.assign(raw.begin(), raw.end());
+        }
+        for (const char c : joined) {
+            if (c == '\n') {
+                data.push_back(0);
+                if (wide) {
+                    data.push_back(0);
+                }
+            } else {
+                data.push_back(static_cast<std::uint8_t>(c));
+                if (wide) {
+                    data.push_back(0);
+                }
+            }
+        }
+        data.push_back(0);
+        if (wide) {
+            data.push_back(0);
+        }
+        data.push_back(0);
+        if (wide) {
+            data.push_back(0);
+        }
     } else {
         throw QlErrorNotImplemented(std::string("registry type ") + reg_type_name(data_type) + " not implemented");
     }

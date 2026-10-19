@@ -34,11 +34,12 @@ inline std::filesystem::path write_stub_dll(
     const std::vector<std::string>& exports) {
   auto factory = LIEF::PE::Factory::create(LIEF::PE::PE_TYPE::PE32_PLUS);
 
-  // one `ret` (0xC3) cell per export, 16 bytes each
-  std::vector<std::uint8_t> code(exports.size() * 16, 0xC3);
-  LIEF::PE::Section text(".text");
-  text.content(code);
-  text.virtual_size(static_cast<std::uint32_t>(code.size()));
+  // one `ret` (0xC3) cell per export, 16 bytes each. The content has to ride
+  // the constructor: Section::content(vector) is a no-op in this LIEF build,
+  // which left every cell zero-filled (the dispatch hook masked it for the
+  // implemented apis, but an unimplemented import then executed zeros)
+  std::vector<std::uint8_t> code(std::max<std::size_t>(exports.size(), 1) * 16, 0xC3);
+  LIEF::PE::Section text(".text", code);
   factory->add_section(text);
 
   auto bin = factory->get();

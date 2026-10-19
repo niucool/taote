@@ -106,10 +106,10 @@ inline void write_stub_dll(const fs::path& rootfs, const std::string& dll_name,
                            const std::vector<std::string>& exports) {
     auto factory = LIEF::PE::Factory::create(LIEF::PE::PE_TYPE::PE32_PLUS);
 
+    // the content rides the constructor (Section::content(vector) is a no-op
+    // in this LIEF build — the cells would be zero-filled)
     std::vector<std::uint8_t> code(std::max<std::size_t>(exports.size(), 1) * 16, 0xC3);
-    LIEF::PE::Section text(".text");
-    text.content(code);
-    text.virtual_size(static_cast<std::uint32_t>(code.size()));
+    LIEF::PE::Section text(".text", code);
     factory->add_section(text);
 
     auto bin = factory->get();

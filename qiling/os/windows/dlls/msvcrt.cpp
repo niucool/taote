@@ -353,15 +353,67 @@ void register_msvcrt_family() {
         return 1;
     };
 
-    // int _except_handler3 — the pre-EH4 MSVC scope-table walker; the stub
-    // body answers EXCEPTION_CONTINUE_SEARCH (the real walk needs the EH3
-    // frame layout, which no current sample exercises)
+    // int _except_handler3(PEXCEPTION_RECORD, _EXCEPTION_REGISTRATION_RECORD*,
+    //                      PCONTEXT, void*);
+    //
+    // The pre-EH4 MSVC walker: the registration chain is {Next, Handler,
+    // ScopeTable, TryLevel} with a PLAIN scope-table pointer (no cookie, no
+    // 16-byte header — unlike EH4) and 12-byte {EnclosingLevel, FilterFunc,
+    // HandlerAddress} records indexed by the current TryLevel. The walk
+    // records the frames for the dispatch (QlOsWindows::seh_continue) and
+    // answers EXCEPTION_CONTINUE_SEARCH.
     WinsdkApi("_except_handler3", WinCc::Cdecl, {
         {"exception_record", PVOID_},
         {"establisher_frame", PVOID_},
         {"context_record", PVOID_},
         {"dispatcher_context", PVOID_},
-    }) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        auto establisher = api_get_int(get_param(params, "establisher_frame"));
+        auto& os = w(ql);
+        os.seh_clear_frames();
+
+        for (int depth = 0; depth < 32; ++depth) {
+            if (establisher == 0 || establisher == 0xffffffffull ||
+                establisher < 0x1000 || establisher >= 0xfffff000) {
+                break;
+            }
+
+            std::uint64_t next = 0;
+            std::int32_t trylevel = -1;
+            std::uint32_t scope_table = 0;
+            try {
+                next = ql.mem().read_ptr(establisher, 4);
+                scope_table = static_cast<std::uint32_t>(ql.mem().read_ptr(establisher + 8, 4));
+                trylevel = static_cast<std::int32_t>(
+                    static_cast<std::uint32_t>(ql.mem().read_ptr(establisher + 12, 4)));
+            } catch (...) {
+                break;
+            }
+            if (scope_table < 0x1000 || scope_table >= 0xfffff000) {
+                break;
+            }
+
+            // -1 (0xffffffff) = no active scope; -2 = the outermost
+            if (trylevel == -2) {
+                trylevel = 0;
+            }
+            if (trylevel >= 0) {
+                const auto record_addr = static_cast<std::uint64_t>(scope_table) +
+                                         static_cast<std::uint64_t>(trylevel) * 12;
+                try {
+                    qiling::os::windows::SehScopeRecord scope;
+                    scope.enclosing_level = static_cast<std::uint32_t>(ql.mem().read_ptr(record_addr, 4));
+                    scope.filter = static_cast<std::uint32_t>(ql.mem().read_ptr(record_addr + 4, 4));
+                    scope.handler = static_cast<std::uint32_t>(ql.mem().read_ptr(record_addr + 8, 4));
+                    os.seh_record_frame(establisher, scope);
+                } catch (...) {
+                    break;
+                }
+            }
+
+            establisher = next;
+        }
+
         return qiling::os::windows::kExceptionContinueSearch;
     };
 
@@ -486,6 +538,15 @@ void register_msvcrt_family() {
         ql.mem().write_ptr(ret, p_argv);
 
         return ret;
+    };
+
+    // char*** __cdecl __p___initenv (void) — the address of the CRT's
+    // __initenv global (the environment block pointer cell). The old-MSVC
+    // startup stores the __getmainargs environment through it
+    // (`*__p___initenv() = env`), so the cell has to exist and stay stable
+    WinsdkApi("__p___initenv", WinCc::Cdecl, {}) = [](Qiling& ql, std::uint64_t,
+                                                      const ResolvedParams&) -> std::optional<std::uint64_t> {
+        return w(ql).ensure_env_cell();
     };
 
     // int* __p___argc(void)

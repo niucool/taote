@@ -275,6 +275,19 @@ void QlOsWindows::ensure_profile_state() {
     }
 }
 
+// the __p___initenv cell: a zeroed pointer-sized guest cell the CRT stores
+// the environment block pointer in (`*__p___initenv() = env`)
+std::uint64_t QlOsWindows::ensure_env_cell() {
+    if (env_cell_ == 0) {
+        const auto ps = ql_->arch().pointersize();
+        env_cell_ = heap_->alloc(ps);
+        if (env_cell_ != 0) {
+            ql_->mem().write(env_cell_, std::vector<std::uint8_t>(ps, 0));
+        }
+    }
+    return env_cell_;
+}
+
 std::uint64_t QlOsWindows::thread_manager_ret_addr() const noexcept {
     // windows.py: os.thread_manager.thread_ret_addr (0 before the setup)
     return thread_manager_ == nullptr ? thread_ret_addr_ : thread_manager_->thread_ret_addr();

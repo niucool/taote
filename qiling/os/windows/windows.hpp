@@ -121,6 +121,11 @@ public:
     void set_seh_dispatch(bool enabled) noexcept { seh_dispatch_enabled_ = enabled; }
     bool seh_dispatch() const noexcept { return seh_dispatch_enabled_; }
 
+    // the CRT environment cell (the __p___initenv global): allocated once and
+    // handed out on every call (the CRT keeps the address it was given)
+    std::uint64_t env_cell() const noexcept { return env_cell_; }
+    std::uint64_t ensure_env_cell();
+
     // the pending emu restart target armed by the dispatch / the continue
     // walk (0 = none); QlOsWindows::run consumes it after emu_start errors
     std::uint64_t seh_retarget() const noexcept { return seh_retarget_; }
@@ -179,6 +184,7 @@ private:
     std::uint64_t seh_fault_addr_ = 0;      // the repeat-guard key (fault address)
     int seh_repeat_count_ = 0;
     bool seh_dispatch_enabled_ = true;   // the set_seh_dispatch switch
+    std::uint64_t env_cell_ = 0;         // the __p___initenv cell
     std::vector<SehFrame> seh_frames_;
 };
 
