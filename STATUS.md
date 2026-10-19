@@ -1446,3 +1446,30 @@ entry before copying the payload (the upstream python keeps the popped object
 alive via the refcounting; the C++ `queue.erase` invalidated the `msg`
 pointer → the segfault). Fixed by copying the mtype/mtext before the erase.
 Also swept: the committed debug prints ([sysinfo]/[clone]/[disp]) removed.
+
+## Phase 14 — the windows dlls tree (the MIRROR_LAYOUT_REORGANIZATION.md
+## `os/windows/dlls/` mapping; the PE-first directive)
+
+The consumer surface is the upstream `qiling/os/windows/dlls/` (the ~522
+`@winsdkapi` handlers; the port's PE priority: kernel32 → msvcrt → user32,
+ntoskrnl/wudplatform defer with the driver path).
+
+| piece | upstream | state | notes |
+|---|---|---|---|
+| const.hpp | `os/windows/const.py` | ✅ | the 468 scalar constants verbatim (the #ifndef guards ride the windows.h macro duality — the dll bodies reference the bare spellings); REG_TYPES→registry.cpp, the LOCALE/MAP_VK/SYSTEMS_VERSION/Mapper tables port with their consumer families |
+| wdk_const.hpp | `os/windows/wdk_const.py` | ✅ | the IRP major functions + the device types + the IOCTL bases (115 entries) |
+| the fncc handler shape | `fncc.py winsdkapi` | ✅ | the ApiHandler upgraded to the resolved-params shape (the posix kernel_api ResolvedParams duality); the STRING/WSTRING entries arrive decoded, the plain-int entries raw |
+| the hook_winapi dispatch | `windows.py hook_winapi` + `fncc.py` | ✅ | completed: the user-override raw ride → the registry find → the debug_stop QlErrorSyscallNotFound raise → the per-call-site fcall select + the resolve_named_params + the os.call (the unicorn-1579 pc guard) |
+| the ctor profile deferral | — | ✅ | the QlOsWindows ctor profile reads moved to ensure_profile_state() (the ctor runs before the profile loads; the pinned macos gotcha) — the end-to-end QlOsWindows construction is now reachable |
+| kernel32/handleapi | `dlls/kernel32/handleapi.py` (3) | ✅ | DuplicateHandle (the verbatim TODO comment), CloseHandle (the last_error ERROR_INVALID_HANDLE + the FIXME-protected branch; the IO-close ride defers to the fileapi slice), SetHandleInformation |
+| the dlls aggregation | `dlls/__init__.py` | ✅ | dlls.hpp/.cpp: the register_dlls() re-seedable surface (the test isolation) + the per-family static-init |
+| the fixtures | tests/Windows_Api_Test.cpp | ✅ | the handleapi coverage/shapes + the get_param/api_get_int paths |
+
+The remaining dll families (the ~516 handlers): kernel32 (fileapi 29,
+synchapi 24, processthreadsapi 20, winbase 40, sysinfoapi 16, libloaderapi 16,
+heapapi 8, processenv 9, the console/debug/timezone/psapi/tlhelp32 tails),
+msvcrt 50, user32 60, ntdll 29, advapi32 31, wininet 19, the small modules;
+ntoskrnl 80 + wudplatform defer with the driver path. The per-family slice
+cadence: the verbatim bodies over the done handle/fs/fd surfaces, one commit
+per family, the structs.py pieces (FILETIME/SYSTEMTIME/SYSTEM_INFO/
+OSVERSIONINFOEX...) port as their consumers need them.
