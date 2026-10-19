@@ -9,11 +9,15 @@
 #include <string>
 #include <vector>
 
-#include "qiling/os/windows/windows.hpp"
+// the QlOsWindows forward (the clipboard holds the os pointer; the full
+// definition lands with the .cpp — the windows.hpp ↔ clipboard.hpp include
+// cycle stays broken here)
 
 namespace qiling {
 namespace os {
 namespace windows {
+
+class QlOsWindows;
 
 // os/windows/const.py: the standard clipboard formats. The CF_*/ERROR_* names
 // collide with windows.h macros, so the QL_-prefixed spellings are used (the

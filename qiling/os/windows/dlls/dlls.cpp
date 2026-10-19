@@ -24,6 +24,7 @@
 #include "qiling/os/windows/dlls/kernel32/wow64apiset.cpp"
 #include "qiling/os/windows/dlls/kernel32/debugapi.cpp"
 #include "qiling/os/windows/dlls/kernel32/ioapiset.cpp"
+#include "qiling/os/windows/dlls/kernel32/fibersapi.cpp"
 
 namespace qiling {
 namespace os {
@@ -47,6 +48,7 @@ void register_dlls() {
     win::register_wow64apiset_family();
     win::register_debugapi_family();
     win::register_ioapiset_family();
+    win::register_fibersapi_family();
 }
 
 // the static-init registration (the python module-import side effect)

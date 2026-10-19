@@ -60,6 +60,10 @@ QlOsWindows::QlOsWindows(Qiling* ql) : QlOs(ql) {
     // the handle manager (windows.py __setup_components)
     handle_manager_ = std::make_unique<HandleManager>();
 
+    // the fiber manager (windows.py __setup_components rides the fiber.py
+    // FiberManager surface)
+    fiber_manager_ = std::make_unique<FiberManager>(ql_);
+
     // bind the stdio streams to their handles (windows.py stdin/stdout/stderr setters)
     HandleManager& mgr = *handle_manager_;
     if (auto* h = mgr.get(QL_STD_INPUT_HANDLE)) h->obj = &stdin_stream();

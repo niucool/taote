@@ -2560,3 +2560,55 @@ TEST(WinApiIoapiset, DeviceIoControlRidesVerbatimOne) {
     ASSERT_TRUE(r.has_value());
     EXPECT_EQ(*r, 1u);
 }
+
+TEST(WinApiFibersapi, FlsCycleAllocSetGetFree) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    // the alloc: the sequential index from 0; the 0 callback rides none
+    const auto* alloc = ApiRegistry::instance().find("FlsAlloc");
+    ASSERT_NE(alloc, nullptr);
+    const auto ra = alloc->handler(ql, 0, ResolvedParams{{"lpCallback", 0ull}});
+    ASSERT_TRUE(ra.has_value());
+    EXPECT_EQ(*ra, 0u);
+    const auto rb = alloc->handler(ql, 0, ResolvedParams{{"lpCallback", 0x4000ull}});
+    ASSERT_TRUE(rb.has_value());
+    EXPECT_EQ(*rb, 1u);
+
+    // the set/get cycle on the second slot
+    const auto* setv = ApiRegistry::instance().find("FlsSetValue");
+    ASSERT_NE(setv, nullptr);
+    const auto rs = setv->handler(ql, 0, ResolvedParams{{"dwFlsIndex", 1ull}, {"lpFlsData", 0x1234ull}});
+    ASSERT_TRUE(rs.has_value());
+    EXPECT_EQ(*rs, 1u);
+
+    const auto* getv = ApiRegistry::instance().find("FlsGetValue");
+    ASSERT_NE(getv, nullptr);
+    const auto rg = getv->handler(ql, 0, ResolvedParams{{"dwFlsIndex", 1ull}});
+    ASSERT_TRUE(rg.has_value());
+    EXPECT_EQ(*rg, 0x1234u);
+
+    // the free: the verbatim True; the second free rides the last_error
+    const auto* freef = ApiRegistry::instance().find("FlsFree");
+    ASSERT_NE(freef, nullptr);
+    const auto rf = freef->handler(ql, 0, ResolvedParams{{"dwFlsIndex", 1ull}});
+    ASSERT_TRUE(rf.has_value());
+    EXPECT_EQ(*rf, 1u);
+
+    const auto rf2 = freef->handler(ql, 0, ResolvedParams{{"dwFlsIndex", 1ull}});
+    ASSERT_TRUE(rf2.has_value());
+    EXPECT_EQ(*rf2, 0u);
+    EXPECT_EQ(ql.os<QlOsWindows>().last_error(), 87u);  // the ERROR_INVALID_PARAMETER
+
+    // the get on the freed slot rides the error + the 0; the get_noerr stays silent
+    const auto rg2 = getv->handler(ql, 0, ResolvedParams{{"dwFlsIndex", 1ull}});
+    ASSERT_TRUE(rg2.has_value());
+    EXPECT_EQ(*rg2, 0u);
+
+    const auto* getn = ApiRegistry::instance().find("FlsGetValue2");
+    ASSERT_NE(getn, nullptr);
+    const auto rn = getn->handler(ql, 0, ResolvedParams{{"dwFlsIndex", 1ull}});
+    ASSERT_TRUE(rn.has_value());
+    EXPECT_EQ(*rn, 0u);
+    EXPECT_EQ(ql.os<QlOsWindows>().last_error(), 87u);  // the get_noerr did not touch it
+}

@@ -12,6 +12,7 @@
 #include "qiling/os/windows/fncc.hpp"
 #include "qiling/os/windows/handle.hpp"
 #include "qiling/os/windows/registry.hpp"
+#include "qiling/os/windows/fiber.hpp"
 #include "qiling/os/windows/thread.hpp"
 
 namespace qiling {
@@ -62,12 +63,18 @@ public:
     const std::string& winsys() const noexcept { return winsys_; }
     const std::string& userprofile() const noexcept { return userprofile_; }
     const std::string& username() const noexcept { return username_; }
-    std::uint32_t last_error() const noexcept { return last_error_; }
-    void set_last_error(std::uint32_t code) noexcept { last_error_ = code; }
+    // os.py last_error: ONE surface — the QlOs base field (the fiber.py
+    // manager and the api handlers share it; the port previously shadowed
+    // the base field with a windows-local copy)
+    using QlOs::last_error;
+    using QlOs::set_last_error;
 
     // windows.py __setup_components: the registry manager (the diff store +
     // the hive front; the hive parsing defers with the real-hive fixtures)
     registry::RegistryManager& registry_manager() const noexcept { return *registry_manager_; }
+
+    // windows.py __setup_components: the fiber manager (the Fls* family)
+    FiberManager& fiber_manager() const noexcept { return *fiber_manager_; }
 
     QlMemoryHeap& heap() const noexcept { return *heap_; }
     HandleManager& handle_manager() const noexcept { return *handle_manager_; }
@@ -96,12 +103,12 @@ private:
     QlMemoryHeap* heap_ = nullptr;
     std::unique_ptr<HandleManager> handle_manager_;
     std::unique_ptr<registry::RegistryManager> registry_manager_;
+    std::unique_ptr<FiberManager> fiber_manager_;
     std::optional<HookRet> hook_handle_;
     std::string windir_;
     std::string winsys_;
     std::string userprofile_;
     std::string username_;
-    std::uint32_t last_error_ = 0;
     // windows.py thread_management (the typed surface; __setup_components
     // builds it over the main thread)
     std::unique_ptr<QlWindowsThreadManagement> thread_manager_;
