@@ -11,6 +11,7 @@
 #include "qiling/os/windows/dlls/kernel32/processthreadsapi.cpp"
 #include "qiling/os/windows/dlls/kernel32/synchapi.cpp"
 #include "qiling/os/windows/dlls/kernel32/heapapi.cpp"
+#include "qiling/os/windows/dlls/kernel32/memoryapi.cpp"
 
 namespace qiling {
 namespace os {
@@ -21,6 +22,7 @@ void register_dlls() {
     win::register_processthreadsapi_family();
     win::register_synchapi_family();
     win::register_heapapi_family();
+    win::register_memoryapi_family();
 }
 
 // the static-init registration (the python module-import side effect)

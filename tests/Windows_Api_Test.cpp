@@ -1312,3 +1312,78 @@ TEST(WinApiHeapapi, HeapReAllocRoundTripPreservesContent) {
     ASSERT_TRUE(shrunk.has_value());
     EXPECT_EQ(*shrunk, 0u);
 }
+
+TEST(WinApiMemoryapi, VirtualAllocFreeProtectQueryVerbatim) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    // VirtualAlloc: the verbatim heap-alloc ride
+    const auto* alloc = ApiRegistry::instance().find("VirtualAlloc");
+    ASSERT_NE(alloc, nullptr);
+    const auto base = alloc->handler(ql, 0, ResolvedParams{
+        {"lpAddress", std::uint64_t{0}},
+        {"dwSize", std::uint64_t{0x1000}},
+        {"flAllocationType", std::uint64_t{0x1000}},  // MEM_COMMIT
+        {"flProtect", std::uint64_t{0x40}},
+    });
+    ASSERT_TRUE(base.has_value());
+    EXPECT_NE(*base, 0u);
+    ql.mem().write_ptr(*base, 0x4142);
+
+    // VirtualProtect: the verbatim 1
+    const auto* protect = ApiRegistry::instance().find("VirtualProtect");
+    ASSERT_NE(protect, nullptr);
+    const auto pr = protect->handler(ql, 0, ResolvedParams{
+        {"lpAddress", *base},
+        {"dwSize", std::uint64_t{0x1000}},
+        {"flNewProtect", std::uint64_t{0x04}},
+        {"lpflOldProtect", std::uint64_t{0}},
+    });
+    ASSERT_TRUE(pr.has_value());
+    EXPECT_EQ(*pr, 1u);
+
+    // VirtualQuery over the allocated chunk: the MBI pack rides the
+    // pointer-sized stride (7 fields: the base, the alloc base, the
+    // EXECUTE_READ_WRITE, the size, the MEM_COMMIT, the protect, the
+    // MEM_MAPPED)
+    const auto* query = ApiRegistry::instance().find("VirtualQuery");
+    ASSERT_NE(query, nullptr);
+    const auto q = query->handler(ql, 0, ResolvedParams{
+        {"lpAddress", *base + 0x10},
+        {"lpBuffer", kCells},
+        {"dwLength", std::uint64_t{0x100}},
+    });
+    ASSERT_TRUE(q.has_value());
+    const auto ps = ql.arch().pointersize();
+    EXPECT_EQ(*q, ps * 7u);
+    EXPECT_EQ(ql.mem().read_ptr(kCells, 8), *base);        // BaseAddress
+    EXPECT_EQ(ql.mem().read_ptr(kCells + 8, 8), *base);    // AllocationBase
+    EXPECT_EQ(ql.mem().read_ptr(kCells + 16, 4), 0x40u);   // AllocationProtect
+    EXPECT_EQ(ql.mem().read_ptr(kCells + 24, 8), 0x1000u); // RegionSize
+    EXPECT_EQ(ql.mem().read_ptr(kCells + 32, 4), 0x1000u); // State (MEM_COMMIT)
+    EXPECT_EQ(ql.mem().read_ptr(kCells + 40, 4), 0x40u);   // Protect
+    EXPECT_EQ(ql.mem().read_ptr(kCells + 48, 4), 0x40000u);// Type (MEM_MAPPED)
+
+    // VirtualQuery over an unallocated address: the ERROR_INVALID_PARAMETER
+    // + the 0 (the verbatim page-not-found walk)
+    ql.os<QlOsWindows>().set_last_error(0);
+    const auto qb = query->handler(ql, 0, ResolvedParams{
+        {"lpAddress", std::uint64_t{0x70000000}},
+        {"lpBuffer", kCells},
+        {"dwLength", std::uint64_t{0x100}},
+    });
+    ASSERT_TRUE(qb.has_value());
+    EXPECT_EQ(*qb, 0u);
+    EXPECT_EQ(ql.os<QlOsWindows>().last_error(), 0x57u);
+
+    // VirtualFree: the verbatim free + the 1
+    const auto* free_ = ApiRegistry::instance().find("VirtualFree");
+    ASSERT_NE(free_, nullptr);
+    const auto f = free_->handler(ql, 0, ResolvedParams{
+        {"lpAddress", *base},
+        {"dwSize", std::uint64_t{0}},
+        {"dwFreeType", std::uint64_t{0x4000}},  // MEM_RELEASE
+    });
+    ASSERT_TRUE(f.has_value());
+    EXPECT_EQ(*f, 1u);
+}
