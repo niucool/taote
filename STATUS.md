@@ -1176,6 +1176,18 @@ implementation moved to timer.cpp — the header cannot include hw/hw.hpp withou
 the peripheral.hpp <-> hw.hpp cycle (the TICKINT branch's nvic lookup needs the
 full manager type).
 
+### Phase 13.7 — the board-profile slice 4: the Exti family (the STM32F1xxExti)
+
+| piece | upstream | state | notes |
+|---|---|---|---|
+| STM32F1xxExti | `hw/intc/stm32f1xx_exti.py` | ✅ | the 24-byte image (IMR/EMR/RTSR/FTSR/SWIER/PR), the per-line intn table (the exti0..4 singles + the 9_5/15_10 shared slots), the SWIER write masked against the IMR and the 0x7ffff with the 0->1 transitions riding the send_interrupt, the PR write clearing the pending + the SWIER bits, the send_interrupt walk (the IMR gate → the PR set → the gpio mirror via the afio's exti → the nvic pending with the line's intn) |
+| the fixture | `tests/Hw_Test.cpp` | ✅ | the CORTEX_M env walk creating the gpioa/afio/exti (the exti0_intn=6 kwarg) — the EXTICR0 nibble 0 maps the line 0 to the port A, the SWIER bit 0 sets the gpio pin 0 and pends the nvic at 6, the PR write clears, the unmasked-line SWIER write stays inert |
+
+The board-profile families remaining upstream: the Adc/Spi/I2c/Dma/Rcc/Flash/
+Crc/Usb/Can/Bkp/Pwr/Wwdg/Iwdg classes (the mk64f12/sam3/gd32 boards ride the
+same slice pattern); the stm32f103 board table + the load_env 'peripheral'
+items ride the board-assembly slice once the peripheral classes land.
+
 ### Phase 12 sub-slice 3 — socketpair + the send/recv family
 
 | piece | upstream | state | notes |

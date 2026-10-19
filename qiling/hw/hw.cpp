@@ -5,6 +5,7 @@
 #include "qiling/hw/stm32f1xx_gpio.hpp"
 #include "qiling/hw/stm32f4xx_usart.hpp"
 #include "qiling/hw/stm32f4xx_tim.hpp"
+#include "qiling/hw/stm32f1xx_exti.hpp"
 
 #include <algorithm>
 #include <map>
@@ -54,6 +55,19 @@ QlHwManager::QlHwManager(Qiling& ql) : ql_(&ql) {
         };
         return std::make_unique<STM32F1xxTim>(q, label, intn_of("intn"), intn_of("brk_intn"),
                                               intn_of("cc_intn"), intn_of("trg_com_intn"), intn_of("up_intn"));
+    });
+    register_struct("STM32F1xxExti", [](Qiling& q, const std::string& label, const PeripheralKwargs& kwargs) {
+        auto exti = std::make_unique<STM32F1xxExti>(q, label);
+        const auto intn_of = [&kwargs](const char* key) {
+            const auto it = kwargs.find(key);
+            return it == kwargs.end() ? -1 : static_cast<std::int64_t>(it->second);
+        };
+        for (int line = 0; line <= 4; ++line) {
+            const auto key = "exti" + std::to_string(line) + "_intn";
+            exti->set_line_intn(line, intn_of(key.c_str()));
+        }
+        exti->set_shared_intn(intn_of("exti9_5_intn"), intn_of("exti15_10_intn"));
+        return exti;
     });
 }
 

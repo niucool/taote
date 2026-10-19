@@ -18,6 +18,8 @@
 #include "qiling/hw/cm_scb.hpp"
 #include "qiling/hw/stm32f4xx_tim.hpp"
 #include "qiling/hw/stm32f1xx_gpio.hpp"
+#include "qiling/hw/stm32f1xx_exti.hpp"
+#include "qiling/hw/stm32f1xx_gpio.hpp"
 #include "qiling/hw/stm32f4xx_usart.hpp"
 #include "qiling/exception.hpp"
 
@@ -528,4 +530,62 @@ TEST(HwManager, Stm32f1xxTimStepWalkPendsUpdateInterrupt) {
     tim2->write(tim2->kCntOffset, 4, 0);
     tim2->step();
     EXPECT_EQ(tim2->raw_read(tim2->kCntOffset, 4), 0u);  // the prescale holds the CNT
+}
+
+// The Exti family: the SWIER write rides the IMR-masked per-bit walk, the
+// line mirrors into the owning gpio port via the AFIO's EXTICR mapping, and
+// the nvic pends with the line's interrupt number; the PR write clears.
+TEST(HwManager, Stm32f1xxExtiSwierWalkMirrorsGpioAndPendsNvic) {
+    const auto hex_path = write_ihex_fixture();
+
+    QilingOptions options;
+    options.argv = {hex_path};
+    options.rootfs = ensure_hw_rootfs().string();
+    options.ostype = QL_OS::MCU;
+    options.archtype = QL_ARCH::CORTEX_M;
+    options.env = {
+        {"FLASH", "memory;0x0;0x2000"},
+        {"SRAM", "memory;0x20000000;0x1000"},
+        {"PPB", "mmio;0xE000E000;0x1000"},
+        {"SYSTICK", "core;cm3_systick;0xE000E010"},
+        {"NVIC", "core;cm_nvic;0xE000E100"},
+        {"SCB", "core;cm4_scb;0xE000ED00"},
+        {"GPIOA", "core;STM32F1xxGpio;0x40010800"},
+        {"AFIO", "core;STM32F1xxAfio;0x40010000"},
+        {"EXTI", "core;STM32F1xxExti;0x40010400;exti0_intn=6"},
+        {"PERIP", "mmio;0x40000000;0x100000"},
+    };
+    Qiling ql(options);
+
+    auto* exti = static_cast<qiling::hw::STM32F1xxExti*>(ql.hw()->peripheral("exti"));
+    auto* gpioa = static_cast<qiling::hw::STM32F1xxGpio*>(ql.hw()->peripheral("gpioa"));
+    auto* nvic = static_cast<qiling::hw::CortexMNvic*>(ql.hw()->peripheral("nvic"));
+    ASSERT_NE(exti, nullptr);
+    ASSERT_NE(gpioa, nullptr);
+    ASSERT_NE(nvic, nullptr);
+    nvic->enable(6);
+
+    // the afio maps the EXTI0 to the port A (the EXTICR0 nibble 0)
+    auto* afio = static_cast<qiling::hw::STM32F1xxAfio*>(ql.hw()->peripheral("afio"));
+    ASSERT_EQ(afio->exti(0), gpioa);
+
+    // the SWIER write with the IMR bit 0 rides the send_interrupt walk: the
+    // gpio pin 0 sets and the nvic pends with the exti0 intn (6)
+    exti->write_body(exti->kImrOffset, 4, 1);
+    exti->write_body(exti->kSwierOffset, 4, 1);
+    EXPECT_EQ(gpioa->pin(0), 1u);
+    EXPECT_NE(exti->raw_read(exti->kPrOffset, 4) & 1, 0u);
+    ASSERT_EQ(nvic->pending_interrupts().size(), 1u);
+    EXPECT_EQ(nvic->pending_interrupts().back(), 6);
+
+    // the PR write clears the pending and the SWIER bits
+    exti->write_body(exti->kPrOffset, 4, 1);
+    EXPECT_EQ(exti->raw_read(exti->kPrOffset, 4) & 1, 0u);
+    EXPECT_EQ(exti->raw_read(exti->kSwierOffset, 4) & 1, 0u);
+
+    // the SWIER write masked against the IMR: the line 3 without the IMR bit
+    // does not pend
+    exti->write_body(exti->kSwierOffset, 4, 8);
+    EXPECT_EQ(exti->raw_read(exti->kPrOffset, 4) & 8, 0u);
+    EXPECT_EQ(nvic->pending_interrupts().size(), 1u);
 }
