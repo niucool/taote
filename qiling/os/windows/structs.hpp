@@ -192,4 +192,40 @@ std::string make_sid_bytes(std::uint32_t subauthority);
 }  // namespace os
 }  // namespace qiling
 
+// ---- shell32/wsock32 struct images (structs.py make_shellex_info / 
+// make_hostent; the 64-bit byte-offset layouts, the naturally-aligned
+// little-endian cells) ----
+
+namespace qiling {
+namespace os {
+namespace win {
+
+// SHELLEXECUTEINFO (make_shellex_info(64)): cbSize u32@0, fMask u32@4,
+// hwnd ptr@8, lpVerb@16, lpFile@24, lpParameters@32, lpDirectory@40,
+// nShow i32@48, hInstApp@56, lpIDList@64, lpClass@72, hkeyClass@80,
+// dwHotKey u32@88, DUMMYUNIONNAME ptr@96, hProcess@104 (112 bytes)
+inline constexpr std::size_t SHELLEXECUTEINFO_SIZE = 112;
+inline constexpr std::size_t SHELLEXECUTEINFO_OFF_CBSIZE = 0;
+inline constexpr std::size_t SHELLEXECUTEINFO_OFF_HWND = 8;
+inline constexpr std::size_t SHELLEXECUTEINFO_OFF_LPVERB = 16;
+inline constexpr std::size_t SHELLEXECUTEINFO_OFF_LPFILE = 24;
+inline constexpr std::size_t SHELLEXECUTEINFO_OFF_LPPARAMETERS = 32;
+inline constexpr std::size_t SHELLEXECUTEINFO_OFF_LPDIRECTORY = 40;
+inline constexpr std::size_t SHELLEXECUTEINFO_OFF_NSHOW = 48;
+inline constexpr std::size_t SHELLEXECUTEINFO_OFF_HINSTAPP = 56;
+inline constexpr std::size_t SHELLEXECUTEINFO_OFF_HPROCESS = 104;
+
+// HOSTENT (make_hostent(64)): h_name@0, h_aliases@8, h_addrtype i16@16,
+// h_length i16@18, h_addr_list@24 (32 bytes)
+inline constexpr std::size_t HOSTENT_SIZE = 32;
+inline constexpr std::size_t HOSTENT_OFF_HNAME = 0;
+inline constexpr std::size_t HOSTENT_OFF_HALIASES = 8;
+inline constexpr std::size_t HOSTENT_OFF_HADDRTYPE = 16;
+inline constexpr std::size_t HOSTENT_OFF_HLENGTH = 18;
+inline constexpr std::size_t HOSTENT_OFF_HADDRLIST = 24;
+
+}  // namespace win
+}  // namespace os
+}  // namespace qiling
+
 #endif  // QILING_OS_WINDOWS_STRUCTS_HPP

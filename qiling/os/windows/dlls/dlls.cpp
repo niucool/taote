@@ -42,6 +42,8 @@
 #include "qiling/os/windows/dlls/ole32.cpp"
 #include "qiling/os/windows/dlls/ucrtbased.cpp"
 #include "qiling/os/windows/dlls/wudplatform.cpp"
+#include "qiling/os/windows/dlls/shell32.cpp"
+#include "qiling/os/windows/dlls/wsock32.cpp"
 
 namespace qiling {
 namespace os {
@@ -85,6 +87,8 @@ void register_dlls() {
     win::register_ole32_family();
     win::register_ucrtbased_family();
     win::register_wudplatform_family();
+    win::register_shell32_family();
+    win::register_wsock32_family();
 }
 
 // the static-init registration (the python module-import side effect)

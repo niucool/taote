@@ -12,6 +12,8 @@
 #include "qiling/os/windows/dlls/dlls.hpp"
 #include "qiling/os/windows/windows.hpp"
 #include "qiling/os/windows/thread.hpp"
+#include "qiling/os/windows/structs.hpp"
+#include "qiling/os/windows/const.hpp"
 #include "qiling/loader/pe.hpp"
 
 using namespace qiling;
@@ -4667,4 +4669,147 @@ TEST(WinApiOle32, ComStubsAnswerSOkAndWudfProbesZero) {
     // the ucrtbased module rides the msvcrt surface verbatim (the same hook
     // objects) — the msvcrt entries stay resolvable
     EXPECT_NE(ApiRegistry::instance().find("strlen"), nullptr);
+}
+
+TEST(WinApiShell32, FileInfoShellExecuteAndSpecialFolderRideVerbatimWalks) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    auto& os = ql.os<QlOsWindows>();
+
+    // SHGetFileInfoA: the large-icon ride (the verbatim 1) + the else-throw
+    const auto* fi = ApiRegistry::instance().find("SHGetFileInfoA");
+    ASSERT_NE(fi, nullptr);
+    const auto r1 = fi->handler(ql, 0, ResolvedParams{
+        {"pszPath", std::string("C:\t.exe")}, {"dwFileAttributes", 0ull}, {"psfi", kScratch},
+        {"cbFileInfo", 0ull}, {"uFlags", static_cast<std::uint64_t>(SHGFI_LARGEICON)},
+    });
+    ASSERT_TRUE(r1.has_value());
+    EXPECT_EQ(*r1, 1u);
+    EXPECT_THROW((void)fi->handler(ql, 0, ResolvedParams{
+        {"pszPath", std::string("C:\t.exe")}, {"dwFileAttributes", 0ull}, {"psfi", kScratch},
+        {"cbFileInfo", 0ull}, {"uFlags", 0x2ull}}), QlErrorNotImplemented);
+
+    // ShellExecuteExW: the struct read + the READY-thread handle + the
+    // hInstApp/hProcess write-back
+    ql.mem().write(kScratch, std::vector<std::uint8_t>{'o', 'p', 'e', 'n', 0});
+    ql.mem().write(kScratch + 0x20, std::vector<std::uint8_t>{'c', 'a', 'l', 'c', 0});
+    ql.mem().write_ptr(kScratch + 0x100, 0x1000, 8);              // cbSize cell
+    ql.mem().write_ptr(kScratch + qiling::os::win::SHELLEXECUTEINFO_OFF_LPVERB, kScratch, 8);
+    ql.mem().write_ptr(kScratch + qiling::os::win::SHELLEXECUTEINFO_OFF_LPFILE, kScratch + 0x20, 8);
+    ql.mem().write_ptr(kScratch + qiling::os::win::SHELLEXECUTEINFO_OFF_NSHOW, 1, 4);
+    const auto* sew = ApiRegistry::instance().find("ShellExecuteExW");
+    ASSERT_NE(sew, nullptr);
+    const auto r2 = sew->handler(ql, 0, ResolvedParams{{"pExecInfo", kScratch + 0x100}});
+    ASSERT_TRUE(r2.has_value());
+    EXPECT_EQ(*r2, 1u);
+    EXPECT_EQ(ql.mem().read_ptr(kScratch + 0x100 + qiling::os::win::SHELLEXECUTEINFO_OFF_HINSTAPP, 8), 33u);
+    const auto proc_id = ql.mem().read_ptr(kScratch + 0x100 + qiling::os::win::SHELLEXECUTEINFO_OFF_HPROCESS, 8);
+    EXPECT_NE(proc_id, 0u);
+    const auto* h = os.handle_manager().get(proc_id);
+    ASSERT_NE(h, nullptr);
+
+    // ShellExecuteW: the verbatim 33
+    const auto* sew2 = ApiRegistry::instance().find("ShellExecuteW");
+    ASSERT_NE(sew2, nullptr);
+    const auto r3 = sew2->handler(ql, 0, ResolvedParams{
+        {"hwnd", 0ull}, {"lpOperation", kScratch}, {"lpFile", kScratch + 0x20},
+        {"lpParameters", 0ull}, {"lpDirectory", 0ull}, {"nShowCmd", 1ull},
+    });
+    ASSERT_TRUE(r3.has_value());
+    EXPECT_EQ(*r3, 33u);
+
+    // SHGetSpecialFolderPathW: the CSIDL_COMMON_APPDATA ride
+    const auto* sfp = ApiRegistry::instance().find("SHGetSpecialFolderPathW");
+    ASSERT_NE(sfp, nullptr);
+    const auto r4 = sfp->handler(ql, 0, ResolvedParams{
+        {"hwnd", 0ull}, {"pszPath", kScratch + 0x200}, {"csidl", static_cast<std::uint64_t>(qiling::os::win::CSIDL_COMMON_APPDATA)}, {"fCreate", 1ull},
+    });
+    ASSERT_TRUE(r4.has_value());
+    EXPECT_EQ(*r4, 1u);
+    const auto wide = ql.mem().read(kScratch + 0x200, 64);
+    std::string got;
+    for (std::size_t k = 0; k + 1 < wide.size() && wide[k] != 0; k += 2) {
+        got.push_back(static_cast<char>(wide[k]));
+    }
+    EXPECT_EQ(got, os.userprofile() + "\\AppData\\");
+
+    // the other csidls raise
+    EXPECT_THROW((void)sfp->handler(ql, 0, ResolvedParams{
+        {"hwnd", 0ull}, {"pszPath", kScratch + 0x200}, {"csidl", 0x24ull}, {"fCreate", 0ull}}),
+                 QlErrorNotImplemented);
+}
+
+TEST(WinApiWsock32, StartupSocketConnectAndGethostbynameRideVerbatimWalks) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    // WSAStartup / WSASocketA: the verbatim zeros
+    const auto* wsa = ApiRegistry::instance().find("WSAStartup");
+    ASSERT_NE(wsa, nullptr);
+    const auto r1 = wsa->handler(ql, 0, ResolvedParams{{"wVersionRequested", 0x202ull}, {"lpWSAData", 0ull}});
+    ASSERT_TRUE(r1.has_value());
+    EXPECT_EQ(*r1, 0u);
+    const auto* wsk = ApiRegistry::instance().find("WSASocketA");
+    ASSERT_NE(wsk, nullptr);
+    const auto r2 = wsk->handler(ql, 0, ResolvedParams{
+        {"af", 2ull}, {"type", 1ull}, {"protocol", 6ull}, {"lpProtocolInfo", 0ull},
+        {"g", 0ull}, {"dwFlags", 0ull},
+    });
+    ASSERT_TRUE(r2.has_value());
+    EXPECT_EQ(*r2, 0u);
+
+    // connect: the sockaddr_in parse (the family 2, the BE port, the dotted
+    // quad) answering the verbatim 0
+    const std::uint8_t sa4[] = {0x02, 0x00, 0x1f, 0x90, 10, 2, 13, 38, 0, 0, 0, 0, 0, 0, 0, 0};
+    ql.mem().write(kScratch, std::vector<std::uint8_t>(sa4, sa4 + sizeof(sa4)));
+    const auto* conn = ApiRegistry::instance().find("connect");
+    ASSERT_NE(conn, nullptr);
+    const auto r3 = conn->handler(ql, 0, ResolvedParams{
+        {"s", 0ull}, {"name", kScratch}, {"namelen", static_cast<std::uint64_t>(sizeof(sa4))},
+    });
+    ASSERT_TRUE(r3.has_value());
+    EXPECT_EQ(*r3, 0u);
+
+    // the IPv6 family (0x17) rides the 16-byte body
+    std::vector<std::uint8_t> sa6(28, 0);
+    sa6[0] = 0x17; sa6[1] = 0x00;
+    for (int k = 0; k < 16; ++k) {
+        sa6[8 + k] = static_cast<std::uint8_t>(0x20 + k);
+    }
+    ql.mem().write(kScratch + 0x40, sa6);
+    const auto r4 = conn->handler(ql, 0, ResolvedParams{
+        {"s", 0ull}, {"name", kScratch + 0x40}, {"namelen", static_cast<std::uint64_t>(sizeof(sa6))},
+    });
+    ASSERT_TRUE(r4.has_value());
+    EXPECT_EQ(*r4, 0u);
+
+    // the unhandled family rides the verbatim 0 (the debug note)
+    std::vector<std::uint8_t> sax(4, 0);
+    sax[1] = 0x05;
+    ql.mem().write(kScratch + 0x80, sax);
+    const auto r5 = conn->handler(ql, 0, ResolvedParams{
+        {"s", 0ull}, {"name", kScratch + 0x80}, {"namelen", 4ull},
+    });
+    ASSERT_TRUE(r5.has_value());
+    EXPECT_EQ(*r5, 0u);
+
+    // gethostbyname: the profile NETWORK dns_response_ip seeds the
+    // reversed-octet ip bytes; the hostent image rides the documented offsets
+    ql.mem().write(kScratch + 0xa0, std::vector<std::uint8_t>{'h', 'o', 's', 't', 0});
+    const auto* ghn = ApiRegistry::instance().find("gethostbyname");
+    ASSERT_NE(ghn, nullptr);
+    const auto r6 = ghn->handler(ql, 0, ResolvedParams{{"name", kScratch + 0xa0}});
+    ASSERT_TRUE(r6.has_value());
+    const auto he = *r6;
+    EXPECT_EQ(ql.mem().read_ptr(he + qiling::os::win::HOSTENT_OFF_HNAME, 8), kScratch + 0xa0);
+    const auto d_nullptr = ql.mem().read_ptr(he + qiling::os::win::HOSTENT_OFF_HALIASES, 8);
+    EXPECT_EQ(ql.mem().read_ptr(d_nullptr, 8), 0u);  // the pointer-to-nullptr sentinel
+    EXPECT_EQ(ql.mem().read_ptr(he + qiling::os::win::HOSTENT_OFF_HADDRTYPE, 2), 2u);
+    EXPECT_EQ(ql.mem().read_ptr(he + qiling::os::win::HOSTENT_OFF_HLENGTH, 2), 4u);
+    const auto addr_list = ql.mem().read_ptr(he + qiling::os::win::HOSTENT_OFF_HADDRLIST, 8);
+    const auto item = ql.mem().read_ptr(addr_list, 8);
+    EXPECT_EQ(ql.mem().read_ptr(addr_list + 8, 8), 0u);  // the sentinel
+    const auto ipb = ql.mem().read(item, 4);
+    EXPECT_EQ(ipb, (std::vector<std::uint8_t>{40, 30, 20, 10}));  // the reversed octets
 }
