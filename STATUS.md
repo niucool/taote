@@ -1341,3 +1341,35 @@ color-pair machinery rides the state shell without a terminal.
 | QlArchRISCV::unicorn_exception_handler | `arch/riscv.py` | ✅ | the illegal instruction (intno 2) warns and continues; the rest raise NotImplemented (the verbatim upstream shape) |
 | QlLoaderMCU the arch dispatch | — | ✅ | the reset + the intr hook dispatch on the arch type (the RISCV rides the riscv init_context + the exception handler; the CORTEX_M keeps its own) |
 | the gd32 full-os fixture | — | ✅ | the ihex blob (the ELA record) loads at the flash, the RISCV-32 blob (the lui/addi/sw/jal) executes through the loader's reset + the eclic core entity rides the board table; the store lands in the SRAM |
+
+### The closing-state assessment (the hw-phase completion)
+
+The port's reachable surface is **not exhausted**. The dialect/OS phases all
+closed (freebsd/qnx/dos/uefi/macos ✅, the socket family ✅, the hw/mcu phase
+✅ — the 3 board families + the fast mode + the RISCV run) and the linux
+kernel_api surface is complete (64/64). The genuinely remaining work, by
+priority:
+
+1. **The posix syscall gaps (48 registered-name diffs, prioritized)**:
+   - the io/fs tail (~14: the readv/writev/pread64/sendfile/ioctl/faccessat/
+     mknodat/fsync/fdatasync/fstat64/sysinfo/getrandom bodies — most are the
+     small verbatim bodies over the done fd-table/fs-mapper surfaces);
+   - the ipc/msg/shm family (7: the ipc multiplexer + the msg.py/shm.py
+     bodies);
+   - the time family (6: nanosleep/clock_nanosleep/setitimer/time/times);
+   - the proc/misc family (~10: arch_prctl/prctl/personality/ptrace/rseq/
+     getpriority/setrlimit/prlimit64/ugetrlimit/gettid);
+   - the epoll family (5) + the exec family (3: execve/fork/vfork — the
+     execve rides the close_on_exec consumer).
+2. **The optional extensions surface** (afl/r2/tracing/sanitizers/coverage):
+   the tooling integrations; tractable but value depends on the consumer
+   demand — defer with the tracked note.
+3. **The DISABLED_ probe/study set** (the TB/clone bisects, the uefi
+   second-dispatch pair, the macos kext-relocs): each its own dedicated
+   session per the standing loop-trigger discipline.
+4. **The upstream-dead surfaces** (the macos net_send/net_recv emitters, the
+   dos connect_client_info full body): stay skipped verbatim-absent until a
+   consumer appears.
+
+The first step on item 1 landed with this section (the file-op family:
+chmod/fchmod/mkdir/rmdir/umask/truncate/ftruncate — 430 passed).
