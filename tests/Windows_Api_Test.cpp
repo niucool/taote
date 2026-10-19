@@ -2478,3 +2478,17 @@ TEST(WinApiTimezone, GetTimeZoneInformationFailsInvalid) {
     ASSERT_TRUE(r.has_value());
     EXPECT_EQ(*r, 0xFFFFFFFFu);  // the TIME_ZONE_ID_INVALID (the python -1 as the DWORD)
 }
+
+TEST(WinApiConsole, GetConsoleModeReturnsOneNoWrite) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    // the verbatim body: the 1 return with NO write into lpMode
+    ql.mem().write(kCells, std::vector<std::uint8_t>(4, 0x7E));
+    const auto* gcm = ApiRegistry::instance().find("GetConsoleMode");
+    ASSERT_NE(gcm, nullptr);
+    const auto r = gcm->handler(ql, 0, ResolvedParams{{"hConsoleHandle", 0x10ull}, {"lpMode", kCells}});
+    ASSERT_TRUE(r.has_value());
+    EXPECT_EQ(*r, 1u);
+    EXPECT_EQ(ql.mem().read_ptr(kCells, 4), 0x7E7E7E7Eu);  // untouched
+}
