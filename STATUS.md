@@ -1373,3 +1373,28 @@ priority:
 
 The first step on item 1 landed with this section (the file-op family:
 chmod/fchmod/mkdir/rmdir/umask/truncate/ftruncate — 430 passed).
+
+### Phase 13.14 — the io/fs tail (the readv/writev/pread64/sendfile/ioctl/faccessat/fsync family)
+
+| piece | upstream | state | notes |
+|---|---|---|---|
+| readv/writev | `os/posix/syscall/uio.py` | ✅ | the iovec walk (the 2-native-size records, the iov_base/iov_len pairs), the per-iovec fd write/read ride, the byte-sum return; the non-readable/writable fd answers 0 |
+| pread64 | `unistd.py` | ✅ | the fd check, the is_mapped -EFAULT gate, the tell/seek/read/seek-back walk (the MIPS sp-offset quirk rides the MIPS slice) |
+| sendfile/sendfile64 | `sendfile.py` | ✅ | the fd range checks, the offset read/seek, the read/write pump, the offset write-back, the old-location restore; the sendfile64 alias |
+| fsync/fdatasync | `unistd.py` | ✅ | the fd check + the host flush via the fd's fileno (_commit on WIN32; the OSError answers -1 verbatim) |
+| faccessat | `unistd.py` | ✅ | the virtual_abspath_at walk (the AT_FDCWD cwd + the opened dirfd's host_to_virtual_path), the safety check, the exists check answering 0 or -ENOENT |
+| ioctl | `ioctl.py` | ✅ | the stub table (the allowed/disallowed (fd,cmd) pairs), the TCGETS 4-byte pack, the TIOCGWINSZ (1000,360,1000,1000) u16 pack, the TIOCSWINSZ/TCSETSW ignores, the unknown KeyError answering -1; the socket SIOCGIFADDR/ifrname-override branch defers with the harness chardev surface |
+| sysinfo | `sysinfo.py` | ✅ | the 14-field pack verbatim (the pointer-size pack, the pack16 procs, the pack32 mem_unit) |
+| getrandom | `random.py` | ✅ | the is_mapped -EFAULT gate + the urandom bytes + the len return |
+| mknodat | `stat.py` | ✅ | the dirfd-resolved path + the empty-file creation (the WIN32 dev-node deviation documented); the EEXIST check |
+| fstat64 | `stat.py` | ✅ | the __do_fstat alias riding the pack_stat64 layout (the do_fstat refactor carries the pack64 flag) |
+| the fixture | `tests/Posix_Test.cpp` | ✅ | the writev iovec walk through the open/close flush cycle (the 4+6 byte pairs, the file content verified host-side) |
+
+**Finding (the SchedYieldContinuesRun blob correction)**: the test's blob rode
+`mov eax, 99` believing it sched_yield — on x86-64 **99 = sysinfo** (the
+sched_yield is 24). The test passed vacuously through the not-implemented
+fall-through (rax untouched) and the new sysinfo body faulted writing at the
+guest's garbage `info=0` — the verbatim upstream behavior for sysinfo(0). The
+blob now rides the real sched_yield number; the sysinfo(info=0) fault shape is
+the same class as the upstream's (the mem.write at the caller-supplied
+pointer).
