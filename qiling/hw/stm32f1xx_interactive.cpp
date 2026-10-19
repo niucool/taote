@@ -197,6 +197,13 @@ void STM32F4xxI2c::write_body(std::uint64_t offset, std::uint32_t size, std::uin
     QlConnectivityPeripheral::write_body(offset, size, value);
 }
 
+void STM32F4xxI2c::step() {
+    // i2c.py step (the @device_handler ride): the pre-walk + the
+    // send_event_interrupt walk
+    device_handler_prewalk();
+    send_event_interrupt();
+}
+
 void STM32F4xxI2c::send_event_interrupt() {
     // i2c.py send_event_interrupt: the CR2 ITEVTEN + the BUF/SLAVE/MASTER
     // SR1 walks

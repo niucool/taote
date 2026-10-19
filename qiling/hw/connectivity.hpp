@@ -89,6 +89,26 @@ public:
         }
     }
 
+    // connectivity.py device_handler — the decorator's pre-walk: the otube
+    // byte forwards to every connected device and the devices step before
+    // the subclass body runs (the C++ rides the explicit pre-walk call at
+    // the top of the decorated steps)
+    void device_handler_prewalk() {
+        if (!device_list_.empty()) {
+            if (otube_.readable()) {
+                const auto data = otube_.read(1);
+                for (auto* device : device_list_) {
+                    if (auto* conn = dynamic_cast<QlConnectivityPeripheral*>(device)) {
+                        conn->send(data);
+                    }
+                }
+            }
+            for (auto* device : device_list_) {
+                device->step();
+            }
+        }
+    }
+
     const std::vector<QlPeripheral*>& device_list() const noexcept { return device_list_; }
 
     PeripheralTube& itube() noexcept { return itube_; }

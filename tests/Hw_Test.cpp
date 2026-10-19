@@ -1008,3 +1008,63 @@ TEST(HwManager, Mk64f12BoardAssemblesAndWalks) {
     EXPECT_NE(mcg->raw_read(0x04, 1) & qiling::hw::mk64f12_mcg::s::PLLST, 0u);
     EXPECT_NE(mcg->raw_read(0x04, 1) & qiling::hw::mk64f12_mcg::s::LOCK0, 0u);
 }
+
+// The chardev bridge: the device_handler pre-walk forwards the sender's
+// output-tube byte to the connected device's input tube and steps the device
+// (the usart1 -> usart2 ride); the i2c step rides the same pre-walk.
+TEST(HwManager, DeviceHandlerBridgeForwardsTubeBetweenPeripherals) {
+    const auto hex_path = write_ihex_fixture();
+
+    QilingOptions options;
+    options.argv = {hex_path};
+    options.rootfs = ensure_hw_rootfs().string();
+    options.ostype = QL_OS::MCU;
+    options.archtype = QL_ARCH::CORTEX_M;
+    options.env = {
+        {"FLASH", "memory;0x0;0x2000"},
+        {"SRAM", "memory;0x20000000;0x1000"},
+        {"PPB", "mmio;0xE000E000;0x1000"},
+        {"SYSTICK", "core;cm3_systick;0xE000E010"},
+        {"NVIC", "core;cm_nvic;0xE000E100"},
+        {"SCB", "core;cm4_scb;0xE000ED00"},
+        {"USART2", "core;STM32F1xxUsart;0x40004400;intn=38"},
+        {"USART3", "core;STM32F1xxUsart;0x40004800;intn=39"},
+        {"I2C1", "core;STM32F1xxI2c;0x40005400;ev_intn=31"},
+        {"PERIP", "mmio;0x40000000;0x100000"},
+    };
+    Qiling ql(options);
+
+    auto* usart2 = static_cast<qiling::hw::STM32F1xxUsart*>(ql.hw()->peripheral("usart2"));
+    auto* usart3 = static_cast<qiling::hw::STM32F1xxUsart*>(ql.hw()->peripheral("usart3"));
+    auto* nvic = static_cast<qiling::hw::CortexMNvic*>(ql.hw()->peripheral("nvic"));
+    ASSERT_NE(usart2, nullptr);
+    ASSERT_NE(usart3, nullptr);
+    ASSERT_NE(nvic, nullptr);
+    nvic->enable(38);
+    nvic->enable(39);
+
+    // the bridge: the usart2's DR write fills the otube; the usart2's step
+    // (the device_handler ride) forwards the byte to the connected usart3's
+    // itube and steps the usart3 (the RXNE + the nvic pend at 39)
+    usart2->connect(usart3);
+    usart3->write_body(usart3->kCr1Offset, 4, qiling::hw::usart::cr1::RXNEIE);
+    usart2->write_body(usart2->kDrOffset, 4, 0x5A);
+    usart2->step();
+
+    // the usart3 received the byte (the RXNE set + the pended intn)
+    EXPECT_NE(usart3->raw_read(usart3->kSrOffset, 4) & qiling::hw::usart::sr::RXNE, 0u);
+    ASSERT_EQ(nvic->pending_interrupts().size(), 1u);
+    EXPECT_EQ(nvic->pending_interrupts().back(), 39);
+    // the usart3's DR read rides the byte through and clears the RXNE
+    EXPECT_EQ(usart3->read_body(usart3->kDrOffset, 4), 0x5A);
+    EXPECT_EQ(usart3->raw_read(usart3->kSrOffset, 4) & qiling::hw::usart::sr::RXNE, 0u);
+
+    // the i2c step rides the same pre-walk (the empty device list no-ops and
+    // the send_event_interrupt walk runs)
+    auto* i2c1 = static_cast<qiling::hw::STM32F4xxI2c*>(ql.hw()->peripheral("i2c1"));
+    ASSERT_NE(i2c1, nullptr);
+    i2c1->set_master_mode();
+    i2c1->raw_write(i2c1->kSr1Offset, 4, qiling::hw::i2c::sr1::BTF);
+    i2c1->step();  // the CR2 ITEVTEN unset -> no pend; the walk completes
+    EXPECT_TRUE(i2c1->is_master_mode());
+}

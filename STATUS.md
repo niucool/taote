@@ -1309,3 +1309,11 @@ code). The dos int10/int16 curses surface stays console-detached (the
 resolution map and the null-stdscr branches verbatim; the cursor/scroll
 leaves are no-ops, the int16 poll throws NotImplemented) and the curses
 color-pair machinery rides the state shell without a terminal.
+
+### Phase 13.10 — the chardev bridge (the device_handler pre-walk)
+
+| piece | upstream | state | notes |
+|---|---|---|---|
+| QlConnectivityPeripheral::device_handler_prewalk | `hw/connectivity.py device_handler` | ✅ | the decorator's pre-walk: the otube byte (`recv(1)`) forwards to every connected device (`device.send(data)`) and the devices step before the subclass body; the C++ rides the explicit pre-walk call at the top of the decorated steps (the decorator-to-explicit-call deviation) |
+| the wired steps | `hw/char/stm32f4xx_usart.py`, `hw/i2c/stm32f4xx_i2c.py` steps | ✅ | the STM32F4xxUsart::step (the transfer + the check_interrupt after the pre-walk), the STM32F4xxI2c::step (the send_event_interrupt after the pre-walk); the upstream's third decorated step (the stm32f4xx_spi pass-body) rides the port's STM32F1xxSpi which predates it |
+| the fixture | `tests/Hw_Test.cpp` | ✅ | the usart2→usart3 bridge ride (the DR write fills the otube, the step forwards to the usart3's itube, the usart3's RXNE + the nvic pend at 39, the DR read rides the byte), the i2c step walk |

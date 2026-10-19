@@ -180,6 +180,10 @@ public:
     // i2c.py send_event_interrupt: the CR2 ITEVTEN + the SR1 status walks
     void send_event_interrupt();
 
+    // i2c.py step (the @device_handler ride): the pre-walk + the
+    // send_event_interrupt walk
+    void step() override;
+
     // i2c.py generate_start/generate_stop/send_address/send_data walks
     void generate_start();
     void generate_stop();

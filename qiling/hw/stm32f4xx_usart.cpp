@@ -32,16 +32,10 @@ void STM32F4xxUsart::check_interrupt() {
 }
 
 void STM32F4xxUsart::step() {
-    // usart.py step (the @device_handler ride): the output tube forwards one
-    // byte to the connected devices and the devices step (the chardev bridge
-    // slice completes the device walk — the port keeps the tube transfer);
+    // usart.py step (the @device_handler ride): the device_handler pre-walk
+    // forwards the output-tube byte to the connected devices and steps them;
     // then the transfer + the interrupt-check walks
-    if (!device_list().empty()) {
-        if (otube().readable()) {
-            // the device bridge rides the chardev slice (the upstream sends
-            // the byte to each connected device)
-        }
-    }
+    device_handler_prewalk();
 
     transfer();
     check_interrupt();
