@@ -2466,3 +2466,15 @@ TEST(WinApiStringapiset, CompareStringRidesCmpReturn) {
     ASSERT_TRUE(r_w.has_value());
     EXPECT_EQ(*r_w, static_cast<std::uint64_t>(-1));
 }
+
+TEST(WinApiTimezone, GetTimeZoneInformationFailsInvalid) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    // the verbatim TODO body: the fail-for-now TIME_ZONE_ID_INVALID
+    const auto* gtz = ApiRegistry::instance().find("GetTimeZoneInformation");
+    ASSERT_NE(gtz, nullptr);
+    const auto r = gtz->handler(ql, 0, ResolvedParams{{"lpTimeZoneInformation", kCells}});
+    ASSERT_TRUE(r.has_value());
+    EXPECT_EQ(*r, 0xFFFFFFFFu);  // the TIME_ZONE_ID_INVALID (the python -1 as the DWORD)
+}
