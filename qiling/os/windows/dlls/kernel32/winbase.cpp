@@ -7,13 +7,16 @@
 // walks. The family self-registers at static-init and can be re-seeded
 // after ApiRegistry::clear() (the test isolation).
 #include "qiling/core.hpp"
+#include "qiling/os/utils.hpp"
 #include "qiling/os/windows/api.hpp"
 #include "qiling/os/windows/const.hpp"
 #include "qiling/os/windows/fncc.hpp"
 #include "qiling/os/windows/structs.hpp"
 #include "qiling/os/windows/windows.hpp"
 
+#include <algorithm>
 #include <cstdio>
+#include <cctype>
 #include <string>
 
 #ifdef _WIN32
@@ -281,6 +284,321 @@ void register_winbase_family() {
         // Check write permission for size of memory
         return 0;  // ACCESS_TRUE  (verbatim)
     };
+
+    // ---- sub-slice 2: the Local/Global heap family + the lstr family ----
+
+    // DECLSPEC_ALLOCATOR HLOCAL LocalAlloc(
+    //   UINT   uFlags,
+    //   SIZE_T uBytes
+    // );
+    WinsdkApi("LocalAlloc", WinCc::Stdcall, {
+        {"uFlags", UINT_},
+        {"uBytes", DWORD_PTR_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto u_bytes = api_get_int(get_param(params, "uBytes"));
+        return w(ql).heap().alloc(u_bytes);
+    };
+
+    // DECLSPEC_ALLOCATOR HLOCAL LocalReAlloc(
+    //   _Frees_ptr_opt_ HLOCAL hMem,
+    //   SIZE_T                 uBytes,
+    //   UINT                   uFlags
+    // );
+    WinsdkApi("LocalReAlloc", WinCc::Stdcall, {
+        {"hMem", PVOID_},
+        {"uBytes", DWORD_PTR_},
+        {"uFlags", UINT_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        // the inline verbatim (the windows.h LMEM_MODIFY macro preempts the
+        // local spelling, so the value rides inline here)
+        constexpr std::uint64_t kLmemModify = 0x80;
+
+        const auto h_mem = api_get_int(get_param(params, "hMem"));
+        const auto u_bytes = api_get_int(get_param(params, "uBytes"));
+        const auto u_flags = api_get_int(get_param(params, "uFlags"));
+
+        if (u_flags & kLmemModify) {
+            throw QlErrorNotImplemented("");
+        }
+
+        w(ql).heap().free(h_mem);
+        return w(ql).heap().alloc(u_bytes);
+    };
+
+    // HLOCAL LocalFree(
+    //   _Frees_ptr_opt_ HLOCAL hMem
+    // );
+    WinsdkApi("LocalFree", WinCc::Stdcall, {
+        {"hMem", PVOID_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        w(ql).heap().free(api_get_int(get_param(params, "hMem")));
+        return 0;
+    };
+
+    // UINT SetHandleCount handled above (the verbatim passthrough)
+
+    // LPVOID GlobalLock(
+    //  HGLOBAL hMem
+    // );
+    WinsdkApi("GlobalLock", WinCc::Stdcall, {
+        {"hMem", PVOID_},
+    }) = [](Qiling&, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        return api_get_int(get_param(params, "hMem"));
+    };
+
+    // LPVOID GlobalUnlock(
+    //  HGLOBAL hMem
+    // );
+    WinsdkApi("GlobalUnlock", WinCc::Stdcall, {
+        {"hMem", PVOID_},
+    }) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
+        return 1;
+    };
+
+    // DECLSPEC_ALLOCATOR HGLOBAL GlobalAlloc(
+    //  UINT   uFlags,
+    //  SIZE_T dwBytes
+    // );
+    WinsdkApi("GlobalAlloc", WinCc::Stdcall, {
+        {"uFlags", UINT_},
+        {"dwBytes", DWORD_PTR_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto dw_bytes = api_get_int(get_param(params, "dwBytes"));
+        return w(ql).heap().alloc(dw_bytes);
+    };
+
+    // HGLOBAL GlobalFree(
+    //   _Frees_ptr_opt_ HGLOBAL hMem
+    // );
+    WinsdkApi("GlobalFree", WinCc::Stdcall, {
+        {"hMem", PVOID_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        w(ql).heap().free(api_get_int(get_param(params, "hMem")));
+        return 0;
+    };
+
+    // HGLOBAL GlobalHandle(
+    //   LPCVOID pMem
+    // );
+    WinsdkApi("GlobalHandle", WinCc::Stdcall, {
+        {"pMem", PVOID_},
+    }) = [](Qiling&, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        return api_get_int(get_param(params, "pMem"));
+    };
+
+    // LPSTR lstrcpynA(
+    //   LPSTR  lpString1,
+    //   LPCSTR lpString2,
+    //   int    iMaxLength
+    // );
+    WinsdkApi("lstrcpynA", WinCc::Stdcall, {
+        {"lpString1", LPSTR_},
+        {"lpString2", LPCSTR_},
+        {"iMaxLength", INT_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        // Copy String2 into String for max iMaxLength chars  (verbatim)
+        const auto dst = api_get_int(get_param(params, "lpString1"));
+        auto src = api_get_string(ql, get_param(params, "lpString2"));
+        const auto max_length = api_get_int(get_param(params, "iMaxLength"));
+
+        if (static_cast<std::int64_t>(src.size()) > max_length) {
+            src.resize(static_cast<std::size_t>(max_length));
+        }
+
+        ql.mem().write(dst, std::vector<std::uint8_t>(src.begin(), src.end()));
+
+        return dst;
+    };
+
+    // LPSTR lstrcpynW(
+    //   LPWSTR  lpString1,
+    //   LPCWSTR lpString2,
+    //   int     iMaxLength
+    // );
+    WinsdkApi("lstrcpynW", WinCc::Stdcall, {
+        {"lpString1", LPWSTR_},
+        {"lpString2", LPCWSTR_},
+        {"iMaxLength", INT_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        // Copy String2 into String for max iMaxLength chars  (verbatim)
+        const auto dst = api_get_int(get_param(params, "lpString1"));
+        auto src = api_get_string(ql, get_param(params, "lpString2"));
+        const auto max_length = api_get_int(get_param(params, "iMaxLength"));
+
+        if (static_cast<std::int64_t>(src.size()) > max_length) {
+            src.resize(static_cast<std::size_t>(max_length));
+        }
+
+        ql.mem().write(dst, std::vector<std::uint8_t>(src.begin(), src.end()));
+
+        return dst;
+    };
+
+    // LPSTR lstrcpyA(
+    //   LPSTR  lpString1,
+    //   LPCSTR lpString2,
+    // );
+    WinsdkApi("lstrcpyA", WinCc::Stdcall, {
+        {"lpString1", LPSTR_},
+        {"lpString2", LPCSTR_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        // Copy String2 into String  (verbatim)
+        const auto dst = api_get_int(get_param(params, "lpString1"));
+        const auto src = api_get_string(ql, get_param(params, "lpString2"));
+
+        ql.mem().write(dst, std::vector<std::uint8_t>(src.begin(), src.end()));
+
+        return dst;
+    };
+
+    // LPSTR lstrcpyW(
+    //   LPWSTR  lpString1,
+    //   LPCWSTR lpString2,
+    // );
+    WinsdkApi("lstrcpyW", WinCc::Stdcall, {
+        {"lpString1", LPWSTR_},
+        {"lpString2", LPCWSTR_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        // Copy String2 into String  (verbatim)
+        const auto dst = api_get_int(get_param(params, "lpString1"));
+        const auto src = api_get_string(ql, get_param(params, "lpString2"));
+
+        ql.mem().write(dst, std::vector<std::uint8_t>(src.begin(), src.end()));
+
+        return dst;
+    };
+
+    // LPSTR lstrcatA(
+    //   LPSTR  lpString1,
+    //   LPCSTR lpString2
+    // );
+    WinsdkApi("lstrcatA", WinCc::Stdcall, {
+        {"lpString1", LPSTR_},
+        {"lpString2", LPCSTR_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        // Copy String2 into String  (verbatim)
+        const auto dst = api_get_int(get_param(params, "lpString1"));
+        const auto src = api_get_string(ql, get_param(params, "lpString2"));
+
+        // string_base = ql.os.utils.read_cstring(dst) — the base rides the
+        // MEMORY read at the dst (the LPSTR param stays raw), verbatim
+        const auto string_base = QlOsUtils::read_cstring(ql, dst);
+
+        const std::string result = string_base + src + std::string(1, char(0));
+        ql.mem().write(dst, std::vector<std::uint8_t>(result.begin(), result.end()));
+
+        return dst;
+    };
+
+    // LPSTR lstrcatW(
+    //   LPWSTR  lpString1,
+    //   LPCWSTR lpString2
+    // );
+    WinsdkApi("lstrcatW", WinCc::Stdcall, {
+        {"lpString1", LPWSTR_},
+        {"lpString2", LPCWSTR_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        // Copy String2 into String  (verbatim)
+        const auto dst = api_get_int(get_param(params, "lpString1"));
+        const auto src = api_get_string(ql, get_param(params, "lpString2"));
+
+        // string_base = ql.os.utils.read_wstring(dst) — the utf-16le memory
+        // read (verbatim); the result re-encodes utf-16le
+        const auto string_base = QlOsUtils::read_wstring(ql, dst);
+
+        const std::string result = string_base + src + std::string(1, char(0));
+        std::string encoded;
+        encoded.reserve(result.size() * 2);
+        for (const char c : result) {
+            encoded.push_back(c);
+            encoded.push_back('\0');
+        }
+        ql.mem().write(dst, std::vector<std::uint8_t>(encoded.begin(), encoded.end()));
+
+        return dst;
+    };
+
+    // the shared __lstrlen body (the empty string rides the 0)
+    // int lstrlenA(LPCSTR lpString);
+    WinsdkApi("lstrlenA", WinCc::Stdcall, {
+        {"lpString", LPCSTR_},
+    }) = [](Qiling&, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto s = get_param(params, "lpString");
+        const auto& str = std::get<std::string>(s.second);
+        return str.empty() ? 0 : str.size();
+    };
+
+    // int lstrlenW(
+    //   LPCWSTR lpString
+    // );
+    WinsdkApi("lstrlenW", WinCc::Stdcall, {
+        {"lpString", LPCWSTR_},
+    }) = [](Qiling&, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto s = get_param(params, "lpString");
+        const auto& str = std::get<std::string>(s.second);
+        return str.empty() ? 0 : str.size();
+    };
+
+    // the shared __lstrcmp/__lstrcmpi bodies (the verbatim cmp walk; the
+    // case-insensitive pair lowercases both sides)
+    const auto lstrcmp_body = [](const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto s1 = get_param(params, "lpString1");
+        const auto s2 = get_param(params, "lpString2");
+        const auto& str1 = std::get<std::string>(s1.second);
+        const auto& str2 = std::get<std::string>(s2.second);
+        return static_cast<std::uint64_t>((str1 > str2) - (str1 < str2));
+    };
+    const auto lstrcmpi_body = [](const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        auto str1 = std::get<std::string>(get_param(params, "lpString1").second);
+        auto str2 = std::get<std::string>(get_param(params, "lpString2").second);
+        std::transform(str1.begin(), str1.end(), str1.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        std::transform(str2.begin(), str2.end(), str2.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return static_cast<std::uint64_t>((str1 > str2) - (str1 < str2));
+    };
+    // the KernelApi handler slot takes the full 3-arg shape; the helpers
+    // keep the params-only body and ride through the adapter lambdas
+    const auto lstrcmp_handler = [lstrcmp_body](Qiling&, std::uint64_t, const ResolvedParams& p) {
+        return lstrcmp_body(p);
+    };
+    const auto lstrcmpi_handler = [lstrcmpi_body](Qiling&, std::uint64_t, const ResolvedParams& p) {
+        return lstrcmpi_body(p);
+    };
+
+    // int lstrcmpiW(
+    //   LPCWSTR lpString1,
+    //   LPCWSTR lpString2
+    // );
+    WinsdkApi("lstrcmpiW", WinCc::Stdcall, {
+        {"lpString1", LPCWSTR_},
+        {"lpString2", LPCWSTR_},
+    }) = lstrcmpi_handler;
+
+    // int lstrcmpiA(
+    //   LPCSTR lpString1,
+    //   LPCSTR lpString2
+    // );
+    WinsdkApi("lstrcmpiA", WinCc::Stdcall, {
+        {"lpString1", LPCSTR_},
+        {"lpString2", LPCSTR_},
+    }) = lstrcmpi_handler;
+
+    // int lstrcmpW(
+    //   LPCWSTR lpString1,
+    //   LPCWSTR lpString2
+    // );
+    WinsdkApi("lstrcmpW", WinCc::Stdcall, {
+        {"lpString1", LPCWSTR_},
+        {"lpString2", LPCWSTR_},
+    }) = lstrcmp_handler;
+
+    // int lstrcmpA(
+    //   LPCSTR lpString1,
+    //   LPCSTR lpString2
+    // );
+    WinsdkApi("lstrcmpA", WinCc::Stdcall, {
+        {"lpString1", LPCSTR_},
+        {"lpString2", LPCSTR_},
+    }) = lstrcmp_handler;
 }
 
 // the static-init registration (the python module-import side effect)

@@ -2871,3 +2871,159 @@ TEST(WinApiWinbase, LFileFamilyRidesRealDescriptors) {
     ASSERT_TRUE(rerr.has_value());
     EXPECT_EQ(*rerr, static_cast<std::uint64_t>(-1));
 }
+
+TEST(WinApiWinbase, LocalGlobalHeapFamilyRidesHeapSurface) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    auto& os = ql.os<QlOsWindows>();
+
+    // LocalAlloc: the heap address rides back
+    const auto* la = ApiRegistry::instance().find("LocalAlloc");
+    ASSERT_NE(la, nullptr);
+    const auto rla = la->handler(ql, 0, ResolvedParams{{"uFlags", 0ull}, {"uBytes", 0x40ull}});
+    ASSERT_TRUE(rla.has_value());
+    EXPECT_NE(*rla, 0u);
+
+    // LocalReAlloc: the free + the fresh alloc
+    const auto* lra = ApiRegistry::instance().find("LocalReAlloc");
+    ASSERT_NE(lra, nullptr);
+    const auto rlra = lra->handler(ql, 0, ResolvedParams{{"hMem", *rla}, {"uBytes", 0x20ull}, {"uFlags", 0ull}});
+    ASSERT_TRUE(rlra.has_value());
+    EXPECT_NE(*rlra, 0u);
+
+    // the LMEM_MODIFY flag raises the verbatim NotImplemented
+    bool threw = false;
+    try {
+        (void)lra->handler(ql, 0, ResolvedParams{{"hMem", *rlra}, {"uBytes", 0x20ull}, {"uFlags", 0x80ull}});
+    } catch (const QlErrorNotImplemented&) {
+        threw = true;
+    }
+    EXPECT_TRUE(threw);
+
+    // LocalFree rides the 0
+    const auto* lf = ApiRegistry::instance().find("LocalFree");
+    ASSERT_NE(lf, nullptr);
+    const auto rlf = lf->handler(ql, 0, ResolvedParams{{"hMem", *rlra}});
+    ASSERT_TRUE(rlf.has_value());
+    EXPECT_EQ(*rlf, 0u);
+
+    // the Global family: the alloc/lock/unlock/handle/free cycle
+    const auto* ga = ApiRegistry::instance().find("GlobalAlloc");
+    ASSERT_NE(ga, nullptr);
+    const auto rga = ga->handler(ql, 0, ResolvedParams{{"uFlags", 0ull}, {"dwBytes", 0x30ull}});
+    ASSERT_TRUE(rga.has_value());
+    EXPECT_NE(*rga, 0u);
+
+    const auto* gl = ApiRegistry::instance().find("GlobalLock");
+    ASSERT_NE(gl, nullptr);
+    const auto rgl = gl->handler(ql, 0, ResolvedParams{{"hMem", *rga}});
+    ASSERT_TRUE(rgl.has_value());
+    EXPECT_EQ(*rgl, *rga);  // the identity passthrough
+
+    const auto* gu = ApiRegistry::instance().find("GlobalUnlock");
+    ASSERT_NE(gu, nullptr);
+    const auto rgu = gu->handler(ql, 0, ResolvedParams{{"hMem", *rga}});
+    ASSERT_TRUE(rgu.has_value());
+    EXPECT_EQ(*rgu, 1u);
+
+    const auto* gh = ApiRegistry::instance().find("GlobalHandle");
+    ASSERT_NE(gh, nullptr);
+    const auto rgh = gh->handler(ql, 0, ResolvedParams{{"pMem", *rga}});
+    ASSERT_TRUE(rgh.has_value());
+    EXPECT_EQ(*rgh, *rga);
+
+    const auto* gf = ApiRegistry::instance().find("GlobalFree");
+    ASSERT_NE(gf, nullptr);
+    const auto rgf = gf->handler(ql, 0, ResolvedParams{{"hMem", *rga}});
+    ASSERT_TRUE(rgf.has_value());
+    EXPECT_EQ(*rgf, 0u);
+}
+
+TEST(WinApiWinbase, LstrFamilyRidesCopyConcatLengthCompare) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    // lstrcpynA: the iMaxLength truncation
+    const auto* cpyna = ApiRegistry::instance().find("lstrcpynA");
+    ASSERT_NE(cpyna, nullptr);
+    const auto rc = cpyna->handler(ql, 0, ResolvedParams{
+        {"lpString1", kScratch},
+        {"lpString2", std::string("hello world")},
+        {"iMaxLength", 5ull},
+    });
+    ASSERT_TRUE(rc.has_value());
+    EXPECT_EQ(*rc, kScratch);
+    const auto got5 = ql.mem().read(kScratch, 5);
+    EXPECT_EQ(std::string(got5.begin(), got5.end()), "hello");  // the truncated copy, no NUL (the verbatim write shape)
+
+    // lstrcpyA: the verbatim copy (no truncation)
+    const auto* cpya = ApiRegistry::instance().find("lstrcpyA");
+    ASSERT_NE(cpya, nullptr);
+    const auto rc2 = cpya->handler(ql, 0, ResolvedParams{
+        {"lpString1", kScratch + 0x100},
+        {"lpString2", std::string("abcdef")},
+    });
+    ASSERT_TRUE(rc2.has_value());
+    EXPECT_EQ(*rc2, kScratch + 0x100);
+
+    // lstrcatA: the base rides the read_cstring walk + the appended NUL
+    ql.mem().write(kScratch + 0x200, std::vector<std::uint8_t>{'b', 'a', 's', 'e', 0});
+    const auto* cata = ApiRegistry::instance().find("lstrcatA");
+    ASSERT_NE(cata, nullptr);
+    const auto rca = cata->handler(ql, 0, ResolvedParams{
+        {"lpString1", kScratch + 0x200},
+        {"lpString2", std::string("++")},
+    });
+    ASSERT_TRUE(rca.has_value());
+    const auto cat = ql.mem().read(kScratch + 0x200, 7);
+    EXPECT_EQ(std::string(cat.begin(), cat.end()), "base++" + std::string(1, char(0)));
+
+    // lstrlenA: the length (the resolved cstring excludes the NUL)
+    const auto* lena = ApiRegistry::instance().find("lstrlenA");
+    ASSERT_NE(lena, nullptr);
+    const auto rla = lena->handler(ql, 0, ResolvedParams{{"lpString", std::string("abcdef")}});
+    ASSERT_TRUE(rla.has_value());
+    EXPECT_EQ(*rla, 6u);
+
+    const auto* lenw = ApiRegistry::instance().find("lstrlenW");
+    ASSERT_NE(lenw, nullptr);
+    const auto rlw = lenw->handler(ql, 0, ResolvedParams{{"lpString", std::string("")}});
+    ASSERT_TRUE(rlw.has_value());
+    EXPECT_EQ(*rlw, 0u);  // the verbatim 0 if not s
+
+    // lstrcatW: the wide concat (the utf-16le result)
+    ql.mem().write(kScratch + 0x400, std::vector<std::uint8_t>{'w', 0, 0, 0});
+    const auto* catw = ApiRegistry::instance().find("lstrcatW");
+    ASSERT_NE(catw, nullptr);
+    const auto rcw = catw->handler(ql, 0, ResolvedParams{
+        {"lpString1", kScratch + 0x400},
+        {"lpString2", std::string("ide")},
+    });
+    ASSERT_TRUE(rcw.has_value());
+    const auto catw_got = ql.mem().read(kScratch + 0x400, 10);
+    std::string decoded;
+    for (std::size_t i = 0; i + 1 < catw_got.size(); i += 2) {
+        decoded.push_back(static_cast<char>(catw_got[i]));
+    }
+    EXPECT_EQ(decoded, "wide" + std::string(1, char(0)));
+
+    // the lstrcmp/lstrcmpi quartet: the verbatim -1/0/1 walk
+    const auto* scmpa = ApiRegistry::instance().find("lstrcmpA");
+    ASSERT_NE(scmpa, nullptr);
+    const auto rcmp = scmpa->handler(ql, 0, ResolvedParams{{"lpString1", std::string("abc")}, {"lpString2", std::string("abd")}});
+    ASSERT_TRUE(rcmp.has_value());
+    EXPECT_EQ(*rcmp, static_cast<std::uint64_t>(-1));
+
+    const auto* scmpia = ApiRegistry::instance().find("lstrcmpiA");
+    ASSERT_NE(scmpia, nullptr);
+    const auto rcmi = scmpia->handler(ql, 0, ResolvedParams{{"lpString1", std::string("ABC")}, {"lpString2", std::string("abd")}});
+    ASSERT_TRUE(rcmi.has_value());
+    EXPECT_EQ(*rcmi, static_cast<std::uint64_t>(-1));  // the case-folded
+
+    const auto* scmpw = ApiRegistry::instance().find("lstrcmpW");
+    ASSERT_NE(scmpw, nullptr);
+    const auto rcmw = scmpw->handler(ql, 0, ResolvedParams{{"lpString1", std::string("same")}, {"lpString2", std::string("same")}});
+    ASSERT_TRUE(rcmw.has_value());
+    EXPECT_EQ(*rcmw, 0u);
+}
