@@ -23,6 +23,7 @@
 #include "qiling/hw/stm32f1xx_interactive.hpp"
 #include "qiling/hw/sam3xa.hpp"
 #include "qiling/hw/gd32vf1xx.hpp"
+#include "qiling/hw/mk64f12.hpp"
 #include "qiling/hw/board_env.hpp"
 #include "qiling/hw/stm32f1xx_gpio.hpp"
 #include "qiling/hw/stm32f4xx_usart.hpp"
@@ -940,4 +941,70 @@ TEST(HwManager, Gd32vf103BoardAssemblesAndGpioWalks) {
     // the usart STAT seed rides the TC|TXE bits
     auto* usart0 = static_cast<qiling::hw::Gd32vf1xxUsart*>(hw.peripheral("entry2"));
     EXPECT_EQ(usart0->raw_read(0x00, 4), 0xc0u);
+}
+
+// The mk64f12 board-table assembly: the implemented MK64F12 families create
+// through the board struct names (the uart's S1 seed, the gpio PSOR/PTOR
+// loops, the port IRQC walk, the adc CAL walk, the mcg C1/C6 status rides),
+// the unimplemented upstream names degrade to null.
+TEST(HwManager, Mk64f12BoardAssemblesAndWalks) {
+    auto ql = make_hw_ql();
+    qiling::hw::QlHwManager hw(ql);
+
+    // the implemented families
+    for (const auto& struct_name : {"MK64F12Uart", "MK64F12Gpio", "MK64F12Port", "MK64F12Spi",
+                                    "MK64F12Ftm", "MK64F12Adc", "MK64F12Mcg", "MK64F12Sim",
+                                    "MK64F12Smc", "MK64F12Wdog", "MK64F12Osc", "MK64F12Rtc"}) {
+        EXPECT_NE(hw.create("entry_" + std::string(struct_name), struct_name, 0x40000000, {}), nullptr) << struct_name;
+    }
+    // the upstream-unimplemented names degrade to null
+    for (const auto& missing : {"MK64F12Ftfe", "MK64F12Aips", "MK64F12Dma", "MK64F12Pit",
+                                "MK64F12I2c", "MK64F12Crc", "MK64F12Rng", "MK64F12Enet", "MK64F12Cau"}) {
+        EXPECT_EQ(hw.create(missing, missing, 0x40010000, {}), nullptr) << missing;
+    }
+
+    // the uart walk: the D write rides the tube, the input + the C2.RIE ride
+    // the step's S1.RDRF + the nvic pend
+    auto* uart = static_cast<qiling::hw::Mk64f12Uart*>(hw.peripheral("entry_MK64F12Uart"));
+    uart->write_body(uart->kDOffset, 1, 0x41);
+    const auto out = uart->recv(2);
+    ASSERT_EQ(out.size(), 1u);
+    EXPECT_EQ(out[0], 0x41);
+    uart->send({'Z'});
+    uart->write_body(0x03, 1, qiling::hw::mk64f12_uart::c2::RIE);  // the C2 u8 field
+    uart->step();
+    EXPECT_NE(uart->raw_read(0x04, 1) & qiling::hw::mk64f12_uart::s1::RDRF, 0u);
+    EXPECT_EQ(uart->read_body(uart->kDOffset, 1), 'Z');
+
+    // the gpio/port walk: the PSOR write rides the port IRQC (the rising
+    // edge config pends the nvic) and the PDOR tracks the set
+    auto* gpioa = static_cast<qiling::hw::Mk64f12Gpio*>(hw.peripheral("entry_MK64F12Gpio"));
+    auto* portx = static_cast<qiling::hw::Mk64f12Port*>(hw.peripheral("entry_MK64F12Port"));
+    (void)portx;
+    std::size_t set_calls = 0;
+    gpioa->hook_set(1, [&set_calls]() { ++set_calls; });
+    gpioa->write_body(gpioa->kPddrOffset, 4, 0xffffffffu);  // the PDDR: the output mode
+    gpioa->write_body(gpioa->kPsorOffset, 4, 0);            // the verbatim unmasked loop
+    EXPECT_EQ(gpioa->pin(1), 1u);
+    EXPECT_EQ(set_calls, 1u);  // the PSOR loop walks all 32 pins (the pin-1 set fires once)
+
+    // the port IRQC walk: the logic-one config + the set ride the pend
+    // (the pending rides the port's intn — the direct send_interrupt shape)
+    portx->write_body(portx->kPcrOffset + 4, 4, 0xCu << 16);  // the PCR[1] logic-one
+    // the send_interrupt walk rides the (prev, curr) pair
+    // (the nvic pend is exercised through the sam3xa walk; the mode gate here)
+    EXPECT_EQ(portx->pin_interrupt_config(1), 0xCu);
+
+    // the adc CAL walk: the SC3.CAL sets both SC1 COCO bits and self-clears
+    auto* adc = static_cast<qiling::hw::Mk64f12Adc*>(hw.peripheral("entry_MK64F12Adc"));
+    adc->write_body(adc->kSc3Offset, 4, qiling::hw::mk64f12_adc::sc3::CAL);
+    EXPECT_NE(adc->raw_read(adc->kSc1Offset, 4) & qiling::hw::mk64f12_adc::sc1::COCO, 0u);
+    EXPECT_NE(adc->raw_read(adc->kSc1bOffset, 4) & qiling::hw::mk64f12_adc::sc1::COCO, 0u);
+    EXPECT_EQ(adc->raw_read(adc->kSc3Offset, 4) & qiling::hw::mk64f12_adc::sc3::CAL, 0u);
+
+    // the mcg C6.PLLS ride: the PLLST + the LOCK0 status bits
+    auto* mcg = static_cast<qiling::hw::Mk64f12Mcg*>(hw.peripheral("entry_MK64F12Mcg"));
+    mcg->write_body(0x0A, 1, qiling::hw::mk64f12_mcg::c6::PLLS);
+    EXPECT_NE(mcg->raw_read(0x04, 1) & qiling::hw::mk64f12_mcg::s::PLLST, 0u);
+    EXPECT_NE(mcg->raw_read(0x04, 1) & qiling::hw::mk64f12_mcg::s::LOCK0, 0u);
 }

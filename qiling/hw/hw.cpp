@@ -10,6 +10,7 @@
 #include "qiling/hw/stm32f1xx_interactive.hpp"
 #include "qiling/hw/sam3xa.hpp"
 #include "qiling/hw/gd32vf1xx.hpp"
+#include "qiling/hw/mk64f12.hpp"
 
 #include <algorithm>
 #include <map>
@@ -173,6 +174,52 @@ QlHwManager::QlHwManager(Qiling& ql) : ql_(&ql) {
     });
     register_struct("GD32VF1xxEclic", [](Qiling& q, const std::string& label, const PeripheralKwargs&) {
         return std::make_unique<Gd32vf1xxEclic>(q, label);
+    });
+    register_struct("MK64F12Uart", [](Qiling& q, const std::string& label, const PeripheralKwargs& kwargs) {
+        auto intn_of = [&kwargs](const char* key) {
+            const auto it = kwargs.find(key);
+            return it == kwargs.end() ? -1 : static_cast<std::int64_t>(it->second);
+        };
+        return std::make_unique<Mk64f12Uart>(q, label, intn_of("lon_intn"), intn_of("rx_tx_intn"), intn_of("err_intn"));
+    });
+    register_struct("MK64F12Gpio", [](Qiling& q, const std::string& label, const PeripheralKwargs& kwargs) {
+        auto it = kwargs.find("intn");
+        return std::make_unique<Mk64f12Gpio>(q, label, it == kwargs.end() ? -1 : static_cast<std::int64_t>(it->second));
+    });
+    register_struct("MK64F12Port", [](Qiling& q, const std::string& label, const PeripheralKwargs& kwargs) {
+        auto it = kwargs.find("intn");
+        return std::make_unique<Mk64f12Port>(q, label, it == kwargs.end() ? -1 : static_cast<std::int64_t>(it->second));
+    });
+    register_struct("MK64F12Spi", [](Qiling& q, const std::string& label, const PeripheralKwargs& kwargs) {
+        auto it = kwargs.find("intn");
+        return std::make_unique<Mk64f12Spi>(q, label, it == kwargs.end() ? -1 : static_cast<std::int64_t>(it->second));
+    });
+    register_struct("MK64F12Ftm", [](Qiling& q, const std::string& label, const PeripheralKwargs& kwargs) {
+        auto it = kwargs.find("intn");
+        return std::make_unique<Mk64f12Ftm>(q, label, it == kwargs.end() ? -1 : static_cast<std::int64_t>(it->second));
+    });
+    register_struct("MK64F12Adc", [](Qiling& q, const std::string& label, const PeripheralKwargs& kwargs) {
+        auto it = kwargs.find("intn");
+        return std::make_unique<Mk64f12Adc>(q, label, it == kwargs.end() ? -1 : static_cast<std::int64_t>(it->second));
+    });
+    register_struct("MK64F12Mcg", [](Qiling& q, const std::string& label, const PeripheralKwargs& kwargs) {
+        auto it = kwargs.find("intn");
+        return std::make_unique<Mk64f12Mcg>(q, label, it == kwargs.end() ? -1 : static_cast<std::int64_t>(it->second));
+    });
+    register_struct("MK64F12Sim", [](Qiling& q, const std::string& label, const PeripheralKwargs&) {
+        return std::make_unique<Mk64f12Sim>(q, label);
+    });
+    register_struct("MK64F12Smc", [](Qiling& q, const std::string& label, const PeripheralKwargs&) {
+        return std::make_unique<Mk64f12Smc>(q, label);
+    });
+    register_struct("MK64F12Wdog", [](Qiling& q, const std::string& label, const PeripheralKwargs&) {
+        return std::make_unique<Mk64f12Wdog>(q, label);
+    });
+    register_struct("MK64F12Osc", [](Qiling& q, const std::string& label, const PeripheralKwargs&) {
+        return std::make_unique<Mk64f12Osc>(q, label);
+    });
+    register_struct("MK64F12Rtc", [](Qiling& q, const std::string& label, const PeripheralKwargs&) {
+        return std::make_unique<Mk64f12Rtc>(q, label);
     });
     register_struct("STM32F1xxExti", [](Qiling& q, const std::string& label, const PeripheralKwargs& kwargs) {
         auto exti = std::make_unique<STM32F1xxExti>(q, label);
