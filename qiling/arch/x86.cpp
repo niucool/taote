@@ -227,7 +227,8 @@ QlArchX86::QlArchX86(Qiling* ql, std::optional<X86_CPU_MODEL> cputype)
     : QlArchIntel(ql, 32, cputype) {
     regs_ = QlRegisterManager(*uc_,
                               merged_maps(reg_map_8(), reg_map_16(), reg_map_32(), reg_map_cr(), reg_map_dr(),
-                                          reg_map_st(), reg_map_misc(), reg_map_xmm(), reg_map_ymm()),
+                                          reg_map_st(), reg_map_misc(), reg_map_xmm(), reg_map_ymm(),
+                                          reg_map_seg_base()),
                               "eip", "esp");
 }
 

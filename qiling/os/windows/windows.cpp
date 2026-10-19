@@ -105,9 +105,12 @@ void QlOsWindows::ensure_profile_state() {
     }
     ql_->mem().map(GS_SEGMENT_ADDR, GS_SEGMENT_SIZE, UC_PROT_ALL, "[GS]");
 
-    // FS/GS base: the segment registers point at the region bases
+    // FS/GS base: the segment registers point at the region bases (the x64
+    // rides the GS segment; the x86 TEB lives in the FS segment)
     if (ql_->arch().bits() == 64) {
         ql_->arch().regs().write("gsbase", GS_SEGMENT_ADDR);
+    } else {
+        ql_->arch().regs().write("fsbase", FS_SEGMENT_ADDR);
     }
 
     const auto heap_base = static_cast<std::uint64_t>(profile().get_int(os_section_name(), "heap_address"));

@@ -5052,3 +5052,41 @@ TEST(WinApiE2E, RealPeHelloRunsToExitProcess) {
     std::string got((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     EXPECT_EQ(got, "hello from qiling\r\n");
 }
+
+TEST(WinApiE2E, RealPeHelloX86RunsThroughTheX86IatPath) {
+    register_dlls();
+
+    // the 32-bit variant rides the same surface through the OS32 profile:
+    // the FS-based TEB, the x86 IAT walk and the stdcall fcall shape
+    const auto rootfs = win_ensure_rootfs();
+    std::filesystem::create_directories(rootfs / "Windows" / "System32");
+    std::filesystem::copy_file(std::filesystem::path("C:/Windows/SysWOW64/kernel32.dll"),
+                               rootfs / "Windows" / "System32" / "kernel32.dll",
+                               std::filesystem::copy_options::overwrite_existing);
+    std::filesystem::create_directories(rootfs / "Windows" / "registry");
+    std::filesystem::create_directories(rootfs / "qltest");
+
+    const auto exe = std::filesystem::absolute(std::filesystem::path(__FILE__)).parent_path() /
+                     "data" / "hello_x86.exe";
+    ASSERT_TRUE(std::filesystem::exists(exe)) << exe.string();
+
+    QilingOptions options;
+    options.rootfs = rootfs.string();
+    options.ostype = QL_OS::WINDOWS;
+    options.archtype = QL_ARCH::X86;
+    options.argv = {exe.string(), "arg-one"};
+    Qiling ql(std::move(options));
+
+    const auto& loader = static_cast<const qiling::loader::QlLoaderPE&>(ql.loader());
+    const auto* k32_image = loader.get_image_by_name("kernel32.dll", true);
+    ASSERT_NE(k32_image, nullptr);
+    EXPECT_GT(k32_image->base, 0ull);
+
+    ql.run();
+
+    const auto guest_file = rootfs / "qltest" / "hello.txt";
+    ASSERT_TRUE(std::filesystem::exists(guest_file));
+    std::ifstream in(guest_file, std::ios::binary);
+    std::string got((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    EXPECT_EQ(got, "hello from qiling\r\n");
+}
