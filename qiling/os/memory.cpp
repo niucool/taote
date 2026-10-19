@@ -628,6 +628,12 @@ bool QlMemoryHeap::free(std::uint64_t addr) {
     return true;
 }
 
+const QlMemoryHeap::Chunk* QlMemoryHeap::find_chunk(std::uint64_t addr) const {
+    // heapapi hook_HeapValidate rides the raw _find (the inuse flag is read
+    // by the caller)
+    return find(addr);
+}
+
 std::uint64_t QlMemoryHeap::size(std::uint64_t addr) const {
     const Chunk* chunk = find(addr, true);
     return chunk != nullptr ? chunk->size : 0;

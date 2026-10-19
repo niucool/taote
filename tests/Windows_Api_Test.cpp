@@ -1177,3 +1177,138 @@ TEST(WinApiSynchapi, CreateEventNamedAndAnonymous) {
     // the W sibling shares the body
     EXPECT_NE(ApiRegistry::instance().find("CreateEventW"), nullptr);
 }
+
+TEST(WinApiHeapapi, HeapLifecycleAllocWriteFreeValidate) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    // HeapCreate: the verbatim alloc over the initial size
+    const auto* create = ApiRegistry::instance().find("HeapCreate");
+    ASSERT_NE(create, nullptr);
+    const auto hheap = create->handler(ql, 0, ResolvedParams{
+        {"flOptions", std::uint64_t{0}},
+        {"dwInitialSize", std::uint64_t{0x1000}},
+        {"dwMaximumSize", std::uint64_t{0}},
+    });
+    ASSERT_TRUE(hheap.has_value());
+    EXPECT_NE(*hheap, 0u);
+
+    // HeapAlloc: the plain alloc, the writable memory
+    const auto* alloc = ApiRegistry::instance().find("HeapAlloc");
+    ASSERT_NE(alloc, nullptr);
+    const auto p1 = alloc->handler(ql, 0, ResolvedParams{
+        {"hHeap", *hheap},
+        {"dwFlags", std::uint64_t{0}},
+        {"dwBytes", std::uint64_t{0x40}},
+    });
+    ASSERT_TRUE(p1.has_value());
+    EXPECT_NE(*p1, 0u);
+    ql.mem().write_ptr(*p1, 0x4142);
+
+    // HeapAlloc with HEAP_ZERO_MEMORY: the range reads back zero
+    const auto p2 = alloc->handler(ql, 0, ResolvedParams{
+        {"hHeap", *hheap},
+        {"dwFlags", std::uint64_t{0x8}},  // HEAP_ZERO_MEMORY
+        {"dwBytes", std::uint64_t{0x100}},
+    });
+    ASSERT_TRUE(p2.has_value());
+    EXPECT_NE(*p2, 0u);
+    for (std::uint64_t off = 0; off < 0x100; off += 0x20) {
+        ASSERT_EQ(ql.mem().read(*p2 + off, 8), std::vector<std::uint8_t>(8, 0)) << "offset " << off;
+    }
+
+    // HeapSize: the allocated size rides back
+    const auto* size_ = ApiRegistry::instance().find("HeapSize");
+    ASSERT_NE(size_, nullptr);
+    const auto sz = size_->handler(ql, 0, ResolvedParams{
+        {"hHeap", *hheap}, {"dwFlags", std::uint64_t{0}}, {"lpMem", *p1}});
+    ASSERT_TRUE(sz.has_value());
+    EXPECT_EQ(*sz, 0x40u);
+
+    // HeapValidate: the in-use chunk validates, the freed one does not
+    const auto* validate = ApiRegistry::instance().find("HeapValidate");
+    ASSERT_NE(validate, nullptr);
+    const auto v1 = validate->handler(ql, 0, ResolvedParams{
+        {"hHeap", *hheap}, {"dwFlags", std::uint64_t{0}}, {"lpMem", *p1}});
+    ASSERT_TRUE(v1.has_value());
+    EXPECT_EQ(*v1, 1u);
+
+    const auto* free_ = ApiRegistry::instance().find("HeapFree");
+    ASSERT_NE(free_, nullptr);
+    const auto f1 = free_->handler(ql, 0, ResolvedParams{
+        {"hHeap", *hheap}, {"dwFlags", std::uint64_t{0}}, {"lpMem", *p1}});
+    ASSERT_TRUE(f1.has_value());
+    EXPECT_EQ(*f1, 1u);
+
+    const auto v2 = validate->handler(ql, 0, ResolvedParams{
+        {"hHeap", *hheap}, {"dwFlags", std::uint64_t{0}}, {"lpMem", *p1}});
+    ASSERT_TRUE(v2.has_value());
+    EXPECT_EQ(*v2, 0u);
+
+    // GetProcessHeap: the heap start address
+    const auto* gph = ApiRegistry::instance().find("GetProcessHeap");
+    ASSERT_NE(gph, nullptr);
+    const auto ph = gph->handler(ql, 0, {});
+    ASSERT_TRUE(ph.has_value());
+    EXPECT_EQ(*ph, ql.os<QlOsWindows>().heap().start_address());
+
+    // HeapSetInformation: the verbatim 1
+    const auto* setinfo = ApiRegistry::instance().find("HeapSetInformation");
+    ASSERT_NE(setinfo, nullptr);
+    const auto si = setinfo->handler(ql, 0, ResolvedParams{
+        {"HeapHandle", std::uint64_t{0}},
+        {"HeapInformationClass", std::uint64_t{0}},
+        {"HeapInformation", std::uint64_t{0}},
+        {"HeapInformationLength", std::uint64_t{0}},
+    });
+    ASSERT_TRUE(si.has_value());
+    EXPECT_EQ(*si, 1u);
+}
+
+TEST(WinApiHeapapi, HeapReAllocRoundTripPreservesContent) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    const auto* create = ApiRegistry::instance().find("HeapCreate");
+    ASSERT_NE(create, nullptr);
+    const auto hheap = create->handler(ql, 0, ResolvedParams{
+        {"flOptions", std::uint64_t{0}},
+        {"dwInitialSize", std::uint64_t{0x1000}},
+        {"dwMaximumSize", std::uint64_t{0}},
+    });
+    ASSERT_TRUE(hheap.has_value());
+
+    const auto* alloc = ApiRegistry::instance().find("HeapAlloc");
+    ASSERT_NE(alloc, nullptr);
+    const auto p = alloc->handler(ql, 0, ResolvedParams{
+        {"hHeap", *hheap}, {"dwFlags", std::uint64_t{0}}, {"dwBytes", std::uint64_t{0x20}}});
+    ASSERT_TRUE(p.has_value());
+
+    // stage the recognizable content then grow
+    const std::vector<std::uint8_t> payload(0x10, 0x5a);
+    ql.mem().write(*p, payload);
+
+    const auto* realloc = ApiRegistry::instance().find("HeapReAlloc");
+    ASSERT_NE(realloc, nullptr);
+    const auto grown = realloc->handler(ql, 0, ResolvedParams{
+        {"hHeap", *hheap}, {"dwFlags", std::uint64_t{0}},
+        {"lpMem", *p}, {"dwBytes", std::uint64_t{0x80}}});
+    ASSERT_TRUE(grown.has_value());
+    EXPECT_NE(*grown, 0u);
+    // the first 0x10 bytes carry over (the verbatim old-data walk)
+    EXPECT_EQ(ql.mem().read(*grown, 0x10), payload);
+
+    // the null base: the verbatim HeapAlloc ride
+    const auto fresh = realloc->handler(ql, 0, ResolvedParams{
+        {"hHeap", *hheap}, {"dwFlags", std::uint64_t{0}},
+        {"lpMem", std::uint64_t{0}}, {"dwBytes", std::uint64_t{0x10}}});
+    ASSERT_TRUE(fresh.has_value());
+    EXPECT_NE(*fresh, 0u);
+
+    // the zero new size: the verbatim free + the 0 return
+    const auto shrunk = realloc->handler(ql, 0, ResolvedParams{
+        {"hHeap", *hheap}, {"dwFlags", std::uint64_t{0}},
+        {"lpMem", *grown}, {"dwBytes", std::uint64_t{0}}});
+    ASSERT_TRUE(shrunk.has_value());
+    EXPECT_EQ(*shrunk, 0u);
+}

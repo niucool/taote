@@ -196,6 +196,10 @@ public:
     bool free(std::uint64_t addr);
     // The size of the used chunk starting at an address (0 when none)
     std::uint64_t size(std::uint64_t addr) const;
+    // The raw chunk lookup (heapapi HeapValidate rides _find + chunk.inuse);
+    // returns nullptr when no chunk starts at the address
+    struct Chunk;
+    const Chunk* find_chunk(std::uint64_t addr) const;
     // Clear all memory regions allocated for heap use
     void clear();
 
