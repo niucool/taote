@@ -1408,3 +1408,16 @@ pointer).
 | setitimer | `time.py` | ✅ | the verbatim no-op (the upstream FIXME: the signal machinery is unmodeled) |
 | times | `time.py` | ✅ | the 4×u32 ms fields + the elapsed*100 return (the clock-based approximation on WIN32) |
 | the fixture | `tests/Posix_Test.cpp` | ✅ | the time/times/setitimer blob ride (the epoch, the ticks, the stub-0) |
+
+### Phase 13.16 — the proc/misc family
+
+| piece | upstream | state | notes |
+|---|---|---|---|
+| arch_prctl | `os/posix/syscall/prctl.py` | ✅ | the ARCH_SET/GET_FS/GS walks over the FS/GS base MSRs (the msr manager ride), the unknown-code -EINVAL |
+| prctl/personality/ptrace/rseq | `prctl.py`/`personality.py`/`ptrace.py`/`rseq.py` | ✅ | the zero bodies verbatim (the rseq ENOSYS alternative stays commented verbatim) |
+| gettid | `types.py` | ✅ | the thread-management id or the pid (the port's fixed getpid constant 0x512 rides the single-thread case) |
+| ugetrlimit | `resource.py __getrlimit_common` | ✅ | the RLIMIT_STACK rides the profile `OS{bits}` stack_size pair (cur, -1); the others ride the host getrlimit (the WIN32 stub pair) |
+| setrlimit | `resource.py` | ✅ | the nop shape (the maybe-nop comment verbatim) |
+| prlimit64 | `resource.py` | ✅ | the pid==0 && new_limit==0 read branch via the host getrlimit; the rest -1 (the WIN32 stubs) |
+| getpriority | `resource.py` | ✅ | the nice-0 fixed ride (the WIN32 has no getpriority) |
+| the fixture | `tests/Posix_Test.cpp` | ✅ | the arch_prctl FS round trip + the prctl/personality/rseq zero rides |
