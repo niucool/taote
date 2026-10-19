@@ -2492,3 +2492,20 @@ TEST(WinApiConsole, GetConsoleModeReturnsOneNoWrite) {
     EXPECT_EQ(*r, 1u);
     EXPECT_EQ(ql.mem().read_ptr(kCells, 4), 0x7E7E7E7Eu);  // untouched
 }
+
+TEST(WinApiWow64, IsWow64ProcessRaisesNotImplementedOnX64) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    // the verbatim body: the x8664 mode raises the NotImplemented (only the
+    // 32-bit host mode rides the FALSE write)
+    const auto* iw = ApiRegistry::instance().find("IsWow64Process");
+    ASSERT_NE(iw, nullptr);
+    bool threw = false;
+    try {
+        (void)iw->handler(ql, 0, ResolvedParams{{"hProcess", 0x10ull}, {"Wow64Process", kCells}});
+    } catch (const QlErrorNotImplemented&) {
+        threw = true;
+    }
+    EXPECT_TRUE(threw);
+}

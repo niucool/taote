@@ -21,6 +21,7 @@
 #include "qiling/os/windows/dlls/kernel32/stringapiset.cpp"
 #include "qiling/os/windows/dlls/kernel32/timezoneapi.cpp"
 #include "qiling/os/windows/dlls/kernel32/consoleapi.cpp"
+#include "qiling/os/windows/dlls/kernel32/wow64apiset.cpp"
 
 namespace qiling {
 namespace os {
@@ -41,6 +42,7 @@ void register_dlls() {
     win::register_stringapiset_family();
     win::register_timezoneapi_family();
     win::register_consoleapi_family();
+    win::register_wow64apiset_family();
 }
 
 // the static-init registration (the python module-import side effect)
