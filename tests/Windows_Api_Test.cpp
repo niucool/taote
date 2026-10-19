@@ -4813,3 +4813,31 @@ TEST(WinApiWsock32, StartupSocketConnectAndGethostbynameRideVerbatimWalks) {
     const auto ipb = ql.mem().read(item, 4);
     EXPECT_EQ(ipb, (std::vector<std::uint8_t>{40, 30, 20, 10}));  // the reversed octets
 }
+
+TEST(WinApiWininet, StubFamilyRidesVerbatimPassesAndOnes) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    // the pass-family: the no-op returns (the verbatim None -> 0 ride)
+    for (const char* name : {"InternetOpenA", "InternetOpenW", "InternetOpenUrlA",
+                             "InternetOpenUrlW", "InternetConnectA", "InternetConnectW",
+                             "InternetCheckConnectionA", "HttpOpenRequestA", "HttpOpenRequestW",
+                             "HttpSendRequestExA", "InternetErrorDlg"}) {
+        const auto* api = ApiRegistry::instance().find(name);
+        ASSERT_NE(api, nullptr) << name;
+        const auto r = api->handler(ql, 0, {});
+        ASSERT_TRUE(r.has_value()) << name;
+        EXPECT_EQ(*r, 0u) << name;
+    }
+
+    // the BOOLAPI family: the verbatim 1s
+    for (const char* name : {"InternetCloseHandle", "InternetSetOptionA", "InternetSetOptionW",
+                             "HttpSendRequestA", "HttpSendRequestW", "InternetReadFile",
+                             "InternetWriteFile", "HttpEndRequestA"}) {
+        const auto* api = ApiRegistry::instance().find(name);
+        ASSERT_NE(api, nullptr) << name;
+        const auto r = api->handler(ql, 0, {});
+        ASSERT_TRUE(r.has_value()) << name;
+        EXPECT_EQ(*r, 1u) << name;
+    }
+}
