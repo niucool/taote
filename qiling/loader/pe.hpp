@@ -129,6 +129,10 @@ public:
     void init_ldr_data();
     void add_ldr_data_table_entry(const std::string& dll_name);
 
+    // loader/pe.py init_imports — the main-image import walk (the api-ms
+    // redirect ladder + the load_dll rides + the IAT slot writes)
+    void init_imports();
+
     // loader/pe.py init_function_tables / lookup_function_entry — the
     // x64/.pdata RUNTIME_FUNCTION walk (the upstream parses the pefile
     // DIRECTORY_ENTRY_EXCEPTION objects; the port reads the mapped .pdata
@@ -170,7 +174,8 @@ public:
 
 private:
     // loads one PE image (the main executable or a dll) and returns its base
-    std::uint64_t load_image(const std::string& host_path, const std::string& label);
+    std::uint64_t load_image(const std::string& host_path, const std::string& label,
+                             bool set_entry_point = true);
 
     // loader/pe.py __get_path_elements: the dll basename (the .dll append +
     // the casefold) and the host path (the winsys default when nameless)

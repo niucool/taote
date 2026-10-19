@@ -146,6 +146,16 @@ void QlOsWindows::ensure_profile_state() {
         handle_manager_->append(main_thread_handle);
         main_thread_handle_appended_ = true;
     }
+
+    // the winapi dispatch hook (windows.py: ql.hook_code(self.hook_winapi))
+    // — the upstream rides it at os-construction time (the windows.py
+    // __init__ calls self.load()); the explicit full-range bounds are the
+    // pinned registration shape (the default begin=1/end=0 never fires)
+    auto* self = this;
+    hook_handle_ = ql_->hook_code([self](std::uint64_t address, std::uint32_t size) -> int {
+        self->hook_winapi(address, size);
+        return 0;
+    }, 0, 0xffffffffffffffffull);
 }
 
 std::uint64_t QlOsWindows::thread_manager_ret_addr() const noexcept {
@@ -191,23 +201,20 @@ void QlOsWindows::load() {
         throw QlErrorBase("cannot map GS segment, memory location is taken");
     }
     if (arch.bits() == 64) {
-        arch.regs().write("gs_base", GS_SEGMENT_ADDR);
+        arch.regs().write("gsbase", GS_SEGMENT_ADDR);
     }
 
-    // the winapi dispatch hook (windows.py: ql.hook_code(self.hook_winapi))
-    auto* self = this;
-    hook_handle_ = ql_->hook_code([self](std::uint64_t address, std::uint32_t size) -> int {
-        self->hook_winapi(address, size);
-        return 0;
-    });
+    // the winapi dispatch hook rides ensure_profile_state (the ctor-time
+    // registration — the load() body here stays for the direct callers only)
 }
 
 void QlOsWindows::hook_winapi(std::uint64_t address, std::uint32_t size) {
     (void)size;
 
-    // windows.py hook_winapi: the import_symbols table maps the stub address
-    // to the api identity; the resolved handler comes from the ApiRegistry
-    // (the C++ static registration replacing the getattr dispatch)
+    // windows.py hook_winapi: the import_symbols table maps the resolved
+    // export address to the api identity; the resolved handler comes from
+    // the ApiRegistry (the C++ static registration replacing the getattr
+    // dispatch)
     const auto* imported = static_cast<const loader::QlLoaderPE&>(ql_->loader()).import_symbols_at(address);
     if (imported == nullptr) {
         return;
@@ -221,8 +228,29 @@ void QlOsWindows::hook_winapi(std::uint64_t address, std::uint32_t size) {
     }
 
     // select the calling convention for this call site and run the handler
-    // through the os.call orchestration
+    // through the os.call orchestration: the handler resolves through
+    // resolve_named_params (the placeholder-typed entries decode to strings)
+    // and the fcall call unwinds the frame (rax + the pc = the return
+    // address) unless the handler stopped the emulation first
     set_fcall_ptr(fcall_select(api->cc));
+
+    // the upstream's os.call(func, params, ...) resolution: the raw values
+    // read through the cc apply the resolvers table (the placeholder-typed
+    // entries decode to the guest strings) before the handler runs
+    const auto proto = api->params;
+    const auto handler = api->handler;
+    auto* self = this;
+    call(address, imported->name,
+         [self, proto, handler](std::uint64_t pc, const QlFunctionCall::Params& raw) -> std::optional<std::uint64_t> {
+             std::vector<std::uint64_t> rawvals;
+             rawvals.reserve(raw.size());
+             for (const auto& [n, v] : raw) {
+                 (void)n;
+                 rawvals.push_back(v);
+             }
+             return handler(*self->ql_, pc, self->resolve_named_params(proto, rawvals));
+         },
+         api->params, nullptr, nullptr, api->passthru);
 }
 
 void QlOsWindows::run() {

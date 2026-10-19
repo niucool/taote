@@ -5006,3 +5006,49 @@ TEST(WinApiLoader, PebAndLdrCellsRideTheImageAndTheListHeads) {
     // the TEB.PebAddress cell rides the PEB the loader laid out
     EXPECT_EQ(ql.mem().read_ptr(teb_addr + qiling::os::win::TEB_OFF_PEB_ADDRESS, 8), peb_addr);
 }
+
+TEST(WinApiE2E, RealPeHelloRunsToExitProcess) {
+    register_dlls();
+
+    // the real compiled binary rides the PE path: the loader maps the
+    // sections, resolves the import table against the rootfs kernel32.dll
+    // (the real host dll copied into the fixture rootfs), and the api
+    // dispatch rides the code hook at the mapped export addresses
+    const auto rootfs = win_ensure_rootfs();
+    std::filesystem::create_directories(rootfs / "Windows" / "System32");
+    std::filesystem::copy_file(std::filesystem::path("C:/Windows/System32/kernel32.dll"),
+                               rootfs / "Windows" / "System32" / "kernel32.dll",
+                               std::filesystem::copy_options::overwrite_existing);
+
+    std::filesystem::create_directories(rootfs / "qltest");
+
+    // the PE path rides the registry-hive gate (windows.py: reghive =
+    // windir\registry must exist for the PE runs; the shellcode runs skip it)
+    std::filesystem::create_directories(rootfs / "Windows" / "registry");
+
+    const auto exe = std::filesystem::absolute(std::filesystem::path(__FILE__)).parent_path() /
+                     "data" / "hello_x64.exe";
+    ASSERT_TRUE(std::filesystem::exists(exe)) << exe.string();
+
+    QilingOptions options;
+    options.rootfs = rootfs.string();
+    options.ostype = QL_OS::WINDOWS;
+    options.archtype = QL_ARCH::X8664;
+    options.argv = {exe.string(), "arg-one"};
+    Qiling ql(std::move(options));
+
+    // the mapped dll exposes the real exports
+    const auto& loader = static_cast<const qiling::loader::QlLoaderPE&>(ql.loader());
+    const auto* k32_image = loader.get_image_by_name("kernel32.dll", true);
+    ASSERT_NE(k32_image, nullptr);
+    EXPECT_GT(k32_image->base, 0ull);
+
+    ql.run();
+
+    // the output file lands inside the rootfs (the guest C:\ path maps onto it)
+    const auto guest_file = rootfs / "qltest" / "hello.txt";
+    ASSERT_TRUE(std::filesystem::exists(guest_file));
+    std::ifstream in(guest_file, std::ios::binary);
+    std::string got((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    EXPECT_EQ(got, "hello from qiling\r\n");
+}

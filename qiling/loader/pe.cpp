@@ -14,26 +14,11 @@
 namespace qiling {
 namespace loader {
 
-namespace {
-
-// canonicalizes a dll name (pe.py __get_path_elements: append .dll, casefold)
-std::string canonical_dll_name(std::string name) {
-    bool has_ext = name.size() >= 4 && (name.compare(name.size() - 4, 4, ".dll", 4) == 0 ||
-                                        name.compare(name.size() - 4, 4, ".DLL", 4) == 0);
-    if (!has_ext) {
-        name += ".dll";
-    }
-    for (auto& c : name) {
-        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    }
-    return name;
-}
-
-}  // namespace
 
 QlLoaderPE::QlLoaderPE(Qiling* ql, bool libcache) : QlLoader(ql), libcache_(libcache) {}
 
-std::uint64_t QlLoaderPE::load_image(const std::string& host_path, const std::string& label) {
+std::uint64_t QlLoaderPE::load_image(const std::string& host_path, const std::string& label,
+                                     bool set_entry_point) {
     // LIEF 0.17 is exception-free: a failed parse surfaces as nullptr (the
     // robustness tenet: malformed binaries raise QlError*, never a host crash)
     auto parsed = LIEF::PE::Parser::parse(host_path);
@@ -55,7 +40,12 @@ std::uint64_t QlLoaderPE::load_image(const std::string& host_path, const std::st
         base = image_address_;
     }
 
-    entry_point = base + entry_rva;
+    if (set_entry_point) {
+        // the main image sets the entry point; the dll loads never touch it
+        // (the upstream pe.py only sets self.entry_point in the main-image
+        // load() branch — the dll's DllMain is never driven by load_dll)
+        entry_point = base + entry_rva;
+    }
 
     mem.map(base, mem.align_up(size_of_image), UC_PROT_ALL, label);
     images.push_back(Image{base, base + size_of_image, host_path});
@@ -78,27 +68,25 @@ std::uint64_t QlLoaderPE::load_image(const std::string& host_path, const std::st
                          std::vector<std::uint8_t>{content.begin(), content.end()});
     }
 
-    // the imports: stub each imported function with a unique address in the
-    // stub region (loader/pe.py init_imports); the api dispatcher matches
-    // the pc against these stubs
-    for (const LIEF::PE::Import& import : parsed->imports()) {
-        const std::string dll = canonical_dll_name(import.name());
-        for (const LIEF::PE::ImportEntry& entry : import.entries()) {
-            ImportSymbol symbol;
-            symbol.address = entry.iat_address();
-            symbol.dll = dll;
-            symbol.name = entry.name();
-            import_symbols_[symbol.address] = std::move(symbol);
-        }
-    }
+    // loader/pe.py init_imports: the import-table walk does NOT key the
+    // dispatch map — the upstream records the import_symbols by the MAPPED
+    // EXPORT address (the load_dll export walk below); the IAT slots get
+    // written in init_imports (the OS-layer call, after the sys dlls load)
 
-    // loader/pe.py init_exports: the exports ride the export_symbols map
-    // (ea-keyed) plus the image's own iat slice; the GetProcAddress self
-    // branch walks them verbatim
+    // loader/pe.py load_dll: the export walk fills the import_symbols map
+    // keyed by the mapped export address, plus the image's own iat slice and
+    // the export_symbols map (the GetProcAddress self branch walks them)
     if (parsed->has_exports()) {
         const auto* export_ = parsed->get_export();
         std::map<std::string, std::uint64_t> iat_by_name;
         std::map<std::uint64_t, std::uint64_t> iat_by_ordinal;
+
+        // dll_name = os.path.basename(self.path).casefold() (verbatim)
+        const std::filesystem::path loaded(host_path);
+        std::string dll_name = loaded.filename().string();
+        for (auto& c : dll_name) {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
 
         for (const LIEF::PE::ExportEntry& entry : export_->entries()) {
             const std::uint64_t ea = base + entry.address();
@@ -109,18 +97,23 @@ std::uint64_t QlLoaderPE::load_image(const std::string& host_path, const std::st
             symbol.ordinal = entry.ordinal();
             export_symbols_[ea] = std::move(symbol);
 
+            // loader/pe.py load_dll: import_symbols[ea] = {'name', 'ordinal',
+            // 'dll'} — the dispatch map is keyed by the mapped export address
+            // (the hook fires at the pc inside the mapped dll body; the
+            // upstream keys the same ea)
+            ImportSymbol isym;
+            isym.address = ea;
+            isym.dll = dll_name;
+            isym.name = entry.name();
+            isym.ordinal = entry.ordinal();
+            import_symbols_[ea] = std::move(isym);
+
             if (!entry.name().empty()) {
                 iat_by_name[entry.name()] = ea;
             }
             iat_by_ordinal[entry.ordinal()] = ea;
         }
 
-        // dll_name = os.path.basename(self.path).casefold() (verbatim)
-        const std::filesystem::path loaded(host_path);
-        std::string dll_name = loaded.filename().string();
-        for (auto& c : dll_name) {
-            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        }
         import_address_table_[dll_name] = ImportTable{std::move(iat_by_name), std::move(iat_by_ordinal)};
     }
 
@@ -254,13 +247,137 @@ std::uint64_t QlLoaderPE::load_dll(const std::string& name) {
         }
     }
 
-    const auto base = load_image(dll_path_host, dll_name);
+    const auto base = load_image(dll_path_host, dll_name, false);
     (void)base;
 
-    // the loaded image's exports ride the same maps (the load_image's
-    // export-registration keyed the main image only; the dll path registers
-    // under the dll basename here)
     return get_image_by_name(dll_name, true) ? get_image_by_name(dll_name, true)->base : 0;
+}
+
+// loader/pe.py init_imports: the main-image import walk — the upstream
+// receives the parsed pefile; the port re-parses the image (the documented
+// deviation: the LIEF parse object does not survive load_image). For each
+// import dll: the api-ms-win-* names ride the verbatim key_dlls scan (the
+// redirect resolution over the loaded images' export tables), the dll loads
+// through load_dll when unbound symbols remain, and the resolved export
+// addresses write over the IAT slots (the mem.write_ptr(imp.address, addr)
+// verbatim). The upstream's bound-import skip degrades to an all-unbound
+// walk (LIEF's ImportEntry carries no bound flag; modern linkers never emit
+// pre-bound IATs).
+void QlLoaderPE::init_imports() {
+    auto parsed = LIEF::PE::Parser::parse(ql_->path());
+    if (parsed == nullptr || !parsed->has_imports()) {
+        return;
+    }
+
+    // the IAT slots ride the main image base (LIEF's iat_address() returns
+    // the RVA — the pefile imp.address equivalent carries the absolute
+    // address, so the port adds the mapped base where the pefile read the
+    // final VA)
+    const auto* main_image = get_image_by_name(ql_->targetname(), true);
+    if (main_image == nullptr) {
+        return;
+    }
+    const std::uint64_t image_base = main_image->base;
+
+    static constexpr std::array<const char*, 4> kKeyDlls = {
+        "kernel32.dll", "ntdll.dll", "kernelbase.dll", "ucrtbase.dll",
+    };
+
+    for (const LIEF::PE::Import& entry : parsed->imports()) {
+        std::string dll_name = entry.name();
+        for (auto& c : dll_name) {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+        const std::string orig_dll_name = dll_name;
+
+        bool redirected = false;
+        if (dll_name.rfind("api-ms-win-", 0) == 0) {
+            // the verbatim key_dlls ladder: scan the loaded images' export
+            // tables for each imported symbol; exactly one candidate
+            // redirects, several remember the last as the fallback and ride
+            // to the next symbol, none fails the dll
+            std::string fallback;
+            std::string key_dll;
+            const auto& imps = entry.entries();
+            std::size_t idx = 0;
+            while (!redirected) {
+                const LIEF::PE::ImportEntry* imp = idx < imps.size() ? &imps[idx] : nullptr;
+                std::vector<std::string> options;
+                if (imp == nullptr) {
+                    if (!fallback.empty()) {
+                        options.push_back(fallback);
+                    }
+                } else {
+                    for (const auto* kd : kKeyDlls) {
+                        const auto it = import_address_table_.find(std::string(kd));
+                        if (it != import_address_table_.end() &&
+                            it->second.by_name.count(std::string(imp->name())) != 0) {
+                            options.push_back(kd);
+                        }
+                    }
+                }
+                if (options.empty()) {
+                    break;  // failed to resolve (the upstream failed flag)
+                }
+                if (options.size() == 1) {
+                    key_dll = options.front();
+                    redirected = true;
+                } else {
+                    fallback = options.back();
+                }
+                ++idx;
+            }
+            if (!redirected) {
+                ql_->log().debug("Failed to resolve " + dll_name);
+                continue;
+            }
+            ql_->log().debug("Redirecting " + dll_name + " to " + key_dll);
+            dll_name = key_dll;
+        }
+
+        const auto unbound = [&]() {
+            std::vector<const LIEF::PE::ImportEntry*> out;
+            for (const LIEF::PE::ImportEntry& imp : entry.entries()) {
+                out.push_back(&imp);
+            }
+            return out;
+        }();
+
+        if (!unbound.empty()) {
+            // only load dll if encountered unbound symbol (verbatim)
+            if (!redirected) {
+                const auto dll_base = load_dll(entry.name());
+                if (dll_base == 0) {
+                    continue;
+                }
+            }
+
+            const auto it = import_address_table_.find(dll_name);
+            if (it == import_address_table_.end()) {
+                continue;
+            }
+            const ImportTable& iat = it->second;
+
+            for (const LIEF::PE::ImportEntry* imp : unbound) {
+                std::uint64_t addr = 0;
+                if (!imp->name().empty()) {
+                    addr = iat.lookup(std::string(imp->name()));
+                    if (addr == 0) {
+                        ql_->log().debug("Error in loading function " + std::string(imp->name()) +
+                                         " (" + orig_dll_name + ")");
+                        continue;
+                    }
+                } else {
+                    const auto oit = iat.by_ordinal.find(imp->ordinal());
+                    if (oit == iat.by_ordinal.end()) {
+                        continue;
+                    }
+                    addr = oit->second;
+                }
+                ql_->mem().write_ptr(image_base + imp->iat_address(), addr);
+            }
+        }
+    }
 }
 
 void QlLoaderPE::run() {
@@ -295,14 +412,18 @@ void QlLoaderPE::run() {
     // driver objects AND the TEB/PEB/LDR stack walk across BOTH paths
     structure_last_addr_ = bits == 64 ? os::windows::GS_SEGMENT_ADDR : os::windows::FS_SEGMENT_ADDR;
 
+    // loader/pe.py load(): the stack map rides BOTH paths (the shellcode
+    // + the PE) before the branch
+    {
+        auto& mem = ql_->mem();
+        mem.map(stack_address_, stack_size_, UC_PROT_ALL, "[stack]");
+    }
+
     if (!ql_->code().empty()) {
         // the shellcode path (loader/pe.py load(pe=None))
         is_driver_ = false;
 
         auto& mem = ql_->mem();
-        // loader/pe.py load(): the stack map rides BOTH paths (the shellcode
-        // + the PE) before the branch; the port previously mapped it nowhere
-        mem.map(stack_address_, stack_size_, UC_PROT_ALL, "[stack]");
         mem.map(entry_point, static_cast<std::uint64_t>(ql_->os().code_ram_size()), UC_PROT_ALL, "[shellcode]");
         mem.write(entry_point, ql_->code());
         const auto top_of_stack = stack_address_ + stack_size_;
@@ -341,9 +462,33 @@ void QlLoaderPE::run() {
             init_ldr_data();
             add_ldr_data_table_entry(std::filesystem::path(ql_->path()).filename().string());
         }
+
+        // loader/pe.py run: "Stack should not init at the very bottom. Will
+        // cause errors with Dlls" (verbatim comment) — the sp/bp ride the
+        // stack head minus one page
+        const auto top_of_stack = stack_address_ + stack_size_ - 0x1000;
+        const auto sp = bits == 64 ? "rsp" : "esp";
+        const auto bp = bits == 64 ? "rbp" : "ebp";
+        ql_->arch().regs().write(sp, top_of_stack);
+        ql_->arch().regs().write(bp, top_of_stack);
     }
 
     init_ki_user_shared_data();
+
+    // loader/pe.py run(): the shellcode path loads the init_dlls tuple and
+    // the PE path the sys_dlls tuple (the missing files degrade through
+    // load_dll's zero return); then the import-table walk resolves the
+    // main-image imports against the loaded images' export tables
+    if (!ql_->code().empty()) {
+        for (const char* each : {"ntdll.dll", "kernelbase.dll", "kernel32.dll", "user32.dll"}) {
+            (void)load_dll(each);
+        }
+    } else {
+        for (const char* each : {"ntdll.dll", "kernelbase.dll", "kernel32.dll", "mscoree.dll", "ucrtbase.dll"}) {
+            (void)load_dll(each);
+        }
+        init_imports();
+    }
 
     init_sp = ql_->arch().regs().arch_sp();
 }
