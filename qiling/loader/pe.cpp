@@ -7,6 +7,7 @@
 #include "qiling/os/memory.hpp"
 #include "qiling/os/windows/windows.hpp"
 #include "qiling/os/windows/structs.hpp"
+#include "qiling/os/windows/api.hpp"
 
 #include <filesystem>
 #include "qiling/os/os.hpp"
@@ -305,6 +306,29 @@ std::uint64_t QlLoaderPE::load_dll(const std::string& name) {
         }
     }
 
+    // loader/pe.py load_dll tail: the verbatim sequence — add the dll to the
+    // ldr table, resolve the dll's own import table against the loaded
+    // images (the api-ms ladder over the loaded export tables), then drive
+    // the DllMain when the emulation has not started yet
+    {
+        const auto dll_base = get_image_by_name(dll_name, true) != nullptr
+                                  ? get_image_by_name(dll_name, true)->base : 0;
+        if (dll_base != 0 && !is_driver_) {
+            add_ldr_data_table_entry(dll_name);
+        }
+
+        auto dll_parsed = LIEF::PE::Parser::parse(dll_path_host);
+        if (dll_base != 0 && dll_parsed != nullptr) {
+            const auto dll_len = static_cast<std::uint64_t>(dll_parsed->virtual_size());
+            init_imports_for(*dll_parsed, dll_base, dll_name);
+
+            // the DllMain ride (the verbatim blacklist + the emu-state gate)
+            if (ql_->emu_state() != QL_STATE::STARTED) {
+                call_dll_entrypoint(*dll_parsed, dll_base, dll_len, dll_name);
+            }
+        }
+    }
+
     // loader/pe.py load_dll tail: resolve_forwarded_exports() rides after the
     // export walk (the targets loaded earlier in the sys_dlls order resolve;
     // the rest stays deferred until their dll lands)
@@ -382,21 +406,26 @@ void QlLoaderPE::init_imports() {
         return;
     }
 
-    // the IAT slots ride the main image base (LIEF's iat_address() returns
-    // the RVA — the pefile imp.address equivalent carries the absolute
-    // address, so the port adds the mapped base where the pefile read the
-    // final VA)
     const auto* main_image = get_image_by_name(ql_->targetname(), true);
     if (main_image == nullptr) {
         return;
     }
-    const std::uint64_t image_base = main_image->base;
+    init_imports_for(*parsed, main_image->base, ql_->targetname());
+}
+
+// loader/pe.py init_imports body — the walk over ONE image's import table
+// (the main image and the loaded dlls share the call site, verbatim)
+void QlLoaderPE::init_imports_for(LIEF::PE::Binary& parsed, std::uint64_t image_base,
+                                  const std::string& image_label) {
+    // the IAT slots ride the image base (LIEF's iat_address() returns the
+    // RVA — the pefile imp.address equivalent carries the absolute address,
+    // so the port adds the mapped base where the pefile read the final VA)
 
     static constexpr std::array<const char*, 4> kKeyDlls = {
         "kernel32.dll", "ntdll.dll", "kernelbase.dll", "ucrtbase.dll",
     };
 
-    for (const LIEF::PE::Import& entry : parsed->imports()) {
+    for (const LIEF::PE::Import& entry : parsed.imports()) {
         std::string dll_name = entry.name();
         for (auto& c : dll_name) {
             c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -881,5 +910,84 @@ void QlLoaderPE::add_ldr_data_table_entry(const std::string& dll_name) {
     ldr_list_.push_back(entry_addr);
 }
 
+// loader/pe.py call_dll_entrypoint: the DllMain drive — the entry section
+// gate (the DllMain must live inside a mapped section), the kernelbase/
+// kernel32 skip, the problematic-DllMain blacklist, then the fcall CDECL
+// frame over emu_start with the bailing restore on failure (verbatim)
+
+
+// loader/pe.py call_dll_entrypoint: the DllMain drive — the entry section
+// gate (the DllMain must live inside a mapped section), the kernelbase/
+// kernel32 skip, the problematic-DllMain blacklist, then the fcall CDECL
+// frame over emu_start with the bailing restore on failure (verbatim)
+void QlLoaderPE::call_dll_entrypoint(LIEF::PE::Binary& dll, std::uint64_t dll_base,
+                                     std::uint64_t dll_len, const std::string& dll_name) {
+    const auto entry_address = dll.entrypoint() - dll.imagebase();
+
+    bool covered = false;
+    for (const LIEF::PE::Section& section : dll.sections()) {
+        if (entry_address >= section.virtual_address() &&
+            entry_address < section.virtual_address() + section.size()) {
+            covered = true;
+            break;
+        }
+    }
+    if (!covered) {
+        return;
+    }
+
+    if (dll_name == "kernelbase.dll" || dll_name == "kernel32.dll") {
+        ql_->log().debug("Ignoring " + dll_name + " entry point");
+        return;
+    }
+
+    // DllMain functions often call many APIs that may crash the program if
+    // they are not implemented correctly (if at all). here we blacklist the
+    // problematic DLLs whose DllMain functions are known to be crashing.
+    // (verbatim comment; the blacklist may be revisited)
+    const auto is64 = ql_->arch().bits() == 64;
+    const char* blacklist[] = {"gdi32.dll", "user32.dll"};
+    for (const auto* entry : blacklist) {
+        if (dll_name == entry) {
+            ql_->log().debug(std::string("Ignoring ") + entry + " entry point (blacklisted)");
+            return;
+        }
+    }
+    (void)is64;
+
+    const auto entry_point = dll_base + entry_address;
+    const auto exit_point = dll_base + dll_len - 16;
+
+    const std::vector<std::pair<int, std::uint64_t>> args = {
+        {os::api::HINSTANCE_, dll_base},  // hinstDLL = base address of DLL
+        {os::api::DWORD_, 1},             // fdwReason = DLL_PROCESS_ATTACH
+        {os::api::LPVOID_, 0},            // lpReserved = 0
+    };
+
+    ql_->log().debug("Calling " + dll_name + " DllMain");
+
+    const auto regs_state = ql_->arch().save();
+
+    auto& fcall = ql_->os().fcall();
+    fcall.call_native(entry_point, args, exit_point);
+
+    // Execute the call to the entry point
+    try {
+        ql_->emu_start(entry_point, exit_point);
+    } catch (const QlErrorBase&) {
+        ql_->log().debug("Error encountered while running " + dll_name + " DllMain, bailing");
+
+        ql_->arch().restore(*regs_state);
+
+        // emu_start leaves the state at STARTED when it raises; reset it so a
+        // single failing DllMain does not gate every subsequently loaded
+        // DLL's entry point. (verbatim comment)
+        ql_->state_ = QL_STATE::STOPPED;
+        return;
+    }
+    // the successful path: fcall.cc.unwind(len(args)) (the verbatim unwind —
+    // the cc pops the arg slots and the return address)
+    fcall.unwind_native(3);
+}
 }  // namespace loader
 }  // namespace qiling

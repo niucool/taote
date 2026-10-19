@@ -142,6 +142,12 @@ public:
     // loader/pe.py init_imports — the main-image import walk (the api-ms
     // redirect ladder + the load_dll rides + the IAT slot writes)
     void init_imports();
+    void init_imports_for(LIEF::PE::Binary& parsed, std::uint64_t image_base, const std::string& image_label);
+
+    // loader/pe.py call_dll_entrypoint — the DllMain drive (the verbatim
+    // blacklist + the emu-state gate + the fcall CDECL frame)
+    void call_dll_entrypoint(LIEF::PE::Binary& dll, std::uint64_t dll_base, std::uint64_t dll_len,
+                             const std::string& dll_name);
 
     // loader/pe.py resolve_forwarded_exports — re-points the forwarded
     // exports' IAT cells and the dispatch keys at the target dll's real

@@ -163,4 +163,10 @@ void QlFunctionCall::call_native(std::uint64_t addr, const std::vector<std::pair
     cc_->arch().regs().set_arch_pc(addr);
 }
 
+// the post-emu_start frame unwind (the call_dll_entrypoint tail: the native
+// frame pops its arg slots and the return address after emu_start returns)
+void QlFunctionCall::unwind_native(int nslots) {
+    static_cast<void>(cc_->unwind(nslots));
+}
+
 }  // namespace qiling

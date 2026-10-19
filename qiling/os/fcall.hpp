@@ -132,6 +132,10 @@ public:
     void call_native(std::uint64_t addr, const std::vector<std::pair<int, std::uint64_t>>& args,
                      std::optional<std::uint64_t> ret);
 
+    // the post-emu_start frame unwind (fcall.py's cc.unwind(len(args)) ride
+    // at the call_dll_entrypoint tail; the nslots form mirrors count_slots)
+    void unwind_native(int nslots);
+
 private:
     int count_slots(const std::vector<int>& ptypes) const;
 

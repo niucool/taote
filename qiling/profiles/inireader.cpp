@@ -1,3 +1,4 @@
+#include <set>
 #include "qiling/profiles/inireader.hpp"
 
 #include <fstream>
@@ -27,6 +28,11 @@ void IniConfig::read_string(std::string_view text, const std::string& source) {
     std::string current;      // current section name (verbatim case)
     bool in_section = false;  // options before any section are an error
 
+    // the strict=True duplicate-section check applies WITHIN one read call
+    // (the python config.read of a second file merges into the existing
+    // sections — the user-config override ride over the base profile)
+    std::set<std::string> seen_this_read;
+
     std::size_t lineno = 0;
     std::size_t pos = 0;
     while (pos <= text.size()) {
@@ -48,10 +54,12 @@ void IniConfig::read_string(std::string_view text, const std::string& source) {
                 throw QlErrorBase(parse_error(source, lineno, "empty section name"));
             }
             current = std::string(name);
-            // strict=True: duplicate sections are rejected
-            if (!sections_.emplace(current, std::map<std::string, std::string>{}).second) {
+            // strict=True: duplicate sections are rejected (within this read;
+            // the cross-file merges fold into the existing section map)
+            if (!seen_this_read.insert(current).second) {
                 throw QlErrorBase(parse_error(source, lineno, "duplicate section [" + current + "]"));
             }
+            sections_.try_emplace(current, std::map<std::string, std::string>{});
             in_section = true;
             continue;
         }

@@ -2,6 +2,7 @@
 // decorator engine over the static ApiRegistry; the fncc calling conventions).
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <fstream>
 #include <string>
 
@@ -140,7 +141,12 @@ TEST(WinApiDlls, GetParamLookupAndGetIntPaths) {
 namespace {
 
 std::filesystem::path win_ensure_rootfs() {
-    const auto base = std::filesystem::temp_directory_path() / "ql_windows_rootfs";
+    // a unique rootfs per call: the shared temp dir made the dll-carrying
+    // fixtures (the CRT/registry runs) leak their System32 into the
+    // shellcode fixtures' load_dll walks
+    static std::atomic<unsigned> counter{0};
+    const auto base = std::filesystem::temp_directory_path() /
+                      ("ql_windows_rootfs_" + std::to_string(counter.fetch_add(1)));
     std::filesystem::create_directories(base);
     return base;
 }
@@ -365,6 +371,7 @@ TEST(WinApiFileapi, CreateDirectoryAndDeleteAndCopyRideRootfs) {
     Qiling ql(win_test_options());
 
     std::error_code wipe_ec;
+    std::filesystem::create_directories(std::filesystem::path(ql.rootfs()) / "qltest", wipe_ec);
     std::filesystem::remove_all(std::filesystem::path(ql.rootfs()) / "qltest" / "subdir", wipe_ec);
 
     const auto* mkdir_ = ApiRegistry::instance().find("CreateDirectoryA");
@@ -5132,4 +5139,62 @@ TEST(WinApiE2E, CrtLinkedBinaryRidesStartupAndFprintf) {
     std::ifstream in(guest_file, std::ios::binary);
     std::string got((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     EXPECT_EQ(got, "crt ok argc=2 arg1=from-emulator\r\n");
+}
+
+// DISABLED_: the real advapi32.dll's DllMain drive wanders into the real
+// kernelbase/ntdll bodies (the port's api coverage lacks the SRW/heap depth
+// the real init walk needs) and dies UC_ERR_INSN_INVALID. The registry
+// surface itself stays proven by the RegistryManager handler fixtures; the
+// e2e re-enable waits for either the deeper handler coverage or the emulated
+// ntdll surface. The blocker signature: the load_dll DllMain drive for
+// advapi32.dll walks the real kernelbase code and lands in the ntdll .rdata
+// (the wild pc 0x180195160) after the SRWLock handler set.
+TEST(WinApiE2E, DISABLED_RegistrySurfaceRidesProfileAndDiffStore) {
+    register_dlls();
+
+    const auto rootfs = win_ensure_rootfs();
+    std::filesystem::create_directories(rootfs / "Windows" / "System32");
+    for (const char* dll : {"kernel32.dll", "kernelbase.dll", "ntdll.dll", "advapi32.dll"}) {
+        std::filesystem::copy_file(std::filesystem::path("C:/Windows/System32/") / dll,
+                                   rootfs / "Windows" / "System32" / dll,
+                                   std::filesystem::copy_options::overwrite_existing);
+    }
+    std::filesystem::create_directories(rootfs / "Windows" / "registry");
+    std::filesystem::create_directories(rootfs / "qltest");
+
+    // the profile key rides the [REGISTRY] section (the verbatim profile
+    // read: the value arrives without touching the diff store)
+    const auto user_profile = rootfs / "reg_profile.ini";
+    {
+        std::ofstream cfg(user_profile, std::ios::binary);
+        cfg << "[REGISTRY]\n"
+            << "HKEY_CURRENT_USER\Software\QilingTest\greeting = hello-profile\n";
+    }
+
+    const auto exe_src = std::filesystem::absolute(std::filesystem::path(__FILE__)).parent_path() /
+                         "data" / "hello_reg.exe";
+    const auto exe_in_rootfs = rootfs / "Windows" / "hello_reg.exe";
+    std::filesystem::copy_file(exe_src, exe_in_rootfs, std::filesystem::copy_options::overwrite_existing);
+
+    QilingOptions options;
+    options.rootfs = rootfs.string();
+    options.ostype = QL_OS::WINDOWS;
+    options.archtype = QL_ARCH::X8664;
+    // the modern System32 dlls carry the CET control-flow guard prologues
+    // (endbr64) - the default qemu64 model rejects them (UC_ERR_INSN_INVALID);
+    // the icelake-server model carries the CET feature
+    options.cputype = qiling::X86_CPU_MODEL::INTEL_ICELAKE_SERVER;
+    options.profile = user_profile.string();
+    options.argv = {exe_in_rootfs.string()};
+    Qiling ql(std::move(options));
+
+    ql.run();
+
+    // the diff-store round trip landed the created value at the guest path;
+    // a non-zero exit codes the failed stage
+    const auto guest_file = rootfs / "qltest" / "reg.txt";
+    ASSERT_TRUE(std::filesystem::exists(guest_file));
+    std::ifstream in(guest_file, std::ios::binary);
+    std::string got((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    EXPECT_EQ(got, "made=value42");
 }
