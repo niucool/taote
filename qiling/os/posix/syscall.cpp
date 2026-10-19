@@ -25,6 +25,7 @@
 #include "qiling/os/posix/posix.hpp"
 #include "qiling/os/posix/const_mapping.hpp"
 #include "qiling/loader/loader.hpp"
+#include "qiling/loader/elf.hpp"
 
 #include "qiling/core.hpp"
 #include "qiling/os/os.hpp"
@@ -465,7 +466,6 @@ std::optional<std::int64_t> syscall_ioctl(Qiling& ql, const std::vector<std::uin
 std::optional<std::int64_t> syscall_sysinfo(Qiling& ql, const std::vector<std::uint64_t>& params) {
     const auto info = params[0];
     const auto ps = ql.arch().pointersize();
-    std::fprintf(stderr, "[sysinfo] CALLED info=%llx ps=%zu\n", (unsigned long long)info, ps);
 
     const auto put = [&](std::uint64_t at, std::uint64_t v) {
         std::vector<std::uint8_t> bytes;
@@ -742,6 +742,335 @@ std::optional<std::int64_t> syscall_prlimit64(Qiling& ql, const std::vector<std:
 std::optional<std::int64_t> syscall_getpriority(Qiling&, const std::vector<std::uint64_t>&) {
     // the WIN32 has no getpriority; the port rides the fixed 0 (the nice 0)
     return 0;
+}
+
+// msq.py __perms: the request/granted mode walk (the uid>>6 shift, the 0o007 mask)
+int msq_perms(Qiling& ql, const MsqId& msq, std::uint64_t flag) {
+    const auto request_mode = (flag >> 6) | (flag >> 3) | flag;
+    auto granted_mode = msq.mode();
+    if (ql.os<posix::QlOsPosix>().uid() == msq.uid()) {
+        granted_mode >>= 6;
+    }
+    if (request_mode & ~granted_mode & 0007) {
+        return -13;  // -EACCES
+    }
+    return 0;
+}
+
+// msg.py ql_syscall_msgget: the IPC_PRIVATE/create walk (the MSGMNI cap, the
+// mode & 0o777), the get_by_key IPC_CREAT/IPC_EXCL walks, the perms
+std::int64_t msq_create(Qiling& ql, std::int64_t key, std::uint64_t flags) {
+    auto& posix = ql.os<posix::QlOsPosix>();
+    if (posix.msq().size() >= ipc::kMsgMni) {
+        return -61;  // -ENOSPC
+    }
+    const auto mode = flags & ((1 << 9) - 1);
+    return static_cast<std::int64_t>(posix.msq().add(MsqId(key, posix.uid(), posix.gid(), mode)));
+}
+
+std::optional<std::int64_t> syscall_msgget(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    const auto key = static_cast<std::int64_t>(params[0]);
+    const auto msgflg = params[1];
+
+    if (key == static_cast<std::int64_t>(ipc::kPrivate)) {
+        return msq_create(ql, key, msgflg);
+    }
+
+    auto& posix = ql.os<posix::QlOsPosix>();
+    const auto [msqid, msq] = posix.msq().get_by_key(key);
+    if (msq == nullptr) {
+        if (msgflg & ipc::kCreat) {
+            return msq_create(ql, key, msgflg);
+        }
+        return -2;  // -ENOENT
+    }
+    if (msgflg & (ipc::kCreat | ipc::kExcl)) {
+        return -17;  // -EEXIST
+    }
+    if (msq_perms(ql, *msq, msgflg)) {
+        return -13;
+    }
+    return msqid;
+}
+
+// msg.py ql_syscall_msgsnd: the msq lookup, the S_IWUGO perms, the
+// mtype/mtext read, the maxlen/IPC_NOWAIT walk, the queue append
+std::optional<std::int64_t> syscall_msgsnd(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    const auto msqid = static_cast<std::int64_t>(params[0]);
+    const auto msgp = params[1];
+    const auto msgsz = params[2];
+    const auto msgflg = params[3];
+
+    auto& posix = ql.os<posix::QlOsPosix>();
+    auto* msq = posix.msq().get_by_id(msqid);
+    if (msq == nullptr) {
+        return -22;  // -EINVAL
+    }
+    if (msq_perms(ql, *msq, 0222)) {
+        return -13;  // -EACCES
+    }
+
+    const auto msg_type = ql.mem().read_ptr(msgp);
+    const auto msg_text = ql.mem().read(msgp + ql.arch().pointersize(), msgsz);
+
+    if (msq->queue().size() >= msq->queue().max_size() && (msgflg & ipc::kNowait)) {
+        return -11;  // -EAGAIN
+    }
+
+    msq->queue().push_back(MsqBuf{static_cast<std::uint64_t>(msg_type), msg_text});
+    return 0;
+}
+
+// msg.py __find_msg: the MSG_COPY index peek, the msgtyp 0/>0/<0 walks (the
+// MSG_EXCEPT inversion), the first-match walk
+MsqBuf* find_msg(MsqId& msq, std::int64_t msgtyp, std::uint64_t msgflg) {
+    auto& queue = msq.queue();
+    if (msgflg & ipc::kMsgCopy) {
+        if (static_cast<std::size_t>(msgtyp) < queue.size()) {
+            auto it = queue.begin();
+            std::advance(it, msgtyp);
+            return &*it;
+        }
+        return nullptr;
+    }
+
+    const auto predicate = [&](const MsqBuf& msg) {
+        if (msgtyp == 0) {
+            return true;
+        }
+        if (msgtyp > 0) {
+            if (msgflg & ipc::kMsgExcept) {
+                return msg.mtype != static_cast<std::uint64_t>(msgtyp);
+            }
+            return msg.mtype == static_cast<std::uint64_t>(msgtyp);
+        }
+        return msg.mtype <= static_cast<std::uint64_t>(-msgtyp);
+    };
+
+    for (auto& msg : queue) {
+        if (predicate(msg)) {
+            return &msg;
+        }
+    }
+    return nullptr;
+}
+
+// msg.py ql_syscall_msgrcv: the MSG_COPY/MSG_EXCEPT walks, the S_IRUGO perms,
+// the find/remove, the E2BIG/MSG_NOERROR walk, the mtype/mtext write-back,
+// the size return
+std::optional<std::int64_t> syscall_msgrcv(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    const auto msqid = static_cast<std::int64_t>(params[0]);
+    const auto msgp = params[1];
+    const auto msgsz = params[2];
+    const auto msgtyp = static_cast<std::int64_t>(params[3]);
+    const auto msgflg = params[4];
+
+    auto& posix = ql.os<posix::QlOsPosix>();
+    auto* msq = posix.msq().get_by_id(msqid);
+    if (msq == nullptr) {
+        return -22;  // -EINVAL
+    }
+    if (msgflg & ipc::kMsgCopy) {
+        if ((msgflg & ipc::kMsgExcept) || !(msgflg & ipc::kNowait)) {
+            return -22;
+        }
+    }
+    if (msq_perms(ql, *msq, 0444)) {
+        return -13;  // -EACCES
+    }
+
+    auto* msg = find_msg(*msq, msgtyp, msgflg);
+    if (msg == nullptr) {
+        return -42;  // -ENOMSG (the wait loop lands with the IPC_NOWAIT only)
+    }
+
+    std::uint64_t sz = 0;
+    if (msgsz < msg->mtext.size()) {
+        if (!(msgflg & ipc::kMsgNoError)) {
+            return -7;  // -E2BIG
+        }
+        sz = msgsz;
+    } else {
+        sz = msg->mtext.size();
+    }
+
+    // the copy before the erase: the queue erase invalidates msg (the upstream
+    // python keeps the popped object alive via the refcounting; the C++ port
+    // must copy the payload out first)
+    const auto mtype = msg->mtype;
+    const auto text = msg->mtext;
+
+    if (!(msgflg & ipc::kMsgCopy)) {
+        auto& queue = msq->queue();
+        for (auto it = queue.begin(); it != queue.end(); ++it) {
+            if (&*it == msg) {
+                queue.erase(it);
+                break;
+            }
+        }
+    }
+
+    ql.mem().write_ptr(msgp, mtype);
+    ql.mem().write(msgp + ql.arch().pointersize(),
+                   std::vector<std::uint8_t>(text.begin(), text.begin() + static_cast<std::ptrdiff_t>(sz)));
+    return static_cast<std::int64_t>(sz);
+}
+
+// shm.py ql_syscall_shmget: the IPC_PRIVATE/create walk (the SHMMNI cap, the
+// alignment walk), the get_by_key IPC_CREAT/IPC_EXCL walks, the uid/SHM_W|
+// SHM_R permission shape
+std::optional<std::int64_t> syscall_shmget(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    const auto key = static_cast<std::int64_t>(params[0]);
+    const auto size = params[1];
+    const auto shmflg = params[2];
+    auto& posix = ql.os<posix::QlOsPosix>();
+
+    const auto create_shm = [&]() -> std::int64_t {
+        if (posix.shm().size() >= ipc::kShmMni) {
+            return -61;  // -ENOSPC
+        }
+        const auto mode = shmflg & ((1 << 9) - 1);
+        const auto shm_size = ql.mem().align_up(size, ql.mem().pagesize());
+        return posix.shm().add(ShmId(key, posix.uid(), posix.gid(), mode, shm_size));
+    };
+
+    if (key == static_cast<std::int64_t>(ipc::kPrivate)) {
+        return create_shm();
+    }
+
+    const auto [shmid, shm] = posix.shm().get_by_key(key);
+    if (shm == nullptr) {
+        if (shmflg & ipc::kCreat) {
+            return create_shm();
+        }
+        return -2;  // -ENOENT
+    }
+    if (shmflg & (ipc::kCreat | ipc::kExcl)) {
+        return -17;  // -EEXIST
+    }
+    if (posix.uid() == shm->uid() && (shm->mode() & (ipc::kShmW | ipc::kShmR))) {
+        return shmid;
+    }
+    return -13;  // -EACCES
+}
+
+// shm.py ql_syscall_shmat: the shmaddr walks (the find_free_space at
+// mmap_address, the SHM_RND align), the perms (the READ|WRITE|EXEC from the
+// flags), the mode permission gates, the map + the attachment tracking, the
+// attaddr return
+std::optional<std::int64_t> syscall_shmat(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    const auto shmid = static_cast<std::int64_t>(params[0]);
+    const auto shmaddr = params[1];
+    const auto shmflg = params[2];
+
+    auto& posix = ql.os<posix::QlOsPosix>();
+    auto* shm = posix.shm().get_by_id(shmid);
+    if (shm == nullptr) {
+        return -22;  // -EINVAL
+    }
+
+    std::uint64_t attaddr = 0;
+    if (shmaddr == 0) {
+        const auto mmap_base = dynamic_cast<loader::QlLoaderELF&>(ql.loader()).mmap_address();
+        attaddr = ql.mem().find_free_space(shm->segsz(), mmap_base);
+    } else if (shmflg & ipc::kShmRnd) {
+        attaddr = ql.mem().align_up(shmaddr, ql.mem().pagesize());
+    } else {
+        if (shmaddr & (ql.mem().pagesize() - 1)) {
+            return -22;  // -EINVAL
+        }
+        attaddr = shmaddr;
+    }
+
+    int perms = 1;  // UC_PROT_READ
+    if ((shmflg & ipc::kShmRdonly) == 0) {
+        perms |= 2;  // UC_PROT_WRITE
+    }
+    if (shmflg & ipc::kShmExec) {
+        perms |= 4;  // UC_PROT_EXEC
+    }
+
+    if ((perms & 1) && !(shm->mode() & ipc::kShmR)) {
+        return -13;  // -EACCES
+    }
+    if ((perms & 2) && !(shm->mode() & ipc::kShmW)) {
+        return -13;  // -EACCES
+    }
+
+    try {
+        ql.mem().map(attaddr, shm->segsz(), perms, "[shm]");
+    } catch (const QlMemoryMappedError&) {
+        return -22;  // -EINVAL
+    }
+
+    shm->attach().push_back(attaddr);
+    return static_cast<std::int64_t>(attaddr);
+}
+
+// shm.py ql_syscall_shmdt: the attachment lookup + the detach
+std::optional<std::int64_t> syscall_shmdt(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    const auto shmaddr = params[0];
+    auto& posix = ql.os<posix::QlOsPosix>();
+    auto* shm = posix.shm().get_by_attaddr(shmaddr);
+    if (shm == nullptr) {
+        return -22;  // -EINVAL
+    }
+    auto& attach = shm->attach();
+    for (auto it = attach.begin(); it != attach.end(); ++it) {
+        if (*it == shmaddr) {
+            attach.erase(it);
+            break;
+        }
+    }
+    return 0;
+}
+
+// syscall.py ql_syscall_ipc: the call decode walk (the version hi-word, the
+// lo-word call), the shmat/shmdt/shmget/msgget/msgsnd/msgrcv dispatch (the
+// verbatim arg reshuffles: the shmat rides (args[0], args[3], args[1]), the
+// msgsnd (args[0], args[3], args[1], args[2]), the msgrcv version-0 reads
+// msgp/msgtyp through the memory)
+std::optional<std::int64_t> syscall_ipc(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    const auto call_raw = params[0];
+    const std::uint64_t version = call_raw >> 16;
+    const auto call = static_cast<int>(call_raw & 0xffff);
+
+    const auto first = params[1];
+    const auto second = params[2];
+    const auto third = params[3];
+    const auto ptr = params[4];
+    const auto fifth = params[5];
+
+    const std::vector<std::uint64_t> args = {first, second, third, ptr, fifth};
+
+    switch (call) {
+        case 21:  // SHMAT
+            if (version == 1) {
+                return -22;  // -EINVAL
+            }
+            return syscall_shmat(ql, {args[0], args[3], args[1]});
+        case 23:  // SHMDT
+            return syscall_shmdt(ql, {args[3]});
+        case 29:  // SHMGET
+            return syscall_shmget(ql, {args[0], args[1], args[2]});
+        case 30:  // MSGGET
+            return syscall_msgget(ql, {args[0], args[1]});
+        case 31:  // MSGSND
+            return syscall_msgsnd(ql, {args[0], args[3], args[1], args[2]});
+        case 32: {  // MSGRCV
+            if (version == 0) {
+                if (args[3] == 0) {
+                    return -22;
+                }
+                const auto msgp = static_cast<std::uint64_t>(ql.mem().read_ptr(args[3]));
+                const auto msgtyp = static_cast<std::uint64_t>(ql.mem().read_ptr(args[3] + ql.arch().pointersize()));
+                return syscall_msgrcv(ql, {args[0], msgp, args[1], msgtyp, args[2]});
+            }
+            return syscall_msgrcv(ql, {args[0], args[3], args[1], args[4], args[2]});
+        }
+        default:
+            return -38;  // -ENOSYS
+    }
 }
 
 std::optional<std::int64_t> syscall_exit(Qiling& ql, const std::vector<std::uint64_t>& params) {
@@ -1738,11 +2067,6 @@ std::optional<std::int64_t> syscall_clone(Qiling& ql, const std::vector<std::uin
     ql.os<posix::QlOsPosix>().syscall_abi_mut().set_return_value(0);
     th->save();
 
-    // BISECT: the child ctx's pc as saved
-    std::fprintf(stderr, "[clone] child_ctx_pc=%llx parent_after=%llx\n",
-                 static_cast<unsigned long long>(after_syscall),
-                 static_cast<unsigned long long>(after_syscall));
-
     // the parent's context back (sched.py: ql.restore(ctx))
     // BISECT cycle 3 (b2): the parent's in-hook uc_context restore removed
     // together with the matching save — restore when the study closes
@@ -1965,6 +2289,13 @@ void register_builtin_syscalls() {
     registry.register_syscall({"setrlimit", {PARAM_INTN, PARAM_PTRX}, syscall_setrlimit});
     registry.register_syscall({"prlimit64", {PARAM_INTN, PARAM_INTN, PARAM_PTRX, PARAM_PTRX}, syscall_prlimit64});
     registry.register_syscall({"getpriority", {PARAM_INTN, PARAM_INTN}, syscall_getpriority});
+    registry.register_syscall({"msgget", {PARAM_INTN, PARAM_INTN}, syscall_msgget});
+    registry.register_syscall({"msgsnd", {PARAM_INTN, PARAM_PTRX, PARAM_INTN, PARAM_INTN}, syscall_msgsnd});
+    registry.register_syscall({"msgrcv", {PARAM_INTN, PARAM_PTRX, PARAM_INTN, PARAM_INTN, PARAM_INTN}, syscall_msgrcv});
+    registry.register_syscall({"shmget", {PARAM_INTN, PARAM_INTN, PARAM_INTN}, syscall_shmget});
+    registry.register_syscall({"shmat", {PARAM_INTN, PARAM_PTRX, PARAM_INTN}, syscall_shmat});
+    registry.register_syscall({"shmdt", {PARAM_PTRX}, syscall_shmdt});
+    registry.register_syscall({"ipc", {PARAM_INTN, PARAM_INTN, PARAM_INTN, PARAM_INTN, PARAM_PTRX, PARAM_INTN}, syscall_ipc});
     registry.register_syscall({"fstat64", {PARAM_INTN, PARAM_PTRX}, syscall_fstat64_pack64});    registry.register_syscall({"ftruncate", {PARAM_INTN, PARAM_INTN}, syscall_ftruncate});
     registry.register_syscall({"open", {PARAM_PTRX, PARAM_INTN, PARAM_INTN}, syscall_open});
     registry.register_syscall({"openat", {PARAM_INTN, PARAM_PTRX, PARAM_INTN, PARAM_INTN}, syscall_open});

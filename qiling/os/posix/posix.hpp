@@ -18,6 +18,7 @@
 #include "qiling/os/posix/syscall.hpp"
 #include "qiling/os/memory.hpp"
 #include "qiling/os/posix/syscall/abi.hpp"
+#include "qiling/os/posix/ipc.hpp"
 
 namespace qiling {
 
@@ -128,6 +129,11 @@ public:
     int egid() const noexcept { return egid_; }
     int pid() const noexcept { return pid_; }
 
+    // posix.py: the ipc emulations (os.msq / os.shm) — the msq deque pool and
+    // the shm segment pool ride the in-memory maps
+    Msq& msq() noexcept { return msq_; }
+    Shm& shm() noexcept { return shm_; }
+
 private:
     static std::unique_ptr<cc::QlCC> make_cc_default(QL_ARCH archtype, QlArch& arch);
 
@@ -143,6 +149,8 @@ private:
     int gid_ = 1000;
     int egid_ = 1000;
     int pid_ = 1996;
+    Msq msq_;
+    Shm shm_;
 
 public:
     // signal.py: the per-signum sigaction table (the os.sig dict) + the

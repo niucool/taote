@@ -1974,3 +1974,63 @@ TEST(PosixProcMisc, ArchPrctlFsRoundtripAndZeroBodies) {
     EXPECT_EQ(ql.mem().read_ptr(0x1002208), 0u);
     EXPECT_EQ(ql.mem().read_ptr(0x1002210), 0u);
 }
+
+// The ipc/msg family through the direct x86-64 syscalls (the msgget=68, the
+// msgsnd=69, the msgrcv=70): the msgget via the IPC_PRIVATE, the msgsnd
+// (msqid, msgp, msgsz, msgflg), the msgrcv (msqid, msgp, msgsz, msgtyp,
+// msgflg). The msg queue round trip returns the sent bytes. The ipc
+// multiplexer shim itself is x86-32 only (the 117 = setresuid on x86-64) and
+// is exercised by no x86-64 fixture.
+TEST(PosixIpc, MsgQueueRoundtripDirectSyscalls) {
+    // ipc(30=MSGGET, IPC_PRIVATE=0, 0o666)
+    // then ipc(31=MSGSND, msqid, 0x1002400, 4, 0)
+    // then ipc(32=MSGRCV, msqid, 0x1002500, 4, 1, 0) — the version-0 walk
+    const std::vector<std::uint8_t> code = {
+        // msgget(IPC_PRIVATE=0, 0o666) - the direct x86-64 msgget=68
+        // (the ipc multiplexer is x86-32 only: the 117 = setresuid here)
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00,  // mov rdi, 0 (IPC_PRIVATE)
+        0x48, 0xC7, 0xC6, 0xB6, 0x01, 0x00, 0x00,  // mov rsi, 0o666
+        0x48, 0xC7, 0xC0, 0x44, 0x00, 0x00, 0x00,  // mov rax, 68 (msgget)
+        0x0F, 0x05,                                 // syscall
+        0x48, 0x89, 0x04, 0x25, 0x00, 0x22, 0x00, 0x01,  // mov [0x1002200], rax (the msqid)
+        // ipc(call=31=MSGSND, msqid, msgp=0x1002400, msgsz=4, msgflg=0)
+        // (the args reshuffle: args[0]=rsi=msqid, args[1]=rdx=msgsz,
+        //  args[2]=r10=msgflg, args[3]=r8=msgp)
+        // msgsnd(msqid, 0x1002400, 4, 0) - the direct x86-64 msgsnd=69
+        // (rdi, rsi, rdx, r10) = (msqid, msgp, msgsz, msgflg)
+        0x48, 0xB9, 0x00, 0x22, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,  // mov rcx, 0x1002200 (the msqid cell)
+        0x48, 0x8B, 0x39,                           // mov rdi, [rcx] (the msqid)
+        0x48, 0xC7, 0xC6, 0x00, 0x24, 0x00, 0x01,  // mov rsi, 0x1002400 (the msgp)
+        0x48, 0xC7, 0xC2, 0x04, 0x00, 0x00, 0x00,  // mov rdx, 4 (the msgsz)
+        0x41, 0xBA, 0x00, 0x00, 0x00, 0x00,        // mov r10d, 0 (the msgflg)
+        0x48, 0xC7, 0xC0, 0x45, 0x00, 0x00, 0x00,  // mov rax, 69 (msgsnd)
+        0x0F, 0x05,                                 // syscall
+        0x48, 0x89, 0x04, 0x25, 0x08, 0x22, 0x00, 0x01,  // mov [0x1002208], rax
+        //         // msgrcv(msqid, 0x1002500, 4, 1, 0) - the direct x86-64 msgrcv=70
+        // (rdi, rsi, rdx, r10, r8) = (msqid, msgp, msgsz, msgtyp, msgflg)
+        0x48, 0xB9, 0x00, 0x22, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,  // mov rcx, 0x1002200 (the msqid cell)
+        0x48, 0x8B, 0x39,                           // mov rdi, [rcx] (the msqid)
+        0x48, 0xC7, 0xC6, 0x00, 0x25, 0x00, 0x01,  // mov rsi, 0x1002500 (the msgp)
+        0x48, 0xC7, 0xC2, 0x04, 0x00, 0x00, 0x00,  // mov rdx, 4 (the msgsz)
+        0x41, 0xBA, 0x01, 0x00, 0x00, 0x00,        // mov r10d, 1 (the msgtyp)
+        0x41, 0xB8, 0x00, 0x00, 0x00, 0x00,        // mov r8d, 0 (the msgflg)
+        0x48, 0xC7, 0xC0, 0x46, 0x00, 0x00, 0x00,  // mov rax, 70 (msgrcv)
+        0x0F, 0x05,                                 // syscall
+        0x48, 0x89, 0x04, 0x25, 0x10, 0x22, 0x00, 0x01,  // mov [0x1002210], rax
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00,  // mov rax, 60 (exit)
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00,  // mov rdi, 0
+        0x0F, 0x05,                                 // syscall
+    };
+
+    QilingOptions options = posix_options(code);
+    Qiling ql(options);
+    ql.mem().write(0x1002400, std::vector<std::uint8_t>{1, 0, 0, 0, 0, 0, 0, 0, 'D', 'A', 'T', 'A'});
+    ql.mem().write(0x1002500, std::vector<std::uint8_t>(12, 0));
+    ql.run();
+    EXPECT_EQ(ql.mem().read_ptr(0x1002210), 4u);
+    // the received buffer carries the mtype + the text
+    const auto buf = ql.mem().read(0x1002500, 12);
+    EXPECT_EQ(buf[0], 1);
+    EXPECT_EQ(buf[8], 'D');
+    EXPECT_EQ(buf[11], 'A');
+}
