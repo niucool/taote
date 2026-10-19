@@ -3027,3 +3027,185 @@ TEST(WinApiWinbase, LstrFamilyRidesCopyConcatLengthCompare) {
     ASSERT_TRUE(rcmw.has_value());
     EXPECT_EQ(*rcmw, 0u);
 }
+
+TEST(WinApiWinbase, VerifyVersionInfoRidesCriteriaWalk) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    // the profile rides windows.ql: the major 10, the minor 0, the sp 0, the
+    // product type 1 — the asked struct mirrors it for the equal test
+    const auto* vvw = ApiRegistry::instance().find("VerifyVersionInfoW");
+    ASSERT_NE(vvw, nullptr);
+
+    // stage the OSVERSIONINFOEXW (the 284-byte layout): the size field, the
+    // major 10, the minor 0, the sp major 0, the product type 1
+    const auto asked = kScratch;
+    ql.mem().write(asked, std::vector<std::uint8_t>(0x120, 0));
+    ql.mem().write_ptr(asked + 0, 284, 4);
+    ql.mem().write_ptr(asked + 4, 10, 4);       // dwMajorVersion
+    ql.mem().write_ptr(asked + 8, 0, 4);        // dwMinorVersion
+    ql.mem().write_ptr(asked + 148 + 128, 0, 2);  // wServicePackMajor (the W layout @276)
+    ql.mem().write_ptr(asked + 276 + 6, 1, 1);  // wProductType
+
+    // VER_MAJORVERSION | VER_EQUAL: the equal comparison holds
+    const auto cond_equal = static_cast<std::uint64_t>(VER_EQUAL) << (1 * 3);
+    const auto r = vvw->handler(ql, 0, ResolvedParams{
+        {"lpVersionInformation", asked},
+        {"dwTypeMask", 1ull << 1},          // VER_MAJORVERSION bit
+        {"dwlConditionMask", cond_equal},
+    });
+    ASSERT_TRUE(r.has_value());
+    EXPECT_EQ(*r, 1u);
+
+    // the asked major 9 with VER_GREATER: the emul (10) > the asked (9) → the 1
+    ql.mem().write_ptr(asked + 4, 9, 4);
+    const auto cond_greater = static_cast<std::uint64_t>(VER_GREATER) << (1 * 3);
+    const auto rg = vvw->handler(ql, 0, ResolvedParams{
+        {"lpVersionInformation", asked},
+        {"dwTypeMask", 1ull << 1},
+        {"dwlConditionMask", cond_greater},
+    });
+    ASSERT_TRUE(rg.has_value());
+    EXPECT_EQ(*rg, 1u);
+
+    // the asked major 10 with VER_GREATER: the emul == the asked — the verbatim
+    // walk has no VER_EQUAL branch under the GREATER cond, so the res stays
+    // true and the 1 rides back (the upstream quirk, pinned)
+    ql.mem().write_ptr(asked + 4, 10, 4);
+    const auto rf = vvw->handler(ql, 0, ResolvedParams{
+        {"lpVersionInformation", asked},
+        {"dwTypeMask", 1ull << 1},
+        {"dwlConditionMask", cond_greater},
+    });
+    ASSERT_TRUE(rf.has_value());
+    EXPECT_EQ(*rf, 1u);
+
+    // the VER_EQUAL cond with the mismatched minor: the res &= false → the 0 + the last_error
+    ql.mem().write_ptr(asked + 8, 3, 4);  // the asked minor 3 (the profile rides 0)
+    const auto cond_eq_minor = static_cast<std::uint64_t>(VER_EQUAL) << (0 * 3);  // the bit 0 = the MINORVERSION
+    const auto rf2 = vvw->handler(ql, 0, ResolvedParams{
+        {"lpVersionInformation", asked},
+        {"dwTypeMask", 1ull << 0},          // VER_MINORVERSION bit
+        {"dwlConditionMask", cond_eq_minor},
+    });
+    ASSERT_TRUE(rf2.has_value());
+    EXPECT_EQ(*rf2, 0u);
+    EXPECT_EQ(ql.os<QlOsWindows>().last_error(), 0x47Eu);  // the ERROR_OLD_WIN_VERSION
+    ql.mem().write_ptr(asked + 8, 0, 4);  // the restore
+
+    // the A sibling shares the body (the 156-byte layout)
+    const auto* vva = ApiRegistry::instance().find("VerifyVersionInfoA");
+    ASSERT_NE(vva, nullptr);
+    const auto asked_a = kScratch + 0x200;
+    ql.mem().write(asked_a, std::vector<std::uint8_t>(0x100, 0));
+    ql.mem().write_ptr(asked_a + 0, 156, 4);
+    ql.mem().write_ptr(asked_a + 4, 10, 4);
+    const auto ra = vva->handler(ql, 0, ResolvedParams{
+        {"lpVersionInformation", asked_a},
+        {"dwTypeMask", 1ull << 1},
+        {"dwlConditionMask", cond_equal},
+    });
+    ASSERT_TRUE(ra.has_value());
+    EXPECT_EQ(*ra, 1u);
+}
+
+TEST(WinApiWinbase, NameQueriesAndProfileIniRideProfileSections) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    // GetUserNameA: the "Qiling\0" + the size cell update
+    const auto* gun = ApiRegistry::instance().find("GetUserNameA");
+    ASSERT_NE(gun, nullptr);
+    ql.mem().write_ptr(kCells, 0x40, 4);
+    const auto ru = gun->handler(ql, 0, ResolvedParams{{"lpBuffer", kScratch}, {"pcbBuffer", kCells}});
+    ASSERT_TRUE(ru.has_value());
+    EXPECT_EQ(*ru, 1u);
+    EXPECT_EQ(ql.mem().read_ptr(kCells, 4), 7u);  // the "Qiling" + the NUL
+    const auto uname = ql.mem().read(kScratch, 7);
+    EXPECT_EQ(std::string(uname.begin(), uname.end()), "Qiling" + std::string(1, char(0)));
+
+    // the short buffer: the ERROR_INSUFFICIENT_BUFFER + the 0 (the size cell still updates)
+    ql.mem().write_ptr(kCells, 3, 4);
+    const auto rshort = gun->handler(ql, 0, ResolvedParams{{"lpBuffer", kScratch}, {"pcbBuffer", kCells}});
+    ASSERT_TRUE(rshort.has_value());
+    EXPECT_EQ(*rshort, 0u);
+    EXPECT_EQ(ql.os<QlOsWindows>().last_error(), 0x7Au);
+    EXPECT_EQ(ql.mem().read_ptr(kCells, 4), 7u);
+
+    // GetUserNameW: the wide form rides the same walk (the size = 14)
+    const auto* gunw = ApiRegistry::instance().find("GetUserNameW");
+    ASSERT_NE(gunw, nullptr);
+    ql.mem().write_ptr(kCells + 8, 0x40, 4);
+    const auto ruw = gunw->handler(ql, 0, ResolvedParams{{"lpBuffer", kScratch + 0x100}, {"pcbBuffer", kCells + 8}});
+    ASSERT_TRUE(ruw.has_value());
+    EXPECT_EQ(*ruw, 1u);
+    EXPECT_EQ(ql.mem().read_ptr(kCells + 8, 4), 14u);
+
+    // GetComputerNameA: the "qilingpc\0"
+    const auto* gcn = ApiRegistry::instance().find("GetComputerNameA");
+    ASSERT_NE(gcn, nullptr);
+    ql.mem().write_ptr(kCells + 16, 0x40, 4);
+    const auto rcn = gcn->handler(ql, 0, ResolvedParams{{"lpBuffer", kScratch + 0x200}, {"nSize", kCells + 16}});
+    ASSERT_TRUE(rcn.has_value());
+    EXPECT_EQ(*rcn, 1u);
+    EXPECT_EQ(ql.mem().read_ptr(kCells + 16, 4), 9u);
+    const auto cname = ql.mem().read(kScratch + 0x200, 9);
+    EXPECT_EQ(std::string(cname.begin(), cname.end()), "qilingpc" + std::string(1, char(0)));
+
+    // GetPrivateProfileStringA: the ini file with the section/key + the default arm
+    const auto ini_path = std::filesystem::temp_directory_path() / "ql_winbase_profile.ini";
+    {
+        std::ofstream out(ini_path, std::ios::binary);
+        out << "[owner]\r\nname=Qiling\r\n";
+    }
+    const auto* gpp = ApiRegistry::instance().find("GetPrivateProfileStringA");
+    ASSERT_NE(gpp, nullptr);
+
+    const auto rfound = gpp->handler(ql, 0, ResolvedParams{
+        {"lpAppName", std::string("owner")},
+        {"lpKeyName", std::string("name")},
+        {"lpDefault", std::string("nobody")},
+        {"lpReturnedString", kScratch + 0x300},
+        {"nSize", 0x20ull},
+        {"lpFileName", ini_path.string()},
+    });
+    ASSERT_TRUE(rfound.has_value());
+    EXPECT_EQ(*rfound, 6u);
+    const auto vfound = ql.mem().read(kScratch + 0x300, 7);
+    EXPECT_EQ(std::string(vfound.begin(), vfound.end()), "Qiling" + std::string(1, char(0)));
+
+    const auto rdefault = gpp->handler(ql, 0, ResolvedParams{
+        {"lpAppName", std::string("ghost")},
+        {"lpKeyName", std::string("name")},
+        {"lpDefault", std::string("nobody")},
+        {"lpReturnedString", kScratch + 0x300},
+        {"nSize", 0x20ull},
+        {"lpFileName", ini_path.string()},
+    });
+    ASSERT_TRUE(rdefault.has_value());
+    EXPECT_EQ(*rdefault, 6u);
+    const auto vdefault = ql.mem().read(kScratch + 0x300, 7);
+    EXPECT_EQ(std::string(vdefault.begin(), vdefault.end()), "nobody" + std::string(1, char(0)));
+
+    // the missing file: the ERROR_OLD_WIN_VERSION + the 0 (the verbatim except arm)
+    const auto rmissing = gpp->handler(ql, 0, ResolvedParams{
+        {"lpAppName", std::string("owner")},
+        {"lpKeyName", std::string("name")},
+        {"lpDefault", std::string("nobody")},
+        {"lpReturnedString", kScratch + 0x300},
+        {"nSize", 0x20ull},
+        {"lpFileName", (std::filesystem::temp_directory_path() / "ql_winbase_missing.ini").string()},
+    });
+    ASSERT_TRUE(rmissing.has_value());
+    EXPECT_EQ(*rmissing, 0u);
+    EXPECT_EQ(ql.os<QlOsWindows>().last_error(), 0x47Eu);
+
+    // WritePrivateProfileStringA: the verbatim pass
+    const auto* wpp = ApiRegistry::instance().find("WritePrivateProfileStringA");
+    ASSERT_NE(wpp, nullptr);
+    const auto rwp = wpp->handler(ql, 0, ResolvedParams{
+        {"lpAppName", std::string("s")}, {"lpKeyName", std::string("k")},
+        {"lpString", std::string("v")}, {"lpFileName", ini_path.string()},
+    });
+    EXPECT_FALSE(rwp.has_value());
+}

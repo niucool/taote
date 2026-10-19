@@ -17,7 +17,10 @@
 #include <algorithm>
 #include <cstdio>
 #include <cctype>
+#include <functional>
 #include <string>
+
+#include "qiling/profiles/inireader.hpp"
 
 #ifdef _WIN32
 #include <io.h>
@@ -44,6 +47,178 @@ std::string lcreat_mode(std::uint64_t attribute) {
         mode += "r+b";
     }
     return mode;
+}
+
+// the OSVERSIONINFOEX[A|W] field read (structs.py make_os_version_info_ex:
+// the default-aligned ctypes layout — the dw fields @4..16, the szCSDVersion
+// char/wchar[128] @20, the w fields after it — 156/284 bytes total)
+struct OsVerExFields {
+    std::uint32_t dw_major = 0;
+    std::uint32_t dw_minor = 0;
+    std::uint32_t dw_build = 0;
+    std::uint32_t dw_platform_id = 0;
+    std::uint16_t w_sp_major = 0;
+    std::uint16_t w_sp_minor = 0;
+    std::uint16_t w_suite_mask = 0;
+    std::uint8_t w_product_type = 0;
+};
+
+OsVerExFields read_os_ver_ex(Qiling& ql, std::uint64_t addr, const bool wide) {
+    OsVerExFields f;
+    f.dw_major = static_cast<std::uint32_t>(ql.mem().read_ptr(addr + 4, 4));
+    f.dw_minor = static_cast<std::uint32_t>(ql.mem().read_ptr(addr + 8, 4));
+    f.dw_build = static_cast<std::uint32_t>(ql.mem().read_ptr(addr + 12, 4));
+    f.dw_platform_id = static_cast<std::uint32_t>(ql.mem().read_ptr(addr + 16, 4));
+    const auto sp = addr + (wide ? 276 : 148);
+    f.w_sp_major = static_cast<std::uint16_t>(ql.mem().read_ptr(sp, 2));
+    f.w_sp_minor = static_cast<std::uint16_t>(ql.mem().read_ptr(sp + 2, 2));
+    f.w_suite_mask = static_cast<std::uint16_t>(ql.mem().read_ptr(sp + 4, 2));
+    f.w_product_type = static_cast<std::uint8_t>(ql.mem().read_ptr(sp + 6, 1));
+    return f;
+}
+
+// the shared __VerifyVersionInfo body (the verbatim criteria walk)
+std::optional<std::uint64_t> verify_version_info_body(Qiling& ql, const ResolvedParams& params, const bool wide) {
+    // see: https://docs.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-verifyversioninfow
+    const auto lp_version_information = api_get_int(get_param(params, "lpVersionInformation"));
+    const auto dw_type_mask = api_get_int(get_param(params, "dwTypeMask"));
+    const auto dwl_condition_mask = api_get_int(get_param(params, "dwlConditionMask"));
+
+    const auto asked = read_os_ver_ex(ql, lp_version_information, wide);
+
+    // reading emulated os version info from profile
+    // FIXME: read the necessary information from KUSER_SHARED_DATA instead
+    // (verbatim)
+    OsVerExFields emul;
+    emul.dw_major = static_cast<std::uint32_t>(ql.profile().get_int("SYSTEM", "majorVersion"));
+    emul.dw_minor = static_cast<std::uint32_t>(ql.profile().get_int("SYSTEM", "minorVersion"));
+    emul.dw_build = 0;             // verbatim
+    emul.dw_platform_id = 0;       // verbatim
+    emul.w_sp_major = static_cast<std::uint16_t>(ql.profile().get_int("SYSTEM", "VER_SERVICEPACKMAJOR"));
+    emul.w_sp_minor = 0;           // verbatim
+    emul.w_suite_mask = 0;         // verbatim
+    emul.w_product_type = static_cast<std::uint8_t>(ql.profile().get_int("SYSTEM", "productType"));
+
+    // check criteria by the order they should be evaluated. the online
+    // microsoft documentation only specify the first five, so not sure about
+    // the other three.  (verbatim comment)
+    const std::pair<int, std::function<std::uint64_t(const OsVerExFields&)>> checks[] = {
+        {1, [](const OsVerExFields& f) { return f.dw_major; }},      // VER_MAJORVERSION
+        {0, [](const OsVerExFields& f) { return f.dw_minor; }},      // VER_MINORVERSION
+        {2, [](const OsVerExFields& f) { return f.dw_build; }},      // VER_BUILDNUMBER
+        {5, [](const OsVerExFields& f) { return f.w_sp_major; }},    // VER_SERVICEPACKMAJOR
+        {4, [](const OsVerExFields& f) { return f.w_sp_minor; }},    // VER_SERVICEPACKMINOR
+        {3, [](const OsVerExFields& f) { return f.dw_platform_id; }},  // VER_PLATFORMID
+        {6, [](const OsVerExFields& f) { return f.w_suite_mask; }},  // VER_SUITENAME
+        {7, [](const OsVerExFields& f) { return f.w_product_type; }},  // VER_PRODUCT_TYPE
+    };
+
+    bool res = true;
+
+    for (const auto& [bit, getter] : checks) {
+        if (!(dw_type_mask & (1ull << bit))) {
+            continue;
+        }
+        const auto asked_val = getter(asked);
+        const auto emuld = getter(emul);
+
+        // extract the condition code for the required field
+        const auto cond = (static_cast<std::uint64_t>(dwl_condition_mask) >> (bit * VER_NUM_BITS_PER_CONDITION_MASK)) & VER_CONDITION_MASK;
+
+        // special case for VER_SUITENAME
+        if (bit == 6) {
+            // the python dict lookup: a cond outside {AND, OR} raises the
+            // KeyError (unhandled — the barrier)
+            if (cond == VER_AND) {
+                // all members of b must be present  (verbatim comment)
+                res &= (emuld & asked_val) == asked_val;
+            } else if (cond == VER_OR) {
+                // at least one member of b must be present
+                res &= (emuld & asked_val) != 0;
+            } else {
+                throw QlErrorBase("VER_SUITENAME cond KeyError");
+            }
+        } else {
+            // cond operates as a bitmask, so multiple 'if' statements are
+            // appropriately used here. do not turn this into an 'elif'
+            // construct.  (verbatim comment)
+            if ((cond & VER_GREATER) && (emuld > asked_val)) {
+                return 1;
+            }
+
+            if ((cond & VER_LESS) && (emuld < asked_val)) {
+                return 1;
+            }
+
+            if (cond & VER_EQUAL) {
+                res &= (emuld == asked_val);
+            }
+        }
+    }
+
+    if (!res) {
+        w(ql).set_last_error(ERROR_OLD_WIN_VERSION);
+    }
+
+    return res ? 1 : 0;
+}
+
+// the shared __GetUserName body
+std::optional<std::uint64_t> get_user_name_body(Qiling& ql, const ResolvedParams& params, const bool wstring) {
+    const auto lp_buffer = api_get_int(get_param(params, "lpBuffer"));
+    const auto pcb_buffer = api_get_int(get_param(params, "pcbBuffer"));
+
+    const auto username_value = ql.profile().get("USER", "username").value_or("");
+    const std::string username_src = username_value + std::string(1, char(0));
+    std::string username;
+    if (wstring) {
+        for (const char c : username_src) {
+            username.push_back(c);
+            username.push_back('\0');
+        }
+    } else {
+        username = username_src;
+    }
+
+    const auto max_size = ql.mem().read_ptr(pcb_buffer, 4);
+    ql.mem().write_ptr(pcb_buffer, username.size(), 4);
+
+    if (username.size() > max_size) {
+        w(ql).set_last_error(ERROR_INSUFFICIENT_BUFFER);
+        return 0;
+    }
+
+    ql.mem().write(lp_buffer, std::vector<std::uint8_t>(username.begin(), username.end()));
+    return 1;
+}
+
+// the shared __GetComputerName body
+std::optional<std::uint64_t> get_computer_name_body(Qiling& ql, const ResolvedParams& params, const bool wstring) {
+    const auto lp_buffer = api_get_int(get_param(params, "lpBuffer"));
+    const auto n_size = api_get_int(get_param(params, "nSize"));
+
+    const auto computer_value = ql.profile().get("SYSTEM", "computername").value_or("");
+    const std::string computer_src = computer_value + std::string(1, char(0));
+    std::string computer;
+    if (wstring) {
+        for (const char c : computer_src) {
+            computer.push_back(c);
+            computer.push_back('\0');
+        }
+    } else {
+        computer = computer_src;
+    }
+
+    const auto max_size = ql.mem().read_ptr(n_size, 4);
+    ql.mem().write_ptr(n_size, computer.size(), 4);
+
+    if (computer.size() > max_size) {
+        w(ql).set_last_error(ERROR_BUFFER_OVERFLOW);
+        return 0;
+    }
+
+    ql.mem().write(lp_buffer, std::vector<std::uint8_t>(computer.begin(), computer.end()));
+    return 1;
 }
 
 }  // namespace
@@ -599,6 +774,151 @@ void register_winbase_family() {
         {"lpString1", LPCSTR_},
         {"lpString2", LPCSTR_},
     }) = lstrcmp_handler;
+
+    // ---- sub-slice 3: VerifyVersionInfo, the name queries, the profile ini ----
+
+    // BOOL VerifyVersionInfoW(
+    //   LPOSVERSIONINFOEXW lpVersionInformation,
+    //   DWORD              dwTypeMask,
+    //   DWORDLONG          dwlConditionMask
+    // );
+    WinsdkApi("VerifyVersionInfoW", WinCc::Stdcall, {
+        {"lpVersionInformation", PVOID_},
+        {"dwTypeMask", DWORD_},
+        {"dwlConditionMask", DWORDLONG_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        return verify_version_info_body(ql, params, true);
+    };
+
+    // BOOL VerifyVersionInfoA(
+    //   LPOSVERSIONINFOEXA lpVersionInformation,
+    //   DWORD              dwTypeMask,
+    //   DWORDLONG          dwlConditionMask
+    // );
+    WinsdkApi("VerifyVersionInfoA", WinCc::Stdcall, {
+        {"lpVersionInformation", PVOID_},
+        {"dwTypeMask", DWORD_},
+        {"dwlConditionMask", DWORDLONG_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        return verify_version_info_body(ql, params, false);
+    };
+
+    // BOOL GetUserNameW(
+    //   LPWSTR  lpBuffer,
+    //   LPDWORD pcbBuffer
+    // );
+    WinsdkApi("GetUserNameW", WinCc::Stdcall, {
+        {"lpBuffer", LPWSTR_},
+        {"pcbBuffer", PVOID_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        return get_user_name_body(ql, params, true);
+    };
+
+    // BOOL GetUserNameA(
+    //   LPCSTR  lpBuffer,
+    //   LPDWORD pcbBuffer
+    // );
+    WinsdkApi("GetUserNameA", WinCc::Stdcall, {
+        {"lpBuffer", LPSTR_},
+        {"pcbBuffer", PVOID_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        return get_user_name_body(ql, params, false);
+    };
+
+    // BOOL GetComputerNameW(
+    //   LPWSTR  lpBuffer,
+    //   LPDWORD nSize
+    // );
+    WinsdkApi("GetComputerNameW", WinCc::Stdcall, {
+        {"lpBuffer", LPWSTR_},
+        {"nSize", PVOID_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        return get_computer_name_body(ql, params, true);
+    };
+
+    // BOOL GetComputerNameA(
+    //   LPCSTR  lpBuffer,
+    //   LPDWORD nSize
+    // );
+    WinsdkApi("GetComputerNameA", WinCc::Stdcall, {
+        {"lpBuffer", LPSTR_},
+        {"nSize", PVOID_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        return get_computer_name_body(ql, params, false);
+    };
+
+    // DWORD GetPrivateProfileStringA(
+    //   LPCSTR lpAppName,
+    //   LPCSTR lpKeyName,
+    //   LPCSTR lpDefault,
+    //   LPSTR  lpReturnedString,
+    //   DWORD  nSize,
+    //   LPCSTR lpFileName
+    // );
+    WinsdkApi("GetPrivateProfileStringA", WinCc::Stdcall, {
+        {"lpAppName", LPCSTR_},
+        {"lpKeyName", LPCSTR_},
+        {"lpDefault", LPCSTR_},
+        {"lpReturnedString", LPSTR_},
+        {"nSize", DWORD_},
+        {"lpFileName", LPCSTR_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto app_name = api_get_string(ql, get_param(params, "lpAppName"));
+        const auto key_name = api_get_string(ql, get_param(params, "lpKeyName"));
+        const auto default_value = api_get_string(ql, get_param(params, "lpDefault"));
+        const auto returned = api_get_int(get_param(params, "lpReturnedString"));
+        const auto n_size = api_get_int(get_param(params, "nSize"));
+        const auto file_name = api_get_string(ql, get_param(params, "lpFileName"));
+
+        IniConfig config;
+        try {
+            // TODO: this doesn't seem to be safe  (verbatim — the raw host
+            // open, no fs_mapper ride)
+            if (!config.read(file_name)) {
+                // the python open() FileNotFoundError rides the except arm
+                w(ql).set_last_error(ERROR_OLD_WIN_VERSION);
+                return 0;
+            }
+        } catch (const QlErrorBase&) {
+            // the parse errors propagate in the python (outside the try);
+            // the port's IniConfig raises the QlErrorBase from read() — the
+            // unhandled barrier matches
+            throw;
+        }
+
+        std::string value;
+        if (config.has_section(app_name) && config.has_option(app_name, key_name)) {
+            value = config.get(app_name, key_name).value();
+        } else {
+            value = default_value;
+        }
+
+        const auto write_len = static_cast<std::int64_t>(value.size()) < n_size - 1
+            ? value.size()
+            : static_cast<std::size_t>(n_size > 0 ? n_size - 1 : 0);
+
+        std::string out = value.substr(0, write_len);
+        out.push_back('\0');
+        ql.mem().write(returned, std::vector<std::uint8_t>(out.begin(), out.end()));
+
+        return write_len;
+    };
+
+    // BOOL WritePrivateProfileStringA(
+    //   LPCSTR lpAppName,
+    //   LPCSTR lpKeyName,
+    //   LPCSTR lpString,
+    //   LPCSTR lpFileName
+    // );
+    WinsdkApi("WritePrivateProfileStringA", WinCc::Stdcall, {
+        {"lpAppName", LPCSTR_},
+        {"lpKeyName", LPCSTR_},
+        {"lpString", LPCSTR_},
+        {"lpFileName", LPCSTR_},
+    }) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
+        // the verbatim pass
+        return std::nullopt;
+    };
 }
 
 // the static-init registration (the python module-import side effect)
