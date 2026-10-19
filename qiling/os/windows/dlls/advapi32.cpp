@@ -266,6 +266,11 @@ std::optional<std::uint64_t> reg_delete_value(Qiling& ql, const ResolvedParams& 
 
 }  // namespace
 
+// the token/SID + the SC-manager registration entry (the shared body lambdas
+// live above; the verbatim python module surfaces both families through the
+// single advapi32.py import)
+void register_advapi32_token_sc_families();
+
 void register_advapi32_family() {
     using namespace qiling::os::api;
 
@@ -449,7 +454,6 @@ void register_advapi32_family() {
         return reg_delete_value(ql, params);
     };
 
-    // LSTATUS RegEnumValueA( ... );
     WinsdkApi("RegEnumValueA", WinCc::Stdcall, {
         {"hKey", HKEY_},
         {"dwIndex", DWORD_},
@@ -462,12 +466,13 @@ void register_advapi32_family() {
     }) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
         return ERROR_NO_MORE_ITEMS;
     };
+
+    // the token/SID + the SC-manager handlers ride the same registration
+    register_advapi32_token_sc_families();
 }
 
-// ---- sub-slice B: the token/SID and the SC-manager families (the separate
-// registration entry; the shared body lambdas live here) ----
-
-namespace {
+// ---- sub-slice B: the token/SID and the SC-manager families (the shared
+// body lambdas live here) ----
 
 // the SID image builder (structs.py make_sid(auth_count): the Revision u8,
 // the SubAuthorityCount u8, the IdentifierAuthority BaseStructEB Value u32
@@ -496,8 +501,6 @@ std::string admin_sid_image()     { return make_sid_image({0x20, 0x220}); }  // 
 std::string users_sid_image()     { return make_sid_image({0x20, 0x221}); }  // S-1-5-32-545
 std::string guests_sid_image()    { return make_sid_image({0x20, 0x222}); }  // S-1-5-32-546
 std::string powerusers_sid_image() { return make_sid_image({0x20, 0x223}); } // S-1-5-32-547
-
-}  // namespace
 
 void register_advapi32_token_sc_families() {
     using namespace qiling::os::api;
