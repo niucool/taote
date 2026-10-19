@@ -6,6 +6,7 @@
 #include <string>
 
 #include "qiling/exception.hpp"
+#include "qiling/os/utils.hpp"
 #include "qiling/os/windows/api.hpp"
 #include "qiling/os/windows/fncc.hpp"
 #include "qiling/os/windows/dlls/dlls.hpp"
@@ -1393,8 +1394,10 @@ TEST(WinApiMemoryapi, VirtualAllocFreeProtectQueryVerbatim) {
 
 // the minimal PE64 builder carrying an export table: the export directory
 // rides the .text page after the code stub; the export "MinFunc" resolves to
-// the entry code (the rva 0x1000)
-static std::vector<std::uint8_t> build_minimal_pe64_with_exports() {
+// the entry code (the rva 0x1000). The named-export variant builds the same
+// image with a different dll/export name (the msvcrt stub rides it).
+static std::vector<std::uint8_t> build_minimal_pe64_named_export(const std::string& dll_name,
+                                                                 const std::string& func_name) {
     std::vector<std::uint8_t> pe(0x800, 0);
     auto put16 = [&](std::size_t off, std::uint16_t v) {
         pe[off] = static_cast<std::uint8_t>(v);
@@ -1461,12 +1464,10 @@ static std::vector<std::uint8_t> build_minimal_pe64_with_exports() {
     const auto rva_of = [](std::uint32_t raw) { return 0x1000 + (raw - 0x200); };
 
     // the name strings
-    const std::string dll_name = "MINPE.dll";
     for (std::size_t i = 0; i < dll_name.size(); ++i) {
         pe[0x2a0 + i] = static_cast<std::uint8_t>(dll_name[i]);
     }
     pe[0x2a0 + dll_name.size()] = 0;
-    const std::string func_name = "MinFunc";
     for (std::size_t i = 0; i < func_name.size(); ++i) {
         pe[0x2c0 + i] = static_cast<std::uint8_t>(func_name[i]);
     }
@@ -1493,6 +1494,10 @@ static std::vector<std::uint8_t> build_minimal_pe64_with_exports() {
     put16(0x2d0, 0);
 
     return pe;
+}
+
+static std::vector<std::uint8_t> build_minimal_pe64_with_exports() {
+    return build_minimal_pe64_named_export("MINPE.dll", "MinFunc");
 }
 
 TEST(WinApiLibloader, GetProcAddressSelfModuleByNameAndOrdinal) {
@@ -4015,4 +4020,287 @@ TEST(WinApiAdvapi32, SidAndServiceFamiliesRideVerbatimWalks) {
     ASSERT_TRUE(rcsh.has_value());
     EXPECT_EQ(*rcsh, 1u);
     EXPECT_EQ(os.handle_manager().get(*rosv), nullptr);
+}
+
+TEST(WinApiMsvcrt, CrtArgvEnvWalksRideGuestMemory) {
+    register_dlls();
+
+    // the PE-image mode: the argv/env walk rides the Qiling argv/env
+    const auto pe = build_minimal_pe64_with_exports();
+    const auto rootfs = std::filesystem::temp_directory_path() / "ql_msvcrt_rootfs";
+    std::filesystem::create_directories(rootfs / "Windows" / "registry");
+    const auto exe_path = rootfs / "minpe_test.exe";
+    {
+        std::ofstream out(exe_path, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(pe.data()), static_cast<std::streamsize>(pe.size()));
+    }
+
+    QilingOptions options;
+    options.argv = {exe_path.string(), "arg1"};
+    options.env = {{"QLVAR", "qlval"}};
+    options.rootfs = rootfs.string();
+    options.ostype = QL_OS::WINDOWS;
+    options.archtype = QL_ARCH::X8664;
+    Qiling ql(options);
+
+    // __p___argc: the count cell
+    const auto* pac = ApiRegistry::instance().find("__p___argc");
+    ASSERT_NE(pac, nullptr);
+    const auto rac = pac->handler(ql, 0, {});
+    ASSERT_TRUE(rac.has_value());
+    EXPECT_EQ(ql.mem().read_ptr(*rac, 8), 2u);
+
+    // __p___argv: the argv pointer array (no trailing null — the verbatim walk)
+    const auto* pav = ApiRegistry::instance().find("__p___argv");
+    ASSERT_NE(pav, nullptr);
+    const auto rav = pav->handler(ql, 0, {});
+    ASSERT_TRUE(rav.has_value());
+    const auto p_argv = ql.mem().read_ptr(*rav, 8);
+    const auto a0 = ql.mem().read_ptr(p_argv, 8);
+    const auto a1 = ql.mem().read_ptr(p_argv + 8, 8);
+    EXPECT_EQ(QlOsUtils::read_cstring(ql, a0), exe_path.string());
+    EXPECT_EQ(QlOsUtils::read_cstring(ql, a1), "arg1");
+
+    // __p__environ: the "K=V" entries (no trailing null — the verbatim walk)
+    const auto* pen = ApiRegistry::instance().find("__p__environ");
+    ASSERT_NE(pen, nullptr);
+    const auto ren = pen->handler(ql, 0, {});
+    ASSERT_TRUE(ren.has_value());
+    const auto pp0 = ql.mem().read_ptr(*ren, 8);
+    const auto p0 = ql.mem().read_ptr(pp0, 8);
+    EXPECT_EQ(QlOsUtils::read_cstring(ql, p0), "QLVAR=qlval");
+
+    // __p__fmode / __p__commode: the fresh heap cells
+    const auto* pfm = ApiRegistry::instance().find("__p__fmode");
+    ASSERT_NE(pfm, nullptr);
+    const auto rfm = pfm->handler(ql, 0, {});
+    ASSERT_TRUE(rfm.has_value());
+    EXPECT_NE(*rfm, 0u);
+    const auto* pcm = ApiRegistry::instance().find("__p__commode");
+    ASSERT_NE(pcm, nullptr);
+    const auto rcm = pcm->handler(ql, 0, {});
+    ASSERT_TRUE(rcm.has_value());
+    EXPECT_NE(*rcm, 0u);
+    EXPECT_NE(*rfm, *rcm);
+
+    // the __getmainargs ride: the argc u32 + the argv/env pointer cells
+    const auto* gm = ApiRegistry::instance().find("__getmainargs");
+    ASSERT_NE(gm, nullptr);
+    const auto rgm = gm->handler(ql, 0, ResolvedParams{
+        {"_Argc", kScratch}, {"_Argv", kScratch + 8}, {"_Env", kScratch + 0x10},
+        {"_DoWildCard", 0ull}, {"_StartInfo", 0ull},
+    });
+    ASSERT_TRUE(rgm.has_value());
+    EXPECT_EQ(*rgm, 0u);
+    EXPECT_EQ(ql.mem().read_ptr(kScratch, 4), 2u);
+    const auto gm_argv = ql.mem().read_ptr(kScratch + 8, 8);
+    EXPECT_EQ(QlOsUtils::read_cstring(ql, ql.mem().read_ptr(gm_argv, 8)), exe_path.string());
+    const auto gm_env = ql.mem().read_ptr(kScratch + 0x10, 8);
+    EXPECT_EQ(QlOsUtils::read_cstring(ql, ql.mem().read_ptr(gm_env, 8)), "QLVAR=qlval");
+
+    // the __wgetmainargs ride: the wide argv[1] reads as the utf-16le pairs
+    const auto* wgm = ApiRegistry::instance().find("__wgetmainargs");
+    ASSERT_NE(wgm, nullptr);
+    const auto rwgm = wgm->handler(ql, 0, ResolvedParams{
+        {"_Argc", kScratch + 0x20}, {"_Argv", kScratch + 0x28}, {"_Env", kScratch + 0x30},
+        {"_DoWildCard", 0ull}, {"_StartInfo", 0ull},
+    });
+    ASSERT_TRUE(rwgm.has_value());
+    EXPECT_EQ(*rwgm, 0u);
+    const auto w_argv = ql.mem().read_ptr(kScratch + 0x28, 8);
+    const auto w_a1 = ql.mem().read_ptr(w_argv + 8, 8);
+    const auto w_bytes = ql.mem().read(w_a1, 8);
+    EXPECT_EQ(w_bytes, (std::vector<std::uint8_t>{'a', 0, 'r', 0, 'g', 0, '1', 0}));
+
+    // the verbatim no-op walkers
+    const auto* sat = ApiRegistry::instance().find("__set_app_type");
+    ASSERT_NE(sat, nullptr);
+    const auto rsat = sat->handler(ql, 0, ResolvedParams{{"at", 0ull}});
+    ASSERT_TRUE(rsat.has_value());
+    EXPECT_EQ(*rsat, 0u);
+
+    const auto* cf = ApiRegistry::instance().find("_controlfp");
+    ASSERT_NE(cf, nullptr);
+    const auto rcf = cf->handler(ql, 0, ResolvedParams{{"new", 0ull}, {"mask", 0ull}});
+    ASSERT_TRUE(rcf.has_value());
+    EXPECT_EQ(*rcf, 0x8001fu);
+
+    const auto* lci = ApiRegistry::instance().find("__lconv_init");
+    ASSERT_NE(lci, nullptr);
+    const auto rlci = lci->handler(ql, 0, {});
+    ASSERT_TRUE(rlci.has_value());
+    EXPECT_EQ(*rlci, 0u);
+
+    const auto* cex = ApiRegistry::instance().find("_cexit");
+    ASSERT_NE(cex, nullptr);
+    const auto rcex = cex->handler(ql, 0, {});
+    ASSERT_TRUE(rcex.has_value());
+    EXPECT_EQ(*rcex, 0u);
+}
+
+TEST(WinApiMsvcrt, StringMemAndExitFamiliesRideVerbatimWalks) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    // strlen: the length (the empty string rides the verbatim 0)
+    const auto* sl = ApiRegistry::instance().find("strlen");
+    ASSERT_NE(sl, nullptr);
+    const auto rsl = sl->handler(ql, 0, ResolvedParams{{"str", std::string("hello world")}});
+    ASSERT_TRUE(rsl.has_value());
+    EXPECT_EQ(*rsl, 11u);
+    const auto rsl0 = sl->handler(ql, 0, ResolvedParams{{"str", std::string("")}});
+    ASSERT_TRUE(rsl0.has_value());
+    EXPECT_EQ(*rsl0, 0u);
+
+    // strncmp: the [:count] compare ride (0 / 1 / -1)
+    const auto* scmp = ApiRegistry::instance().find("strncmp");
+    ASSERT_NE(scmp, nullptr);
+    const auto rs0 = scmp->handler(ql, 0, ResolvedParams{
+        {"string1", std::string("hello")}, {"string2", std::string("helloX")}, {"count", 5ull}});
+    ASSERT_TRUE(rs0.has_value());
+    EXPECT_EQ(*rs0, 0u);
+    const auto rs1 = scmp->handler(ql, 0, ResolvedParams{
+        {"string1", std::string("hello")}, {"string2", std::string("hellp")}, {"count", 5ull}});
+    ASSERT_TRUE(rs1.has_value());
+    EXPECT_EQ(*rs1, static_cast<std::uint64_t>(-1));
+    const auto rs2 = scmp->handler(ql, 0, ResolvedParams{
+        {"string1", std::string("hello")}, {"string2", std::string("helln")}, {"count", 5ull}});
+    ASSERT_TRUE(rs2.has_value());
+    EXPECT_EQ(*rs2, 1u);
+
+    // __strncnt: the NUL probe (the "ab\\0cd" image with the maxsize 5 -> 2;
+    // the NUL-less string -> the maxsize)
+    ql.mem().write(kScratch, std::vector<std::uint8_t>{'a', 'b', 0, 'c', 'd'});
+    ql.mem().write(kScratch + 0x20, std::vector<std::uint8_t>{'x', 'y', 'z', 'w', 'v'});
+    const auto* snc = ApiRegistry::instance().find("__strncnt");
+    ASSERT_NE(snc, nullptr);
+    const auto rsnc = snc->handler(ql, 0, ResolvedParams{{"str", kScratch}, {"maxsize", 5ull}});
+    ASSERT_TRUE(rsnc.has_value());
+    EXPECT_EQ(*rsnc, 2u);
+    const auto rsnc2 = snc->handler(ql, 0, ResolvedParams{{"str", kScratch + 0x20}, {"maxsize", 5ull}});
+    ASSERT_TRUE(rsnc2.has_value());
+    EXPECT_EQ(*rsnc2, 5u);
+
+    // puts: the stdout write + the len+1 return
+    const auto* pu = ApiRegistry::instance().find("puts");
+    ASSERT_NE(pu, nullptr);
+    const auto rpu = pu->handler(ql, 0, ResolvedParams{{"str", std::string("via puts")}});
+    ASSERT_TRUE(rpu.has_value());
+    EXPECT_EQ(*rpu, 9u);
+
+    // the onexit family: the heap cell parks the function pointer
+    const auto* oe = ApiRegistry::instance().find("_onexit");
+    ASSERT_NE(oe, nullptr);
+    const auto roe = oe->handler(ql, 0, ResolvedParams{{"function", 0x403000ull}});
+    ASSERT_TRUE(roe.has_value());
+    EXPECT_EQ(ql.mem().read_ptr(*roe, 8), 0x403000u);
+    const auto* doe = ApiRegistry::instance().find("__dllonexit");
+    ASSERT_NE(doe, nullptr);
+    const auto rdoe = doe->handler(ql, 0, ResolvedParams{{"function", 0x404000ull}, {"pbegin", 0ull}, {"pend", 0ull}});
+    ASSERT_TRUE(rdoe.has_value());
+    EXPECT_EQ(ql.mem().read_ptr(*rdoe, 8), 0x404000u);
+    const auto rdoe0 = doe->handler(ql, 0, ResolvedParams{{"function", 0ull}, {"pbegin", 0ull}, {"pend", 0ull}});
+    ASSERT_TRUE(rdoe0.has_value());
+    EXPECT_EQ(*rdoe0, 0u);
+
+    // _ismbblead: the LOCALE_EN_US[0x1004] = utf-8 ride returns the 0
+    const auto* imb = ApiRegistry::instance().find("_ismbblead");
+    ASSERT_NE(imb, nullptr);
+    const auto rimb = imb->handler(ql, 0, ResolvedParams{{"c", 0x81ull}});
+    ASSERT_TRUE(rimb.has_value());
+    EXPECT_EQ(*rimb, 0u);
+
+    // the passthru family: the hooks return nothing (the original bodies run)
+    for (const char* name : {"atexit", "malloc", "free", "memset", "memmove", "calloc",
+                             "_malloc_base", "_realloc_base", "_free_base", "_calloc_base",
+                             "_get_initial_narrow_environment"}) {
+        const auto* api = ApiRegistry::instance().find(name);
+        ASSERT_NE(api, nullptr) << name;
+        EXPECT_FALSE(api->handler(ql, 0, {}).has_value()) << name;
+    }
+
+    // exit: the emu stop (the handler returns nothing; the status rides
+    // nowhere — the upstream emu_stop is the whole ride)
+    const auto* ex = ApiRegistry::instance().find("exit");
+    ASSERT_NE(ex, nullptr);
+    EXPECT_FALSE(ex->handler(ql, 0, ResolvedParams{{"status", 5ull}}).has_value());
+
+    // abort: the STATUS_STACK_BUFFER_OVERRUN exit code + the emu stop
+    const auto* ab = ApiRegistry::instance().find("abort");
+    ASSERT_NE(ab, nullptr);
+    EXPECT_FALSE(ab->handler(ql, 0, {}).has_value());
+    EXPECT_EQ(static_cast<std::uint32_t>(ql.os<QlOsWindows>().exit_code()), 0xC0000409u);
+
+    // _time64: the cell write + the return in a sane range
+    const auto* t64 = ApiRegistry::instance().find("_time64");
+    ASSERT_NE(t64, nullptr);
+    const auto rt64 = t64->handler(ql, 0, ResolvedParams{{"destTime", kScratch + 0x40}});
+    ASSERT_TRUE(rt64.has_value());
+    EXPECT_GT(*rt64, 1'600'000'000ull);
+    EXPECT_EQ(ql.mem().read_ptr(kScratch + 0x40, 8), *rt64);
+
+    // _wfopen_s: the fs mapper + the handle id at the pFile (the verbatim 1)
+    const auto guest_path = std::string("C:\\qltest\\wopen.bin");
+    const auto rootfs_file = std::filesystem::path(ql.rootfs()) / "qltest" / "wopen.bin";
+    std::filesystem::create_directories(rootfs_file.parent_path());
+    {
+        std::ofstream out(rootfs_file, std::ios::binary);
+        out << "wdata";
+    }
+    const auto* wfs = ApiRegistry::instance().find("_wfopen_s");
+    ASSERT_NE(wfs, nullptr);
+    const auto rwfs = wfs->handler(ql, 0, ResolvedParams{
+        {"pFile", kScratch + 0x50}, {"filename", guest_path}, {"mode", std::string("rb")},
+    });
+    ASSERT_TRUE(rwfs.has_value());
+    EXPECT_EQ(*rwfs, 1u);
+    const auto fh = ql.mem().read_ptr(kScratch + 0x50, 8);
+    EXPECT_NE(fh, 0u);
+    const auto* h = ql.os<QlOsWindows>().handle_manager().get(fh);
+    ASSERT_NE(h, nullptr);
+}
+
+TEST(WinApiMsvcrt, PAcmdlnRidesMsvcrtDllIat) {
+    register_dlls();
+
+    // the PE-image mode + the msvcrt.dll stub exporting _acmdln under the
+    // System32: the load_dll walk registers the iat, the handler resolves it
+    const auto pe = build_minimal_pe64_named_export("msvcrt.dll", "_acmdln");
+    const auto rootfs = std::filesystem::temp_directory_path() / "ql_msvcrt_iat_rootfs";
+    std::filesystem::create_directories(rootfs / "Windows" / "registry");
+    const auto exe_path = rootfs / "minpe_test.exe";
+    {
+        std::ofstream out(exe_path, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(pe.data()), static_cast<std::streamsize>(pe.size()));
+    }
+    const auto dll_path = rootfs / "Windows" / "System32" / "msvcrt.dll";
+    std::filesystem::create_directories(dll_path.parent_path());
+    {
+        std::ofstream out(dll_path, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(pe.data()), static_cast<std::streamsize>(pe.size()));
+    }
+
+    QilingOptions options;
+    options.argv = {exe_path.string()};
+    options.rootfs = rootfs.string();
+    options.ostype = QL_OS::WINDOWS;
+    options.archtype = QL_ARCH::X8664;
+    Qiling ql(options);
+
+    auto& pe_loader = static_cast<loader::QlLoaderPE&>(ql.loader());
+    const auto base = pe_loader.load_dll("msvcrt.dll");
+    ASSERT_NE(base, 0u);
+
+    // __p__acmdln: the iat walk resolves the _acmdln export address
+    const auto* acmdln = ApiRegistry::instance().find("__p__acmdln");
+    ASSERT_NE(acmdln, nullptr);
+    const auto ra = acmdln->handler(ql, 0, {});
+    ASSERT_TRUE(ra.has_value());
+    EXPECT_EQ(*ra, base + 0x1000);
+
+    // __p__wcmdln: the _wcmdln is not exported -> the verbatim KeyError ladder
+    // (the port raises the QlErrorBase)
+    const auto* wcmdln = ApiRegistry::instance().find("__p__wcmdln");
+    ASSERT_NE(wcmdln, nullptr);
+    EXPECT_THROW((void)wcmdln->handler(ql, 0, {}), QlErrorBase);
 }

@@ -32,6 +32,7 @@
 #include "qiling/os/windows/dlls/kernel32/consoleapi23.cpp"
 #include "qiling/os/windows/dlls/ntdll.cpp"
 #include "qiling/os/windows/dlls/advapi32.cpp"
+#include "qiling/os/windows/dlls/msvcrt.cpp"
 
 namespace qiling {
 namespace os {
@@ -65,6 +66,7 @@ void register_dlls() {
     win::register_psapi_family();
     win::register_ntdll_family();
     win::register_advapi32_family();
+    win::register_msvcrt_family();
 }
 
 // the static-init registration (the python module-import side effect)
