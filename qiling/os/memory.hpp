@@ -165,6 +165,9 @@ public:
 
     std::uint64_t pagesize() const noexcept { return pagesize_; }
 
+    // memory.py max_mem_addr — the arch-bounded upper address
+    std::uint64_t max_mem_addr() const noexcept { return max_mem_addr_; }
+
 private:
     // consolidated adjacent mapped regions (memory.py __mapped_regions)
     std::vector<std::pair<std::uint64_t, std::uint64_t>> mapped_regions() const;

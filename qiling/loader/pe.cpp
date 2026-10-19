@@ -18,25 +18,29 @@ namespace loader {
 QlLoaderPE::QlLoaderPE(Qiling* ql, bool libcache) : QlLoader(ql), libcache_(libcache) {}
 
 std::uint64_t QlLoaderPE::load_image(const std::string& host_path, const std::string& label,
-                                     bool set_entry_point) {
-    // LIEF 0.17 is exception-free: a failed parse surfaces as nullptr (the
-    // robustness tenet: malformed binaries raise QlError*, never a host crash)
+                                     bool set_entry_point, std::optional<std::uint64_t> base_override) {
     auto parsed = LIEF::PE::Parser::parse(host_path);
     if (parsed == nullptr) {
         throw QlErrorBase("failed to parse PE: " + host_path);
     }
+    return load_parsed(std::move(parsed), host_path, label, set_entry_point, base_override);
+}
 
+std::uint64_t QlLoaderPE::load_parsed(std::unique_ptr<LIEF::PE::Binary> parsed, const std::string& host_path,
+                                      const std::string& label, bool set_entry_point,
+                                      std::optional<std::uint64_t> base_override) {
+    // (the parse rides the caller: the dll path pre-applies the base
+    // relocations to the parsed object before this walk)
     auto& mem = ql_->mem();
-    const bool is64 = parsed->type() == LIEF::PE::PE_TYPE::PE32_PLUS;
-
     const std::uint64_t image_base = parsed->imagebase();
     const std::uint64_t size_of_image = parsed->virtual_size();
     const std::uint64_t entry_rva = parsed->entrypoint() - image_base;
 
-    // loader/pe.py load: if the default base is taken, fall back to the
-    // profile image_address
-    std::uint64_t base = image_base;
-    if (!mem.is_available(base, mem.align_up(size_of_image))) {
+    // loader/pe.py load: if the default base address is taken, use the one
+    // specified in profile — the dll callers pass the verbatim policy base
+    // through base_override (the load_dll ImageBase/find_free_space walk)
+    std::uint64_t base = base_override.value_or(image_base);
+    if (!base_override.has_value() && !mem.is_available(base, mem.align_up(size_of_image))) {
         base = image_address_;
     }
 
@@ -90,6 +94,18 @@ std::uint64_t QlLoaderPE::load_image(const std::string& host_path, const std::st
 
         for (const LIEF::PE::ExportEntry& entry : export_->entries()) {
             const std::uint64_t ea = base + entry.address();
+
+            if (entry.is_forwarded()) {
+                std::string target_dll = entry.forward_information().library;
+                for (auto& c : target_dll) {
+                    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                }
+                if (!target_dll.empty() && target_dll.find(".dll") == std::string::npos) {
+                    target_dll += ".dll";
+                }
+                forwarded_exports_.push_back(ForwardedExport{dll_name, entry.name(), entry.ordinal(),
+                                                             target_dll, entry.forward_information().function});
+            }
 
             ExportSymbol symbol;
             symbol.address = ea;
@@ -238,19 +254,116 @@ std::uint64_t QlLoaderPE::load_dll(const std::string& name) {
         dll_path_host = *folded;
     }
 
-    // loader/pe.py: self.dll_size += dll_len (the GetSystemInfo rider; the
-    // port tracks the mapped length through the load_image's parse)
+    // loader/pe.py load_dll: the verbatim dll base policy — the ImageBase
+    // (or the dll_last_address cursor when zero), the max_mem_addr gate, the
+    // find_free_space fallback and the base-relocation application (the
+    // DIR64/HIGHLOW walk; the pefile relocate_image analogue)
+    std::uint64_t base = 0;
+    bool relocate = false;
     {
         auto parsed = LIEF::PE::Parser::parse(dll_path_host);
-        if (parsed != nullptr) {
-            dll_size_ += parsed->virtual_size();
+        if (parsed == nullptr) {
+            throw QlErrorBase("failed to parse PE: " + dll_path_host);
+        }
+        dll_size_ += parsed->virtual_size();
+
+        auto& mem = ql_->mem();
+        const auto dll_len = mem.align_up(parsed->virtual_size());
+        std::uint64_t image_base = parsed->imagebase() != 0 ? parsed->imagebase() : dll_last_address_;
+
+        if (image_base + dll_len > mem.max_mem_addr()) {
+            image_base = dll_last_address_;
+            relocate = true;
+        }
+        if (!mem.is_available(image_base, dll_len)) {
+            image_base = mem.find_free_space(dll_len, image_base, {}, 0x10000ull);
+            relocate = true;
+        }
+
+        // the relocation walk rides AFTER the map (the guest-memory patching)
+        const auto relocations = parsed->relocations();
+        const auto original_image_base = parsed->imagebase();
+        relocate = relocate && !relocations.empty();
+
+        const std::uint64_t mapped_base = load_parsed(std::move(parsed), dll_path_host, dll_name, false, image_base);
+
+        if (relocate) {
+            const auto delta = static_cast<std::int64_t>(mapped_base) - static_cast<std::int64_t>(original_image_base);
+            using RelEntry = LIEF::PE::RelocationEntry;
+            for (const auto& block : relocations) {
+                const auto block_va = block.virtual_address();
+                for (const auto& entry : block.entries()) {
+                    if (entry.type() == RelEntry::BASE_TYPES::DIR64) {
+                        const auto addr = mapped_base + block_va + entry.position();
+                        mem.write_ptr(addr, mem.read_ptr(addr, 8) + static_cast<std::uint64_t>(delta), 8);
+                    } else if (entry.type() == RelEntry::BASE_TYPES::HIGHLOW) {
+                        const auto addr = mapped_base + block_va + entry.position();
+                        mem.write_ptr(addr, mem.read_ptr(addr, 4) + static_cast<std::uint64_t>(delta), 4);
+                    }
+                }
+            }
         }
     }
 
-    const auto base = load_image(dll_path_host, dll_name, false);
-    (void)base;
+    // loader/pe.py load_dll tail: resolve_forwarded_exports() rides after the
+    // export walk (the targets loaded earlier in the sys_dlls order resolve;
+    // the rest stays deferred until their dll lands)
+    resolve_forwarded_exports();
 
     return get_image_by_name(dll_name, true) ? get_image_by_name(dll_name, true)->base : 0;
+}
+
+// loader/pe.py resolve_forwarded_exports: re-point the forwarded exports at
+// the target dll's real export address (the upstream verbatim walk: the
+// ordinal-only forwarders skip, the missing target tables skip, the failed
+// symbol lookups warn and drop)
+void QlLoaderPE::resolve_forwarded_exports() {
+    while (!forwarded_exports_.empty()) {
+        const auto forwarded_export = forwarded_exports_.back();
+        forwarded_exports_.pop_back();
+
+        if (forwarded_export.source_symbol.empty()) {
+            // Some DLLs (shlwapi.dll) have a bunch of forwarded exports with
+            // ordinals but no symbols. These are really annoying to deal
+            // with, but they are used extremely rarely, so we will ignore
+            // them. (verbatim comment)
+            continue;
+        }
+
+        const auto target_it = import_address_table_.find(forwarded_export.target_dll);
+        if (target_it == import_address_table_.end()) {
+            // If IAT was not found, it is probably a virtual library. (verbatim)
+            continue;
+        }
+
+        // If we have an existing entry in the process IAT for the code this
+        // entry forwards to, then we will point the symbol there rather than
+        // the symbol string in the exporter's data section. (verbatim)
+        const std::uint64_t forward_ea = target_it->second.lookup(forwarded_export.target_symbol);
+        if (forward_ea == 0) {
+            ql_->log().debug("Forwarding symbol " + forwarded_export.source_dll + "." +
+                             forwarded_export.source_symbol + " to " + forwarded_export.target_dll + "." +
+                             forwarded_export.target_symbol + ": Failed to resolve address");
+            continue;
+        }
+
+        auto& source_iat = import_address_table_[forwarded_export.source_dll];
+        source_iat.by_name[forwarded_export.source_symbol] = forward_ea;
+        source_iat.by_ordinal[forwarded_export.source_ordinal] = forward_ea;
+
+        // Register the new address as having the source symbol/ordinal. This
+        // way, hooks on forward source symbols will function correctly. (verbatim)
+        ImportSymbol isym;
+        isym.address = forward_ea;
+        isym.dll = forwarded_export.source_dll;
+        isym.name = forwarded_export.source_symbol;
+        isym.ordinal = forwarded_export.source_ordinal;
+        import_symbols_[forward_ea] = std::move(isym);
+
+        ql_->log().debug("Forwarding symbol " + forwarded_export.source_dll + "." +
+                         forwarded_export.source_symbol + " to " + forwarded_export.target_dll + "." +
+                         forwarded_export.target_symbol + ": Resolved symbol");
+    }
 }
 
 // loader/pe.py init_imports: the main-image import walk — the upstream

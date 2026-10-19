@@ -16,6 +16,7 @@
 #ifndef QILING_LOADER_PE_HPP
 #define QILING_LOADER_PE_HPP
 
+#include <memory>
 #include <map>
 #include <string>
 #include <vector>
@@ -34,6 +35,15 @@ struct ImportSymbol {
     std::string dll;      // canonicalized (casefolded) dll basename
     std::string name;     // the symbol name (empty for ordinal imports)
     std::uint64_t ordinal = 0;
+};
+
+// loader/pe.py ForwardedExport — the deferred forwarder resolution record
+struct ForwardedExport {
+    std::string source_dll;
+    std::string source_symbol;
+    std::uint64_t source_ordinal = 0;
+    std::string target_dll;
+    std::string target_symbol;
 };
 
 // one main-image export (loader/pe.py init_exports: the export_symbols walk)
@@ -133,6 +143,11 @@ public:
     // redirect ladder + the load_dll rides + the IAT slot writes)
     void init_imports();
 
+    // loader/pe.py resolve_forwarded_exports — re-points the forwarded
+    // exports' IAT cells and the dispatch keys at the target dll's real
+    // export address (the KERNELBASE-style forwarder chains)
+    void resolve_forwarded_exports();
+
     // loader/pe.py init_function_tables / lookup_function_entry — the
     // x64/.pdata RUNTIME_FUNCTION walk (the upstream parses the pefile
     // DIRECTORY_ENTRY_EXCEPTION objects; the port reads the mapped .pdata
@@ -175,7 +190,14 @@ public:
 private:
     // loads one PE image (the main executable or a dll) and returns its base
     std::uint64_t load_image(const std::string& host_path, const std::string& label,
-                             bool set_entry_point = true);
+                             bool set_entry_point = true,
+                             std::optional<std::uint64_t> base_override = {});
+
+    // the post-parse load walk (the dll path pre-applies the base
+    // relocations to the parsed object and passes the policy base through)
+    std::uint64_t load_parsed(std::unique_ptr<LIEF::PE::Binary> parsed, const std::string& host_path,
+                              const std::string& label, bool set_entry_point,
+                              std::optional<std::uint64_t> base_override = {});
 
     // loader/pe.py __get_path_elements: the dll basename (the .dll append +
     // the casefold) and the host path (the winsys default when nameless)
@@ -208,6 +230,7 @@ private:
     std::map<std::uint64_t, ExportSymbol> export_symbols_;
     std::map<std::string, ImportTable> import_address_table_;
     std::vector<std::uint8_t> cmdline_;
+    std::vector<ForwardedExport> forwarded_exports_;
 
     // the ntoskrnl-family rider addresses (the init_* walks seed them)
     std::uint64_t kuser_shared_data_address_ = 0;

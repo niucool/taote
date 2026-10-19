@@ -220,8 +220,10 @@ void QlOsWindows::hook_winapi(std::uint64_t address, std::uint32_t size) {
     // dispatch)
     const auto* imported = static_cast<const loader::QlLoaderPE&>(ql_->loader()).import_symbols_at(address);
     if (imported == nullptr) {
+        fprintf(stderr, "[probe] miss pc=%llx\n", (unsigned long long)address);
         return;
     }
+    fprintf(stderr, "[probe] hit %s\n", imported->name.c_str());
 
     const auto* api = ApiRegistry::instance().find(imported->name);
     if (api == nullptr) {

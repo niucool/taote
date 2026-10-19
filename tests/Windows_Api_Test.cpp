@@ -1579,10 +1579,11 @@ TEST(WinApiLibloader, GetModuleHandleBasenameAndNull) {
     options.archtype = QL_ARCH::X8664;
     Qiling ql(options);
 
-    // the null module name: the pe_image_address
+    // the null module name (the resolved form: the raw int 0 — the zero
+    // guard keeps the NULL un-decoded): the pe_image_address branch
     const auto* gh = ApiRegistry::instance().find("GetModuleHandleA");
     ASSERT_NE(gh, nullptr);
-    const auto r0 = gh->handler(ql, 0, ResolvedParams{{"lpModuleName", std::string("")}});
+    const auto r0 = gh->handler(ql, 0, ResolvedParams{{"lpModuleName", 0ull}});
     ASSERT_TRUE(r0.has_value());
     EXPECT_EQ(*r0, 0x140000000u);
 
@@ -5089,4 +5090,46 @@ TEST(WinApiE2E, RealPeHelloX86RunsThroughTheX86IatPath) {
     std::ifstream in(guest_file, std::ios::binary);
     std::string got((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     EXPECT_EQ(got, "hello from qiling\r\n");
+}
+
+TEST(WinApiE2E, CrtLinkedBinaryRidesStartupAndFprintf) {
+    register_dlls();
+
+    const auto rootfs = win_ensure_rootfs();
+    std::filesystem::create_directories(rootfs / "Windows" / "System32");
+    // the real kernel32 + its forwarder targets (the CRT startup calls the
+    // forwarded exports — the resolve_forwarded_exports walk re-points them
+    // at the loaded KERNELBASE/ntdll export addresses)
+    for (const char* dll : {"kernel32.dll", "kernelbase.dll", "ntdll.dll"}) {
+        std::filesystem::copy_file(std::filesystem::path("C:/Windows/System32/") / dll,
+                                   rootfs / "Windows" / "System32" / dll,
+                                   std::filesystem::copy_options::overwrite_existing);
+    }
+    std::filesystem::create_directories(rootfs / "Windows" / "registry");
+    std::filesystem::create_directories(rootfs / "qltest");
+
+    // the emulated binary lives inside the rootfs (the upstream test shape:
+    // the CRT startup's GetModuleFileNameW maps the exe through the rootfs)
+    const auto exe_src = std::filesystem::absolute(std::filesystem::path(__FILE__)).parent_path() /
+                         "data" / "hello_crt.exe";
+    ASSERT_TRUE(std::filesystem::exists(exe_src)) << exe_src.string();
+    const auto exe_in_rootfs = rootfs / "Windows" / "hello_crt.exe";
+    std::filesystem::copy_file(exe_src, exe_in_rootfs, std::filesystem::copy_options::overwrite_existing);
+
+    QilingOptions options;
+    options.rootfs = rootfs.string();
+    options.ostype = QL_OS::WINDOWS;
+    options.archtype = QL_ARCH::X8664;
+    options.argv = {exe_in_rootfs.string(), "from-emulator"};
+    Qiling ql(std::move(options));
+
+    ql.run();
+
+    // the static CRT's fprintf lands through the port's CreateFileW/WriteFile
+    // handlers at the guest path; the exit rides the CRT's ExitProcess
+    const auto guest_file = rootfs / "qltest" / "crt.txt";
+    ASSERT_TRUE(std::filesystem::exists(guest_file));
+    std::ifstream in(guest_file, std::ios::binary);
+    std::string got((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    EXPECT_EQ(got, "crt ok argc=2 arg1=from-emulator\r\n");
 }

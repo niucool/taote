@@ -31,13 +31,21 @@ loader::QlLoaderPE& pe_loader(Qiling& ql) {
 
 // the shared _GetModuleHandle body (the utils.has_lib_ext walk)
 std::optional<std::uint64_t> get_module_handle_body(Qiling& ql, const ResolvedParams& params) {
-    const auto lp_module_name = api_get_string(ql, get_param(params, "lpModuleName"));
+    // the upstream's `if lpModuleName == 0` walk: the NULL module name
+    // arrives as the raw int (the zero guard in resolve_fcall_params); the
+    // string-typed entries carry the decoded name — the cstring read at 0
+    // would fault
+    const auto& lp_param = get_param(params, "lpModuleName");
+    bool null_name = false;
+    if (const auto* v = std::get_if<std::uint64_t>(&lp_param.second)) {
+        null_name = (*v == 0);
+    }
 
     std::uint64_t ret = 0;
-    if (lp_module_name.empty()) {
+    if (null_name) {
         ret = pe_loader(ql).pe_image_address();
     } else {
-        std::string module = lp_module_name;
+        std::string module = api_get_string(ql, lp_param);
         // utils.py has_lib_ext: the dll/exe/sys/drv suffix check
         const auto dot = module.rfind('.');
         const std::string ext = dot == std::string::npos ? std::string() : module.substr(dot + 1);
@@ -54,7 +62,7 @@ std::optional<std::uint64_t> get_module_handle_body(Qiling& ql, const ResolvedPa
         if (image != nullptr) {
             ret = image->base;
         } else {
-            // f'Library "{lpModuleName}" not imported' (the debug log)
+            // f'Library "{module}" not imported' (the debug log)
             ret = 0;
         }
     }
