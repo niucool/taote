@@ -13,12 +13,18 @@ Clipboard::Clipboard(QlOsWindows* os) : os_(os) {
 }
 
 bool Clipboard::open(std::uint32_t h_wnd) {
-    // clipboard.py open: lock to the window if not already locked elsewhere
+    // clipboard.py open: lock to the window if not already locked elsewhere;
+    // the 0 handle rides the current thread id (the clipboard.py
+    // `hWndNewOwner or self.os.thread_manager.cur_thread.id` walk)
     if (locked_by_ != NOT_LOCKED && locked_by_ != static_cast<std::int32_t>(h_wnd)) {
         return false;
     }
 
-    locked_by_ = static_cast<std::int32_t>(h_wnd);
+    if (h_wnd == 0 && os_ != nullptr) {
+        locked_by_ = static_cast<std::int32_t>(os_->thread_manager().cur_thread()->get_id());
+    } else {
+        locked_by_ = static_cast<std::int32_t>(h_wnd);
+    }
     return true;
 }
 
