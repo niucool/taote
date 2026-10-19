@@ -14,6 +14,7 @@
 #include "qiling/os/windows/windows.hpp"
 #include "qiling/os/windows/thread.hpp"
 #include "qiling/os/windows/structs.hpp"
+#include "Pe_Stub.hpp"
 #include "qiling/os/windows/const.hpp"
 #include "qiling/loader/pe.hpp"
 
@@ -4974,6 +4975,70 @@ TEST(WinApiLoader, TebRidesGsSegmentBaseWithProfileStackCells) {
 
     // the gs_base register points at the TEB region
     EXPECT_EQ(ql.arch().regs().read("gsbase"), teb_addr);
+}
+
+// the stub-dll round-trip: a synthesized minimal PE dll loads through the
+// real load_dll path, its exports key the import_symbols_ dispatch map, and
+// a blob calling the export address rides the ApiRegistry handler (the
+// GetACP pass returns the handler's value into the blob's store cell, then
+// ExitProcess stops the emu)
+TEST(WinApiLoader, StubDllRoundTripsThroughExportResolutionAndDispatch) {
+    register_dlls();
+
+    const auto rootfs = win_ensure_rootfs();
+    const auto stub_path = qiling::testing::write_stub_dll(rootfs, "kernel32.dll", {"GetACP", "ExitProcess"});
+    ASSERT_TRUE(std::filesystem::exists(stub_path));
+
+    // the blob:
+    //   0x00: movabs rax, <getacp ea>   (patched after load_dll)
+    //   0x0a: call rax
+    //   0x0c: mov [0x140001000], rax    (the moffs store)
+    //   0x16: movabs rax, <exit ea>     (patched after load_dll)
+    //   0x1e: xor ecx, ecx
+    //   0x20: call rax                  -> ExitProcess(0) stops the emu
+    const auto kStore = 0x140001000ull;
+    const auto blob = std::vector<std::uint8_t>{
+        0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0,
+        0xFF, 0xD0,
+        0x48, 0xA3, 0x00, 0x10, 0x00, 0x40, 0x01, 0x00, 0x00, 0x00,
+        0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0,
+        0x31, 0xC9,
+        0xFF, 0xD0,
+    };
+
+    QilingOptions options;
+    options.code = blob;
+    options.rootfs = rootfs.string();
+    options.ostype = QL_OS::WINDOWS;
+    options.archtype = QL_ARCH::X8664;
+    Qiling ql(std::move(options));
+
+    // the stub loads through the real load_dll path (the LIEF parse -> the
+    // section map -> the export walk -> the dispatch-map keying)
+    auto& loader = static_cast<qiling::loader::QlLoaderPE&>(ql.loader());
+    const auto base = loader.load_dll("kernel32.dll");
+    ASSERT_NE(base, 0ull);
+
+    // the export cells resolve to the mapped stub addresses
+    std::uint64_t getacp_ea = 0, exit_ea = 0;
+    for (const auto& [ea, sym] : loader.import_symbols()) {
+        if (sym.name == "GetACP") {
+            getacp_ea = ea;
+        } else if (sym.name == "ExitProcess") {
+            exit_ea = ea;
+        }
+    }
+    ASSERT_NE(getacp_ea, 0ull);
+    ASSERT_NE(exit_ea, 0ull);
+
+    // patch the two movabs immediates in the mapped code
+    ql.mem().write_ptr(0x140000000ull + 2, static_cast<std::int64_t>(getacp_ea), 8);
+    ql.mem().write_ptr(0x140000000ull + 0x18, static_cast<std::int64_t>(exit_ea), 8);
+
+    ql.run();
+
+    // the dispatch rode the ApiRegistry GetACP handler (OEM_US = 437)
+    EXPECT_EQ(ql.mem().read_ptr(kStore, 8), 437u);  // OEM_US
 }
 
 TEST(WinApiLoader, PebAndLdrCellsRideTheImageAndTheListHeads) {
