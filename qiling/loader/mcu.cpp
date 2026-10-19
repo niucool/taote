@@ -153,11 +153,20 @@ void QlLoaderMCU::load_env() {
             } else if (type == "mmio" && parts.size() >= 3) {
                 ql_->hw()->setup_mmio(number(parts[1]), number(parts[2]), name);
             } else if (type == "core" && parts.size() >= 3) {
+                // the trailing "key=value" parts ride the kwargs map (the
+                // upstream's env kwargs dicts)
+                QlHwManager::PeripheralKwargs kwargs;
+                for (std::size_t i = 3; i < parts.size(); ++i) {
+                    const auto eq = parts[i].find('=');
+                    if (eq != std::string::npos) {
+                        kwargs[parts[i].substr(0, eq)] = number(parts[i].substr(eq + 1));
+                    }
+                }
                 auto lower = name;
                 std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) {
                     return static_cast<char>(std::tolower(c));
                 });
-                ql_->hw()->create(lower, parts[1], number(parts[2]));
+                ql_->hw()->create(lower, parts[1], number(parts[2]), kwargs);
             } else if (type == "peripheral") {
                 // the peripheral items ride the explicit create calls (the
                 // upstream load_all path — the test harness creates them)

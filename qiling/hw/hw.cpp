@@ -3,6 +3,7 @@
 #include "qiling/hw/cm_scb.hpp"
 #include "qiling/hw/cm_systick.hpp"
 #include "qiling/hw/stm32f1xx_gpio.hpp"
+#include "qiling/hw/stm32f4xx_usart.hpp"
 
 #include <algorithm>
 #include <map>
@@ -28,6 +29,14 @@ QlHwManager::QlHwManager(Qiling& ql) : ql_(&ql) {
     });
     register_struct("STM32F1xxAfio", [](Qiling& q, const std::string& label, const PeripheralKwargs&) {
         return std::make_unique<STM32F1xxAfio>(q, label);
+    });
+    register_struct("STM32F1xxUsart", [](Qiling& q, const std::string& label, const PeripheralKwargs& kwargs) {
+        std::int64_t intn = -1;
+        const auto it = kwargs.find("intn");
+        if (it != kwargs.end()) {
+            intn = static_cast<std::int64_t>(it->second);
+        }
+        return std::make_unique<STM32F1xxUsart>(q, label, intn);
     });
 }
 

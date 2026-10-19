@@ -1144,6 +1144,23 @@ first 4KB map missed the GPIOA at 0x40010800 — the write-unmapped caught it);
 the BSRR/ODR bit walks only drive the pins from the BSRR and the ODR — the
 BRR write is the verbatim no-op.
 
+### Phase 13.5 — the board-profile slice 2: the Usart family (the QlConnectivityPeripheral + the STM32F4xxUsart/F1xx + the const tables)
+
+| piece | upstream | state | notes |
+|---|---|---|---|
+| PeripheralTube | `hw/connectivity.py` | ✅ | the byte queue (the readable/read/write/put/get walks), the save drain-then-refill + the restore verbatim |
+| QlConnectivityPeripheral | `hw/connectivity.py` | ✅ | the itube/otube pair, the send/recv/send_to_user/recv_from_user, the connect/device_list; the snapshot rides the prefixed tube counts + the instance bytes (the port-side encoding of the upstream tuple); the port's recv_from_user guards the empty tube (the upstream's queue.get would block — the deviation documented) |
+| STM32F4xxUsart | `hw/char/stm32f4xx_usart.py` | ✅ | the 28-byte image (SR/DR/BRR/CR1/CR2/CR3/GTPR), the SR seed TXE\|TC, the DR read clears the RXNE + rides the input tube + re-runs the transfer, the SR write keeps the CTS/LBD/TC/RXNE/TXE sticky bits, the DR write sends to the output tube, the transfer walk, the check_interrupt (the CR1/SR pairs pend the nvic), the step ride |
+| STM32F1xxUsart | `hw/char/stm32f1xx_usart.py` | ✅ | the verbatim pass-through (the same register surface) |
+| the const tables | `hw/const/stm32f4xx_usart.py` | ✅ | the USART_SR/DR/BRR/CR1/CR2/CR3/GTPR bit tables verbatim |
+| the loader env kwargs | (the port-side) | ✅ | the core records carry the trailing `key=value` parts riding the kwargs map (the upstream's env kwargs dicts) |
+| the fixture | `tests/Hw_Test.cpp` | ✅ | the CORTEX_M env walk creating the usart2 (the intn=38 kwarg) — the DR write lands the 'A' in the output tube, the injected input rides the RXNE via the transfer, the RXNEIE+RXNE pair pends the nvic through the check_interrupt (the ISER enable precedes — the set_pending only queues the enabled IRQs), the DR read drains and clears |
+
+Findings: the usart2 sits at 0x40004400 (the board table) — the earlier blob
+store targeting 0x40004C04 was the hand-arithmetic error (the DR = the base +
+4); the nvic's set_pending only queues the enabled interrupts (the ISER bit
+must ride the enable walk first — the firmware's NVIC_EnableIRQ shape).
+
 ### Phase 12 sub-slice 3 — socketpair + the send/recv family
 
 | piece | upstream | state | notes |

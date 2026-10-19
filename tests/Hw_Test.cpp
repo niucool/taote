@@ -16,6 +16,7 @@
 #include "qiling/hw/cm_systick.hpp"
 #include "qiling/hw/cm_scb.hpp"
 #include "qiling/hw/stm32f1xx_gpio.hpp"
+#include "qiling/hw/stm32f4xx_usart.hpp"
 #include "qiling/exception.hpp"
 
 using namespace qiling;
@@ -409,4 +410,64 @@ TEST(HwManager, Stm32f1xxGpioBsrrOdrWalkRidesPinHooks) {
     EXPECT_EQ(gpio->pin(0), 0u);
     EXPECT_EQ(gpio->pin(1), 0u);
     EXPECT_EQ(reset1, 1);
+}
+
+// The Usart family: the usart rides the CORTEX_M env walk (the usart2 core
+// item with the intn kwarg); the DR writes land in the output tube, the
+// host-injected input rides the RXNE walk, and the RXNEIE/SR-RXNE pair pends
+// the nvic through the check_interrupt walk.
+TEST(HwManager, Stm32f1xxUsartTubesRideDrAndInterruptCheck) {
+    const auto hex_path = write_ihex_fixture();
+
+    QilingOptions options;
+    options.argv = {hex_path};
+    options.rootfs = ensure_hw_rootfs().string();
+    options.ostype = QL_OS::MCU;
+    options.archtype = QL_ARCH::CORTEX_M;
+    options.env = {
+        {"FLASH", "memory;0x0;0x2000"},
+        {"SRAM", "memory;0x20000000;0x1000"},
+        {"PPB", "mmio;0xE000E000;0x1000"},
+        {"SYSTICK", "core;cm3_systick;0xE000E010"},
+        {"NVIC", "core;cm_nvic;0xE000E100"},
+        {"SCB", "core;cm4_scb;0xE000ED00"},
+        {"USART2", "core;STM32F1xxUsart;0x40004400;intn=38"},
+        {"PERIP", "mmio;0x40000000;0x100000"},
+    };
+    Qiling ql(options);
+
+    auto* usart2 = ql.hw()->peripheral("usart2");
+    ASSERT_NE(usart2, nullptr);
+    auto* usart = static_cast<qiling::hw::STM32F4xxUsart*>(usart2);
+
+    // the DR write lands in the output tube
+    usart->write_body(usart->kDrOffset, 4, 0x41);
+    const auto out = usart->recv(4);
+    ASSERT_EQ(out.size(), 1u);
+    EXPECT_EQ(out[0], 0x41);
+
+    // the host injects the input: the transfer walk raises the RXNE
+    usart->send({0x62});
+    usart->step();
+    EXPECT_NE(usart->raw_read(usart->kSrOffset, 4) & qiling::hw::usart::sr::RXNE, 0u);
+
+    auto* nvic = ql.hw()->peripheral("nvic");
+    ASSERT_NE(nvic, nullptr);
+    auto& nvic_ref = *static_cast<qiling::hw::CortexMNvic*>(nvic);
+
+    // the CR1 RXNEIE + the SR RXNE: the check_interrupt pends the nvic (the
+    // intn 38 = the USART2 IRQ on the stm32f103); the firmware enables the
+    // IRQ through the ISER first (the nvic's set_pending only queues the
+    // enabled interrupts)
+    nvic_ref.enable(38);
+    usart->write_body(usart->kCr1Offset, 4, qiling::hw::usart::cr1::RXNEIE);
+    const auto before = nvic_ref.pending_interrupts().size();
+    usart->check_interrupt();
+    ASSERT_EQ(nvic_ref.pending_interrupts().size(), before + 1);
+    EXPECT_EQ(nvic_ref.pending_interrupts().back(), 38);
+
+    // the DR read drains the input tube and clears the RXNE
+    const auto byte = usart->read(usart->kDrOffset, 4);
+    EXPECT_EQ(byte, 0x62);
+    EXPECT_EQ(usart->raw_read(usart->kSrOffset, 4) & qiling::hw::usart::sr::RXNE, 0u);
 }
