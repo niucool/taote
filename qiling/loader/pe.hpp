@@ -87,6 +87,12 @@ public:
     // loader/pe.py: the dll load base (the dll_address profile value)
     std::uint64_t dll_address() const noexcept { return dll_address_; }
 
+    // loader/pe.py PEB.BeingDebugged (the debugapi rider): the PEB itself
+    // lands with the full TEB/PEB/LDR stack; the flag rides a placeholder
+    // default of 0 (the not-being-debugged state) until that slice wires
+    // the real PEB byte
+    std::uint8_t peb_being_debugged() const noexcept { return peb_being_debugged_; }
+
     // loader/pe.py init_exports: the main-image exports keyed by the ea
     const std::map<std::uint64_t, ExportSymbol>& export_symbols() const noexcept { return export_symbols_; }
 
@@ -120,6 +126,7 @@ private:
     std::uint64_t dll_address_ = 0;
     std::uint64_t dll_size_ = 0;
     std::uint64_t dll_last_address_ = 0;
+    std::uint8_t peb_being_debugged_ = 0;
     std::uint64_t pe_image_address_ = 0;
     std::map<std::uint64_t, ImportSymbol> import_symbols_;
     std::map<std::uint64_t, ExportSymbol> export_symbols_;

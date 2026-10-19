@@ -2509,3 +2509,54 @@ TEST(WinApiWow64, IsWow64ProcessRaisesNotImplementedOnX64) {
     }
     EXPECT_TRUE(threw);
 }
+
+TEST(WinApiDebugapi, DebuggerReadsAndOutputDebugLog) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    // the PEB.BeingDebugged placeholder: the 0 (the not-being-debugged state
+    // until the TEB/PEB/LDR stack wires the real PEB byte)
+    const auto* idp = ApiRegistry::instance().find("IsDebuggerPresent");
+    ASSERT_NE(idp, nullptr);
+    const auto r = idp->handler(ql, 0, {});
+    ASSERT_TRUE(r.has_value());
+    EXPECT_EQ(*r, 0u);
+
+    // the remote sibling writes the pack8 of the same result + the 1
+    const auto* crdp = ApiRegistry::instance().find("CheckRemoteDebuggerPresent");
+    ASSERT_NE(crdp, nullptr);
+    const auto rr = crdp->handler(ql, 0, ResolvedParams{{"hProcess", 0x10ull}, {"pbDebuggerPresent", kCells}});
+    ASSERT_TRUE(rr.has_value());
+    EXPECT_EQ(*rr, 1u);
+    EXPECT_EQ(ql.mem().read_ptr(kCells, 8), 0u);
+
+    // the OutputDebugString pair rides the log-info pass + the 0
+    const auto* odw = ApiRegistry::instance().find("OutputDebugStringW");
+    ASSERT_NE(odw, nullptr);
+    const auto rw = odw->handler(ql, 0, ResolvedParams{{"lpOutputString", std::string("hello wide")}});
+    ASSERT_TRUE(rw.has_value());
+    EXPECT_EQ(*rw, 0u);
+
+    const auto* oda = ApiRegistry::instance().find("OutputDebugStringA");
+    ASSERT_NE(oda, nullptr);
+    const auto ra = oda->handler(ql, 0, ResolvedParams{{"lpOutputString", std::string("hello narrow")}});
+    ASSERT_TRUE(ra.has_value());
+    EXPECT_EQ(*ra, 0u);
+}
+
+TEST(WinApiIoapiset, DeviceIoControlRidesVerbatimOne) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    // the TODO verbatim body: the 1, no buffers touched
+    const auto* dio = ApiRegistry::instance().find("DeviceIoControl");
+    ASSERT_NE(dio, nullptr);
+    const auto r = dio->handler(ql, 0, ResolvedParams{
+        {"hDevice", 0x10ull}, {"dwIoControlCode", 0x2D1400ull},
+        {"lpInBuffer", 0ull}, {"nInBufferSize", 0ull},
+        {"lpOutBuffer", kCells}, {"nOutBufferSize", 0x100ull},
+        {"lpBytesReturned", kCells + 0x100}, {"lpOverlapped", 0ull},
+    });
+    ASSERT_TRUE(r.has_value());
+    EXPECT_EQ(*r, 1u);
+}
