@@ -195,6 +195,55 @@ void register_shell32_family() {
 
         return 1;
     };
+
+    // HINSTANCE ShellExecuteA(HWND hwnd, LPCSTR lpOperation, LPCSTR lpFile,
+    //     LPCSTR lpParameters, LPCSTR lpDirectory, INT nShowCmd); — the ANSI
+    // twin (the shell surface rides the handle-manager stub)
+    WinsdkApi("ShellExecuteA", WinCc::Stdcall, {
+        {"hwnd", HWND_},
+        {"lpOperation", LPCSTR_},
+        {"lpFile", LPCSTR_},
+        {"lpParameters", LPCSTR_},
+        {"lpDirectory", LPCSTR_},
+        {"nShowCmd", INT_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        shell_execute_body(ql, params, false);
+        return 33;  // SE_ERR_NOASSOC rides >32 (the success shape)
+    };
+
+    // HRESULT SHGetFolderPathA(HWND hwnd, int csidl, HANDLE hToken, DWORD
+    //                          dwFlags, LPSTR pszPath); — the folder text
+    // rides the profile identities (the CSIDL_WINDOWS shape)
+    WinsdkApi("SHGetFolderPathA", WinCc::Stdcall, {
+        {"hwnd", HWND_},
+        {"csidl", INT_},
+        {"hToken", PVOID_},
+        {"dwFlags", DWORD_},
+        {"pszPath", PVOID_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto csidl = static_cast<int>(api_get_int(get_param(params, "csidl")));
+        const auto psz_path = api_get_int(get_param(params, "pszPath"));
+
+        // the CSIDL values (shlobj.h): the profile-known shapes only
+        std::string folder;
+        if (csidl == 0x24) {       // CSIDL_WINDOWS
+            folder = w(ql).windir();
+        } else if (csidl == 0x26) {  // CSIDL_PROGRAM_FILES
+            folder = "C:\\Program Files";
+        } else if (csidl == 0x1a) {  // CSIDL_APPDATA
+            folder = w(ql).userprofile() + "\\AppData\\Roaming";
+        }
+
+        if (folder.empty()) {
+            w(ql).set_last_error(0x80004005u >> 0);  // E_FAIL shape
+            return static_cast<std::uint64_t>(0x80004005u);
+        }
+        if (psz_path != 0) {
+            ql.mem().write(psz_path, std::vector<std::uint8_t>(folder.begin(), folder.end()));
+            ql.mem().write_ptr(psz_path + folder.size(), 0, 1);
+        }
+        return S_OK;
+    };
 }
 
 }  // namespace win

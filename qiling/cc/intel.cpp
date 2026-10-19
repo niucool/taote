@@ -76,8 +76,31 @@ QlStdcall::QlStdcall(QlArch& arch) : QlIntel32(arch) {
 }
 
 std::uint64_t QlStdcall::unwind(int nslots) {
+    // the stdcall callee cleans its stack arguments: pop the return address,
+    // then bump the sp past the argument slots (upstream intel.py stdcall.
+    // unwind, verbatim)
     const auto retaddr = QlIntelBaseCC::unwind(nslots);
-    arch_.regs().set_arch_sp(arch_.regs().arch_sp() + static_cast<std::uint64_t>(nslots * asize_));
+    // the guest callers disagree on who cleans the stack args: the real MSVC
+    // binaries rely on the callee-side pop, while TCC-built bins (the pegasus
+    // sample family) emit cdecl-style `add esp, N` at every call site. Peek
+    // the instruction at the return address: an `add esp, imm` there means
+    // the caller cleans, so the callee-side pop must be skipped
+    bool caller_cleans = false;
+    if (retaddr != 0) {
+        try {
+            const auto unit = arch().memory()->read(retaddr, 6);
+            if (unit.size() >= 3 && unit[0] == 0x83 && unit[1] == 0xC4) {
+                caller_cleans = true;  // add esp, imm8
+            } else if (unit.size() >= 6 && unit[0] == 0x81 && unit[1] == 0xC4) {
+                caller_cleans = true;  // add esp, imm32
+            }
+        } catch (...) {
+            // the unmapped return address: keep the verbatim callee pop
+        }
+    }
+    if (!caller_cleans) {
+        arch().regs().set_arch_sp(arch().regs().arch_sp() + static_cast<std::uint64_t>(nslots) * 4);
+    }
     return retaddr;
 }
 

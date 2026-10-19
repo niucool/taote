@@ -935,6 +935,253 @@ void register_ntdll_family() {
 
         return function_table_addr;
     };
+
+    // ---- the ntdll file/memory surface (the ntdll_file/virt/section test
+    // shapes; the NT calls ride the same bodies the kernel32 wrappers use,
+    // flattened to the NT argument lists) ----
+
+    // NTSTATUS NtAllocateVirtualMemory(HANDLE ProcessHandle, PVOID*
+    //     BaseAddress, ULONG_PTR ZeroBits, PSIZE_T RegionSize, ULONG
+    //     AllocateType, ULONG Protect); — the page-aligned heap walk
+    WinsdkApi("NtAllocateVirtualMemory", WinCc::Stdcall, {
+        {"ProcessHandle", PVOID_},
+        {"BaseAddress", PVOID_},
+        {"ZeroBits", PVOID_},
+        {"RegionSize", PVOID_},
+        {"AllocateType", DWORD_},
+        {"Protect", DWORD_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto base_ptr = api_get_int(get_param(params, "BaseAddress"));
+        const auto size_ptr = api_get_int(get_param(params, "RegionSize"));
+        const auto alloc_type = api_get_int(get_param(params, "AllocateType"));
+
+        const auto ps = ql.arch().pointersize();
+        auto want = size_ptr != 0 ? ql.mem().read_ptr(size_ptr, ps) : 0;
+        const auto page = static_cast<std::uint64_t>(0x1000);
+        want = (want + page - 1) & ~(page - 1);
+        if (want == 0) {
+            return static_cast<std::uint64_t>(0xc0000045u);  // STATUS_INVALID_PARAMETER_4
+        }
+
+        const auto addr = w(ql).heap().alloc(want);
+        if (addr == 0) {
+            return static_cast<std::uint64_t>(0xc0000017u);  // STATUS_NO_MEMORY
+        }
+        if (base_ptr != 0) {
+            ql.mem().write_ptr(base_ptr, addr);
+        }
+        if (size_ptr != 0) {
+            ql.mem().write_ptr(size_ptr, want);
+        }
+        (void)alloc_type;
+        return 0;  // STATUS_SUCCESS
+    };
+
+    // NTSTATUS NtFreeVirtualMemory(...); — the heap release (the MEM_RELEASE
+    // walk; the base must ride the allocation base)
+    WinsdkApi("NtFreeVirtualMemory", WinCc::Stdcall, {
+        {"ProcessHandle", PVOID_},
+        {"BaseAddress", PVOID_},
+        {"RegionSize", PVOID_},
+        {"FreeType", DWORD_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto base_ptr = api_get_int(get_param(params, "BaseAddress"));
+        if (base_ptr != 0) {
+            const auto ps = ql.arch().pointersize();
+            w(ql).heap().free(ql.mem().read_ptr(base_ptr, ps));
+        }
+        return 0;
+    };
+
+    // NTSTATUS NtProtectVirtualMemory(...); — the no-op (the access state is
+    // not observable through the single-threaded probes)
+    WinsdkApi("NtProtectVirtualMemory", WinCc::Stdcall, {
+        {"ProcessHandle", PVOID_},
+        {"BaseAddress", PVOID_},
+        {"RegionSize", PVOID_},
+        {"NewProtect", DWORD_},
+        {"OldProtect", PVOID_},
+    }) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
+        return 0;
+    };
+
+    // NTSTATUS NtMapViewOfSection(...); — the zeroed view (the size cell
+    // rides the view size)
+    WinsdkApi("NtMapViewOfSection", WinCc::Stdcall, {
+        {"SectionHandle", PVOID_},
+        {"ProcessHandle", PVOID_},
+        {"BaseAddress", PVOID_},
+        {"ZeroBits", PVOID_},
+        {"CommitSize", PVOID_},
+        {"SectionOffset", PVOID_},
+        {"ViewSize", PVOID_},
+        {"InheritDisposition", DWORD_},
+        {"AllocationType", DWORD_},
+        {"Win32Protect", DWORD_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto base_ptr = api_get_int(get_param(params, "BaseAddress"));
+        const auto view_size_ptr = api_get_int(get_param(params, "ViewSize"));
+        const auto ps = ql.arch().pointersize();
+
+        const auto want = view_size_ptr != 0 ? ql.mem().read_ptr(view_size_ptr, ps) : 0x1000;
+        const auto addr = w(ql).heap().alloc(want);
+        if (addr == 0) {
+            return static_cast<std::uint64_t>(0xc0000017u);
+        }
+        if (base_ptr != 0) {
+            ql.mem().write_ptr(base_ptr, addr);
+        }
+        if (view_size_ptr != 0) {
+            ql.mem().write_ptr(view_size_ptr, want);
+        }
+        return 0;
+    };
+
+    // NTSTATUS NtCreateFile(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES, ...);
+    // — the file rides the fs mapper (the OBJECT_ATTRIBUTES walks the name;
+    // the share/access shapes map onto the open_mode walk)
+    WinsdkApi("NtCreateFile", WinCc::Stdcall, {
+        {"FileHandle", PVOID_},
+        {"DesiredAccess", PVOID_},
+        {"ObjectAttributes", PVOID_},
+        {"IoStatusBlock", PVOID_},
+        {"AllocationSize", PVOID_},
+        {"FileAttributes", PVOID_},
+        {"ShareAccess", PVOID_},
+        {"CreateDisposition", PVOID_},
+        {"CreateOptions", PVOID_},
+        {"EaBuffer", PVOID_},
+        {"EaLength", PVOID_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto out_handle = api_get_int(get_param(params, "FileHandle"));
+        const auto obj_attr = api_get_int(get_param(params, "ObjectAttributes"));
+        const auto disposition_ptr = api_get_int(get_param(params, "CreateDisposition"));
+        if (out_handle == 0 || obj_attr == 0) {
+            return static_cast<std::uint64_t>(0xc000000du);  // STATUS_INVALID_PARAMETER
+        }
+
+        // OBJECT_ATTRIBUTES: the ObjectName field rides at the 2nd pointer
+        // slot (Length, RootDirectory, ObjectName); the UNICODE_STRING body:
+        // Length/MaximumLength (the two u16s), then the Buffer pointer at the
+        // native alignment (the ps offset)
+        const auto ps = ql.arch().pointersize();
+        const auto name_struct = ql.mem().read_ptr(obj_attr + 2 * ps);
+        if (name_struct == 0) {
+            return static_cast<std::uint64_t>(0xc0000033u);  // STATUS_OBJECT_NAME_INVALID
+        }
+        const auto name_len = ql.mem().read_ptr(name_struct, 2);
+        const auto name_buf = ql.mem().read_ptr(name_struct + ps);
+        if (name_buf == 0 || name_len == 0) {
+            return static_cast<std::uint64_t>(0xc0000033u);  // STATUS_OBJECT_NAME_INVALID
+        }
+        auto name_bytes = ql.mem().read(name_buf, static_cast<std::size_t>(name_len));
+        // the NT object names are utf-16le verbatim (the OBJECT_ATTRIBUTES
+        // contract — the Length cell counts the bytes) — decode to the narrow
+        // dos-path form (the ascii subset; the non-ascii cells degrade)
+        std::string name;
+        for (std::size_t i = 0; i + 1 < name_bytes.size(); i += 2) {
+            name.push_back(static_cast<char>(name_bytes[i]));
+        }
+
+        // the \??\ prefix rides the NT object-manager namespace marker — the
+        // fs mapper wants the dos path (the C:\... body)
+        if (name.rfind("\\??\\", 0) == 0) {
+            name.erase(0, 4);
+        }
+
+        std::shared_ptr<QlFsMappedObject> f;
+        try {
+            f = w(ql).fs_mapper()->open(name, "r+");
+        } catch (const std::exception&) {
+            // the open miss rides the status (the FILE_OPEN on the missing
+            // path; the callers probe and continue)
+            if (out_handle != 0) {
+                ql.mem().write_ptr(out_handle, 0);
+            }
+            if (const auto io = api_get_int(get_param(params, "IoStatusBlock")); io != 0) {
+                ql.mem().write_ptr(io, static_cast<std::uint64_t>(0xc0000034u), 8);  // STATUS_OBJECT_NAME_NOT_FOUND
+            }
+            return static_cast<std::uint64_t>(0xc0000034u);
+        }
+        Handle new_handle(std::nullopt, f.get());
+        new_handle.owned = f;
+        w(ql).handle_manager().append(new_handle);
+
+        ql.mem().write_ptr(out_handle, new_handle.id);
+        if (disposition_ptr != 0) {
+            ql.mem().write_ptr(disposition_ptr, 1, 4);  // FILE_OPENED
+        }
+        if (const auto io = api_get_int(get_param(params, "IoStatusBlock")); io != 0) {
+            ql.mem().write_ptr(io, 0, 8);  // the status + the info cells
+        }
+        return 0;
+    };
+
+    // NTSTATUS NtWriteFile(...); — the parked-handle write
+    WinsdkApi("NtWriteFile", WinCc::Stdcall, {
+        {"FileHandle", PVOID_},
+        {"Event", PVOID_},
+        {"ApcRoutine", PVOID_},
+        {"ApcContext", PVOID_},
+        {"IoStatusBlock", PVOID_},
+        {"Buffer", PVOID_},
+        {"Length", PVOID_},
+        {"ByteOffset", PVOID_},
+        {"Key", PVOID_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto h = api_get_int(get_param(params, "FileHandle"));
+        const auto buf = api_get_int(get_param(params, "Buffer"));
+        const auto len = api_get_int(get_param(params, "Length"));
+        const auto io = api_get_int(get_param(params, "IoStatusBlock"));
+
+        const auto* handle = w(ql).handle_manager().get(h);
+        if (handle == nullptr || handle->obj == nullptr) {
+            return static_cast<std::uint64_t>(0xc0000008u);  // STATUS_INVALID_HANDLE
+        }
+        const auto data = ql.mem().read(buf, static_cast<std::size_t>(len));
+        const auto written = static_cast<QlFsMappedObject*>(handle->obj)->write(data);
+        if (io != 0) {
+            ql.mem().write_ptr(io, 0, 8);           // the status
+            ql.mem().write_ptr(io + 8, written);    // the info
+        }
+        return 0;
+    };
+
+    // NTSTATUS NtQueryValueKey(HANDLE KeyHandle, PUNICODE_STRING ValueName,
+    //     KEY_VALUE_INFORMATION_CLASS, PVOID, ULONG, PULONG); — the miss
+    // answers STATUS_OBJECT_NAME_NOT_FOUND (the registry surface rides the
+    // RegistryManager walk; the flat NT probe degrades)
+    WinsdkApi("NtQueryValueKey", WinCc::Stdcall, {
+        {"KeyHandle", PVOID_},
+        {"ValueName", PVOID_},
+        {"KeyValueInformationClass", DWORD_},
+        {"KeyValueInformation", PVOID_},
+        {"Length", PVOID_},
+        {"ResultLength", PVOID_},
+    }) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
+        return static_cast<std::uint64_t>(0xc0000034u);  // STATUS_OBJECT_NAME_NOT_FOUND
+    };
+
+    // NTSTATUS NtCreateSection(...); — the SEC_COMMIT view stub (the pagefile
+    // section shape; the file-mapped sections land with the memory-mapping
+    // slice)
+    WinsdkApi("NtCreateSection", WinCc::Stdcall, {
+        {"SectionHandle", PVOID_},
+        {"DesiredAccess", PVOID_},
+        {"ObjectAttributes", PVOID_},
+        {"MaximumSize", PVOID_},
+        {"SectionPageProtection", PVOID_},
+        {"AllocationAttributes", PVOID_},
+        {"FileHandle", PVOID_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto out_handle = api_get_int(get_param(params, "SectionHandle"));
+        if (out_handle != 0) {
+            Handle new_handle(std::nullopt, nullptr, "section");
+            w(ql).handle_manager().append(new_handle);
+            ql.mem().write_ptr(out_handle, new_handle.id);
+        }
+        return 0;
+    };
 }
 
 // the static-init registration (the python module-import side effect)

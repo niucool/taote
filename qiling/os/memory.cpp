@@ -212,7 +212,7 @@ std::vector<std::uint8_t> QlMemoryManager::read(std::uint64_t addr, std::uint64_
     if (size != 0) {
         const uc_err err = uc_mem_read(uc_, addr, out.data(), size);
         if (err != UC_ERR_OK) {
-            throw QlErrorBase("failed to read memory (uc_err " + std::to_string(static_cast<int>(err)) + ")");
+            throw QlErrorBase("failed to read memory (uc_err " + std::to_string(static_cast<int>(err)) + ") at 0x" + [&] { char b[32]; std::snprintf(b, sizeof(b), "%llx", (unsigned long long)addr); return std::string(b); }());
         }
     }
     return out;

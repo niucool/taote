@@ -192,6 +192,108 @@ void register_crypt32_family() {
     }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
         return crypt_string_to_binary_body(ql, params);
     };
+
+    // BOOL CryptBinaryToStringA(const BYTE* pbBinary, DWORD cbBinary,
+    //     DWORD dwFlags, LPSTR pszString, DWORD* pcchString); — the base64
+    // encode (the null-buffer probe answers the required length; the
+    // CRYPT_STRING_BASE64 (0x1) shape rides the 4-char-per-triplet walk)
+    WinsdkApi("CryptBinaryToStringA", WinCc::Stdcall, {
+        {"pbBinary", PVOID_},
+        {"cbBinary", DWORD_},
+        {"dwFlags", DWORD_},
+        {"pszString", PVOID_},
+        {"pcchString", PVOID_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto pb = api_get_int(get_param(params, "pbBinary"));
+        const auto cb = api_get_int(get_param(params, "cbBinary"));
+        const auto out = api_get_int(get_param(params, "pszString"));
+        const auto out_len_ptr = api_get_int(get_param(params, "pcchString"));
+
+        static const char table[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        const auto data = ql.mem().read(pb, static_cast<std::size_t>(cb));
+
+        std::string encoded;
+        for (std::size_t i = 0; i < data.size(); i += 3) {
+            const std::uint32_t b0 = data[i];
+            const std::uint32_t b1 = i + 1 < data.size() ? data[i + 1] : 0;
+            const std::uint32_t b2 = i + 2 < data.size() ? data[i + 2] : 0;
+            const std::uint32_t trip = (b0 << 16) | (b1 << 8) | b2;
+            encoded += table[(trip >> 18) & 0x3f];
+            encoded += table[(trip >> 12) & 0x3f];
+            encoded += (i + 1 < data.size()) ? table[(trip >> 6) & 0x3f] : '=';
+            encoded += (i + 2 < data.size()) ? table[trip & 0x3f] : '=';
+        }
+
+        if (out == 0) {
+            // the length probe: the terminator cell rides the required size
+            if (out_len_ptr != 0) {
+                ql.mem().write_ptr(out_len_ptr, static_cast<std::uint64_t>(encoded.size() + 1), 4);
+            }
+            return 1;
+        }
+        if (out_len_ptr == 0) {
+            return 0;
+        }
+        const auto room = ql.mem().read_ptr(out_len_ptr, 4);
+        if (encoded.size() + 1 > room) {
+            w(ql).set_last_error(0x57);  // ERROR_INVALID_PARAMETER
+            return 0;
+        }
+        ql.mem().write(out, std::vector<std::uint8_t>(encoded.begin(), encoded.end()));
+        ql.mem().write_ptr(out + encoded.size(), 0, 1);
+        ql.mem().write_ptr(out_len_ptr, static_cast<std::uint64_t>(encoded.size() + 1), 4);
+        return 1;
+    };
+
+    // BOOL CryptBinaryToStringW(...); — the wide flavour rides the same walk
+    WinsdkApi("CryptBinaryToStringW", WinCc::Stdcall, {
+        {"pbBinary", PVOID_},
+        {"cbBinary", DWORD_},
+        {"dwFlags", DWORD_},
+        {"pszString", PVOID_},
+        {"pcchString", PVOID_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto pb = api_get_int(get_param(params, "pbBinary"));
+        const auto cb = api_get_int(get_param(params, "cbBinary"));
+        const auto out = api_get_int(get_param(params, "pszString"));
+        const auto out_len_ptr = api_get_int(get_param(params, "pcchString"));
+
+        static const char table[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        const auto data = ql.mem().read(pb, static_cast<std::size_t>(cb));
+
+        std::string encoded;
+        for (std::size_t i = 0; i < data.size(); i += 3) {
+            const std::uint32_t b0 = data[i];
+            const std::uint32_t b1 = i + 1 < data.size() ? data[i + 1] : 0;
+            const std::uint32_t b2 = i + 2 < data.size() ? data[i + 2] : 0;
+            const std::uint32_t trip = (b0 << 16) | (b1 << 8) | b2;
+            encoded += table[(trip >> 18) & 0x3f];
+            encoded += table[(trip >> 12) & 0x3f];
+            encoded += (i + 1 < data.size()) ? table[(trip >> 6) & 0x3f] : '=';
+            encoded += (i + 2 < data.size()) ? table[trip & 0x3f] : '=';
+        }
+
+        if (out == 0) {
+            if (out_len_ptr != 0) {
+                ql.mem().write_ptr(out_len_ptr, static_cast<std::uint64_t>(encoded.size() + 1), 4);
+            }
+            return 1;
+        }
+        if (out_len_ptr == 0) {
+            return 0;
+        }
+        const auto room = ql.mem().read_ptr(out_len_ptr, 4);
+        if (encoded.size() + 1 > room) {
+            w(ql).set_last_error(0x57);
+            return 0;
+        }
+        for (std::size_t i = 0; i <= encoded.size(); ++i) {
+            ql.mem().write_ptr(out + i * 2, static_cast<std::uint8_t>(i < encoded.size() ? encoded[i] : 0), 1);
+            ql.mem().write_ptr(out + i * 2 + 1, 0, 1);
+        }
+        ql.mem().write_ptr(out_len_ptr, static_cast<std::uint64_t>(encoded.size() + 1), 4);
+        return 1;
+    };
 }
 
 }  // namespace win

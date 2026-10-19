@@ -4229,14 +4229,68 @@ TEST(WinApiMsvcrt, StringMemAndExitFamiliesRideVerbatimWalks) {
     ASSERT_TRUE(rimb.has_value());
     EXPECT_EQ(*rimb, 0u);
 
-    // the passthru family: the hooks return nothing (the original bodies run)
-    for (const char* name : {"atexit", "malloc", "free", "memset", "memmove", "calloc",
-                             "_malloc_base", "_realloc_base", "_free_base", "_calloc_base",
-                             "_get_initial_narrow_environment"}) {
+    // the heap-backed family (the passthru conversion): the handlers answer
+    // implemented values — no real CRT body runs on the stub-dll hosts, so
+    // the surface is implemented in the port itself
+    const auto* atx = ApiRegistry::instance().find("atexit");
+    ASSERT_NE(atx, nullptr);
+    const auto ratx = atx->handler(ql, 0, ResolvedParams{{"func", 0ull}});
+    ASSERT_TRUE(ratx.has_value());
+    EXPECT_EQ(*ratx, 1u);
+
+    // malloc: the heap chunk address
+    const auto* mal = ApiRegistry::instance().find("malloc");
+    ASSERT_NE(mal, nullptr);
+    const auto rmal = mal->handler(ql, 0, ResolvedParams{{"size", 32ull}});
+    ASSERT_TRUE(rmal.has_value());
+    EXPECT_NE(*rmal, 0ull);
+
+    // memset: the dest fill answered back
+    const auto* mst = ApiRegistry::instance().find("memset");
+    ASSERT_NE(mst, nullptr);
+    const auto rmst = mst->handler(ql, 0, ResolvedParams{{"dest", kScratch + 0x10}, {"c", 0x41ull}, {"count", 4ull}});
+    ASSERT_TRUE(rmst.has_value());
+    EXPECT_EQ(*rmst, kScratch + 0x10);
+    EXPECT_EQ(ql.mem().read_ptr(kScratch + 0x10, 4), 0x41414141u);
+
+    // memmove: the copy answered back
+    const auto* mmv = ApiRegistry::instance().find("memmove");
+    ASSERT_NE(mmv, nullptr);
+    const auto rmmv = mmv->handler(ql, 0, ResolvedParams{{"dest", kScratch + 0x20}, {"src", kScratch + 0x10}, {"num", 4ull}});
+    ASSERT_TRUE(rmmv.has_value());
+    EXPECT_EQ(*rmmv, kScratch + 0x20);
+    EXPECT_EQ(ql.mem().read_ptr(kScratch + 0x20, 4), 0x41414141u);
+
+    // the family: the calloc zero-fill + the realloc move + the free no-op
+    const auto* cal = ApiRegistry::instance().find("calloc");
+    ASSERT_NE(cal, nullptr);
+    const auto rcal = cal->handler(ql, 0, ResolvedParams{{"num", 4ull}, {"size", 8ull}});
+    ASSERT_TRUE(rcal.has_value());
+    EXPECT_NE(*rcal, 0ull);
+    EXPECT_EQ(ql.mem().read_ptr(*rcal, 4), 0u);
+
+    const auto* ral = ApiRegistry::instance().find("_realloc_base");
+    ASSERT_NE(ral, nullptr);
+    const auto rral = ral->handler(ql, 0, ResolvedParams{{"block", *rmal}, {"size", 64ull}});
+    ASSERT_TRUE(rral.has_value());
+    EXPECT_NE(*rral, 0ull);
+
+    // free/_free_base: the heap release answered 0 (the void shape rides 0
+    // on the stub-dll hosts)
+    for (const char* name : {"free", "_free_base"}) {
         const auto* api = ApiRegistry::instance().find(name);
         ASSERT_NE(api, nullptr) << name;
-        EXPECT_FALSE(api->handler(ql, 0, {}).has_value()) << name;
+        const auto rf = api->handler(ql, 0, ResolvedParams{{"address", *rmal}});
+        ASSERT_TRUE(rf.has_value()) << name;
+        EXPECT_EQ(*rf, 0u) << name;
     }
+
+    // the __getmainargs-family environment: the allocated array
+    const auto* env = ApiRegistry::instance().find("_get_initial_narrow_environment");
+    ASSERT_NE(env, nullptr);
+    const auto renv = env->handler(ql, 0, {});
+    ASSERT_TRUE(renv.has_value());
+    EXPECT_NE(*renv, 0ull);
 
     // exit: the emu stop (the handler returns nothing; the status rides
     // nowhere — the upstream emu_stop is the whole ride)
@@ -4339,26 +4393,32 @@ TEST(WinApiMsvcrt, PrintfFamilyRendersThroughGuestBuffers) {
         return bytes;
     };
 
-    // sprintf: the arglist chain rides the cells [42, ptr("str")]
+    // the handler-level rides need the ms64 fcall bound the way the real
+    // dispatch binds it (hook_winapi set_fcall_ptr before each call): the
+    // default QlCdecl fcall reads the ellipsis off the guest stack
+    auto& os = ql.os<QlOsWindows>();
+    os.bind_fcall(WinCc::Ms64);
+
+    // sprintf: the readEllipsis walk over the register slots (buff rides
+    // rcx, format rdx, the variadic cells r8/r9)
     ql.mem().write(kScratch, std::vector<std::uint8_t>{'s', 't', 'r', 0});
-    ql.mem().write_ptr(kScratch + 0x100, 42, 8);
-    ql.mem().write_ptr(kScratch + 0x108, kScratch, 8);
-    ql.mem().write(kScratch + 0x110, std::vector<std::uint8_t>{'n', '=', '%', 'd', ' ', 's', '=', '%', 's', 0});
+    ql.arch().regs().write("R8", 42);
+    ql.arch().regs().write("R9", kScratch);
     const auto* sp = ApiRegistry::instance().find("sprintf");
     ASSERT_NE(sp, nullptr);
     const auto rsp = sp->handler(ql, 0, ResolvedParams{
-        {"buff", kScratch + 0x140}, {"format", std::string("n=%d s=%s")}, {"arglist", kScratch + 0x100},
+        {"buff", kScratch + 0x140}, {"format", std::string("n=%d s=%s")},
     });
     ASSERT_TRUE(rsp.has_value());
     EXPECT_EQ(*rsp, 10u);
     const auto buf = ql.mem().read(kScratch + 0x140, 11);
     EXPECT_EQ(std::string(buf.begin(), buf.end()), "n=42 s=str" + std::string(1, char(0)));
 
-    // the * width consumes its own slot: "%*d" with the chain [5, 42] -> "   42"
-    ql.mem().write_ptr(kScratch + 0x100, 5, 8);
-    ql.mem().write_ptr(kScratch + 0x108, 42, 8);
+    // the * width consumes its own slot: "%*d" with [5, 42] -> "   42"
+    ql.arch().regs().write("R8", 5);
+    ql.arch().regs().write("R9", 42);
     const auto rsp2 = sp->handler(ql, 0, ResolvedParams{
-        {"buff", kScratch + 0x140}, {"format", std::string("%*d")}, {"arglist", kScratch + 0x100},
+        {"buff", kScratch + 0x140}, {"format", std::string("%*d")},
     });
     ASSERT_TRUE(rsp2.has_value());
     EXPECT_EQ(*rsp2, 5u);
@@ -4368,8 +4428,6 @@ TEST(WinApiMsvcrt, PrintfFamilyRendersThroughGuestBuffers) {
     // printf: the variadic slot rides the CC register (the RDX = the slot 1);
     // the ms64 fcall binds the register slots (the handler-level ride without
     // the emu — the RDX write stands in for the caller's register setup)
-    auto& os = ql.os<QlOsWindows>();
-    os.bind_fcall(WinCc::Ms64);
     ql.arch().regs().write("RDX", 42);
     const auto* pr = ApiRegistry::instance().find("printf");
     ASSERT_NE(pr, nullptr);
@@ -4776,8 +4834,9 @@ TEST(WinApiWsock32, StartupSocketConnectAndGethostbynameRideVerbatimWalks) {
     ASSERT_TRUE(r2.has_value());
     EXPECT_EQ(*r2, 0u);
 
-    // connect: the sockaddr_in parse (the family 2, the BE port, the dotted
-    // quad) answering the verbatim 0
+    // connect: the sockaddr_in parse — with the ws2_32 family registered
+    // after wsock32, the name-keyed registry serves the ws2_32 engine ride:
+    // an invalid socket handle answers SOCKET_ERROR before the parse
     const std::uint8_t sa4[] = {0x02, 0x00, 0x1f, 0x90, 10, 2, 13, 38, 0, 0, 0, 0, 0, 0, 0, 0};
     ql.mem().write(kScratch, std::vector<std::uint8_t>(sa4, sa4 + sizeof(sa4)));
     const auto* conn = ApiRegistry::instance().find("connect");
@@ -4786,7 +4845,7 @@ TEST(WinApiWsock32, StartupSocketConnectAndGethostbynameRideVerbatimWalks) {
         {"s", 0ull}, {"name", kScratch}, {"namelen", static_cast<std::uint64_t>(sizeof(sa4))},
     });
     ASSERT_TRUE(r3.has_value());
-    EXPECT_EQ(*r3, 0u);
+    EXPECT_EQ(*r3, static_cast<std::uint64_t>(-1));
 
     // the IPv6 family (0x17) rides the 16-byte body
     std::vector<std::uint8_t> sa6(28, 0);
@@ -4799,7 +4858,7 @@ TEST(WinApiWsock32, StartupSocketConnectAndGethostbynameRideVerbatimWalks) {
         {"s", 0ull}, {"name", kScratch + 0x40}, {"namelen", static_cast<std::uint64_t>(sizeof(sa6))},
     });
     ASSERT_TRUE(r4.has_value());
-    EXPECT_EQ(*r4, 0u);
+    EXPECT_EQ(*r4, static_cast<std::uint64_t>(-1));
 
     // the unhandled family rides the verbatim 0 (the debug note)
     std::vector<std::uint8_t> sax(4, 0);
@@ -4809,7 +4868,7 @@ TEST(WinApiWsock32, StartupSocketConnectAndGethostbynameRideVerbatimWalks) {
         {"s", 0ull}, {"name", kScratch + 0x80}, {"namelen", 4ull},
     });
     ASSERT_TRUE(r5.has_value());
-    EXPECT_EQ(*r5, 0u);
+    EXPECT_EQ(*r5, static_cast<std::uint64_t>(-1));  // the invalid-socket SOCKET_ERROR
 
     // gethostbyname: the profile NETWORK dns_response_ip seeds the
     // reversed-octet ip bytes; the hostent image rides the documented offsets

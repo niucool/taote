@@ -233,8 +233,13 @@ std::uint64_t QlLoaderPE::load_dll(const std::string& name) {
     auto [dll_path, dll_name] = dll_path_elements(name);
     if (dll_name.rfind("api-ms-win-", 0) == 0) {
         // Usually we should not reach this point and instead imports from
-        // such DLLs should be redirected earlier (verbatim)
-        return 0;
+        // such DLLs should be redirected earlier (verbatim). The synthesized
+        // fixture rootfs carries the api-ms images themselves — those load
+        // directly (the exists() gate keeps the verbatim miss for the empty
+        // rootfs walks).
+        if (!std::filesystem::exists(dll_path)) {
+            return 0;
+        }
     }
 
         // see if this dll was already loaded
@@ -469,11 +474,21 @@ void QlLoaderPE::init_imports_for(LIEF::PE::Binary& parsed, std::uint64_t image_
                 ++idx;
             }
             if (!redirected) {
-                ql_->log().debug("Failed to resolve " + dll_name);
-                continue;
+                // the ladder miss: the stub-based rootfs may carry the
+                // api-ms image itself (the synthesized fixtures bind the
+                // names directly) — load it before giving up (the real-dll
+                // rootfs keeps the redirect path; the load returns the cached
+                // base when the image is already mapped)
+                const auto direct_base = load_dll(orig_dll_name);
+                if (direct_base == 0) {
+                    ql_->log().debug("Failed to resolve " + dll_name);
+                    continue;
+                }
+                dll_name = orig_dll_name;
+            } else {
+                ql_->log().debug("Redirecting " + dll_name + " to " + key_dll);
+                dll_name = key_dll;
             }
-            ql_->log().debug("Redirecting " + dll_name + " to " + key_dll);
-            dll_name = key_dll;
         }
 
         const auto unbound = [&]() {
@@ -776,6 +791,19 @@ void QlLoaderPE::init_teb() {
     put_le(image, TEB_OFF_STACK_LIMIT, stack_address_, 8);
     put_le(image, TEB_OFF_TEB_ADDRESS, teb_addr, 8);
     put_le(image, TEB_OFF_PEB_ADDRESS, peb_addr, 8);
+
+    // the x86 (32-bit) TEB layout: the pointer fields shrink to 4 bytes —
+    // the StackBase/StackLimit ride at 4/8 and the Self at 0x18 (the fs:0x18
+    // read the MSVC x86 CRT makes); the ExceptionList starts the end-of-chain
+    // sentinel (the SEH walkers stop on it)
+    if (ql_->arch().bits() == 32) {
+        put_le(image, 0, 0xffffffffu, 4);                              // ExceptionList = end
+        put_le(image, 4, stack_address_ + stack_size_, 4);             // StackBase
+        put_le(image, 8, stack_address_, 4);                           // StackLimit
+        put_le(image, 0x18, teb_addr, 4);                              // Self
+        put_le(image, 0x1c, peb_addr, 4);                              // ProcessEnvironmentBlock
+    }
+
     ql_->mem().write(teb_addr, image);
 
     structure_last_addr_ = peb_addr;

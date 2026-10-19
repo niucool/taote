@@ -122,6 +122,19 @@ std::uint64_t sprintf_body(Qiling& ql, std::uint64_t buff, const std::string& fo
     return result.count;
 }
 
+// the direct-imported variadic shape: the args ride the pre-pulled ellipsis
+// slots (the readEllipsis walk in the handler)
+std::uint64_t sprintf_body(Qiling& ql, std::uint64_t buff, const std::string& format,
+                           const std::vector<std::uint64_t>& args, bool wstring) {
+    std::size_t cursor = 0;
+    const auto va_args = [&args, &cursor]() -> std::uint64_t {
+        return cursor < args.size() ? args[cursor++] : 0;
+    };
+
+    const auto result = QlOsUtils::sprintf(ql, buff, format, va_args, wstring);
+    return result.count;
+}
+
 // msvcrt.py __stdio_common_vsprintf (the _vsnprintf/_vswprintf/_vsnwprintf
 // variants share the body; the TODO: take _BufferCount into account verbatim
 // comment rides)
@@ -250,12 +263,14 @@ void register_msvcrt_family() {
         return 0x8001f;
     };
 
-    // int atexit(void (__cdecl *func)(void)); — the passthru (the original
-    // CRT body keeps running after the hook returns nothing)
+    // int atexit(void (__cdecl *func)(void)); — the port answers success
+    // (the registered list never runs: exit() stops the emulation before the
+    // teardown; the upstream passthru needs the real CRT body, unavailable on
+    // the stub-dll hosts)
     WinsdkApi("atexit", WinCc::Cdecl, {
         {"func", PVOID_},
-    }, true) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
-        return std::nullopt;
+    }) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
+        return 1;
     };
 
     // char*** __p__environ(void)
@@ -307,6 +322,70 @@ void register_msvcrt_family() {
         return std::nullopt;
     };
 
+    // void _exit(int status); / void _Exit(int status); — the immediate
+    // termination shape (no atexit walk)
+    WinsdkApi("_exit", WinCc::Cdecl, {
+        {"status", INT_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto status = api_get_int(get_param(params, "status"));
+        w(ql).set_exit_code(static_cast<int>(status));
+        ql.emu_stop();
+        return std::nullopt;
+    };
+
+    WinsdkApi("_Exit", WinCc::Cdecl, {
+        {"status", INT_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto status = api_get_int(get_param(params, "status"));
+        w(ql).set_exit_code(static_cast<int>(status));
+        ql.emu_stop();
+        return std::nullopt;
+    };
+
+    // int _XcptFilter(unsigned long xcpt, struct _EXCEPTION_POINTERS*);
+    // — the CRT exception filter: the port answers EXCEPTION_EXECUTE_HANDLER
+    // (1) so the except block runs (the SEH dispatch machinery lands with its
+    // slice)
+    WinsdkApi("_XcptFilter", WinCc::Cdecl, {
+        {"exception", PVOID_},
+        {"exception_pointers", PVOID_},
+    }) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
+        return 1;
+    };
+
+    // int _except_handler3/4 — the MSVC SEH scope-table walkers; the stub
+    // bodies answer EXCEPTION_CONTINUE_SEARCH (the seh_test exercises the
+    // real dispatch, which lands with the SEH slice)
+    WinsdkApi("_except_handler3", WinCc::Cdecl, {
+        {"exception_record", PVOID_},
+        {"establisher_frame", PVOID_},
+        {"context_record", PVOID_},
+        {"dispatcher_context", PVOID_},
+    }) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
+        return 1;  // ExceptionContinueSearch
+    };
+
+    WinsdkApi("_except_handler4_common", WinCc::Cdecl, {
+        {"gs_helper", PVOID_},
+        {"cookie", PVOID_},
+        {"exception_record", PVOID_},
+        {"establisher_frame", PVOID_},
+        {"context_record", PVOID_},
+        {"dispatcher_context", PVOID_},
+    }) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
+        return 1;
+    };
+
+    // LONG __C_specific_handler(PEXCEPTION_RECORD, PEXCEPTION_FRAME, ...);
+    WinsdkApi("__C_specific_handler", WinCc::Cdecl, {
+        {"exception_record", PVOID_},
+        {"establisher_frame", PVOID_},
+        {"context_record", PVOID_},
+        {"dispatcher_context", PVOID_},
+    }) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
+        return 1;
+    };
+
     // char*** __cdecl __p___argv (void);
     WinsdkApi("__p___argv", WinCc::Cdecl, {}) = [](Qiling& ql, std::uint64_t,
                                                    const ResolvedParams&) -> std::optional<std::uint64_t> {
@@ -338,31 +417,41 @@ void register_msvcrt_family() {
         return ret;
     };
 
-    // the ucrtbase rider: _get_initial_narrow_environment (the passthru; the
-    // native version must run or the debug CRT init fails — verbatim comment)
-    WinsdkApi("_get_initial_narrow_environment", WinCc::Cdecl, {},
-              true) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
-        return std::nullopt;
-    };
+    // the ucrtbase rider: _get_initial_narrow_environment (the upstream
+    // passthru needs the real CRT body; the port answers the env strings
+    // array — the same shape __getmainargs builds)
+    WinsdkApi("_get_initial_narrow_environment", WinCc::Cdecl, {}) =
+        [](Qiling& ql, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
+            std::vector<std::string> env;
+            env.reserve(ql.env().size());
+            for (const auto& [k, v] : ql.env()) {
+                env.push_back(k + "=" + v);
+            }
+            return alloc_strings_array(ql, env, false);
+        };
 
     // the printf family (the sprintf/printf/wprintf + the __stdio_common
     // walkers) lands in the sub-slice 2 with the QlOsUtils::count_va_pulls
     // helper.
 
-    // int sprintf ( char * str, const char * format, ... );
+    // int sprintf ( char * str, const char * format, ... ); — the
+    // direct-imported variadic walk: the named slots (the buff, the format)
+    // consume their native slots, the varargs continue from there (the
+    // readEllipsis shape, the same pull the printf family rides)
     WinsdkApi("sprintf", WinCc::Cdecl, {
         {"buff", PVOID_},
         {"format", LPCSTR_},
-        {"arglist", PVOID_},
     }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
         const auto buff = api_get_int(get_param(params, "buff"));
         // NOTE: the verbatim `if format == 0: format = "(null)"` rides the
         // py2 str/int comparison quirk — inert in the py3 (the decoded string
         // never equals the int 0); the port keeps the raw walk
         auto format = api_get_string(ql, get_param(params, "format"));
-        const auto arglist = api_get_int(get_param(params, "arglist"));
 
-        return sprintf_body(ql, buff, format, arglist, false);
+        const std::vector<int> slots{os::PARAM_INTN, os::PARAM_INTN};
+        const auto args = ql.os().fcall().read_ellipsis(slots, QlOsUtils::count_va_pulls(format));
+
+        return sprintf_body(ql, buff, format, args, false);
     };
 
     // int printf(const char *format, ...)
@@ -584,40 +673,59 @@ void register_msvcrt_family() {
         return string1 > string2 ? 1 : static_cast<std::uint64_t>(-1);
     };
 
-    // the malloc/free family: the verbatim passthru hooks (the CRT native
-    // bodies keep running after the hook returns nothing)
+    // the malloc/free family: the upstream rides the passthru (the native
+    // CRT bodies run inside the real msvcrt.dll); the stub-dll hosts have no
+    // native bodies, so the port answers through the emulated heap — the
+    // same QlMemoryHeap the kernel32 HeapAlloc family shares
     WinsdkApi("_malloc_base", WinCc::Cdecl, {
         {"size", UINT_},
-    }, true) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
-        return std::nullopt;
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto size = api_get_int(get_param(params, "size"));
+        return w(ql).heap().alloc(size);
     };
 
     // void* malloc(unsigned int size)
     WinsdkApi("malloc", WinCc::Cdecl, {
         {"size", UINT_},
-    }, true) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
-        return std::nullopt;
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto size = api_get_int(get_param(params, "size"));
+        return w(ql).heap().alloc(size);
     };
 
     // void* __cdecl _realloc_base(void* block, size_t size);
     WinsdkApi("_realloc_base", WinCc::Cdecl, {
         {"block", PVOID_},
         {"size", UINT_},
-    }, true) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
-        return std::nullopt;
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto block = api_get_int(get_param(params, "block"));
+        const auto size = api_get_int(get_param(params, "size"));
+
+        auto& heap = w(ql).heap();
+        const auto fresh = heap.alloc(size);
+        if (block != 0 && fresh != 0) {
+            const auto old_size = heap.size(block);
+            const auto n = std::min<std::uint64_t>(old_size, size);
+            if (n != 0) {
+                ql.mem().write(fresh, ql.mem().read(block, n));
+            }
+            heap.free(block);
+        }
+        return fresh;
     };
 
     WinsdkApi("_free_base", WinCc::Cdecl, {
         {"address", PVOID_},
-    }, true) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
-        return std::nullopt;
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        w(ql).heap().free(api_get_int(get_param(params, "address")));
+        return 0;
     };
 
     // void* free(void *address)
     WinsdkApi("free", WinCc::Cdecl, {
         {"address", PVOID_},
-    }, true) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
-        return std::nullopt;
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        w(ql).heap().free(api_get_int(get_param(params, "address")));
+        return 0;
     };
 
     // _onexit_t _onexit(_onexit_t function);
@@ -649,38 +757,86 @@ void register_msvcrt_family() {
         return 0;
     };
 
-    // void *memset(void *dest, int c, size_t count); — the passthru
+    // void *memcpy(void *dest, const void *src, size_t count); — the guest
+    // copy (the upstream rides the native body through the passthru)
+    WinsdkApi("memcpy", WinCc::Cdecl, {
+        {"dest", PVOID_},
+        {"src", PVOID_},
+        {"count", PVOID_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto dest = api_get_int(get_param(params, "dest"));
+        const auto src = api_get_int(get_param(params, "src"));
+        const auto count = api_get_int(get_param(params, "count"));
+
+        if (count != 0) {
+            ql.mem().write(dest, ql.mem().read(src, count));
+        }
+        return dest;
+    };
+
+    // void *memset(void *dest, int c, size_t count);
     WinsdkApi("memset", WinCc::Cdecl, {
         {"dest", PVOID_},
         {"c", INT_},
         {"count", PVOID_},
-    }, true) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
-        return std::nullopt;
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto dest = api_get_int(get_param(params, "dest"));
+        const auto c = api_get_int(get_param(params, "c")) & 0xff;
+        const auto count = api_get_int(get_param(params, "count"));
+
+        if (count != 0) {
+            ql.mem().write(dest, std::vector<std::uint8_t>(static_cast<std::size_t>(count),
+                                                           static_cast<std::uint8_t>(c)));
+        }
+        return dest;
     };
 
-    // void *memmove(void *dest, const void *src, size_t num); — the passthru
+    // void *memmove(void *dest, const void *src, size_t num);
     WinsdkApi("memmove", WinCc::Cdecl, {
         {"dest", PVOID_},
         {"src", PVOID_},
         {"num", PVOID_},
-    }, true) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
-        return std::nullopt;
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto dest = api_get_int(get_param(params, "dest"));
+        const auto src = api_get_int(get_param(params, "src"));
+        const auto num = api_get_int(get_param(params, "num"));
+
+        if (num != 0) {
+            ql.mem().write(dest, ql.mem().read(src, num));
+        }
+        return dest;
     };
 
-    // the calloc family: the verbatim passthru hooks
+    // the calloc family: the zero-filled heap walk
     WinsdkApi("_calloc_base", WinCc::Cdecl, {
         {"num", PVOID_},
         {"size", PVOID_},
-    }, true) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
-        return std::nullopt;
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto num = api_get_int(get_param(params, "num"));
+        const auto size = api_get_int(get_param(params, "size"));
+
+        const auto total = num * size;
+        const auto addr = w(ql).heap().alloc(total);
+        if (addr != 0 && total != 0) {
+            ql.mem().write(addr, std::vector<std::uint8_t>(static_cast<std::size_t>(total), 0));
+        }
+        return addr;
     };
 
     // void *calloc(size_t num, size_t size);
     WinsdkApi("calloc", WinCc::Cdecl, {
         {"num", PVOID_},
         {"size", PVOID_},
-    }, true) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
-        return std::nullopt;
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto num = api_get_int(get_param(params, "num"));
+        const auto size = api_get_int(get_param(params, "size"));
+
+        const auto total = num * size;
+        const auto addr = w(ql).heap().alloc(total);
+        if (addr != 0 && total != 0) {
+            ql.mem().write(addr, std::vector<std::uint8_t>(static_cast<std::size_t>(total), 0));
+        }
+        return addr;
     };
 
     // int _ismbblead(unsigned int c);
@@ -721,6 +877,117 @@ void register_msvcrt_family() {
         ql.mem().write_ptr(p_file, new_handle.id);
 
         return 1;
+    };
+
+    // FILE* fopen(const char* path, const char* mode); — the CRT stdio
+    // surface over the fs mapper (the _wfopen_s shape: the QlFile parked in
+    // the handle manager, the FILE* rides the handle id)
+    WinsdkApi("fopen", WinCc::Cdecl, {
+        {"path", LPCSTR_},
+        {"mode", LPCSTR_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto path = api_get_string(ql, get_param(params, "path"));
+        const auto mode = api_get_string(ql, get_param(params, "mode"));
+
+        auto f = w(ql).fs_mapper()->open(path, mode);
+
+        Handle new_handle(std::nullopt, f.get());
+        new_handle.owned = f;
+        w(ql).handle_manager().append(new_handle);
+        return new_handle.id;
+    };
+
+    // size_t fread(void* buffer, size_t size, size_t count, FILE* stream);
+    WinsdkApi("fread", WinCc::Cdecl, {
+        {"buffer", PVOID_},
+        {"size", PVOID_},
+        {"count", PVOID_},
+        {"stream", PVOID_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto buffer = api_get_int(get_param(params, "buffer"));
+        const auto size = api_get_int(get_param(params, "size"));
+        const auto count = api_get_int(get_param(params, "count"));
+        const auto stream = api_get_int(get_param(params, "stream"));
+
+        const auto* handle = w(ql).handle_manager().get(stream);
+        if (handle == nullptr || handle->obj == nullptr) {
+            return 0;
+        }
+        auto* f = static_cast<QlFile*>(handle->obj);
+
+        const auto want = static_cast<std::size_t>(size * count);
+        const auto data = f->read(want);
+        if (!data.empty()) {
+            ql.mem().write(buffer, data);
+        }
+        return data.size() / (size != 0 ? static_cast<std::uint64_t>(size) : 1);
+    };
+
+    // int fclose(FILE* stream);
+    WinsdkApi("fclose", WinCc::Cdecl, {
+        {"stream", PVOID_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto stream = api_get_int(get_param(params, "stream"));
+
+        auto* handle = w(ql).handle_manager().get(stream);
+        if (handle == nullptr) {
+            return -1;
+        }
+        if (handle->obj != nullptr) {
+            static_cast<QlFile*>(handle->obj)->close();
+        }
+        w(ql).handle_manager().delete_handle(stream);
+        return 0;
+    };
+
+    // int fseek(FILE* stream, long offset, int origin);
+    WinsdkApi("fseek", WinCc::Cdecl, {
+        {"stream", PVOID_},
+        {"offset", PVOID_},
+        {"origin", INT_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto stream = api_get_int(get_param(params, "stream"));
+        const auto offset = api_get_int(get_param(params, "offset"));
+        const auto origin = api_get_int(get_param(params, "origin"));
+
+        const auto* handle = w(ql).handle_manager().get(stream);
+        if (handle == nullptr || handle->obj == nullptr) {
+            return -1;
+        }
+        static_cast<QlFile*>(handle->obj)->lseek(offset, static_cast<int>(origin));
+        return 0;
+    };
+
+    // int system(const char* command); — no host shell rides the emulator;
+    // the walk answers success with no side effects
+    WinsdkApi("system", WinCc::Cdecl, {
+        {"command", LPCSTR_},
+    }) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
+        return 0;
+    };
+
+    // int _snprintf(char* buffer, size_t count, const char* format, ...);
+    // — the sprintf walk with the count cap (the terminator rides inside
+    // count; the caller sees the truncated length)
+    WinsdkApi("_snprintf", WinCc::Cdecl, {
+        {"buff", PVOID_},
+        {"count", PVOID_},
+        {"format", LPCSTR_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto buff = api_get_int(get_param(params, "buff"));
+        const auto count = api_get_int(get_param(params, "count"));
+        auto format = api_get_string(ql, get_param(params, "format"));
+
+        const std::vector<int> slots{os::PARAM_INTN, os::PARAM_INTN};
+        const auto args = ql.os().fcall().read_ellipsis(slots, QlOsUtils::count_va_pulls(format));
+
+        const auto written = sprintf_body(ql, buff, format, args, false);
+        if (count != 0 && written >= count) {
+            // truncate: force the terminator inside the count window
+            ql.mem().write_ptr(buff + (count - 1), 0, 1);
+            return static_cast<std::uint64_t>(count - 1);
+        }
+        return written;
     };
 
     // time_t time(time_t *destTime);

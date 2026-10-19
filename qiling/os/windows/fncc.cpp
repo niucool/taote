@@ -15,7 +15,15 @@ std::string api_get_string(Qiling& ql, const std::pair<std::string, FcallValue>&
     if (const auto* s = std::get_if<std::string>(&p.second)) {
         return *s;
     }
-    return QlOsUtils::read_cstring(ql, std::get<std::uint64_t>(p.second));
+    // the NULL string args ride the empty string (the windows contract: the
+    // NULL lpValueName means the default-value probe; the raw pointer stays
+    // reachable through api_get_int for the callers that need the
+    // distinction)
+    const auto addr = std::get<std::uint64_t>(p.second);
+    if (addr == 0) {
+        return "";
+    }
+    return QlOsUtils::read_cstring(ql, addr);
 }
 
 std::uint64_t api_get_int(const std::pair<std::string, FcallValue>& p) {

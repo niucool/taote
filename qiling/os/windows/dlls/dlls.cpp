@@ -38,6 +38,8 @@
 #include "qiling/os/windows/dlls/ntdll.cpp"
 #include "qiling/os/windows/dlls/ucrtbased.cpp"
 #include "qiling/os/windows/dlls/wsock32.cpp"
+#include "qiling/os/windows/dlls/ws2_32.cpp"
+#include "qiling/os/windows/dlls/ucrt.cpp"
 #include "qiling/os/windows/dlls/ole32.cpp"
 #include "qiling/os/windows/dlls/shlwapi.cpp"
 #include "qiling/os/windows/dlls/crypt32.cpp"
@@ -81,6 +83,8 @@ void register_dlls() {
     win::register_ntdll_family();
     win::register_ucrtbased_family();
     win::register_wsock32_family();
+    win::register_ws2_32_family();
+    win::register_ucrt_family();
     win::register_ole32_family();
     win::register_shlwapi_family();
     win::register_crypt32_family();

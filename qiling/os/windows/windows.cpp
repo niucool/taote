@@ -1,4 +1,11 @@
 #include "qiling/os/windows/windows.hpp"
+
+#include <cstdio>
+#include <cstdlib>
+#include <array>
+#include <unicorn/unicorn.h>
+#include <unicorn/x86.h>
+
 #include "qiling/loader/pe.hpp"
 
 #include "qiling/arch/x86.hpp"
@@ -30,6 +37,13 @@ QlOsWindows::QlOsWindows(Qiling* ql) : QlOs(ql) {
         fcall_table_[WinCc::Stdcall] = std::make_unique<QlFunctionCall>(std::make_unique<cc::ms64>(arch));
         fcall_table_[WinCc::Cdecl] = std::make_unique<QlFunctionCall>(std::make_unique<cc::ms64>(arch));
     } else {
+        // the x86 windows fcall layer: the stub-dll fixture binaries (the
+        // TCC builds) call the stdcall-declared surfaces through the
+        // caller-cleanup shapes — the callee never owns the arg stack, so
+        // the QlStdcall unwind must not double-pop (the real stdcall bodies
+        // only execute on the real-dll hosts, and there the x64 surface is
+        // the tested shape). The no-pop deviation rides on the QlStdcall::
+        // unwind side — the QlCdecl shape covers both spellings.
         fcall_table_[WinCc::Stdcall] = std::make_unique<QlFunctionCall>(std::make_unique<cc::QlStdcall>(arch));
         fcall_table_[WinCc::Cdecl] = std::make_unique<QlFunctionCall>(std::make_unique<cc::QlCdecl>(arch));
         fcall_table_[WinCc::Ms64] = std::make_unique<QlFunctionCall>(std::make_unique<cc::QlStdcall>(arch));
@@ -110,7 +124,94 @@ void QlOsWindows::ensure_profile_state() {
     if (ql_->arch().bits() == 64) {
         ql_->arch().regs().write("gsbase", GS_SEGMENT_ADDR);
     } else {
-        ql_->arch().regs().write("fsbase", FS_SEGMENT_ADDR);
+        // the x86 GDT walk (windows.py __setup_gdt + arch/x86_utils.py
+        // SegmentManager86): UC_X86_REG_FS_BASE is a no-op on the 32-bit
+        // unicorn (the x64-only register), so the 32-bit segments ride the
+        // GDT descriptors with the fixed slots (the cs @3, the ds/ss/es @5,
+        // the fs @14, the gs @15 — the verbatim upstream indices)
+        constexpr std::uint8_t kAPresent = 1 << 7;
+        constexpr std::uint8_t kAPriv3 = 0b11 << 5;
+        constexpr std::uint8_t kAPriv0 = 0b00 << 5;
+        constexpr std::uint8_t kADescCode = 1 << 4;
+        constexpr std::uint8_t kADescData = 1 << 4;
+        constexpr std::uint8_t kACode = 1 << 3;
+        constexpr std::uint8_t kACodeC = 1 << 2;
+        constexpr std::uint8_t kACodeR = 1 << 1;
+        constexpr std::uint8_t kADataE = 1 << 2;
+        constexpr std::uint8_t kADataW = 1 << 1;
+        constexpr std::uint8_t kFOpSize32 = 1 << 2;
+
+        constexpr std::uint64_t kGdtAddr = 0x30000;   // QL_X86_GDT_ADDR
+        constexpr std::uint32_t kGdtLimit = 0x1000;   // QL_X86_GDT_LIMIT
+        if (!ql_->mem().is_available(kGdtAddr, kGdtLimit)) {
+            throw QlErrorBase("cannot map GDT, memory location is taken");
+        }
+        ql_->mem().map(kGdtAddr, kGdtLimit, UC_PROT_ALL, "[GDT]");
+
+        uc_x86_mmr gdtr{};
+        gdtr.base = kGdtAddr;
+        gdtr.limit = static_cast<std::uint16_t>(kGdtLimit - 1);
+        uc_reg_write(&ql_->arch().uc(), UC_X86_REG_GDTR, &gdtr);
+
+        // x86_utils.py GDTManager.make_entry: the base 8+24 bits, the limit
+        // 4+16 bits, the access byte, the 4 flag bits
+        const auto make_entry = [](std::uint64_t base, std::uint32_t limit, std::uint8_t access,
+                                   std::uint8_t flags) -> std::array<std::uint8_t, 8> {
+            const std::uint64_t entry = static_cast<std::uint64_t>((base >> 24) & 0xff) << 56 |
+                                        static_cast<std::uint64_t>(flags) << 52 |
+                                        static_cast<std::uint64_t>((limit >> 16) & 0xf) << 48 |
+                                        static_cast<std::uint64_t>(access) << 40 |
+                                        static_cast<std::uint64_t>(base & 0xffffff) << 16 |
+                                        (limit & 0xffff);
+            std::array<std::uint8_t, 8> out{};
+            for (int i = 0; i < 8; ++i) {
+                out[static_cast<std::size_t>(i)] = static_cast<std::uint8_t>((entry >> (8 * i)) & 0xff);
+            }
+            return out;
+        };
+        const auto make_selector = [](std::uint16_t idx, std::uint8_t rpl) {
+            return static_cast<std::uint16_t>((idx << 3) | rpl);
+        };
+        // register_gdt_segment: the huge limits get the granularity bit and
+        // the 4K granularity (the lower 12 bits ride implicitly set)
+        const auto write_segment = [&](std::uint16_t idx, std::uint64_t base, std::uint32_t limit,
+                                       std::uint8_t access) {
+            std::uint32_t seg_limit = limit;
+            std::uint8_t flags = kFOpSize32;
+            if (seg_limit > (1 << 16)) {
+                seg_limit >>= 12;
+                flags |= 1 << 3;  // QL_X86_F_GRANULARITY
+            }
+            const auto desc = make_entry(base, seg_limit, access, flags);
+            ql_->mem().write(kGdtAddr + idx * 8, std::vector<std::uint8_t>(desc.begin(), desc.end()));
+            return make_selector(idx, static_cast<std::uint8_t>((access >> 5) & 0b11));
+        };
+
+        const auto write_seg_reg = [this](const char* name, std::uint16_t value) {
+            ql_->arch().regs().write(name, value);
+        };
+
+        // setup_cs_ds_ss_es(0, 4 << 30) — the cs @3 (the conforming code),
+        // the ds/ss/es @5 (the data segments ride PRIV_0 verbatim — the
+        // upstream comment: the ring-3 change only worked with PRIV_0)
+        {
+            const auto cs_access = static_cast<std::uint8_t>(kAPresent | kAPriv3 | kADescCode | kACode | kACodeC | kACodeR);
+            write_seg_reg("cs", write_segment(3, 0, (4ULL << 30) - 1, cs_access));
+        }
+        {
+            const auto ds_access = static_cast<std::uint8_t>(kAPresent | kAPriv0 | kADescData | kADataE | kADataW);
+            const auto ds_sel = write_segment(5, 0, (4ULL << 30) - 1, ds_access);
+            write_seg_reg("ds", ds_sel);
+            write_seg_reg("ss", ds_sel);
+            write_seg_reg("es", ds_sel);
+        }
+
+        // setup_fs(FS_SEGMENT_ADDR, FS_SEGMENT_SIZE) / setup_gs
+        {
+            const auto seg_access = static_cast<std::uint8_t>(kAPresent | kAPriv3 | kADescData | kADataE | kADataW);
+            write_seg_reg("fs", write_segment(14, FS_SEGMENT_ADDR, FS_SEGMENT_SIZE - 1, seg_access));
+            write_seg_reg("gs", write_segment(15, GS_SEGMENT_ADDR, GS_SEGMENT_SIZE - 1, seg_access));
+        }
     }
 
     const auto heap_base = static_cast<std::uint64_t>(profile().get_int(os_section_name(), "heap_address"));

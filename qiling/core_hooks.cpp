@@ -1,5 +1,8 @@
 #include "qiling/core_hooks.hpp"
 
+#include <cstdio>
+#include <cstdlib>
+
 #include <algorithm>
 
 #include <unicorn/unicorn.h>

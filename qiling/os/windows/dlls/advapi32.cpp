@@ -155,7 +155,9 @@ std::optional<std::uint64_t> reg_query_value(Qiling& ql, const ResolvedParams& p
         }
     }
 
-    // set lpData
+    // set lpData. The lpData==0 probe (the value-existence walk, the
+    // reg_query_test shape) answers the required length without the write —
+    // the null-data write would fault on the address-0 read/write
     os::RegValue reg_value = *value;
     const auto length = registry::RegistryManager::write_reg_value_into_mem(
         reg_type, lp_data, reg_value, max_size, wide, ql);
@@ -778,6 +780,111 @@ void register_advapi32_token_sc_families() {
         {"lpServiceArgVectors", PVOID_},
     }) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
         return 1;
+    };
+
+    // BOOL ControlService(SC_HANDLE hService, DWORD dwControl,
+    //                     LPSERVICE_STATUS lpServiceStatus); — the zeroed
+    // status image rides back (the running-state shape)
+    WinsdkApi("ControlService", WinCc::Stdcall, {
+        {"hService", PVOID_},
+        {"dwControl", DWORD_},
+        {"lpServiceStatus", PVOID_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto lp_status = api_get_int(get_param(params, "lpServiceStatus"));
+        if (lp_status != 0) {
+            // SERVICE_STATUS: the type/state/controls/wait cells zeroed, the
+            // state = SERVICE_RUNNING (0x4)
+            ql.mem().write(lp_status, std::vector<std::uint8_t>(28, 0));
+            ql.mem().write_ptr(lp_status + 4, 4, 4);
+        }
+        return 1;
+    };
+
+    // the crypto provider family: the fake provider/hash objects ride the
+    // handle manager (the tests only exercise the call shapes; the real
+    // crypto surface lands with the crypt32 slice)
+    const auto acquire_context_body = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto ph_prov = api_get_int(get_param(params, "phProv"));
+        if (ph_prov == 0) {
+            return 0;  // NTE_BAD_FLAGS shape
+        }
+        Handle new_handle(std::nullopt, nullptr, "cryptprov");
+        w(ql).handle_manager().append(new_handle);
+        ql.mem().write_ptr(ph_prov, new_handle.id);
+        return 1;
+    };
+
+    const auto create_hash_body = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto ph_hash = api_get_int(get_param(params, "phHash"));
+        if (ph_hash == 0) {
+            return 0;
+        }
+        Handle new_handle(std::nullopt, nullptr, "crypthash");
+        w(ql).handle_manager().append(new_handle);
+        ql.mem().write_ptr(ph_hash, new_handle.id);
+        return 1;
+    };
+
+    WinsdkApi("CryptAcquireContextA", WinCc::Stdcall, {
+        {"phProv", PVOID_},
+        {"pszContainer", LPCSTR_},
+        {"pszProvider", LPCSTR_},
+        {"dwProvType", DWORD_},
+        {"dwFlags", DWORD_},
+    }) = acquire_context_body;
+
+    WinsdkApi("CryptAcquireContextW", WinCc::Stdcall, {
+        {"phProv", PVOID_},
+        {"pszContainer", LPCWSTR_},
+        {"pszProvider", LPCWSTR_},
+        {"dwProvType", DWORD_},
+        {"dwFlags", DWORD_},
+    }) = acquire_context_body;
+
+    WinsdkApi("CryptCreateHash", WinCc::Stdcall, {
+        {"hProv", PVOID_},
+        {"Algid", DWORD_},
+        {"hKey", PVOID_},
+        {"dwFlags", DWORD_},
+        {"phHash", PVOID_},
+    }) = create_hash_body;
+
+    WinsdkApi("CryptHashData", WinCc::Stdcall, {
+        {"hHash", PVOID_},
+        {"pbData", PVOID_},
+        {"dwDataLen", DWORD_},
+        {"dwFlags", DWORD_},
+    }) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
+        return 1;
+    };
+
+    WinsdkApi("CryptDestroyHash", WinCc::Stdcall, {
+        {"hHash", PVOID_},
+    }) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
+        return 1;
+    };
+
+    WinsdkApi("CryptReleaseContext", WinCc::Stdcall, {
+        {"hProv", PVOID_},
+        {"dwFlags", DWORD_},
+    }) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
+        return 1;
+    };
+
+    // LSTATUS RegEnumKeyExA(HKEY hKey, DWORD dwIndex, LPSTR lpName,
+    //                        LPDWORD lpcchName, ...); — the fresh keys carry
+    // no subkeys (the ERROR_NO_MORE_ITEMS shape)
+    WinsdkApi("RegEnumKeyExA", WinCc::Stdcall, {
+        {"hKey", PVOID_},
+        {"dwIndex", DWORD_},
+        {"lpName", PVOID_},
+        {"lpcchName", PVOID_},
+        {"lpReserved", PVOID_},
+        {"lpClass", PVOID_},
+        {"lpcchClass", PVOID_},
+        {"lpftLastWriteTime", PVOID_},
+    }) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
+        return 259;  // ERROR_NO_MORE_ITEMS
     };
 }
 

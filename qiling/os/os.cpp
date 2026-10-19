@@ -1,4 +1,5 @@
 #include <cstdio>
+#include <cstdlib>
 #include <cstdint>
 
 #include "qiling/os/os.hpp"

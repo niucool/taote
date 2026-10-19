@@ -250,6 +250,32 @@ std::optional<std::uint64_t> create_file_mapping_body(Qiling& ql, const Resolved
     return fm_handle.id;
 }
 
+// the cwd text (the profile PATH current_dir; the GetCurrentDirectory
+// callers probe with the same buffer size contract)
+std::uint64_t write_current_directory(Qiling& ql, std::uint64_t n_buffer, std::uint64_t lp_buffer,
+                                      bool wide = false) {
+    const std::string cwd = ql.profile().get("PATH", "current_dir").value_or("C:\\Windows\\system32");
+    const std::size_t unit = wide ? 2 : 1;
+    const std::size_t need = cwd.size() + 1;  // the chars + the terminator
+
+    if (lp_buffer == 0 || n_buffer < need) {
+        return need;  // the caller retries with the bigger buffer
+    }
+    std::vector<std::uint8_t> bytes;
+    for (const char c : cwd) {
+        bytes.push_back(static_cast<std::uint8_t>(c));
+        if (wide) {
+            bytes.push_back(0);
+        }
+    }
+    bytes.push_back(0);
+    if (wide) {
+        bytes.push_back(0);
+    }
+    ql.mem().write(lp_buffer, bytes);
+    return cwd.size();
+}
+
 }  // namespace
 
 void register_fileapi_family() {
@@ -283,15 +309,74 @@ void register_fileapi_family() {
             return ERROR_INVALID_PARAMETER;
         }
 
-        // Check if path exists
+        // the wildcard segment probe (the *.txt shape): the case-insensitive
+        // FNMatch-lite (* runs, ? singles)
+        const auto wildcard_match = [](const std::string& text, const std::string& pat) {
+            std::size_t t = 0, p = 0, star = std::string::npos, mark = 0;
+            const auto lower = [](char c) { return static_cast<char>(std::tolower(static_cast<unsigned char>(c))); };
+            while (t < text.size()) {
+                if (p < pat.size() && (pat[p] == '?' || lower(pat[p]) == lower(text[t]))) {
+                    ++t; ++p;
+                } else if (p < pat.size() && pat[p] == '*') {
+                    star = p++;
+                    mark = t;
+                } else if (star != std::string::npos) {
+                    p = star + 1;
+                    t = ++mark;
+                } else {
+                    return false;
+                }
+            }
+            while (p < pat.size() && pat[p] == '*') ++p;
+            return p == pat.size();
+        };
+
+        // Check if path exists; the wildcard segment walks the parent
+        // directory for the first match (the FindNextFile continues from the
+        // parked handle)
         std::shared_ptr<QlFsMappedObject> f;
         std::uint64_t filesize = 0;
+        std::string matched_name;
         try {
             f = w(ql).fs_mapper()->open(filename, "r");
             filesize = std::filesystem::file_size(f->name());
-        } catch (const std::filesystem::filesystem_error&) {
-            w(ql).set_last_error(ERROR_FILE_NOT_FOUND);
-            return kInvalidHandleValue;
+            matched_name = filename;
+        } catch (const std::exception&) {
+            // the fs mapper raises its own exception types over the std
+            // filesystem ones; both land in the wildcard walk
+            const auto slash = filename.find_last_of("\\/");
+            const std::string dir = slash == std::string::npos ? std::string() : filename.substr(0, slash);
+            const std::string pat = slash == std::string::npos ? filename : filename.substr(slash + 1);
+
+            if (pat.find('*') == std::string::npos && pat.find('?') == std::string::npos) {
+                w(ql).set_last_error(ERROR_FILE_NOT_FOUND);
+                return kInvalidHandleValue;
+            }
+
+            const auto hdir = w(ql).path()->virtual_to_host_path(dir.empty() ? std::string(".") : dir);
+            std::error_code ec;
+            std::filesystem::directory_iterator it(hdir, ec);
+            if (ec) {
+                w(ql).set_last_error(ERROR_PATH_NOT_FOUND);
+                return kInvalidHandleValue;
+            }
+            for (const auto& ent : it) {
+                const auto name = ent.path().filename().string();
+                if (wildcard_match(name, pat)) {
+                    try {
+                        f = w(ql).fs_mapper()->open(dir.empty() ? name : dir + "\\" + name, "r");
+                    } catch (const std::exception&) {
+                        continue;
+                    }
+                    filesize = std::filesystem::is_directory(ent.status(ec)) ? 0 : std::filesystem::file_size(ent.path(), ec);
+                    matched_name = name;
+                    break;
+                }
+            }
+            if (matched_name.empty()) {
+                w(ql).set_last_error(ERROR_FILE_NOT_FOUND);
+                return kInvalidHandleValue;
+            }
         }
 
         // Create a handle for the path
@@ -304,7 +389,7 @@ void register_fileapi_family() {
         const auto hnano = filetime_now();
 
         char fdata[WIN32_FIND_DATAA_SIZE];
-        write_win32_find_dataa(fdata, FILE_ATTRIBUTE_NORMAL, hnano, filesize, filename);
+        write_win32_find_dataa(fdata, FILE_ATTRIBUTE_NORMAL, hnano, filesize, matched_name);
         ql.mem().write(pointer, std::vector<std::uint8_t>(fdata, fdata + WIN32_FIND_DATAA_SIZE));
 
         return new_handle.id;
@@ -959,6 +1044,358 @@ void register_fileapi_family() {
     WinsdkApi("DeleteFileW", WinCc::Stdcall, {
         {"lpFileName", LPCWSTR_},
     }) = delete_file_body;
+
+    // ---- the directory/cwd family (the pegasus api-test surface; the
+    // upstream kernel32.py does not implement the cwd walkers — the port
+    // answers the profile cwd and accepts the chdir no-op, since the fs
+    // mapper cwd is fixed per-emulation) ----
+
+    const auto remove_directory_body = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto name = api_get_string(ql, get_param(params, "lpPathName"));
+        const auto dst = w(ql).path()->virtual_to_host_path(name);
+        if (!w(ql).path()->is_safe_host_path(dst)) {
+            w(ql).set_last_error(ERROR_GEN_FAILURE);
+            return 0;
+        }
+        std::error_code ec;
+        std::filesystem::remove(dst, ec);
+        return ec ? 0 : 1;
+    };
+
+    const auto move_file_body = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto src_name = api_get_string(ql, get_param(params, "lpExistingFileName"));
+        const auto dst_name = api_get_string(ql, get_param(params, "lpNewFileName"));
+
+        const auto src = w(ql).path()->virtual_to_host_path(src_name);
+        const auto dst = w(ql).path()->virtual_to_host_path(dst_name);
+        if (!w(ql).path()->is_safe_host_path(src) || !w(ql).path()->is_safe_host_path(dst)) {
+            w(ql).set_last_error(ERROR_GEN_FAILURE);
+            return 0;
+        }
+        std::error_code ec;
+        std::filesystem::rename(src, dst, ec);
+        if (ec) {
+            w(ql).set_last_error(ERROR_FILE_NOT_FOUND);
+            return 0;
+        }
+        return 1;
+    };
+
+    const auto get_file_attributes_body_a = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto name = api_get_string(ql, get_param(params, "lpFileName"));
+        const auto dst = w(ql).path()->virtual_to_host_path(name);
+        if (!w(ql).path()->is_safe_host_path(dst) || !std::filesystem::exists(dst)) {
+            w(ql).set_last_error(ERROR_FILE_NOT_FOUND);
+            return static_cast<std::uint64_t>(0xffffffffu);  // INVALID_FILE_ATTRIBUTES
+        }
+        return std::filesystem::is_directory(dst) ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
+    };
+
+    const auto get_file_attributes_ex_body = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto name = api_get_string(ql, get_param(params, "lpFileName"));
+        const auto info = api_get_int(get_param(params, "lpFileInformation"));
+
+        const auto dst = w(ql).path()->virtual_to_host_path(name);
+        if (!w(ql).path()->is_safe_host_path(dst) || !std::filesystem::exists(dst)) {
+            w(ql).set_last_error(ERROR_FILE_NOT_FOUND);
+            return 0;
+        }
+
+        if (info != 0) {
+            // the WIN32_FILE_ATTRIBUTE_DATA image: the attrs (4), the create
+            // / access / write times (8 each), the size (8) — the cells the
+            // GetFileSizeEx callers probe
+            const std::uint64_t attrs = std::filesystem::is_directory(dst)
+                                            ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
+            const std::uint64_t size = std::filesystem::is_directory(dst) ? 0 : std::filesystem::file_size(dst);
+            const auto hnano = filetime_now();
+            ql.mem().write_ptr(info + 0, attrs, 4);
+            ql.mem().write_ptr(info + 4, hnano, 8);
+            ql.mem().write_ptr(info + 12, hnano, 8);
+            ql.mem().write_ptr(info + 20, hnano, 8);
+            ql.mem().write_ptr(info + 28, size, 8);
+        }
+        return 1;
+    };
+
+    const auto set_file_pointer_body = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto h_file = api_get_int(get_param(params, "hFile"));
+        const auto method = static_cast<int>(api_get_int(get_param(params, "dwMoveMethod")));
+
+        auto& win = w(ql);
+        const auto* handle = win.handle_manager().get(h_file);
+        if (handle == nullptr || handle->obj == nullptr) {
+            win.set_last_error(ERROR_INVALID_HANDLE);
+            return static_cast<std::uint64_t>(-1);
+        }
+
+        // the distance rides the 64-bit cell (the Ex shape) or the high/low
+        // pair (the plain shape; the high cell rides the DWORD pointer)
+        std::int64_t distance = 0;
+        bool has_ex = false, has_high_ptr = false;
+        std::uint64_t li_distance = 0, high_ptr = 0;
+        for (const auto& entry : params) {
+            const auto& pname = entry.first;
+            if (pname == "liDistanceToMove") {
+                li_distance = api_get_int(entry);
+                has_ex = true;
+            } else if (pname == "lDistanceToMove") {
+                distance = static_cast<std::int32_t>(api_get_int(entry));
+            } else if (pname == "lpDistanceToMoveHigh") {
+                high_ptr = api_get_int(entry);
+                has_high_ptr = true;
+            }
+        }
+        if (has_ex) {
+            distance = static_cast<std::int64_t>(li_distance);
+        } else if (has_high_ptr && high_ptr != 0) {
+            const auto high = static_cast<std::int32_t>(ql.mem().read_ptr(high_ptr, 4));
+            distance |= static_cast<std::int64_t>(high) << 32;
+        }
+
+        auto* f = dynamic_cast<QlFile*>(static_cast<QlFsMappedObject*>(handle->obj));
+        if (f == nullptr) {
+            win.set_last_error(ERROR_INVALID_HANDLE);
+            return static_cast<std::uint64_t>(-1);
+        }
+        return f->lseek(static_cast<std::uint64_t>(distance), method);
+    };
+
+    // BOOL SetCurrentDirectoryA(LPCSTR lpPathName);
+    WinsdkApi("SetCurrentDirectoryA", WinCc::Stdcall, {
+        {"lpPathName", LPCSTR_},
+    }) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
+        return 1;
+    };
+
+    // BOOL SetCurrentDirectoryW(LPCWSTR lpPathName);
+    WinsdkApi("SetCurrentDirectoryW", WinCc::Stdcall, {
+        {"lpPathName", LPCWSTR_},
+    }) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
+        return 1;
+    };
+
+    // BOOL SetEnvironmentVariableA(LPCSTR lpName, LPCSTR lpValue); — the
+    // env diff rides the options snapshot (the read-back lands through the
+    // GetEnvironmentVariable walk)
+    WinsdkApi("SetEnvironmentVariableA", WinCc::Stdcall, {
+        {"lpName", LPCSTR_},
+        {"lpValue", LPCSTR_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto name = api_get_string(ql, get_param(params, "lpName"));
+        const auto value = api_get_string(ql, get_param(params, "lpValue"));
+        ql.env_mut()[name] = value;
+        return 1;
+    };
+
+    // BOOL SetEnvironmentVariableW(LPCWSTR lpName, LPCWSTR lpValue);
+    WinsdkApi("SetEnvironmentVariableW", WinCc::Stdcall, {
+        {"lpName", LPCWSTR_},
+        {"lpValue", LPCWSTR_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto name = api_get_string(ql, get_param(params, "lpName"));
+        const auto value = api_get_string(ql, get_param(params, "lpValue"));
+        ql.env_mut()[name] = value;
+        return 1;
+    };
+
+    // DWORD GetCurrentDirectoryA(DWORD nBufferLength, LPSTR lpBuffer);
+    WinsdkApi("GetCurrentDirectoryA", WinCc::Stdcall, {
+        {"nBufferLength", DWORD_},
+        {"lpBuffer", LPVOID_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto n_buffer = api_get_int(get_param(params, "nBufferLength"));
+        const auto lp_buffer = api_get_int(get_param(params, "lpBuffer"));
+        return write_current_directory(ql, n_buffer, lp_buffer);
+    };
+
+    // DWORD GetCurrentDirectoryW(DWORD nBufferLength, LPWSTR lpBuffer);
+    WinsdkApi("GetCurrentDirectoryW", WinCc::Stdcall, {
+        {"nBufferLength", DWORD_},
+        {"lpBuffer", LPVOID_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto n_buffer = api_get_int(get_param(params, "nBufferLength"));
+        const auto lp_buffer = api_get_int(get_param(params, "lpBuffer"));
+        return write_current_directory(ql, n_buffer, lp_buffer, /*wide=*/true);
+    };
+
+    // BOOL RemoveDirectoryA(LPCSTR lpPathName);
+    WinsdkApi("RemoveDirectoryA", WinCc::Stdcall, {
+        {"lpPathName", LPCSTR_},
+    }) = remove_directory_body;
+
+    // BOOL RemoveDirectoryW(LPCWSTR lpPathName);
+    WinsdkApi("RemoveDirectoryW", WinCc::Stdcall, {
+        {"lpPathName", LPCWSTR_},
+    }) = remove_directory_body;
+
+    // BOOL MoveFileA(LPCSTR lpExistingFileName, LPCSTR lpNewFileName);
+    WinsdkApi("MoveFileA", WinCc::Stdcall, {
+        {"lpExistingFileName", LPCSTR_},
+        {"lpNewFileName", LPCSTR_},
+    }) = move_file_body;
+
+    // BOOL MoveFileW(LPCWSTR lpExistingFileName, LPCWSTR lpNewFileName);
+    WinsdkApi("MoveFileW", WinCc::Stdcall, {
+        {"lpExistingFileName", LPCWSTR_},
+        {"lpNewFileName", LPCWSTR_},
+    }) = move_file_body;
+
+    // DWORD GetFileAttributesA(LPCSTR lpFileName); — the attribute cell or
+    // INVALID_FILE_ATTRIBUTES on the miss
+    WinsdkApi("GetFileAttributesA", WinCc::Stdcall, {
+        {"lpFileName", LPCSTR_},
+    }) = get_file_attributes_body_a;
+
+    // BOOL GetFileAttributesExA(LPCSTR lpFileName, GET_FILEEX_INFO_LEVELS
+    //                           fInfoLevelId, LPVOID lpFileInformation);
+    WinsdkApi("GetFileAttributesExA", WinCc::Stdcall, {
+        {"lpFileName", LPCSTR_},
+        {"fInfoLevelId", DWORD_},
+        {"lpFileInformation", LPVOID_},
+    }) = get_file_attributes_ex_body;
+
+    // DWORD SetFilePointer(HANDLE hFile, LONG lDistanceToMove,
+    //                      PLONG lpDistanceToMoveHigh, DWORD dwMoveMethod);
+    WinsdkApi("SetFilePointer", WinCc::Stdcall, {
+        {"hFile", HANDLE_},
+        {"lDistanceToMove", DWORD_},
+        {"lpDistanceToMoveHigh", LPVOID_},
+        {"dwMoveMethod", DWORD_},
+    }) = set_file_pointer_body;
+
+    // BOOL SetFilePointerEx(HANDLE hFile, LARGE_INTEGER liDistanceToMove,
+    //                       PLARGE_INTEGER lpNewFilePointer, DWORD
+    //                       dwMoveMethod);
+    WinsdkApi("SetFilePointerEx", WinCc::Stdcall, {
+        {"hFile", HANDLE_},
+        {"liDistanceToMove", PVOID_},
+        {"lpNewFilePointer", PVOID_},
+        {"dwMoveMethod", DWORD_},
+    }) = set_file_pointer_body;
+
+    // BOOL FlushFileBuffers(HANDLE hFile);
+    WinsdkApi("FlushFileBuffers", WinCc::Stdcall, {
+        {"hFile", HANDLE_},
+    }) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
+        return 1;
+    };
+
+    // BOOL SetStdHandle(DWORD nStdHandle, HANDLE hHandle);
+    WinsdkApi("SetStdHandle", WinCc::Stdcall, {
+        {"nStdHandle", DWORD_},
+        {"hHandle", HANDLE_},
+    }) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
+        return 1;
+    };
+
+    // BOOL WriteConsoleW(HANDLE hConsoleOutput, const VOID* lpBuffer, DWORD
+    //                    nNumberOfCharsToWrite, LPDWORD lpNumberOfCharsWritten,
+    //                    LPVOID lpReserved); — the console write rides the
+    // stats log (the WriteFile path shape, the utf-16 body decodes)
+    WinsdkApi("WriteConsoleW", WinCc::Stdcall, {
+        {"hConsoleOutput", HANDLE_},
+        {"lpBuffer", LPVOID_},
+        {"nNumberOfCharsToWrite", DWORD_},
+        {"lpNumberOfCharsWritten", LPDWORD_},
+        {"lpReserved", LPVOID_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto lp_buffer = api_get_int(get_param(params, "lpBuffer"));
+        const auto n_chars = api_get_int(get_param(params, "nNumberOfCharsToWrite"));
+        const auto n_written = api_get_int(get_param(params, "lpNumberOfCharsWritten"));
+
+        const auto raw = ql.mem().read(lp_buffer, static_cast<std::size_t>(n_chars) * 2);
+        std::string text;
+        for (std::size_t i = 0; i + 1 < raw.size(); i += 2) {
+            const auto ch = static_cast<std::uint16_t>(raw[i]) | (static_cast<std::uint16_t>(raw[i + 1]) << 8);
+            if (ch < 0x80) {
+                text.push_back(static_cast<char>(ch));
+            } else {
+                text.push_back('?');  // the non-ascii console cells degrade
+            }
+        }
+        w(ql).stats().log_string(text);
+        if (n_written != 0) {
+            ql.mem().write_ptr(n_written, n_chars, 4);
+        }
+        return 1;
+    };
+
+    // UINT GetConsoleOutputCP(void); — the OEM codepage (the GetACP shape)
+    WinsdkApi("GetConsoleOutputCP", WinCc::Stdcall, {}) =
+        [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
+        return 437;
+    };
+
+    // BOOL SetEvent / ResetEvent(HANDLE hEvent); — the event state is not
+    // observable by the single-threaded samples (the sync primitives land
+    // with the thread slice); the calls succeed
+    WinsdkApi("SetEvent", WinCc::Stdcall, {
+        {"hEvent", HANDLE_},
+    }) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
+        return 1;
+    };
+    WinsdkApi("ResetEvent", WinCc::Stdcall, {
+        {"hEvent", HANDLE_},
+    }) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
+        return 1;
+    };
+
+    // LONG UnhandledExceptionFilter(struct _EXCEPTION_POINTERS*);
+    // — the upstream returns EXCEPTION_EXECUTE_HANDLER (the process dies)
+    WinsdkApi("UnhandledExceptionFilter", WinCc::Stdcall, {
+        {"ExceptionInfo", PVOID_},
+    }) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
+        return 1;  // EXCEPTION_EXECUTE_HANDLER
+    };
+
+    // PVOID EncodePointer(PVOID ptr); — the cookie xor walk (the value only
+    // round-trips through DecodePointer; the CRT init probes are satisfied)
+    WinsdkApi("EncodePointer", WinCc::Stdcall, {
+        {"ptr", PVOID_},
+    }) = [](Qiling&, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        return api_get_int(get_param(params, "ptr")) ^ 0x0b0b0b0b0b0b0b0bull;
+    };
+
+    // BOOL GetExitCodeProcess(HANDLE hProcess, LPDWORD lpExitCode);
+    WinsdkApi("GetExitCodeProcess", WinCc::Stdcall, {
+        {"hProcess", HANDLE_},
+        {"lpExitCode", LPVOID_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto lp_exit = api_get_int(get_param(params, "lpExitCode"));
+        if (lp_exit != 0) {
+            ql.mem().write_ptr(lp_exit, 0, 4);  // STILL_ACTIVE is never 0; the child rode exit 0
+        }
+        return 1;
+    };
+
+    // BOOL CreateProcessA(LPCSTR, LPSTR, ...); — the child process emulation
+    // is out of scope (the single-emu surface); the call fails with the
+    // ERROR_FILE_NOT_FOUND shape
+    WinsdkApi("CreateProcessA", WinCc::Stdcall, {
+        {"lpApplicationName", LPCSTR_},
+        {"lpCommandLine", LPCSTR_},
+        {"lpProcessAttributes", PVOID_},
+        {"lpThreadAttributes", PVOID_},
+        {"bInheritHandles", INT_},
+        {"dwCreationFlags", DWORD_},
+        {"lpEnvironment", PVOID_},
+        {"lpCurrentDirectory", LPCSTR_},
+        {"lpStartupInfo", PVOID_},
+        {"lpProcessInformation", PVOID_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
+        w(ql).set_last_error(2);  // ERROR_FILE_NOT_FOUND
+        return 0;
+    };
+
+    // BOOL DebugActiveProcess(DWORD dwProcessId); — the debugger attach is
+    // out of scope; the probe answers failure
+    WinsdkApi("DebugActiveProcess", WinCc::Stdcall, {
+        {"dwProcessId", DWORD_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
+        w(ql).set_last_error(87);  // ERROR_INVALID_PARAMETER
+        return 0;
+    };
 }
 
 }  // namespace win

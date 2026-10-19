@@ -17,7 +17,13 @@ namespace os {
 std::string QlOsUtils::read_string(Qiling& ql, std::uint64_t address, int charlen, int maxlen) {
     std::string data;
     int strlen = 0;
-
+    // a pointer into the null canary page is never a real guest string; the
+    // emulation keeps the first page unmapped and windows would fault it
+    // anyway, while a taote-side read would kill the run before the guest
+    // ever sees the bad pointer (the argv startup's bogus _Format=1 slot)
+    if (address < 0x1000) {
+        return data;
+    }
     while (true) {
         const auto unit = ql.mem().read(address, static_cast<std::size_t>(charlen));
         bool is_terminator = true;
@@ -223,6 +229,12 @@ std::pair<std::string, std::vector<std::uint64_t>> QlOsUtils::common_printf(Qili
     std::vector<std::uint64_t> orig_args;
 
     const auto read_str = [&](std::uint64_t addr) {
+        // the %s of a null pointer renders "(null)" (the printf semantics;
+        // the argv-walk fixtures index past the array tail and the read at
+        // 0 would fault the emulation)
+        if (addr == 0) {
+            return std::string("(null)");
+        }
         return wstring ? read_wstring(ql, addr) : read_cstring(ql, addr);
     };
 

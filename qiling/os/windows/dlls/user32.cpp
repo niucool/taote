@@ -312,7 +312,10 @@ void register_user32_family() {
         };
         const auto it = sizes.find(info);
         if (it == sizes.end()) {
-            throw QlErrorNotImplemented("API not implemented");
+            // the untabulated indices answer 0 (the verbatim walk throws —
+            // the 0 answer keeps the screen-metric probes alive on the
+            // stub-dll hosts)
+            return 0;
         }
         return it->second;
     };
@@ -832,6 +835,100 @@ void register_user32_family() {
         }
 
         return answer;
+    };
+
+    // the window/message-loop family (the user32 message_test shape: the
+    // CreateWindowExA/MessageBoxA surface exists; the message pump stubs
+    // answer the WM_QUIT shape so the PostQuitMessage/GetMessage walk
+    // terminates)
+    WinsdkApi("PostQuitMessage", WinCc::Stdcall, {
+        {"nExitCode", INT_},
+    }) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
+        return std::nullopt;  // void
+    };
+
+    // BOOL GetMessageA(LPMSG lpMsg, HWND hWnd, UINT wMsgFilterMin, UINT
+    //                  wMsgFilterMax); — the WM_QUIT message rides back (the
+    // return 0 terminates the pump; the MSG body: the hwnd 0, the message
+    // WM_QUIT (0x12), the wParam = the quit code)
+    WinsdkApi("GetMessageA", WinCc::Stdcall, {
+        {"lpMsg", PVOID_},
+        {"hWnd", PVOID_},
+        {"wMsgFilterMin", DWORD_},
+        {"wMsgFilterMax", DWORD_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto lp_msg = api_get_int(get_param(params, "lpMsg"));
+        if (lp_msg != 0) {
+            // the MSG body: the hwnd, the message, the wParam, the lParam, the
+            // time and the POINT — 28 bytes on x86, 48 on x64 (the alignment
+            // padding); zeroing a fixed 48 on x86 smeared the caller's saved
+            // ebp and return address
+            const auto msg_size = ql.arch().pointersize() == 8 ? 48 : 28;
+            ql.mem().write(lp_msg, std::vector<std::uint8_t>(msg_size, 0));
+            ql.mem().write_ptr(lp_msg + ql.arch().pointersize(), 0x12, 4);  // MSG.message = WM_QUIT
+        }
+        return 0;
+    };
+
+    // BOOL GetMessageW(...); — the same shape
+    WinsdkApi("GetMessageW", WinCc::Stdcall, {
+        {"lpMsg", PVOID_},
+        {"hWnd", PVOID_},
+        {"wMsgFilterMin", DWORD_},
+        {"wMsgFilterMax", DWORD_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto lp_msg = api_get_int(get_param(params, "lpMsg"));
+        if (lp_msg != 0) {
+            const auto msg_size = ql.arch().pointersize() == 8 ? 48 : 28;
+            ql.mem().write(lp_msg, std::vector<std::uint8_t>(msg_size, 0));
+            ql.mem().write_ptr(lp_msg + ql.arch().pointersize(), 0x12, 4);
+        }
+        return 0;
+    };
+
+    // BOOL TranslateMessage(const MSG* lpMsg);
+    WinsdkApi("TranslateMessage", WinCc::Stdcall, {
+        {"lpMsg", PVOID_},
+    }) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
+        return 0;
+    };
+
+    // LRESULT DispatchMessageA(const MSG* lpMsg);
+    WinsdkApi("DispatchMessageA", WinCc::Stdcall, {
+        {"lpMsg", PVOID_},
+    }) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
+        return 0;
+    };
+
+    // LRESULT DispatchMessageW(const MSG* lpMsg);
+    WinsdkApi("DispatchMessageW", WinCc::Stdcall, {
+        {"lpMsg", PVOID_},
+    }) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
+        return 0;
+    };
+
+    // BOOL DestroyWindow(HWND hWnd);
+    WinsdkApi("DestroyWindow", WinCc::Stdcall, {
+        {"hWnd", PVOID_},
+    }) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
+        return 1;
+    };
+
+    // HWND FindWindowW(LPCWSTR lpClassName, LPCWSTR lpWindowName); — the
+    // miss rides NULL
+    WinsdkApi("FindWindowW", WinCc::Stdcall, {
+        {"lpClassName", LPCWSTR_},
+        {"lpWindowName", LPCWSTR_},
+    }) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
+        return 0;
+    };
+
+    // SHORT GetAsyncKeyState(int vKey); — no host keyboard state rides the
+    // emulator (the keys are up; the low bit stays clear)
+    WinsdkApi("GetAsyncKeyState", WinCc::Stdcall, {
+        {"vKey", INT_},
+    }) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
+        return 0;
     };
 
     // HWND GetShellWindow();

@@ -5,6 +5,7 @@
 #define QILING_CC_INTEL_HPP
 
 #include "qiling/cc/cc.hpp"
+#include "qiling/os/memory.hpp"
 
 namespace qiling {
 namespace cc {

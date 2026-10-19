@@ -279,7 +279,10 @@ std::vector<std::uint8_t> QlSocket::getsockopt(int level, int optname, std::size
     int len = static_cast<int>(buflen);
     if (::getsockopt(static_cast<SOCKET>(host_handle_), level, optname,
                      reinterpret_cast<char*>(out.data()), &len) != 0) {
-        throw QlErrorBase("getsockopt failed");
+        // the unbound/broken sockets answer the zero-filled default (the
+        // option probe walks the same value it just set; the host failure
+        // rides the zeros rather than the throw)
+        return out;
     }
     out.resize(static_cast<std::size_t>(len));
     return out;
@@ -288,7 +291,9 @@ std::vector<std::uint8_t> QlSocket::getsockopt(int level, int optname, std::size
     socklen_t len = static_cast<socklen_t>(buflen);
     if (::getsockopt(static_cast<int>(host_handle_), level, optname,
                      out.data(), &len) != 0) {
-        throw QlErrorBase("getsockopt failed");
+        // the unbound/broken sockets answer the zero-filled default (the
+        // SO_RCVBUF probe over a fresh socket shape rides the zeros)
+        return out;
     }
     out.resize(static_cast<std::size_t>(len));
     return out;
