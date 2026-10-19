@@ -43,6 +43,10 @@ public:
     // riscv.py init_context: pc = 0x08000000 (pure register op — usable now)
     void init_context();
 
+    // riscv.py unicorn_exception_handler: the illegal instruction (intno 2)
+    // warns and returns; the rest raise NotImplemented
+    std::int32_t unicorn_exception_handler(int intno);
+
 protected:
     explicit QlArchRISCV(Qiling* ql, int bits, std::optional<std::uint32_t> cputype);
 

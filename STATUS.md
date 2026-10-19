@@ -1333,3 +1333,11 @@ color-pair machinery rides the state shell without a terminal.
 | QlOsMcu::run fast branch | `os/mcu/mcu.py` (MCUTask + tasks_start) | ✅ | the emu slices per the 100ms interval (the uc timeout in the usec — the uc's interval default rides as the port constant); the hw.step() rides per slice (the on_interrupted body); the fault warns and requests the clean stop (the on_interrupted non-OK shape); the count rides the schedule count; the end/stop checks break the loop |
 | the deviation | — | — | the upstream's fast mode rides the gevent threadpool + the greenlet timeout; the port rides the uc's own emu_start timeout parameter per slice (the same slicing shape without the gevent machinery — the multitask/multi-uc-thread path remains the upstream-only surface) |
 | the fixture | `tests/Hw_Test.cpp` | ✅ | the fast-mode TICKINT dispatch (the systick LOAD=3 + the CTRL TICKINT, the 6 interval slices riding the downcount cross + the handler store through the interrupt context, the counter == 6) |
+
+### Phase 13.13 — the gd32 full-os run (the RISCV/eclic slice)
+
+| piece | upstream | state | notes |
+|---|---|---|---|
+| QlArchRISCV::unicorn_exception_handler | `arch/riscv.py` | ✅ | the illegal instruction (intno 2) warns and continues; the rest raise NotImplemented (the verbatim upstream shape) |
+| QlLoaderMCU the arch dispatch | — | ✅ | the reset + the intr hook dispatch on the arch type (the RISCV rides the riscv init_context + the exception handler; the CORTEX_M keeps its own) |
+| the gd32 full-os fixture | — | ✅ | the ihex blob (the ELA record) loads at the flash, the RISCV-32 blob (the lui/addi/sw/jal) executes through the loader's reset + the eclic core entity rides the board table; the store lands in the SRAM |

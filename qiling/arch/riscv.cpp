@@ -1,5 +1,7 @@
 #include "qiling/arch/riscv.hpp"
 
+#include <spdlog/spdlog.h>
+
 #include <unicorn/riscv.h>
 #include <unicorn/unicorn.h>
 
@@ -135,6 +137,16 @@ void QlArchRISCV::enable_float() {
 void QlArchRISCV::init_context() {
     // riscv.py init_context: pc = 0x08000000 (pure register op)
     regs().write("pc", 0x08000000);
+}
+
+std::int32_t QlArchRISCV::unicorn_exception_handler(int intno) {
+    // riscv.py: the illegal instruction (intno 2) warns and continues; the
+    // rest raise NotImplemented (the upstream raises through the hook)
+    if (intno == 2) {
+        spdlog::warn("[{:#x}] Illegal instruction", regs().arch_pc());
+        return 0;
+    }
+    throw QlErrorNotImplemented("Unhandled interrupt number (" + std::to_string(intno) + ")");
 }
 
 QlArchRISCV64::QlArchRISCV64(Qiling* ql, std::optional<RISCV64_CPU_MODEL> cputype)

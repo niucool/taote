@@ -1167,3 +1167,45 @@ TEST(HwManager, FastModeMcuRunDrivesHwStepPerIntervalSlice) {
     // the slices ran (the counter rides the schedule count)
     EXPECT_EQ(dynamic_cast<qiling::os::QlOsMcu*>(&ql.os())->counter(), 6u);
 }
+
+// The gd32 full-os run on the RISCV arch: the board env rides the loader's
+// load_env walk (the flash/sram/perip + the eclic core), the ihex blob loads
+// at the flash via the ELA record, the init_context rides the RISCV pc, and
+// the guest store lands in the SRAM.
+TEST(HwManager, Gd32FullOsRunLoadsAndExecutesOnRiscv) {
+    // the ihex blob (the RISCV-32): the lui t0,0x20000000; the addi t1,42;
+    // the sw t1,0(t0); the jal x0,0 (the self-loop tail)
+    const std::vector<std::uint8_t> code = {
+        0xB7, 0x02, 0x00, 0x20,  // lui t0, 0x20000
+        0x13, 0x03, 0xA0, 0x02,  // addi t1, zero, 42
+        0x23, 0xA0, 0x62, 0x00,  // sw t1, 0(t0)
+        0x6F, 0x00, 0x00, 0x00,  // jal x0, 0 (the self-loop)
+    };
+    const auto base = std::filesystem::temp_directory_path() / "ql_hw_gd32_full.hex";
+    {
+        std::ofstream out(base, std::ios::binary | std::ios::trunc);
+        out << ihex_line(0x0000, 0x04, {0x08, 0x00}) << "\n";  // the ELA: the base 0x08000000
+        out << ihex_line(0x0000, 0x00, code) << "\n";
+        out << ":00000001FF\n";
+    }
+
+    QilingOptions options;
+    options.argv = {base.string()};
+    options.rootfs = ensure_hw_rootfs().string();
+    options.ostype = QL_OS::MCU;
+    options.archtype = QL_ARCH::RISCV;
+    options.env = qiling::hw::gd32vf103_board_env();
+    Qiling ql(options);
+
+    // the eclic core entity rides the board table
+    auto* eclic = dynamic_cast<qiling::hw::Gd32vf1xxEclic*>(ql.hw()->peripheral("eclic"));
+    ASSERT_NE(eclic, nullptr);
+    // the CLICINFO cell rides the plain image (the read at 0x04 returns 0)
+    EXPECT_EQ(eclic->read_body(0x04, 4), 0u);
+
+    // the blob runs on the RISCV walk (the count rides the slice budget)
+    ql.run(std::nullopt, std::nullopt, 0, 10);
+
+    // the guest store landed in the SRAM (the lui/addi/sw walk executed)
+    EXPECT_EQ(ql.mem().read_ptr(0x20000000, 4), 42u);
+}

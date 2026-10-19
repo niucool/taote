@@ -5,6 +5,7 @@
 #include "qiling/core.hpp"
 #include "qiling/hw/hw.hpp"
 #include "qiling/os/memory.hpp"
+#include "qiling/arch/riscv.hpp"
 
 #include <algorithm>
 #include <fstream>
@@ -211,9 +212,15 @@ void QlLoaderMCU::reset() {
         throw QlErrorNotImplemented("the mcu elf branch rides the board-profile slice");
     }
 
-    auto& arm = dynamic_cast<QlArchCORTEX_M&>(ql_->arch());
-    arm.init_context();
-    entry_point = arm.regs().read("pc");
+    if (ql_->arch().type() == QL_ARCH::RISCV) {
+        auto& riscv = dynamic_cast<QlArchRISCV&>(ql_->arch());
+        riscv.init_context();
+        entry_point = riscv.regs().read("pc");
+    } else {
+        auto& arm = dynamic_cast<QlArchCORTEX_M&>(ql_->arch());
+        arm.init_context();
+        entry_point = arm.regs().read("pc");
+    }
 }
 
 void QlLoaderMCU::run() {
@@ -222,13 +229,22 @@ void QlLoaderMCU::run() {
     // load_env, the intr hook, reset
     load_env();
 
-    auto& arch = dynamic_cast<QlArchCORTEX_M&>(ql_->arch());
-    // the handle rides the loader's lifetime (the discarded HookRet would
-    // RAII-unregister the hook at the temporary's destruction)
-    intr_hook_ = std::make_unique<HookRet>(ql_->hook_intr([&arch](std::uint32_t intno) {
-        arch.unicorn_exception_handler(static_cast<int>(intno));
-        return 0;
-    }));
+    // the intr hook rides the arch's exception handler (the riscv.py and
+    // the cortex_m.py walk their own handlers)
+    if (ql_->arch().type() == QL_ARCH::RISCV) {
+        auto& riscv = dynamic_cast<QlArchRISCV&>(ql_->arch());
+        intr_hook_ = std::make_unique<HookRet>(ql_->hook_intr([&riscv](std::uint32_t intno) {
+            return riscv.unicorn_exception_handler(static_cast<int>(intno));
+        }));
+    } else {
+        auto& arch = dynamic_cast<QlArchCORTEX_M&>(ql_->arch());
+        // the handle rides the loader's lifetime (the discarded HookRet would
+        // RAII-unregister the hook at the temporary's destruction)
+        intr_hook_ = std::make_unique<HookRet>(ql_->hook_intr([&arch](std::uint32_t intno) {
+            arch.unicorn_exception_handler(static_cast<int>(intno));
+            return 0;
+        }));
+    }
 
     reset();
 }
