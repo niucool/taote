@@ -1398,3 +1398,13 @@ guest's garbage `info=0` — the verbatim upstream behavior for sysinfo(0). The
 blob now rides the real sched_yield number; the sysinfo(info=0) fault shape is
 the same class as the upstream's (the mem.write at the caller-supplied
 pointer).
+
+### Phase 13.15 — the time family
+
+| piece | upstream | state | notes |
+|---|---|---|---|
+| time | `os/posix/syscall/time.py` | ✅ | int(time.time()) |
+| nanosleep/clock_nanosleep/clock_nanosleep_time64 | `time.py __sleep_common` | ✅ | the tv_sec read (the timespec64 forcing the 8-byte sec) + the nsec/1e9 add; the thread-management branch rides the host sleep (the documented deviation: the upstream parks via gevent.sleep with its own FIXME "this seems to be incomplete"; the port has no timer-wake machinery, so the sleeping thread stalls the emu for the interval) |
+| setitimer | `time.py` | ✅ | the verbatim no-op (the upstream FIXME: the signal machinery is unmodeled) |
+| times | `time.py` | ✅ | the 4×u32 ms fields + the elapsed*100 return (the clock-based approximation on WIN32) |
+| the fixture | `tests/Posix_Test.cpp` | ✅ | the time/times/setitimer blob ride (the epoch, the ticks, the stub-0) |
