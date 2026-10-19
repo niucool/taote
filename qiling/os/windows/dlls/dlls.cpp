@@ -30,22 +30,23 @@
 #include "qiling/os/windows/dlls/kernel32/tlhelp32.cpp"
 #include "qiling/os/windows/dlls/kernel32/winnt.cpp"
 #include "qiling/os/windows/dlls/kernel32/consoleapi23.cpp"
-#include "qiling/os/windows/dlls/ntdll.cpp"
 #include "qiling/os/windows/dlls/advapi32.cpp"
 #include "qiling/os/windows/dlls/msvcrt.cpp"
-#include "qiling/os/windows/dlls/crypt32.cpp"
+#include "qiling/os/windows/dlls/user32.cpp"
+#include "qiling/os/windows/dlls/wininet.cpp"
 #include "qiling/os/windows/dlls/msi.cpp"
+#include "qiling/os/windows/dlls/ntdll.cpp"
+#include "qiling/os/windows/dlls/ucrtbased.cpp"
+#include "qiling/os/windows/dlls/wsock32.cpp"
+#include "qiling/os/windows/dlls/ole32.cpp"
+#include "qiling/os/windows/dlls/shlwapi.cpp"
+#include "qiling/os/windows/dlls/crypt32.cpp"
 #include "qiling/os/windows/dlls/mscoree.cpp"
 #include "qiling/os/windows/dlls/msvbvm60.cpp"
-#include "qiling/os/windows/dlls/shlwapi.cpp"
-#include "qiling/os/windows/dlls/oleaut32.cpp"
-#include "qiling/os/windows/dlls/ole32.cpp"
-#include "qiling/os/windows/dlls/ucrtbased.cpp"
-#include "qiling/os/windows/dlls/wudplatform.cpp"
 #include "qiling/os/windows/dlls/shell32.cpp"
-#include "qiling/os/windows/dlls/wsock32.cpp"
-#include "qiling/os/windows/dlls/wininet.cpp"
-#include "qiling/os/windows/dlls/user32.cpp"
+#include "qiling/os/windows/dlls/ntoskrnl.cpp"
+#include "qiling/os/windows/dlls/wudplatform.cpp"
+#include "qiling/os/windows/dlls/oleaut32.cpp"
 
 namespace qiling {
 namespace os {
@@ -72,27 +73,28 @@ void register_dlls() {
     win::register_fibersapi_family();
     win::register_winnls_family();
     win::register_winbase_family();
+    win::register_advapi32_family();
+    win::register_msvcrt_family();
+    win::register_user32_family();
+    win::register_wininet_family();
+    win::register_msi_family();
+    win::register_ntdll_family();
+    win::register_ucrtbased_family();
+    win::register_wsock32_family();
+    win::register_ole32_family();
+    win::register_shlwapi_family();
+    win::register_crypt32_family();
+    win::register_mscoree_family();
+    win::register_msvbvm60_family();
+    win::register_shell32_family();
+    win::register_ntoskrnl_family();
+    win::register_wudplatform_family();
+    win::register_oleaut32_family();
     win::register_tlhelp32_family();
     win::register_winnt_family();
     win::register_consoleapi2_family();
     win::register_consoleapi3_family();
     win::register_psapi_family();
-    win::register_ntdll_family();
-    win::register_advapi32_family();
-    win::register_msvcrt_family();
-    win::register_crypt32_family();
-    win::register_msi_family();
-    win::register_mscoree_family();
-    win::register_msvbvm60_family();
-    win::register_shlwapi_family();
-    win::register_oleaut32_family();
-    win::register_ole32_family();
-    win::register_ucrtbased_family();
-    win::register_wudplatform_family();
-    win::register_shell32_family();
-    win::register_wsock32_family();
-    win::register_wininet_family();
-    win::register_user32_family();
 }
 
 // the static-init registration (the python module-import side effect)

@@ -3480,68 +3480,66 @@ TEST(WinApiNtdll, InfoClassWalksRideProfileValues) {
     EXPECT_FALSE(rsd.has_value());  // the set-walk return drops verbatim
 }
 
-TEST(WinApiNtdll, QuerySystemInformationRidesBasicInfoLayout) {
+TEST(WinApiNtdll, QuerySystemInformationShadowedByNtoskrnl) {
     register_dlls();
     Qiling ql(win_test_options());
 
+    // the verbatim star-import order: the ntoskrnl.py registers its
+    // Nt/ZwQuerySystemInformation AFTER the ntdll.py, so the registry keeps
+    // the NTOSKRNL body (the SystemModuleInformation ride); the ntdll's
+    // SystemBasicInformation walk rides shadowed
     const auto* qsi = ApiRegistry::instance().find("ZwQuerySystemInformation");
     ASSERT_NE(qsi, nullptr);
 
-    // SystemBasicInformation: the x64 layout (64 bytes)
+    // the SystemModuleInformation (0xb) walk: the RTL_PROCESS_MODULES image
+    // with the single ntoskrnl.exe module
     const auto r = qsi->handler(ql, 0, ResolvedParams{
-        {"SystemInformationClass", 0ull},    // SystemBasicInformation,
+        {"SystemInformationClass", 0xbull},
         {"SystemInformation", kScratch},
-        {"SystemInformationLength", 0x100ull},
-        {"ReturnLength", kScratch + 0x100},
+        {"SystemInformationLength", 0x200ull},
+        {"ReturnLength", kScratch + 0x200},
     });
     ASSERT_TRUE(r.has_value());
     EXPECT_EQ(*r, 0u);
+    EXPECT_EQ(ql.mem().read_ptr(kScratch, 4), 1u);  // the NumberOfModules
+    EXPECT_EQ(ql.mem().read_ptr(kScratch + 4 + 24, 4), 0xab000u);   // the ImageSize
+    EXPECT_EQ(ql.mem().read_ptr(kScratch + 4 + 28, 4), 0x8804000u); // the Flags
+    const auto name_cell = ql.mem().read(kScratch + 4 + 40, 33);
+    EXPECT_EQ(std::string(name_cell.begin(), name_cell.end()),
+              std::string("\\SystemRoot\\system32\\ntoskrnl.exe"));
+    EXPECT_EQ(ql.mem().read_ptr(kScratch + 0x200, 4), 300u);  // the ReturnLength
 
-    EXPECT_EQ(ql.mem().read_ptr(kScratch + 4, 4), 156250u);   // the TimerResolution
-    EXPECT_EQ(ql.mem().read_ptr(kScratch + 8, 4), 0x1000u);   // the PageSize
-    EXPECT_EQ(ql.mem().read_ptr(kScratch + 12, 4), 0x003FC38Au);
-    EXPECT_EQ(ql.mem().read_ptr(kScratch + 16, 4), 1u);
-    EXPECT_EQ(ql.mem().read_ptr(kScratch + 20, 4), 0x0046DFFFu);
-    EXPECT_EQ(ql.mem().read_ptr(kScratch + 24, 4), 1u);
-    EXPECT_EQ(ql.mem().read_ptr(kScratch + 32, 8), 0x10000u);  // the MinimumUserModeAddress
-    EXPECT_EQ(ql.mem().read_ptr(kScratch + 40, 8), 0x7FFFFFFEFFFFu);
-    EXPECT_EQ(ql.mem().read_ptr(kScratch + 48, 8), 0x3Fu);     // the ActiveProcessorsAffinityMask
-    EXPECT_EQ(ql.mem().read_ptr(kScratch + 56, 1), 6u);        // the NumberOfProcessors
-    EXPECT_EQ(ql.mem().read_ptr(kScratch + 0x100, 4), 64u);    // the ReturnLength
-
-    // the short buffer: the STATUS_INFO_LENGTH_MISMATCH
+    // the short buffer: the verbatim STATUS_INFO_LENGTH_MISMATCH
     const auto rshort = qsi->handler(ql, 0, ResolvedParams{
-        {"SystemInformationClass", 0ull},    // SystemBasicInformation,
+        {"SystemInformationClass", 0xbull},
         {"SystemInformation", kScratch},
         {"SystemInformationLength", 32ull},
-        {"ReturnLength", kScratch + 0x100},
+        {"ReturnLength", kScratch + 0x200},
     });
     ASSERT_TRUE(rshort.has_value());
     EXPECT_EQ(*rshort, 0xC0000004u);
 
-    // the unknown class: the verbatim NotImplemented raise
-    bool threw = false;
-    try {
-        (void)qsi->handler(ql, 0, ResolvedParams{
-            {"SystemInformationClass", 77ull},
-            {"SystemInformation", kScratch}, {"SystemInformationLength", 0x100ull}, {"ReturnLength", 0ull},
-        });
-    } catch (const QlErrorNotImplemented&) {
-        threw = true;
-    }
-    EXPECT_TRUE(threw);
+    // the non-0xb classes: the verbatim no-op (the untouched buffer)
+    const auto r0 = qsi->handler(ql, 0, ResolvedParams{
+        {"SystemInformationClass", 0ull},
+        {"SystemInformation", kScratch + 0x300}, {"SystemInformationLength", 0x100ull},
+        {"ReturnLength", 0ull},
+    });
+    ASSERT_TRUE(r0.has_value());
+    EXPECT_EQ(*r0, 0u);
 
-    // the Nt variant drops the return value (the verbatim missing return)
+    // the Nt variant rides the same body (the ntdll's return-drop quirk does
+    // not survive the shadowing — the registry keeps the last registration)
     const auto* ntqsi = ApiRegistry::instance().find("NtQuerySystemInformation");
     ASSERT_NE(ntqsi, nullptr);
     const auto rnt = ntqsi->handler(ql, 0, ResolvedParams{
-        {"SystemInformationClass", 0ull},    // SystemBasicInformation,
-        {"SystemInformation", kScratch + 0x200},
-        {"SystemInformationLength", 0x100ull},
+        {"SystemInformationClass", 0xbull},
+        {"SystemInformation", kScratch + 0x400},
+        {"SystemInformationLength", 0x200ull},
         {"ReturnLength", 0ull},
     });
-    EXPECT_FALSE(rnt.has_value());
-    EXPECT_EQ(ql.mem().read_ptr(kScratch + 0x200 + 4, 4), 156250u);  // the walk still ran
+    ASSERT_TRUE(rnt.has_value());
+    EXPECT_EQ(*rnt, 0u);
 }
 
 TEST(WinApiNtdll, SmallRtlStubsRideVerbatimBodies) {

@@ -211,6 +211,7 @@ void QlOsWindows::hook_winapi(std::uint64_t address, std::uint32_t size) {
 void QlOsWindows::run() {
     // windows.py run: the explicit entry/exit overrides, then the emulation
     ensure_profile_state();
+    init_sp_ = ql_->arch().regs().arch_sp();
 
     if (ql_->exit_point_set()) {
         set_exit_point(ql_->exit_point());

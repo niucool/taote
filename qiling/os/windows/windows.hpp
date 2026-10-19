@@ -94,6 +94,11 @@ public:
     // windows.py __init__: self.pid = profile.getint('KERNEL', 'pid')
     std::uint32_t pid() const noexcept { return pid_; }
 
+    // the ntoskrnl IoCreateDriver rider (the upstream ql.os.init_sp ride):
+    // the saved stack pointer restored after the nested emulation
+    std::uint64_t init_sp() const noexcept { return init_sp_; }
+    void set_init_sp(std::uint64_t v) noexcept { init_sp_ = v; }
+
     // windows.py: os.thread_manager.thread_ret_addr accessor (the thread
     // create path writes the return address at the new stack top; forwards
     // onto the manager, whose address lands at the install_hook)
@@ -123,6 +128,7 @@ private:
     // builds it over the main thread)
     std::unique_ptr<QlWindowsThreadManagement> thread_manager_;
     std::uint32_t pid_ = 0;
+    std::uint64_t init_sp_ = 0;
     bool main_thread_handle_appended_ = false;
     std::uint64_t thread_ret_addr_ = 0;
     int bits_ = 64;

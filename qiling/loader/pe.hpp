@@ -100,6 +100,23 @@ public:
     // TEB/PEB/LDR stack slice wires the real layout
     std::uint64_t peb_address() const noexcept { return peb_address_; }
 
+    // loader/pe.py: the driver flag (the MH_KEXT... the PE 0xb ride — the
+    // load_image parse sets it; the driver branch riders read it)
+    bool is_driver() const noexcept { return is_driver_; }
+
+    // loader/pe.py init_ki_user_shared_data / init_eprocess /
+    // init_driver_object / init_registry_path — the ntoskrnl-family riders
+    // (the KUSER_SHARED_DATA map + the EPROCESS/DRIVER_OBJECT placeholder
+    // images; the ntoskrnl handlers consume the addresses)
+    std::uint64_t kuser_shared_data_address() const noexcept { return kuser_shared_data_address_; }
+    std::uint64_t eprocess_address() const noexcept { return eprocess_address_; }
+    std::uint64_t driver_object_address() const noexcept { return driver_object_address_; }
+    std::uint64_t regitry_path_address() const noexcept { return regitry_path_address_; }
+    void init_ki_user_shared_data();
+    void init_eprocess();
+    void init_driver_object();
+    void init_registry_path();
+
     // loader/pe.py init_function_tables / lookup_function_entry — the
     // x64/.pdata RUNTIME_FUNCTION walk (the upstream parses the pefile
     // DIRECTORY_ENTRY_EXCEPTION objects; the port reads the mapped .pdata
@@ -155,6 +172,10 @@ private:
     std::uint64_t dll_address_ = 0;
     std::uint64_t dll_size_ = 0;
     std::uint64_t dll_last_address_ = 0;
+    // loader/pe.py structure_last_addr: the structure-allocation cursor (the
+    // driver branch seeds it from the dll cursor; the init_* walks advance it
+    // by the aligned structure sizes)
+    std::uint64_t structure_last_addr_ = 0;
     std::uint8_t peb_being_debugged_ = 0;
     std::uint64_t peb_address_ = 0;
     std::map<std::uint64_t, std::vector<RuntimeFunction>> function_tables_;
@@ -164,6 +185,12 @@ private:
     std::map<std::uint64_t, ExportSymbol> export_symbols_;
     std::map<std::string, ImportTable> import_address_table_;
     std::vector<std::uint8_t> cmdline_;
+
+    // the ntoskrnl-family rider addresses (the init_* walks seed them)
+    std::uint64_t kuser_shared_data_address_ = 0;
+    std::uint64_t eprocess_address_ = 0;
+    std::uint64_t driver_object_address_ = 0;
+    std::uint64_t regitry_path_address_ = 0;
 };
 
 }  // namespace loader

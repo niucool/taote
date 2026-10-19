@@ -308,9 +308,143 @@ void QlLoaderPE::run() {
     } else {
         // the PE image path
         pe_image_address_ = load_image(ql_->path(), ql_->targetname());
+
+        // loader/pe.py load(): the driver branch seeds the driver-object /
+        // registry-path / eprocess riders (the CR8/CR4 setup verbatim); the
+        // structure cursor rides the dll list tail (the upstream shares the
+        // structure_last_addr cursor across the init_* walks)
+        structure_last_addr_ = dll_last_address_;
+        if (is_driver_) {
+            init_driver_object();
+            init_registry_path();
+            init_eprocess();
+
+            // set IRQ Level in CR8 to PASSIVE_LEVEL  (verbatim)
+            ql_->arch().regs().write("CR8", 0);
+
+            // setup CR4, enabling: DE, PSE, PAE, MCE, PGE, OSFXSR and
+            // OSXMMEXCPT. some drivers may check this at initialized
+            // (verbatim)
+            ql_->arch().regs().write("CR4", 0b0000011011111000);
+        }
     }
 
+    init_ki_user_shared_data();
+
     init_sp = ql_->arch().regs().arch_sp();
+}
+
+// ---- the ntoskrnl-family riders (the pe.py init_* walks) ----
+
+// loader/pe.py init_ki_user_shared_data: the KUSER_SHARED_DATA map over the
+// profile KI_USER_SHARED_DATA base + the key-field writes (the ctypes
+// KUSER_SHARED_DATA offsets: the ImageNumberLow@44, the ImageNumberHigh@46,
+// the NtSystemRoot@48 (the 260-char wide string), the NtProductType@612,
+// the NtMajorVersion@620, the NtMinorVersion@624)
+void QlLoaderPE::init_ki_user_shared_data() {
+    auto& mem = ql_->mem();
+    auto& profile = ql_->profile();
+    const std::uint64_t bits = ql_->arch().bits();
+
+    const std::string ossection = bits == 64 ? "OS64" : "OS32";
+    const auto kusd_addr = static_cast<std::uint64_t>(profile.get_int(ossection, "KI_USER_SHARED_DATA"));
+
+    constexpr std::size_t KUSD_SIZE = 0x1000;  // the align_up(sizeof(KUSER_SHARED_DATA))
+    mem.map(kusd_addr, mem.align_up(KUSD_SIZE), UC_PROT_ALL, "[kuser shared data]");
+
+    const auto put32 = [&](std::size_t off, std::uint64_t v) {
+        mem.write_ptr(kusd_addr + off, v, 4);
+    };
+    const auto put16 = [&](std::size_t off, std::uint64_t v) {
+        mem.write_ptr(kusd_addr + off, v, 2);
+    };
+
+    // initialize an instance with a few key fields  (verbatim)
+    put16(44, 0x014c);   // IMAGE_FILE_MACHINE_I386
+    put16(46, 0x8664);   // IMAGE_FILE_MACHINE_AMD64
+    put32(612, profile.get_int("SYSTEM", "productType"));
+    put32(620, profile.get_int("SYSTEM", "majorVersion"));
+    put32(624, profile.get_int("SYSTEM", "minorVersion"));
+
+    const auto windir = ql_->os<os::windows::QlOsWindows>().windir();
+    std::vector<std::uint8_t> root;
+    for (const char c : windir) {
+        root.push_back(static_cast<std::uint8_t>(c));
+        root.push_back(0);
+    }
+    root.resize(520, 0);
+    mem.write(kusd_addr + 48, root);
+
+    kuser_shared_data_address_ = kusd_addr;
+}
+
+// loader/pe.py init_eprocess: the 0x4d0 (64-bit) / 0x2c0 (32-bit) EPROCESS
+// placeholder image (the FIXME: define meaningful fields verbatim ride)
+void QlLoaderPE::init_eprocess() {
+    const std::uint64_t bits = ql_->arch().bits();
+    const std::size_t obj_size = bits == 64 ? 0x4d0 : 0x2c0;
+
+    const auto eproc_addr = structure_last_addr_;
+    const auto nobj_addr = ql_->mem().align_up(eproc_addr + obj_size, 0x10);
+
+    // the dummy empty write (the python `eproc_obj.dummy = b''` ride)
+    std::string image(obj_size, '\0');
+    ql_->mem().write(eproc_addr, std::vector<std::uint8_t>(image.begin(), image.end()));
+
+    structure_last_addr_ = nobj_addr;
+    eprocess_address_ = eproc_addr;
+}
+
+// loader/pe.py init_driver_object: the DRIVER_OBJECT placeholder (the
+// volatile ref — the zero image)
+void QlLoaderPE::init_driver_object() {
+    constexpr std::size_t DRIVER_OBJECT_SIZE_64 = 336;   // the 28 MajorFunction slots + the head
+    constexpr std::size_t DRIVER_OBJECT_SIZE_32 = 208;
+
+    const std::uint64_t bits = ql_->arch().bits();
+    const std::size_t obj_size = bits == 64 ? DRIVER_OBJECT_SIZE_64 : DRIVER_OBJECT_SIZE_32;
+
+    const auto drv_addr = structure_last_addr_;
+    const auto nobj_addr = ql_->mem().align_up(drv_addr + obj_size, 0x10);
+
+    std::string image(obj_size, '\0');
+    ql_->mem().write(drv_addr, std::vector<std::uint8_t>(image.begin(), image.end()));
+
+    // note: driver object is volatile; no need to flush its contents to mem
+    // (verbatim)
+    structure_last_addr_ = nobj_addr;
+    driver_object_address_ = drv_addr;
+}
+
+// loader/pe.py init_registry_path: the PUNICODE_STRING RegistryPath with the
+// Buffer pointing at itself (the FIXME: pointing to self? verbatim quirk)
+void QlLoaderPE::init_registry_path() {
+    // the UNICODE_STRING (the 16-byte x64 / the 8-byte x86 image)
+    const std::uint64_t bits = ql_->arch().bits();
+    const std::size_t ucstr_size = bits == 64 ? 16 : 8;
+
+    const auto regpath_addr = structure_last_addr_;
+    const auto nobj_addr = ql_->mem().align_up(regpath_addr + ucstr_size, 0x10);
+
+    std::string image(ucstr_size, '\0');
+    const auto put16 = [&](std::size_t off, std::uint64_t v) {
+        image[off] = static_cast<char>(v & 0xff);
+        image[off + 1] = static_cast<char>((v >> 8) & 0xff);
+    };
+    put16(0, 0);   // Length
+    put16(2, 0);   // MaximumLength
+    const auto buf_off = bits == 64 ? 8 : 4;
+    const auto put_ptr = [&](std::size_t off, std::uint64_t v) {
+        for (std::size_t k = 0; k < (bits == 64 ? 8 : 4); ++k) {
+            image[off + k] = static_cast<char>((v >> (8 * k)) & 0xff);
+        }
+    };
+    put_ptr(buf_off, regpath_addr);   // FIXME: pointing to self? verbatim
+    ql_->mem().write(regpath_addr, std::vector<std::uint8_t>(image.begin(), image.end()));
+
+    (void)put16;
+    structure_last_addr_ = nobj_addr;
+    regitry_path_address_ = regpath_addr;
 }
 
 }  // namespace loader
