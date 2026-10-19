@@ -1317,3 +1317,11 @@ color-pair machinery rides the state shell without a terminal.
 | QlConnectivityPeripheral::device_handler_prewalk | `hw/connectivity.py device_handler` | ✅ | the decorator's pre-walk: the otube byte (`recv(1)`) forwards to every connected device (`device.send(data)`) and the devices step before the subclass body; the C++ rides the explicit pre-walk call at the top of the decorated steps (the decorator-to-explicit-call deviation) |
 | the wired steps | `hw/char/stm32f4xx_usart.py`, `hw/i2c/stm32f4xx_i2c.py` steps | ✅ | the STM32F4xxUsart::step (the transfer + the check_interrupt after the pre-walk), the STM32F4xxI2c::step (the send_event_interrupt after the pre-walk); the upstream's third decorated step (the stm32f4xx_spi pass-body) rides the port's STM32F1xxSpi which predates it |
 | the fixture | `tests/Hw_Test.cpp` | ✅ | the usart2→usart3 bridge ride (the DR write fills the otube, the step forwards to the usart3's itube, the usart3's RXNE + the nvic pend at 39, the DR read rides the byte), the i2c step walk |
+
+### Phase 13.11 — the stm32f4xx spi variant + the contain walk
+
+| piece | upstream | state | notes |
+|---|---|---|---|
+| STM32F4xxSpi | `hw/spi/stm32f4xx_spi.py` | ✅ | the 36-byte image (the CR1..I2SPR — the I2SPR tail the F1xx lacks), the verbatim seeds (the SR 0xB, the DR 0xC, the CRCPR 7, the I2SPR 2), the SR/RXCRCR/TXCRCR write ignores, the CR1/CR2/CRCPR/I2SCFGR/I2SPR RW_MASK stores, the DR store-then-send over the contain span, the device_handler step, the send_interrupt |
+| QlPeripheral::contain | `hw/peripheral.py contain` | ✅ | the access-span check (field <= offset && offset+size <= field+field_size); the STM32F1xxSpi read/write switched from the exact-offset match to the verbatim contain walk |
+| the I2c coverage pin | `hw/i2c/stm32f4xx_i2c.py` | ✅ | the port's STM32F4xxI2c already covers the upstream f4xx i2c shape verbatim (the recorder pair-clear, the CR1 RW_MASK, the DR master walks, the send_event_interrupt, the generate walks, the device_handler step); the fetch_device_address stays stubbed pending the upstream's device-address contract (the upstream reads `device_list[0].address`, an attribute defined only on the external harness chardev objects, not in the hw tree) |
