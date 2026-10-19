@@ -9,6 +9,7 @@
 #include "qiling/os/windows/dlls/kernel32/fileapi.cpp"
 #include "qiling/os/windows/dlls/kernel32/handleapi.cpp"
 #include "qiling/os/windows/dlls/kernel32/processthreadsapi.cpp"
+#include "qiling/os/windows/dlls/kernel32/synchapi.cpp"
 
 namespace qiling {
 namespace os {
@@ -17,6 +18,7 @@ void register_dlls() {
     win::register_fileapi_family();
     win::register_handleapi_family();
     win::register_processthreadsapi_family();
+    win::register_synchapi_family();
 }
 
 // the static-init registration (the python module-import side effect)

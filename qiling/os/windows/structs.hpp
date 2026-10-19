@@ -57,6 +57,30 @@ inline constexpr std::size_t WIN32_FIND_DATAA_OFF_ALTNAME = 44 + WIN_MAX_PATH;  
 void write_win32_find_dataa(char* dst, std::uint32_t attributes, std::uint64_t filetime_hnano,
                             std::uint64_t filesize, const std::string& filename);
 
+// ---- Mutex (structs.py Mutex) ----
+// the sync-object record the synchapi family parks on the handle: the name,
+// the namespace prefix (''/'Global'), and the locked state. The CreateEvent
+// flavour reuses the same class (the upstream comment: "similar enough to
+// Mutex to just use it")
+class Mutex {
+public:
+    Mutex(std::string name, std::string type)
+        : name_(std::move(name)), locked_(false), type_(std::move(type)) {}
+
+    void lock() { locked_ = true; }
+    void unlock() { locked_ = false; }
+    bool isFree() const { return !locked_; }
+
+    const std::string& name() const noexcept { return name_; }
+    const std::string& type() const noexcept { return type_; }
+    bool locked() const noexcept { return locked_; }
+
+private:
+    std::string name_;
+    bool locked_ = false;
+    std::string type_;
+};
+
 // ---- STARTUPINFO (structs.py make_startup_info(archbits)) ----
 // the default-aligned ctypes shape: the pointers ride the arch bits. x64:
 // cb@0, lpReserved@8, lpDesktop@16, lpTitle@24, dwX@32, dwY@36, dwXSize@40,

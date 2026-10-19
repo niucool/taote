@@ -9,6 +9,8 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <typeindex>
+#include <typeinfo>
 
 namespace qiling {
 namespace os {
@@ -27,6 +29,10 @@ public:
     void* obj = nullptr;
     std::string name;
     std::optional<std::uint32_t> permissions;
+
+    // the runtime type of obj (the python duck-typed isinstance checks in the
+    // handlers ride the RTTI; the port captures the typeid at registration)
+    std::type_index obj_type = std::type_index(typeid(void));
 
     // the type-erased ownership slot (filestruct.py: the python Handle keeps
     // the python object alive via the reference; the C++ port type-erases the

@@ -864,3 +864,316 @@ TEST(WinApiProcessthreads, ExitProcessAndTerminateProcessStopEmulation) {
         EXPECT_EQ(*r, 1u);
     }
 }
+
+TEST(WinApiSynchapi, PassThroughAndCriticalSectionBodies) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    // Sleep: the verbatim pass body (the commented time.sleep)
+    const auto* sleep_ = ApiRegistry::instance().find("Sleep");
+    ASSERT_NE(sleep_, nullptr);
+    EXPECT_FALSE(sleep_->handler(ql, 0, ResolvedParams{{"dwMilliseconds", std::uint64_t{100}}}).has_value());
+
+    // the critical-section pass set: the Enter/Leave/Delete answer 0, the
+    // Initialize trio answers 1
+    const auto* enter = ApiRegistry::instance().find("EnterCriticalSection");
+    ASSERT_NE(enter, nullptr);
+    auto r = enter->handler(ql, 0, ResolvedParams{{"lpCriticalSection", kCells}});
+    ASSERT_TRUE(r.has_value());
+    EXPECT_EQ(*r, 0u);
+
+    r = ApiRegistry::instance().find("LeaveCriticalSection")->handler(ql, 0, ResolvedParams{{"lpCriticalSection", kCells}});
+    ASSERT_TRUE(r.has_value());
+    EXPECT_EQ(*r, 0u);
+
+    r = ApiRegistry::instance().find("DeleteCriticalSection")->handler(ql, 0, ResolvedParams{{"lpCriticalSection", kCells}});
+    ASSERT_TRUE(r.has_value());
+    EXPECT_EQ(*r, 0u);
+
+    r = ApiRegistry::instance().find("InitializeCriticalSection")->handler(ql, 0, ResolvedParams{{"lpCriticalSection", kCells}});
+    ASSERT_TRUE(r.has_value());
+    EXPECT_EQ(*r, 1u);
+
+    r = ApiRegistry::instance().find("InitializeCriticalSectionEx")->handler(ql, 0, ResolvedParams{
+        {"lpCriticalSection", kCells}, {"dwSpinCount", std::uint64_t{0}}, {"Flags", std::uint64_t{0}}});
+    ASSERT_TRUE(r.has_value());
+    EXPECT_EQ(*r, 1u);
+
+    r = ApiRegistry::instance().find("InitializeCriticalSectionAndSpinCount")->handler(ql, 0, ResolvedParams{
+        {"lpCriticalSection", kCells}, {"dwSpinCount", std::uint64_t{0}}});
+    ASSERT_TRUE(r.has_value());
+    EXPECT_EQ(*r, 1u);
+
+    // the SRW no-op set: the initialize/acquire/release/try pair all return
+    // nothing (the void upstream bodies)
+    const auto* srw = ApiRegistry::instance().find("InitializeSRWLock");
+    ASSERT_NE(srw, nullptr);
+    EXPECT_FALSE(srw->handler(ql, 0, ResolvedParams{{"SRWLock", kCells}}).has_value());
+    EXPECT_NE(ApiRegistry::instance().find("AcquireSRWLockExclusive"), nullptr);
+    EXPECT_NE(ApiRegistry::instance().find("AcquireSRWLockShared"), nullptr);
+    EXPECT_NE(ApiRegistry::instance().find("ReleaseSRWLockExclusive"), nullptr);
+    EXPECT_NE(ApiRegistry::instance().find("ReleaseSRWLockShared"), nullptr);
+    EXPECT_NE(ApiRegistry::instance().find("TryAcquireSRWLockExclusive"), nullptr);
+    EXPECT_NE(ApiRegistry::instance().find("TryAcquireSRWLockShared"), nullptr);
+
+    // the SRW try-pair bodies: the verbatim pass (the no return value)
+    const auto* try_ex = ApiRegistry::instance().find("TryAcquireSRWLockExclusive");
+    const auto* try_sh = ApiRegistry::instance().find("TryAcquireSRWLockShared");
+    EXPECT_FALSE(try_ex->handler(ql, 0, ResolvedParams{{"SRWLock", kCells}}).has_value());
+    EXPECT_FALSE(try_sh->handler(ql, 0, ResolvedParams{{"SRWLock", kCells}}).has_value());
+}
+
+TEST(WinApiSynchapi, WaitForSingleObjectRidesWaitforList) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    // the wait target: the CreateThread handle (the obj = the QlWindowsThread)
+    const auto* ct = ApiRegistry::instance().find("CreateThread");
+    ASSERT_NE(ct, nullptr);
+    const auto thread_handle = ct->handler(ql, 0, ResolvedParams{
+        {"lpThreadAttributes", std::uint64_t{0}},
+        {"dwStackSize", std::uint64_t{0x10000}},
+        {"lpStartAddress", std::uint64_t{0x140003000ull}},
+        {"lpParameter", std::uint64_t{0}},
+        {"dwCreationFlags", std::uint64_t{4}},  // CREATE_SUSPENDED
+        {"lpThreadId", std::uint64_t{0}},
+    });
+    ASSERT_TRUE(thread_handle.has_value());
+
+    const auto* wait = ApiRegistry::instance().find("WaitForSingleObject");
+    ASSERT_NE(wait, nullptr);
+    const auto r = wait->handler(ql, 0, ResolvedParams{
+        {"hHandle", *thread_handle},
+        {"dwMilliseconds", std::uint64_t{0}},
+    });
+    ASSERT_TRUE(r.has_value());
+    EXPECT_EQ(*r, 0u);  // the verbatim 0 return
+
+    // the cur_thread's waitfor list now holds the target thread
+    auto& os = ql.os<QlOsWindows>();
+    const auto* cur = os.thread_manager().cur_thread();
+    ASSERT_EQ(cur->has_waitfor(), true);
+
+    // the Ex sibling rides the same waitfor walk (the bAlertable param
+    // unread, verbatim)
+    const auto* wait_ex = ApiRegistry::instance().find("WaitForSingleObjectEx");
+    ASSERT_NE(wait_ex, nullptr);
+    const auto r_ex = wait_ex->handler(ql, 0, ResolvedParams{
+        {"hHandle", *thread_handle},
+        {"dwMilliseconds", std::uint64_t{0}},
+        {"bAlertable", std::uint64_t{0}},
+    });
+    ASSERT_TRUE(r_ex.has_value());
+    EXPECT_EQ(*r_ex, 0u);
+}
+
+TEST(WinApiSynchapi, WaitForMultipleObjectsWalksHandleArray) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    // two suspended worker threads + the guest handle array at kCells
+    const auto* ct = ApiRegistry::instance().find("CreateThread");
+    ASSERT_NE(ct, nullptr);
+    std::array<std::uint64_t, 2> handles{};
+    for (auto& h : handles) {
+        const auto r = ct->handler(ql, 0, ResolvedParams{
+            {"lpThreadAttributes", std::uint64_t{0}},
+            {"dwStackSize", std::uint64_t{0x10000}},
+            {"lpStartAddress", std::uint64_t{0x140003000ull}},
+            {"lpParameter", std::uint64_t{0}},
+            {"dwCreationFlags", std::uint64_t{4}},
+            {"lpThreadId", std::uint64_t{0}},
+        });
+        ASSERT_TRUE(r.has_value());
+        h = *r;
+    }
+    ql.mem().write_ptr(kCells, handles[0]);
+    ql.mem().write_ptr(kCells + 8, handles[1]);
+
+    const auto* wait_multi = ApiRegistry::instance().find("WaitForMultipleObjects");
+    ASSERT_NE(wait_multi, nullptr);
+    const auto r = wait_multi->handler(ql, 0, ResolvedParams{
+        {"nCount", std::uint64_t{2}},
+        {"lpHandles", kCells},
+        {"bWaitAll", std::uint64_t{1}},
+        {"dwMilliseconds", std::uint64_t{0}},
+    });
+    ASSERT_TRUE(r.has_value());
+    EXPECT_EQ(*r, 0u);
+
+    // both threads landed on the cur_thread's waitfor list
+    const auto* cur = ql.os<QlOsWindows>().thread_manager().cur_thread();
+    // (the waitfor list holds 2 entries; the has_waitfor checks liveness —
+    // the suspended threads are not terminated so the wait is live)
+    EXPECT_EQ(cur->has_waitfor(), true);
+}
+
+TEST(WinApiSynchapi, CreateMutexLifecycleVerbatim) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    const auto* create_a = ApiRegistry::instance().find("CreateMutexA");
+    ASSERT_NE(create_a, nullptr);
+
+    // the named mutex, unowned
+    const auto h1 = create_a->handler(ql, 0, ResolvedParams{
+        {"lpMutexAttributes", std::uint64_t{0}},
+        {"bInitialOwner", std::uint64_t{0}},
+        {"lpName", std::string("QL_MUTEX")},
+    });
+    ASSERT_TRUE(h1.has_value());
+    EXPECT_NE(*h1, 0u);
+
+    // the second create with the same name: the verbatim commented
+    // ERROR_ALREADY_EXISTS (the return 0, the last error untouched)
+    const auto h2 = create_a->handler(ql, 0, ResolvedParams{
+        {"lpMutexAttributes", std::uint64_t{0}},
+        {"bInitialOwner", std::uint64_t{0}},
+        {"lpName", std::string("QL_MUTEX")},
+    });
+    ASSERT_TRUE(h2.has_value());
+    EXPECT_EQ(*h2, 0u);
+
+    // the nameless create: the verbatim return 0
+    const auto h3 = create_a->handler(ql, 0, ResolvedParams{
+        {"lpMutexAttributes", std::uint64_t{0}},
+        {"bInitialOwner", std::uint64_t{0}},
+        {"lpName", std::string("")},
+    });
+    ASSERT_TRUE(h3.has_value());
+    EXPECT_EQ(*h3, 0u);
+
+    // the owned create + the release round trip
+    const auto h4 = create_a->handler(ql, 0, ResolvedParams{
+        {"lpMutexAttributes", std::uint64_t{0}},
+        {"bInitialOwner", std::uint64_t{1}},
+        {"lpName", std::string("QL_OWNED")},
+    });
+    ASSERT_TRUE(h4.has_value());
+    EXPECT_NE(*h4, 0u);
+
+    const auto* release = ApiRegistry::instance().find("ReleaseMutex");
+    ASSERT_NE(release, nullptr);
+    const auto r_rel = release->handler(ql, 0, ResolvedParams{{"hMutex", *h4}});
+    ASSERT_TRUE(r_rel.has_value());
+    EXPECT_EQ(*r_rel, 1u);
+
+    // the second release: the mutex is free now -> the ERROR_NOT_OWNER shape
+    ql.os<QlOsWindows>().set_last_error(0);
+    const auto r_rel2 = release->handler(ql, 0, ResolvedParams{{"hMutex", *h4}});
+    ASSERT_TRUE(r_rel2.has_value());
+    EXPECT_EQ(*r_rel2, 0u);
+    EXPECT_EQ(ql.os<QlOsWindows>().last_error(), 0x120u);  // ERROR_NOT_OWNER
+
+    // the release over an unknown handle: the ERROR_INVALID_HANDLE shape
+    ql.os<QlOsWindows>().set_last_error(0);
+    const auto r_bad = release->handler(ql, 0, ResolvedParams{{"hMutex", std::uint64_t{0xdeadbeef}}});
+    ASSERT_TRUE(r_bad.has_value());
+    EXPECT_EQ(*r_bad, 0u);
+    EXPECT_EQ(ql.os<QlOsWindows>().last_error(), 0x6u);
+
+    // the W sibling shares the body
+    EXPECT_NE(ApiRegistry::instance().find("CreateMutexW"), nullptr);
+}
+
+TEST(WinApiSynchapi, OpenMutexGuardsAndGlobalShape) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    const auto* open_a = ApiRegistry::instance().find("OpenMutexA");
+    ASSERT_NE(open_a, nullptr);
+
+    // the empty name: the verbatim return 0
+    auto r = open_a->handler(ql, 0, ResolvedParams{
+        {"dwDesiredAccess", std::uint64_t{0}},
+        {"bInheritHandle", std::uint64_t{0}},
+        {"lpName", std::string("")},
+    });
+    ASSERT_TRUE(r.has_value());
+    EXPECT_EQ(*r, 0u);
+
+    // the missing named mutex: the ERROR_FILE_NOT_FOUND + the 0
+    r = open_a->handler(ql, 0, ResolvedParams{
+        {"dwDesiredAccess", std::uint64_t{0}},
+        {"bInheritHandle", std::uint64_t{0}},
+        {"lpName", std::string("QL_NOPE")},
+    });
+    ASSERT_TRUE(r.has_value());
+    EXPECT_EQ(*r, 0u);
+    EXPECT_EQ(ql.os<QlOsWindows>().last_error(), 0x2u);  // ERROR_FILE_NOT_FOUND
+
+    // the Local-prefix variant rides the same not-found walk
+    r = open_a->handler(ql, 0, ResolvedParams{
+        {"dwDesiredAccess", std::uint64_t{0}},
+        {"bInheritHandle", std::uint64_t{0}},
+        {"lpName", std::string("Local\\QL_NOPE")},
+    });
+    ASSERT_TRUE(r.has_value());
+    EXPECT_EQ(*r, 0u);
+}
+
+TEST(WinApiSynchapi, OpenMutexGlobalReturnsFixedHandle) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    // the Global-prefix open over the missing name: the verbatim 0xD10C
+    // ("we always return a valid handle because we have no way to emulate
+    // them" — the Gandcrab sample)
+    const auto* open_a = ApiRegistry::instance().find("OpenMutexA");
+    ASSERT_NE(open_a, nullptr);
+    const auto r = open_a->handler(ql, 0, ResolvedParams{
+        {"dwDesiredAccess", std::uint64_t{0}},
+        {"bInheritHandle", std::uint64_t{0}},
+        {"lpName", std::string("Global\\QL_GLOBAL")},
+    });
+    ASSERT_TRUE(r.has_value());
+    EXPECT_EQ(*r, 0xD10Cu);
+
+    // the W sibling shares the body
+    EXPECT_NE(ApiRegistry::instance().find("OpenMutexW"), nullptr);
+}
+
+TEST(WinApiSynchapi, CreateEventNamedAndAnonymous) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    const auto* create_a = ApiRegistry::instance().find("CreateEventA");
+    ASSERT_NE(create_a, nullptr);
+
+    // the named event, the initial state locked
+    const auto h1 = create_a->handler(ql, 0, ResolvedParams{
+        {"lpEventAttributes", std::uint64_t{0}},
+        {"bManualReset", std::uint64_t{1}},
+        {"bInitialState", std::uint64_t{1}},
+        {"lpName", std::string("QL_EVENT")},
+    });
+    ASSERT_TRUE(h1.has_value());
+    EXPECT_NE(*h1, 0u);
+
+    // the second create with the same name: the ERROR_ALREADY_EXISTS + the
+    // existing handle id (the verbatim shape)
+    ql.os<QlOsWindows>().set_last_error(0);
+    const auto h2 = create_a->handler(ql, 0, ResolvedParams{
+        {"lpEventAttributes", std::uint64_t{0}},
+        {"bManualReset", std::uint64_t{1}},
+        {"bInitialState", std::uint64_t{0}},
+        {"lpName", std::string("QL_EVENT")},
+    });
+    ASSERT_TRUE(h2.has_value());
+    EXPECT_EQ(*h2, *h1);
+    EXPECT_EQ(ql.os<QlOsWindows>().last_error(), 0xb7u);  // ERROR_ALREADY_EXISTS
+
+    // the anonymous event: the fresh handle (the name = the empty string)
+    const auto h3 = create_a->handler(ql, 0, ResolvedParams{
+        {"lpEventAttributes", std::uint64_t{0}},
+        {"bManualReset", std::uint64_t{0}},
+        {"bInitialState", std::uint64_t{0}},
+        {"lpName", std::string("")},
+    });
+    ASSERT_TRUE(h3.has_value());
+    EXPECT_NE(*h3, 0u);
+    EXPECT_NE(*h3, *h1);
+
+    // the W sibling shares the body
+    EXPECT_NE(ApiRegistry::instance().find("CreateEventW"), nullptr);
+}
