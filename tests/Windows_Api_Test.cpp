@@ -4454,3 +4454,80 @@ TEST(WinApiMsvcrt, PrintfFamilyRendersThroughGuestBuffers) {
     ASSERT_TRUE(rvf_s.has_value());
     EXPECT_EQ(*rvf_s, 3u);  // "b=4"
 }
+
+TEST(WinApiCrypt32, CryptStringToBinaryRidesBase64Decode) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    auto& os = ql.os<QlOsWindows>();
+
+    // the base64 "aABpAA==" decodes to the bytes 68 00 69 00 = the
+    // utf-16le "hi"
+    ql.mem().write_ptr(kScratch, 0x20, 4);  // the pcbBinary cell
+    const auto* csa = ApiRegistry::instance().find("CryptStringToBinaryA");
+    ASSERT_NE(csa, nullptr);
+
+    // the length-query arm (the pbBinary = 0): the return = the decoded length
+    const auto rlen = csa->handler(ql, 0, ResolvedParams{
+        {"pszString", std::string("aABpAA==")}, {"cchString", 8ull}, {"dwFlags", static_cast<std::uint64_t>(CRYPT_STRING_BASE64)},
+        {"pbBinary", 0ull}, {"pcbBinary", kScratch}, {"pdwSkip", 0ull}, {"pdwFlags", 0ull},
+    });
+    ASSERT_TRUE(rlen.has_value());
+    EXPECT_EQ(*rlen, 3u);  // "hi" + NUL
+
+    // the write arm: the decoded text lands utf-16le at the pbBinary, the
+    // size updates, the pdwFlags rides the source flag, the verbatim 1
+    ql.mem().write_ptr(kScratch, 0x20, 4);
+    const auto rw = csa->handler(ql, 0, ResolvedParams{
+        {"pszString", std::string("aABpAA==")}, {"cchString", 8ull}, {"dwFlags", static_cast<std::uint64_t>(CRYPT_STRING_BASE64)},
+        {"pbBinary", kScratch + 0x40}, {"pcbBinary", kScratch}, {"pdwSkip", 0ull}, {"pdwFlags", kScratch + 4},
+    });
+    ASSERT_TRUE(rw.has_value());
+    EXPECT_EQ(*rw, 1u);
+    const auto w = ql.mem().read(kScratch + 0x40, 6);
+    EXPECT_EQ(w, (std::vector<std::uint8_t>{'h', 0, 'i', 0, 0, 0}));
+    EXPECT_EQ(ql.mem().read_ptr(kScratch, 4), 3u);
+    EXPECT_EQ(ql.mem().read_ptr(kScratch + 4, 4), CRYPT_STRING_BASE64);
+
+    // the small destination buffer: the verbatim NotImplemented
+    ql.mem().write_ptr(kScratch, 1, 4);
+    EXPECT_THROW((void)csa->handler(ql, 0, ResolvedParams{
+        {"pszString", std::string("aABpAA==")}, {"cchString", 8ull}, {"dwFlags", static_cast<std::uint64_t>(CRYPT_STRING_BASE64)},
+        {"pbBinary", kScratch + 0x40}, {"pcbBinary", kScratch}, {"pdwSkip", 0ull}, {"pdwFlags", 0ull},
+    }), QlErrorNotImplemented);
+
+    // the non-base64 flag: the verbatim NotImplemented
+    EXPECT_THROW((void)csa->handler(ql, 0, ResolvedParams{
+        {"pszString", std::string("aABpAA==")}, {"cchString", 8ull}, {"dwFlags", 2ull},
+        {"pbBinary", kScratch + 0x40}, {"pcbBinary", kScratch}, {"pdwSkip", 0ull}, {"pdwFlags", 0ull},
+    }), QlErrorNotImplemented);
+
+    // the W flavour: the same body over the wide string source
+    ql.mem().write_ptr(kScratch + 8, 0x20, 4);
+    const auto* csw = ApiRegistry::instance().find("CryptStringToBinaryW");
+    ASSERT_NE(csw, nullptr);
+    const auto rw2 = csw->handler(ql, 0, ResolvedParams{
+        {"pszString", std::string("aABpAA==")}, {"cchString", 8ull}, {"dwFlags", static_cast<std::uint64_t>(CRYPT_STRING_BASE64)},
+        {"pbBinary", kScratch + 0x40}, {"pcbBinary", kScratch + 8}, {"pdwSkip", 0ull}, {"pdwFlags", 0ull},
+    });
+    ASSERT_TRUE(rw2.has_value());
+    EXPECT_EQ(*rw2, 1u);
+
+    // the msi stub: the verbatim ERROR_INVALID_HANDLE
+    const auto* msi = ApiRegistry::instance().find("MsiGetComponentStateA");
+    ASSERT_NE(msi, nullptr);
+    const auto rmi = msi->handler(ql, 0, ResolvedParams{
+        {"hInstall", 0ull}, {"szComponent", std::string("comp")},
+        {"piInstalled", kScratch}, {"piAction", kScratch + 4},
+    });
+    ASSERT_TRUE(rmi.has_value());
+    EXPECT_EQ(*rmi, ERROR_INVALID_HANDLE);
+
+    // the mscoree stub: the emu stop ride
+    const auto* cor = ApiRegistry::instance().find("CorExitProcess");
+    ASSERT_NE(cor, nullptr);
+    EXPECT_FALSE(cor->handler(ql, 0, ResolvedParams{{"exitCode", 1ull}}).has_value());
+
+    // the msvbvm60 module is empty verbatim: no registration surface to walk
+    (void)os;
+}
