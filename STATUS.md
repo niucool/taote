@@ -1209,6 +1209,34 @@ bisected to the write walk); the board table's peripheral items ride the
 load_env create (the deviation documented) — the upstream's load_all exists
 but nothing calls it in the mcu path.
 
+### Phase 13.9 — the board dicts (the sam3x8e/gd32vf103/mk64f12 family ports)
+
+The user's premise that the boards "reuse the existing peripheral classes with
+their own const tables" was corrected on inspection: each upstream board
+carries its OWN peripheral-class family (the Sam3xa*, the GD32VF1xx, the
+MK64F12* structs) — not the STM32 ones. The upstream implements a subset of
+each board's referenced structs (12 of ~60 for the sam3x8e, 10 of ~30 for the
+gd32vf103, 12 of ~73 for the mk64f12) and the rest degrade with the
+module-not-found warn (the port mirrors the degradation: the create returns
+null, the entity stays absent).
+
+| piece | upstream | state | notes |
+|---|---|---|---|
+| SAM3xa family (12 classes) | `hw/{char,dma,misc,analog,flash,gpio,power,spi,timer}/sam3xa_*.py` | ✅ | the Uart (the RHR/THR tube walks + the step RXRDY pend), the Pdc/Wdt/Efc/Pwm/Tc plain images, the Adc (the CHER/CHDR + the CR.START → the ISR.DRDY), the Dac (the CDR → the EOC), the Pio (the SODR/CODR/PUER/PUDR pin walks over the GpioHooks-32), the Pmc (the clock-status write walks), the Spi (the RDR/TDR tube walks), the Uotghs (the CTRL CLKUSABLE walk) |
+| sam3x8e board env | `extensions/mcu/atmel/sam3x8e.py` | ✅ | the full board table verbatim; the fixture rides the assembly + the adc/dac/pio/uart/pmc/spi walks (the uart RXRDY pend at intn 8) |
+| GD32VF1xx family (10 classes) | `hw/{char,gpio,spi,i2c,dma,math,misc,timer,intc}/gd32vf1xx_*.py` | ✅ | the Usart/Spi/I2c connectivity images with the seeds (the STAT 0xc0, the TBE 0x2, the RT 0x2), the Gpio (the OCTL per-bit-transition walk + the BOP set/reset-halves walk over the GpioHooks-16), the Dma/Crc/Rcu/Rtc/Timer plain images, the Eclic 360-byte core image |
+| gd32vf103 board env | `extensions/mcu/gd32vf1/gd32vf103.py` | ✅ | the full board table verbatim (the ECLIC core + the peripherals); the fixture rides the standalone hw-manager create walks + the gpio BOP/OCTL walk — the full-os run is documented as the RISCV/eclic slice debt (the gd32 board has no 0x0 mapping so the CORTEX_M init_context's read at 0x0 would fault; the upstream board rides the RISCV arch) |
+| MK64F12 family (12 classes) | `hw/{char,gpio,spi,timer,analog,misc}/mk64f12_*.py` | ✅ | the Uart (the S1 TDRE|TC seed, the D-write tube, the RXFE/RCFIFO-vs-S1.RDRF read/step, the C2.RIE pend), the Gpio (the verbatim unmasked PSOR/PCOR/PTOR 32-pin loops + the PDDR-vs-PDIR pin storage + the port.send_interrupt ride), the Port (the PCR.IRQC 5-mode interrupt gate), the Spi (the POPR/PUSHR/CTAR + the RFDF/RXCTR), the Ftm (the QlTimerPeripheral CNT walk), the Adc (the SC1 no-op + the SC3.CAL self-clearing COCO), the Mcg (the C1/C5/C6 status walks), the Sim/Smc/Wdog/Osc/Rtc plain images |
+| mk64f12 board env | `extensions/mcu/nxp/mk64f12.py` | ✅ | the full board table verbatim (73 entries); the fixture rides the create walks + the uart/gpio/adc/mcg walks |
+
+Findings: the QlPeripheral using-declaration ctor trap — the Sam3xaPmc's
+`using QlPeripheral::QlPeripheral` bound the registration's intn kwarg to the
+image_size parameter, sizing the instance to 5 bytes while the walks wrote at
+0x20/0x68 (the nondeterministic teardown segfault; fixed with the explicit
+cctor); the ihex ELA type-04 record pin (the addresses past 64K need the
+extended-linear-address record, the 16-bit addr field truncates); the gd32
+board's absent 0x0 mapping vs the CORTEX_M init_context read at 0x0.
+
 ### Phase 12 sub-slice 3 — socketpair + the send/recv family
 
 | piece | upstream | state | notes |
