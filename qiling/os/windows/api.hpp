@@ -74,6 +74,10 @@ inline constexpr int LPWSTR_W_ = PARAM_PTRX + 2;
 inline constexpr int PCNZCH_ = PARAM_PTRX + 1;    // api.py: STRING
 inline constexpr int PCNZWCH_ = PARAM_PTRX + 2;   // api.py: WSTRING
 
+// api.py: BSTR/OLECHAR ride the WSTRING family (the unicode strings)
+inline constexpr int BSTR_ = PARAM_PTRX + 2;
+inline constexpr int OLECHAR_ = PARAM_PTRX + 2;
+
 // the GUID resolver placeholder
 inline constexpr int GUID_ = PARAM_PTRX + 3;
 

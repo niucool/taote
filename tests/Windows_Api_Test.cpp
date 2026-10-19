@@ -4531,3 +4531,140 @@ TEST(WinApiCrypt32, CryptStringToBinaryRidesBase64Decode) {
     // the msvbvm60 module is empty verbatim: no registration surface to walk
     (void)os;
 }
+
+TEST(WinApiShlwapi, PathWalksAndStrCmpRideVerbatimArithmetic) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    // PathFindExtensionA: the cstring read + the pointer+len(prefix) ride
+    ql.mem().write(kScratch, std::vector<std::uint8_t>{'C', ':', '\\', 'd', 'i', 'r', '\\', 'a', '.', 'e', 'x', 'e', 0});
+    const auto* pfe = ApiRegistry::instance().find("PathFindExtensionA");
+    ASSERT_NE(pfe, nullptr);
+    const auto r1 = pfe->handler(ql, 0, ResolvedParams{{"pszPath", kScratch}});
+    ASSERT_TRUE(r1.has_value());
+    EXPECT_EQ(*r1, kScratch + 8);  // the dot cell (C:\dir = 8 chars)
+
+    // the extension-less path: the terminator ride
+    ql.mem().write(kScratch + 0x20, std::vector<std::uint8_t>{'n', 'o', 'e', 'x', 't', 0});
+    const auto r2 = pfe->handler(ql, 0, ResolvedParams{{"pszPath", kScratch + 0x20}});
+    ASSERT_TRUE(r2.has_value());
+    EXPECT_EQ(*r2, kScratch + 0x20 + 5);
+
+    // PathFindFileNameA: the '\'-prefixed rsplit ride
+    const auto* pff = ApiRegistry::instance().find("PathFindFileNameA");
+    ASSERT_NE(pff, nullptr);
+    const auto r3 = pff->handler(ql, 0, ResolvedParams{{"pszPath", kScratch}});
+    ASSERT_TRUE(r3.has_value());
+    EXPECT_EQ(*r3, kScratch + 7);  // the "\C:\dir" prefix ride (7 chars)
+
+    // PathFindExtensionW: the wide read + the char-count offset (the verbatim
+    // TODO quirk: the offset is NOT multiplied by the char size)
+    const std::string wide_path = "C:\\x\\b.dll";
+    std::vector<std::uint8_t> wbytes;
+    for (const char c : wide_path) {
+        wbytes.push_back(static_cast<std::uint8_t>(c));
+        wbytes.push_back(0);
+    }
+    wbytes.push_back(0);
+    wbytes.push_back(0);
+    ql.mem().write(kScratch + 0x40, wbytes);
+    const auto* pfew = ApiRegistry::instance().find("PathFindExtensionW");
+    ASSERT_NE(pfew, nullptr);
+    const auto r4 = pfew->handler(ql, 0, ResolvedParams{{"pszPath", kScratch + 0x40}});
+    ASSERT_TRUE(r4.has_value());
+    EXPECT_EQ(*r4, kScratch + 0x40 + 6);  // the char-count offset (not bytes)
+
+    // StrCmpW: the resolved-string compare (0 / -1 / 1)
+    const auto* scw = ApiRegistry::instance().find("StrCmpW");
+    ASSERT_NE(scw, nullptr);
+    EXPECT_EQ(*scw->handler(ql, 0, ResolvedParams{
+        {"psz1", std::string("abc")}, {"psz2", std::string("abc")}}), 0u);
+    EXPECT_EQ(*scw->handler(ql, 0, ResolvedParams{
+        {"psz1", std::string("abc")}, {"psz2", std::string("abd")}}), static_cast<std::uint64_t>(-1));
+    EXPECT_EQ(*scw->handler(ql, 0, ResolvedParams{
+        {"psz1", std::string("b")}, {"psz2", std::string("ab")}}), 1u);
+
+    // StrCmpIW: the case-folded compare
+    const auto* sciw = ApiRegistry::instance().find("StrCmpIW");
+    ASSERT_NE(sciw, nullptr);
+    EXPECT_EQ(*sciw->handler(ql, 0, ResolvedParams{
+        {"psz1", std::string("ABC")}, {"psz2", std::string("abc")}}), 0u);
+    EXPECT_EQ(*sciw->handler(ql, 0, ResolvedParams{
+        {"psz1", std::string("aBc")}, {"psz2", std::string("abd")}}), static_cast<std::uint64_t>(-1));
+}
+
+TEST(WinApiOleaut32, BstrFamilyRidesHeapWalks) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    // SysAllocString: the heap alloc(len+1) + the utf-16le bytes
+    const auto* sa = ApiRegistry::instance().find("SysAllocString");
+    ASSERT_NE(sa, nullptr);
+    const auto rsa = sa->handler(ql, 0, ResolvedParams{{"psz", std::string("hey")}});
+    ASSERT_TRUE(rsa.has_value());
+    EXPECT_NE(*rsa, 0u);
+    const auto raw = ql.mem().read(*rsa, 7);
+    EXPECT_EQ(raw, (std::vector<std::uint8_t>{'h', 0, 'e', 0, 'y', 0, 0}));
+
+    // SysStringLen: the resolved-string length ride
+    const auto* ssl = ApiRegistry::instance().find("SysStringLen");
+    ASSERT_NE(ssl, nullptr);
+    const auto rssl = ssl->handler(ql, 0, ResolvedParams{{"pbstr", std::string("hey")}});
+    ASSERT_TRUE(rssl.has_value());
+    EXPECT_EQ(*rssl, 3u);
+
+    // SysAllocStringLen: the alloc(ui+1) + the truncated write
+    const auto* sal = ApiRegistry::instance().find("SysAllocStringLen");
+    ASSERT_NE(sal, nullptr);
+    const auto rsal = sal->handler(ql, 0, ResolvedParams{{"strIn", std::string("abcdef")}, {"ui", 3ull}});
+    ASSERT_TRUE(rsal.has_value());
+    const auto raw3 = ql.mem().read(*rsal, 7);
+    EXPECT_EQ(raw3, (std::vector<std::uint8_t>{'a', 0, 'b', 0, 'c', 0, 0}));
+
+    // SysReAllocStringLen: the fresh alloc + the pbstr cell update
+    ql.mem().write_ptr(kScratch + 0x80, 0, 8);
+    const auto* sra = ApiRegistry::instance().find("SysReAllocStringLen");
+    ASSERT_NE(sra, nullptr);
+    const auto rsra = sra->handler(ql, 0, ResolvedParams{
+        {"pbstr", kScratch + 0x80}, {"psz", std::string("zz")}, {"len", 2ull}});
+    ASSERT_TRUE(rsra.has_value());
+    EXPECT_EQ(*rsra, 1u);
+    const auto re_addr = ql.mem().read_ptr(kScratch + 0x80, 8);
+    EXPECT_NE(re_addr, 0u);
+    const auto raw2 = ql.mem().read(re_addr, 5);
+    EXPECT_EQ(raw2, (std::vector<std::uint8_t>{'z', 0, 'z', 0, 0}));
+
+    // SysFreeString: the heap free (no throw on the owned chunk)
+    const auto* sf = ApiRegistry::instance().find("SysFreeString");
+    ASSERT_NE(sf, nullptr);
+    const auto rsf = sf->handler(ql, 0, ResolvedParams{{"bstrString", *rsa}});
+    ASSERT_TRUE(rsf.has_value());
+    EXPECT_EQ(*rsf, 0u);
+}
+
+TEST(WinApiOle32, ComStubsAnswerSOkAndWudfProbesZero) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    for (const char* name : {"OleInitialize", "CoRegisterMessageFilter", "CoInitializeEx",
+                             "CoInitializeSecurity", "CoCreateInstance"}) {
+        const auto* api = ApiRegistry::instance().find(name);
+        ASSERT_NE(api, nullptr) << name;
+        const auto r = api->handler(ql, 0, {});
+        ASSERT_TRUE(r.has_value()) << name;
+        EXPECT_EQ(*r, 0u) << name;  // S_OK
+    }
+
+    for (const char* name : {"WudfIsUserDebuggerPresent", "WudfIsAnyDebuggerPresent",
+                             "WudfIsKernelDebuggerPresent"}) {
+        const auto* api = ApiRegistry::instance().find(name);
+        ASSERT_NE(api, nullptr) << name;
+        const auto r = api->handler(ql, 0, {});
+        ASSERT_TRUE(r.has_value()) << name;
+        EXPECT_EQ(*r, 0u) << name;
+    }
+
+    // the ucrtbased module rides the msvcrt surface verbatim (the same hook
+    // objects) — the msvcrt entries stay resolvable
+    EXPECT_NE(ApiRegistry::instance().find("strlen"), nullptr);
+}
