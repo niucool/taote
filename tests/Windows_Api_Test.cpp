@@ -4841,3 +4841,102 @@ TEST(WinApiWininet, StubFamilyRidesVerbatimPassesAndOnes) {
         EXPECT_EQ(*r, 1u) << name;
     }
 }
+
+TEST(WinApiUser32, StubAndClipboardFamiliesRideVerbatimConstants) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    auto& os = ql.os<QlOsWindows>();
+
+    // the verbatim zero/one/passthru walkers
+    EXPECT_EQ(*ApiRegistry::instance().find("RegisterClassExA")->handler(ql, 0, {}), 0u);
+    EXPECT_EQ(*ApiRegistry::instance().find("UpdateWindow")->handler(ql, 0, {}), 0u);
+    EXPECT_EQ(*ApiRegistry::instance().find("CreateWindowExA")->handler(ql, 0, {}), 0u);
+    EXPECT_EQ(*ApiRegistry::instance().find("CreateWindowExW")->handler(ql, 0, {}), 0u);
+    EXPECT_EQ(*ApiRegistry::instance().find("DialogBoxParamA")->handler(ql, 0, {}), 0u);
+    EXPECT_EQ(*ApiRegistry::instance().find("EndDialog")->handler(ql, 0, {}), 1u);
+    EXPECT_EQ(*ApiRegistry::instance().find("GetDesktopWindow")->handler(ql, 0, {}), 0u);
+    EXPECT_EQ(*ApiRegistry::instance().find("GetKeyState")->handler(ql, 0, {}), 2u);
+    EXPECT_EQ(*ApiRegistry::instance().find("RegisterWindowMessageA")->handler(ql, 0, {}), 0xD10Cu);
+    EXPECT_EQ(*ApiRegistry::instance().find("RegisterWindowMessageW")->handler(ql, 0, {}), 0xD10Cu);
+    EXPECT_EQ(*ApiRegistry::instance().find("GetActiveWindow")->handler(ql, 0, {}), 0xD10Cu);
+    EXPECT_EQ(*ApiRegistry::instance().find("GetDC")->handler(ql, 0, {}), 0xD10Cu);
+    EXPECT_EQ(*ApiRegistry::instance().find("GetSysColorBrush")->handler(ql, 0, {}), 0xD10Cu);
+    EXPECT_EQ(*ApiRegistry::instance().find("LoadCursorA")->handler(ql, 0, {}), 0xD10Cu);
+    EXPECT_EQ(*ApiRegistry::instance().find("SendMessageA")->handler(ql, 0, {}), 0xD10Cu);
+    EXPECT_EQ(*ApiRegistry::instance().find("DefWindowProcA")->handler(ql, 0, {}), 0xD10Cu);
+    EXPECT_EQ(*ApiRegistry::instance().find("GetForegroundWindow")->handler(ql, 0, {}), 0xF02E620Du);
+    EXPECT_EQ(*ApiRegistry::instance().find("GetPhysicalCursorPos")->handler(ql, 0, {}), 1u);
+    EXPECT_EQ(*ApiRegistry::instance().find("GetDeviceCaps")->handler(ql, 0, {}), 1u);
+    EXPECT_EQ(*ApiRegistry::instance().find("ReleaseDC")->handler(ql, 0, {}), 1u);
+    EXPECT_EQ(*ApiRegistry::instance().find("GetSysColor")->handler(ql, 0, {}), 0u);
+    EXPECT_EQ(*ApiRegistry::instance().find("MessageBeep")->handler(ql, 0, {}), 1u);
+    EXPECT_EQ(*ApiRegistry::instance().find("UnhookWindowsHookEx")->handler(ql, 0, {}), 1u);
+    EXPECT_EQ(*ApiRegistry::instance().find("ShowWindow")->handler(ql, 0, {}), 1u);
+    EXPECT_EQ(*ApiRegistry::instance().find("IsWindow")->handler(ql, 0, {}), 1u);
+    EXPECT_EQ(*ApiRegistry::instance().find("MoveWindow")->handler(ql, 0, {}), 1u);
+
+    // GetLastActivePopup rides the hWnd back
+    EXPECT_EQ(*ApiRegistry::instance().find("GetLastActivePopup")->handler(ql, 0,
+        ResolvedParams{{"hWnd", 0x1234ull}}), 0x1234u);
+
+    // GetOEMCP: the OEM_US 437
+    EXPECT_EQ(*ApiRegistry::instance().find("GetOEMCP")->handler(ql, 0, {}), 437u);
+
+    // the GetKeyboardType wine table
+    EXPECT_EQ(*ApiRegistry::instance().find("GetKeyboardType")->handler(ql, 0,
+        ResolvedParams{{"nTypeFlag", 0ull}}), 7u);
+    EXPECT_EQ(*ApiRegistry::instance().find("GetKeyboardType")->handler(ql, 0,
+        ResolvedParams{{"nTypeFlag", 2ull}}), 12u);
+    EXPECT_EQ(*ApiRegistry::instance().find("GetKeyboardType")->handler(ql, 0,
+        ResolvedParams{{"nTypeFlag", 5ull}}), 0u);
+
+    // the MessageBoxW press table (the ok/yes/abort walks)
+    EXPECT_EQ(*ApiRegistry::instance().find("MessageBoxW")->handler(ql, 0,
+        ResolvedParams{{"hWnd", 0ull}, {"lpText", std::string("m")}, {"lpCaption", std::string("c")},
+                       {"uType", 0ull}}), 1u);  // the MB_OK (the windows.h macro rides 0) / IDOK
+    EXPECT_EQ(*ApiRegistry::instance().find("MessageBoxW")->handler(ql, 0,
+        ResolvedParams{{"hWnd", 0ull}, {"lpText", std::string("m")}, {"lpCaption", std::string("c")},
+                       {"uType", 4ull}}), 6u);  // the MB_YESNO (the macro rides 4) / IDYES
+    EXPECT_EQ(*ApiRegistry::instance().find("MessageBoxA")->handler(ql, 0,
+        ResolvedParams{{"hWnd", 0ull}, {"lpText", std::string("m")}, {"lpCaption", std::string("c")},
+                       {"uType", 2ull}}), 3u);  // the MB_ABORTRETRYIGNORE (the macro rides 2) / IDABORT
+
+    // the clipboard cycle: the open -> the format check -> the set (the
+    // CF_TEXT read) -> the get -> the close
+    const auto* open_clip = ApiRegistry::instance().find("OpenClipboard");
+    ASSERT_NE(open_clip, nullptr);
+    EXPECT_EQ(*open_clip->handler(ql, 0, ResolvedParams{{"hWndNewOwner", 0ull}}), 1u);
+
+    const auto* ifa = ApiRegistry::instance().find("IsClipboardFormatAvailable");
+    ASSERT_NE(ifa, nullptr);
+    EXPECT_EQ(*ifa->handler(ql, 0, ResolvedParams{{"format", 1ull}}), 1u);  // CF_TEXT
+    EXPECT_EQ(*ifa->handler(ql, 0, ResolvedParams{{"format", 0x50ull}}), 0u);
+
+    // SetClipboardData: the locker = the current thread id; the handler-level
+    // call rides the clipboard manager directly (the current thread owns the
+    // lock after the OpenClipboard ride)
+    ql.mem().write(kScratch, std::vector<std::uint8_t>{'h', 'e', 'l', 'l', 'o', 0});
+    const auto* scd = ApiRegistry::instance().find("SetClipboardData");
+    ASSERT_NE(scd, nullptr);
+    const auto rscd = scd->handler(ql, 0, ResolvedParams{{"uFormat", 1ull}, {"hMem", kScratch}});
+    ASSERT_TRUE(rscd.has_value());
+    EXPECT_EQ(*rscd, kScratch);
+
+    // GetClipboardData: the fresh heap cell carrying the text
+    const auto* gcd = ApiRegistry::instance().find("GetClipboardData");
+    ASSERT_NE(gcd, nullptr);
+    const auto rgcd = gcd->handler(ql, 0, ResolvedParams{{"uFormat", 1ull}});
+    ASSERT_TRUE(rgcd.has_value());
+    EXPECT_NE(*rgcd, 0u);
+    const auto got = ql.mem().read(*rgcd, 5);
+    EXPECT_EQ(std::string(got.begin(), got.end()), "hello");
+
+    EXPECT_EQ(*ApiRegistry::instance().find("CloseClipboard")->handler(ql, 0, {}), 1u);
+
+    // the closed clipboard rejects the writes (the verbatim
+    // ERROR_CLIPBOARD_NOT_OPEN ride)
+    const auto rscd2 = scd->handler(ql, 0, ResolvedParams{{"uFormat", 1ull}, {"hMem", kScratch}});
+    ASSERT_TRUE(rscd2.has_value());
+    EXPECT_EQ(*rscd2, 0u);
+}

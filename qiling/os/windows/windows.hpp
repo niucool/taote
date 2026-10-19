@@ -13,6 +13,7 @@
 #include "qiling/os/windows/handle.hpp"
 #include "qiling/os/windows/registry.hpp"
 #include "qiling/os/windows/fiber.hpp"
+#include "qiling/os/windows/clipboard.hpp"
 #include "qiling/os/windows/thread.hpp"
 
 namespace qiling {
@@ -76,6 +77,9 @@ public:
     // windows.py __setup_components: the fiber manager (the Fls* family)
     FiberManager& fiber_manager() const noexcept { return *fiber_manager_; }
 
+    // windows.py __init__: the clipboard manager (the user32 clip* family)
+    Clipboard& clipboard() const noexcept { return *clipboard_; }
+
     // advapi32.py `self.services = {}`: the service-name -> binary-path map
     // (the CreateService/OpenService walk)
     std::map<std::string, std::string>& services() noexcept { return services_; }
@@ -108,6 +112,7 @@ private:
     std::unique_ptr<HandleManager> handle_manager_;
     std::unique_ptr<registry::RegistryManager> registry_manager_;
     std::unique_ptr<FiberManager> fiber_manager_;
+    std::unique_ptr<Clipboard> clipboard_;
     std::map<std::string, std::string> services_;
     std::optional<HookRet> hook_handle_;
     std::string windir_;

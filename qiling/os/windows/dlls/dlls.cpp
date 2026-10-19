@@ -45,6 +45,7 @@
 #include "qiling/os/windows/dlls/shell32.cpp"
 #include "qiling/os/windows/dlls/wsock32.cpp"
 #include "qiling/os/windows/dlls/wininet.cpp"
+#include "qiling/os/windows/dlls/user32.cpp"
 
 namespace qiling {
 namespace os {
@@ -91,6 +92,7 @@ void register_dlls() {
     win::register_shell32_family();
     win::register_wsock32_family();
     win::register_wininet_family();
+    win::register_user32_family();
 }
 
 // the static-init registration (the python module-import side effect)

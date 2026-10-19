@@ -64,6 +64,9 @@ QlOsWindows::QlOsWindows(Qiling* ql) : QlOs(ql) {
     // FiberManager surface)
     fiber_manager_ = std::make_unique<FiberManager>(ql_);
 
+    // the clipboard manager (windows.py __init__: self.clipboard = Clipboard(self))
+    clipboard_ = std::make_unique<Clipboard>(this);
+
     // bind the stdio streams to their handles (windows.py stdin/stdout/stderr setters)
     HandleManager& mgr = *handle_manager_;
     if (auto* h = mgr.get(QL_STD_INPUT_HANDLE)) h->obj = &stdin_stream();

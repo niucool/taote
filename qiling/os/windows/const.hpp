@@ -1429,6 +1429,24 @@ inline constexpr std::uint32_t WC_NO_BEST_FIT_CHARS = 0x0400;
 #ifndef TIME_ZONE_ID_INVALID
 inline constexpr std::int32_t TIME_ZONE_ID_INVALID = -1;
 #endif
+#ifndef MAPVK_VK_TO_VSC
+inline constexpr std::uint32_t MAPVK_VK_TO_VSC = 0u;
+#endif
+
+// const.py MAP_VK: the MapVirtualKeyW table keyed by the map type (the
+// upstream carries the single MAPVK_VK_TO_VSC dict: the shift/ctrl/alt/win
+// vk codes -> the scan codes, inserted for one sample)
+inline const std::map<std::uint32_t, std::map<std::uint32_t, std::uint32_t>> MAP_VK = {
+    {0, {
+        {0x5b, 0x5b},
+        {0x10, 0x2a},
+        {0xa0, 0x2a},
+        {0xa1, 0x36},
+        {0x11, 0x1d},
+        {0x12, 0x38},
+    }},
+};
+
 #ifndef HEAP_NO_SERIALIZE
 inline constexpr std::uint32_t HEAP_NO_SERIALIZE = 0x00000001;
 #endif
