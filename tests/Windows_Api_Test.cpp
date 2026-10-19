@@ -1967,3 +1967,188 @@ TEST(WinApiSysinfo, GetSystemTimeMicrosecondPackQuirk) {
     const auto quirky = ql.mem().read_ptr(kCells, 8);
     EXPECT_LT(quirky, 1000000ull);  // the microseconds within one minute
 }
+
+TEST(WinApiProcessenv, GetStdHandlePassthroughReturnsStdHandle) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    // the verbatim body: the pseudo-handle rides back untouched
+    const auto* gh = ApiRegistry::instance().find("GetStdHandle");
+    ASSERT_NE(gh, nullptr);
+
+    const auto r_out = gh->handler(ql, 0, ResolvedParams{{"nStdHandle", 0xFFFFFFF6ull}});
+    ASSERT_TRUE(r_out.has_value());
+    EXPECT_EQ(*r_out, 0xFFFFFFF6ull);  // the STD_OUTPUT_HANDLE pseudo-handle
+
+    const auto r_in = gh->handler(ql, 0, ResolvedParams{{"nStdHandle", 0ull}});
+    ASSERT_TRUE(r_in.has_value());
+    EXPECT_EQ(*r_in, 0ull);
+}
+
+TEST(WinApiProcessenv, GetCommandLineAWritesDoubleNulTail) {
+    register_dlls();
+
+    // the PE-image mode: the cmdline rides the real target path
+    const auto pe = build_minimal_pe64_with_exports();
+    const auto rootfs = std::filesystem::temp_directory_path() / "ql_processenv_rootfs";
+    std::filesystem::create_directories(rootfs / "Windows" / "registry");
+    const auto exe_path = rootfs / "minpe_test.exe";
+    {
+        std::ofstream out(exe_path, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(pe.data()), static_cast<std::streamsize>(pe.size()));
+    }
+
+    QilingOptions options;
+    options.argv = {exe_path.string()};
+    options.rootfs = rootfs.string();
+    options.ostype = QL_OS::WINDOWS;
+    options.archtype = QL_ARCH::X8664;
+    Qiling ql(options);
+
+    // the port's cmdline composition (the loader's concern): the basename +
+    // the trailing NUL — the handler's shape (the second NUL, the wide
+    // encode) is what rides under test here
+    const auto& cmdline_vec = static_cast<loader::QlLoaderPE&>(ql.loader()).cmdline();
+    const std::string target(cmdline_vec.begin(), cmdline_vec.end() - 1);
+    ASSERT_EQ(target, "minpe_test.exe");
+
+    // the A form: the cmdline (already NUL-terminated) + the verbatim second NUL
+    const auto* gca = ApiRegistry::instance().find("GetCommandLineA");
+    ASSERT_NE(gca, nullptr);
+    const auto ra = gca->handler(ql, 0, {});
+    ASSERT_TRUE(ra.has_value());
+    const auto buf_a = ql.mem().read(*ra, target.size() + 2);
+    std::string got_a(buf_a.begin(), buf_a.end());
+    EXPECT_EQ(got_a, target + std::string(2, char(0)));
+
+    // the W form: the utf-16le of the already-terminated cmdline (a single
+    // wide NUL inside the buffer — no extra append, the verbatim asymmetry)
+    const auto* gcw = ApiRegistry::instance().find("GetCommandLineW");
+    ASSERT_NE(gcw, nullptr);
+    const auto rw = gcw->handler(ql, 0, {});
+    ASSERT_TRUE(rw.has_value());
+    const auto buf_w = ql.mem().read(*rw, (target.size() + 1) * 2);
+    std::string got_w;
+    for (std::size_t i = 0; i + 1 < buf_w.size(); i += 2) {
+        got_w.push_back(static_cast<char>(buf_w[i]));
+    }
+    EXPECT_EQ(got_w, target + std::string(1, char(0)));  // the cmdline's own NUL rides wide
+    EXPECT_EQ(buf_w[buf_w.size() - 1], 0);  // the trailing wide NUL
+}
+
+TEST(WinApiProcessenv, GetEnvironmentStringsWritesEmptyBlocks) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    // the A block: envstr = b"\x00" — the empty block is a single NUL
+    const auto* ge = ApiRegistry::instance().find("GetEnvironmentStrings");
+    ASSERT_NE(ge, nullptr);
+    const auto r = ge->handler(ql, 0, {});
+    ASSERT_TRUE(r.has_value());
+    EXPECT_EQ(ql.mem().read(*r, 1), std::vector<std::uint8_t>{0});
+
+    // the W block: envstr = b"\x00\x00" — two NULs
+    const auto* gew = ApiRegistry::instance().find("GetEnvironmentStringsW");
+    ASSERT_NE(gew, nullptr);
+    const auto rw = gew->handler(ql, 0, {});
+    ASSERT_TRUE(rw.has_value());
+    EXPECT_EQ(ql.mem().read(*rw, 2), (std::vector<std::uint8_t>{0, 0}));
+
+    // the free body rides the verbatim 1
+    const auto* fe = ApiRegistry::instance().find("FreeEnvironmentStringsW");
+    ASSERT_NE(fe, nullptr);
+    const auto rf = fe->handler(ql, 0, ResolvedParams{{"penv", *rw}});
+    ASSERT_TRUE(rf.has_value());
+    EXPECT_EQ(*rf, 1u);
+}
+
+TEST(WinApiProcessenv, ExpandEnvironmentStringsResolvesProfileVars) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    const auto* ee = ApiRegistry::instance().find("ExpandEnvironmentStringsW");
+    ASSERT_NE(ee, nullptr);
+
+    // %windir% resolves through the profile PATH section ("Windows")
+    const auto r1 = ee->handler(ql, 0, ResolvedParams{
+        {"lpSrc", std::string("%windir%\\system32")},
+        {"lpDst", kScratch},
+        {"nSize", std::uint64_t{0x100}},
+    });
+    ASSERT_TRUE(r1.has_value());
+    EXPECT_EQ(*r1, 34ull);  // ("Windows\\system32" + NUL) * 2 bytes
+
+    std::string got1;
+    const auto wide1 = ql.mem().read(kScratch, *r1);
+    for (std::size_t i = 0; i + 1 < wide1.size(); i += 2) {
+        got1.push_back(static_cast<char>(wide1[i]));
+    }
+    EXPECT_EQ(got1, "Windows\\system32" + std::string(1, char(0)));
+
+    // the unknown key keeps its %KEY% spelling (the verbatim val = f'%{key}%')
+    const auto r2 = ee->handler(ql, 0, ResolvedParams{
+        {"lpSrc", std::string("%GhostKey%")},
+        {"lpDst", kScratch + 0x100},
+        {"nSize", std::uint64_t{0x100}},
+    });
+    ASSERT_TRUE(r2.has_value());
+    EXPECT_EQ(*r2, 22ull);  // ("%GhostKey%" + NUL) * 2
+
+    std::string got2;
+    const auto wide2 = ql.mem().read(kScratch + 0x100, *r2);
+    for (std::size_t i = 0; i + 1 < wide2.size(); i += 2) {
+        got2.push_back(static_cast<char>(wide2[i]));
+    }
+    EXPECT_EQ(got2, "%GhostKey%" + std::string(1, char(0)));
+}
+
+TEST(WinApiProcessenv, ExpandEnvironmentStringsSizeGuardSkipsWrite) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    const auto* ee = ApiRegistry::instance().find("ExpandEnvironmentStringsW");
+    ASSERT_NE(ee, nullptr);
+
+    // the verbatim quirk: the nSize compare rides BYTES, not TCHARs; a
+    // short buffer skips the write but the full byte length still returns
+    ql.mem().write(kScratch, std::vector<std::uint8_t>(0x40, 0x7E));  // the ~ sentinel
+    const auto r = ee->handler(ql, 0, ResolvedParams{
+        {"lpSrc", std::string("%windir%")},
+        {"lpDst", kScratch},
+        {"nSize", std::uint64_t{8}},  // < ("Windows" + NUL) * 2 = 16
+    });
+    ASSERT_TRUE(r.has_value());
+    EXPECT_EQ(*r, 16ull);
+
+    const auto sent = ql.mem().read(kScratch, 0x40);
+    EXPECT_EQ(sent[0], 0x7E);  // untouched
+    EXPECT_EQ(sent[15], 0x7E);
+}
+
+TEST(WinApiProcessenv, GetEnvironmentVariableReturnsZeroFlat) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    // the verbatim bodies: the flat 0, no buffer write
+    const auto* eva = ApiRegistry::instance().find("GetEnvironmentVariableA");
+    ASSERT_NE(eva, nullptr);
+    ql.mem().write(kCells, std::vector<std::uint8_t>(8, 0x7E));
+    const auto ra = eva->handler(ql, 0, ResolvedParams{
+        {"lpName", std::string("PATH")},
+        {"lpBuffer", kCells},
+        {"nSize", std::uint64_t{8}},
+    });
+    ASSERT_TRUE(ra.has_value());
+    EXPECT_EQ(*ra, 0u);
+    EXPECT_EQ(ql.mem().read(kCells, 8)[0], 0x7E);  // untouched
+
+    const auto* evw = ApiRegistry::instance().find("GetEnvironmentVariableW");
+    ASSERT_NE(evw, nullptr);
+    const auto rw = evw->handler(ql, 0, ResolvedParams{
+        {"lpName", std::string("PATH")},
+        {"lpBuffer", kCells},
+        {"nSize", std::uint64_t{8}},
+    });
+    ASSERT_TRUE(rw.has_value());
+    EXPECT_EQ(*rw, 0u);
+}
