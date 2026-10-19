@@ -181,6 +181,66 @@ private:
     std::uint64_t remap_size_ = 0;
 };
 
+
+// hw/spi/stm32f4xx_spi.py STM32F4xxSpi — the 36-byte image (the CR1..I2SPR);
+// the seeds verbatim (the SR 0xB, the DR 0xC, the CRCPR 7, the I2SPR 2); the
+// SR/RXCRCR/TXCRCR writes ignored, the CR1/CR2/CRCPR/I2SCFGR/I2SPR rides the
+// RW_MASKs, the DR stores then rides the output tube; the device_handler step
+// (the pass body — the pre-walk only)
+class STM32F4xxSpi final : public QlConnectivityPeripheral {
+public:
+    static constexpr std::size_t kStructSize = 36;
+    static constexpr std::uint64_t kCr1Offset = 0x00;
+    static constexpr std::uint64_t kCr2Offset = 0x04;
+    static constexpr std::uint64_t kSrOffset = 0x08;
+    static constexpr std::uint64_t kDrOffset = 0x0C;
+    static constexpr std::uint64_t kCrcprOffset = 0x10;
+    static constexpr std::uint64_t kRxcrcrOffset = 0x14;
+    static constexpr std::uint64_t kTxcrcrOffset = 0x18;
+    static constexpr std::uint64_t kI2scfgrOffset = 0x1C;
+    static constexpr std::uint64_t kI2sprOffset = 0x20;
+
+    STM32F4xxSpi(Qiling& ql, const std::string& label, std::int64_t intn = -1)
+        : QlConnectivityPeripheral(ql, label, kStructSize), intn_(intn) {
+        raw_write(kSrOffset, 4, 0x0000000B);
+        raw_write(kDrOffset, 4, 0x0000000C);
+        raw_write(kCrcprOffset, 4, 0x00000007);
+        raw_write(kI2sprOffset, 4, 0x00000002);
+    }
+
+    // spi.py read: the contain walk rides the DR read through the input tube
+    std::uint64_t read_body(std::uint64_t offset, std::uint32_t size) override;
+
+    // spi.py write: the SR/CRC writes ignored, the masked stores, the DR
+    // store-then-send walk
+    void write_body(std::uint64_t offset, std::uint32_t size, std::uint64_t value) override;
+
+    // spi.py send_interrupt
+    void send_interrupt();
+
+    // spi.py step (the @device_handler ride): the pre-walk only (the pass body)
+    void step() override { device_handler_prewalk(); }
+
+    std::int64_t intn() const noexcept { return intn_; }
+
+private:
+    std::int64_t intn_;
+};
+
+// hw/const/stm32f4xx_spi.py — the RW_MASK tables
+namespace stm32f4xx_spi {
+// SPI_CR1.RW_MASK = 0xffff
+inline constexpr std::uint32_t CR1_RW_MASK = 0xffff;
+// SPI_CR2.RW_MASK = RXDMAEN|TXDMAEN|SSOE|FRF|ERRIE|RXNEIE|TXEIE
+inline constexpr std::uint32_t CR2_RW_MASK = (1u << 0) | (1u << 1) | (1u << 2) | (1u << 4) | (1u << 5) | (1u << 6) | (1u << 7);
+// SPI_CRCPR.CRCPOLY = 0xffff
+inline constexpr std::uint32_t CRCPR_CRCPOLY = 0xffff;
+// SPI_I2SCFGR.RW_MASK = CHLEN|DATLEN|CKPOL|I2SSTD|PCMSYNC|I2SCFG|I2SE|I2SMOD
+inline constexpr std::uint32_t I2SCFGR_RW_MASK = (1u << 0) | (0x3u << 1) | (1u << 3) | (0x3u << 4) | (1u << 7) | (0x3u << 8) | (1u << 10) | (1u << 11);
+// SPI_I2SPR.RW_MASK = I2SDIV|ODD|MCKOE
+inline constexpr std::uint32_t I2SPR_RW_MASK = 0xffu | (1u << 8) | (1u << 9);
+}  // namespace stm32f4xx_spi
+
 }  // namespace hw
 }  // namespace qiling
 

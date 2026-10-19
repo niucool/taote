@@ -70,6 +70,10 @@ QlHwManager::QlHwManager(Qiling& ql) : ql_(&ql) {
     register_struct("STM32F1xxAdc", [](Qiling& q, const std::string& label, const PeripheralKwargs&) {
         return std::make_unique<STM32F1xxAdc>(q, label);
     });
+    register_struct("STM32F4xxSpi", [](Qiling& q, const std::string& label, const PeripheralKwargs& kwargs) {
+        auto it = kwargs.find("intn");
+        return std::make_unique<STM32F4xxSpi>(q, label, it == kwargs.end() ? -1 : static_cast<std::int64_t>(it->second));
+    });
     register_struct("STM32F1xxSpi", [](Qiling& q, const std::string& label, const PeripheralKwargs&) {
         return std::make_unique<STM32F1xxSpi>(q, label);
     });

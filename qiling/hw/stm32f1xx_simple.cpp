@@ -66,16 +66,17 @@ void STM32F1xxSpi::send_interrupt(std::int64_t intn) {
 }
 
 std::uint64_t STM32F1xxSpi::read_body(std::uint64_t offset, std::uint32_t size) {
-    // spi.py read: the DR read rides the input tube when available
-    if (offset == kDrOffset && has_input()) {
+    // spi.py read: the contain walk rides the DR read through the input tube
+    if (contain(kDrOffset, 4, offset, size) && has_input()) {
         return recv_from_user();
     }
     return QlConnectivityPeripheral::read_body(offset, size);
 }
 
 void STM32F1xxSpi::write_body(std::uint64_t offset, std::uint32_t size, std::uint64_t value) {
-    // spi.py write: the DR write sends to the output tube, the others store
-    if (offset == kDrOffset) {
+    // spi.py write: the contain walk rides the DR write to the output tube,
+    // the others store
+    if (contain(kDrOffset, 4, offset, size)) {
         send_to_user(value);
         return;
     }
@@ -123,6 +124,58 @@ void MemoryRemap::write_body(std::uint64_t offset, std::uint32_t size, std::uint
     std::vector<std::uint8_t> bytes(size, 0);
     std::memcpy(bytes.data(), &value, std::min<std::size_t>(size, sizeof(value)));
     ql().mem().write(remap_base_ + offset, bytes);
+}
+
+}  // namespace hw
+}  // namespace qiling
+
+namespace qiling {
+namespace hw {
+
+// ---- the STM32F4xxSpi ----
+
+std::uint64_t STM32F4xxSpi::read_body(std::uint64_t offset, std::uint32_t size) {
+    // spi.py read: the contain walk rides the DR read through the input tube,
+    // the plain read stores the rest
+    if (contain(kDrOffset, 4, offset, size) && has_input()) {
+        return recv_from_user();
+    }
+    return QlConnectivityPeripheral::read_body(offset, size);
+}
+
+void STM32F4xxSpi::write_body(std::uint64_t offset, std::uint32_t size, std::uint64_t value) {
+    // spi.py write: the SR/RXCRCR/TXCRCR writes ignored; the CR1/CR2/CRCPR/
+    // I2SCFGR/I2SPR rides the RW_MASKs; the DR stores then rides the tube
+    if (offset == kSrOffset || offset == kRxcrcrOffset || offset == kTxcrcrOffset) {
+        return;
+    }
+
+    if (offset == kCr1Offset) {
+        value &= stm32f4xx_spi::CR1_RW_MASK;
+    } else if (offset == kCr2Offset) {
+        value &= stm32f4xx_spi::CR2_RW_MASK;
+    } else if (offset == kCrcprOffset) {
+        value &= stm32f4xx_spi::CRCPR_CRCPOLY;
+    } else if (offset == kI2scfgrOffset) {
+        value &= stm32f4xx_spi::I2SCFGR_RW_MASK;
+    } else if (offset == kI2sprOffset) {
+        value &= stm32f4xx_spi::I2SPR_RW_MASK;
+    }
+
+    raw_write(offset, size, value);
+
+    if (contain(kDrOffset, 4, offset, size)) {
+        send_to_user(raw_read(kDrOffset, 4));
+    }
+}
+
+void STM32F4xxSpi::send_interrupt() {
+    if (intn_ >= 0) {
+        auto* nvic = ql().hw() != nullptr ? ql().hw()->peripheral("nvic") : nullptr;
+        if (nvic != nullptr) {
+            dynamic_cast<CortexMNvic&>(*nvic).set_pending(static_cast<int>(intn_));
+        }
+    }
 }
 
 }  // namespace hw

@@ -223,6 +223,12 @@ public:
     // rides the virtual default no-op)
     virtual void step() {}
 
+    // peripheral.py contain - whether the access span [offset:offset+size]
+    // falls within the field [field:field+field_size]
+    static bool contain(std::uint64_t field, std::uint64_t field_size, std::uint64_t offset, std::uint32_t size) {
+        return field <= offset && offset + size <= field + field_size;
+    }
+
     // the snapshot pair (the verbatim save/restore over the instance bytes)
     virtual std::vector<std::uint8_t> save() const { return instance_; }
 

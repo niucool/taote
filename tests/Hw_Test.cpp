@@ -1068,3 +1068,59 @@ TEST(HwManager, DeviceHandlerBridgeForwardsTubeBetweenPeripherals) {
     i2c1->step();  // the CR2 ITEVTEN unset -> no pend; the walk completes
     EXPECT_TRUE(i2c1->is_master_mode());
 }
+
+// The f4xx SPI variant: the 36-byte image with the RW_MASK write masks (the
+// CR1/CR2/CRCPR/I2SCFGR/I2SPR), the SR/CRC write ignores, the contain-span DR
+// walks (a 2-byte access straddling the DR rides the tubes), the f1xx SPI's
+// contain walk riding the same span.
+TEST(HwManager, Stm32f4xxSpiVariantMasksAndContainWalks) {
+    const auto hex_path = write_ihex_fixture();
+
+    QilingOptions options;
+    options.argv = {hex_path};
+    options.rootfs = ensure_hw_rootfs().string();
+    options.ostype = QL_OS::MCU;
+    options.archtype = QL_ARCH::CORTEX_M;
+    options.env = {
+        {"FLASH", "memory;0x0;0x2000"},
+        {"SRAM", "memory;0x20000000;0x1000"},
+        {"PPB", "mmio;0xE000E000;0x1000"},
+        {"SYSTICK", "core;cm3_systick;0xE000E010"},
+        {"NVIC", "core;cm_nvic;0xE000E100"},
+        {"SCB", "core;cm4_scb;0xE000ED00"},
+        {"SPI1", "core;STM32F4xxSpi;0x40013000;intn=35"},
+        {"SPI1_F1", "core;STM32F1xxSpi;0x40014000"},
+        {"PERIP", "mmio;0x40000000;0x100000"},
+    };
+    Qiling ql(options);
+
+    auto* spi1 = static_cast<qiling::hw::STM32F4xxSpi*>(ql.hw()->peripheral("spi1"));
+    ASSERT_NE(spi1, nullptr);
+
+    // the RW_MASK stores: the CR1 rides the 0xffff mask (the upper bits clear),
+    // the CR2 rides its narrow mask (the FRF at bit 4 kept, the bit 3 dropped)
+    spi1->write_body(spi1->kCr1Offset, 4, 0xffffffffu);
+    EXPECT_EQ(spi1->raw_read(spi1->kCr1Offset, 4), 0xffffu);
+    spi1->write_body(spi1->kCr2Offset, 4, 0xffffffffu);
+    EXPECT_EQ(spi1->raw_read(spi1->kCr2Offset, 4), 0xF7u);
+
+    // the SR write is ignored (the sticky seed 0xB stays)
+    spi1->write_body(spi1->kSrOffset, 4, 0);
+    EXPECT_EQ(spi1->raw_read(spi1->kSrOffset, 4), 0xBu);
+    // the RXCRCR write is ignored
+    spi1->write_body(spi1->kRxcrcrOffset, 4, 0x1234);
+    EXPECT_EQ(spi1->raw_read(spi1->kRxcrcrOffset, 4), 0u);
+
+    // the contain-span DR walk: a 2-byte access over the DR's low half rides
+    // the store-then-send (the DR reads back 0x0000ABCD, the send_to_user
+    // takes the low byte)
+    spi1->write_body(0x0C, 2, 0xABCD);
+    const auto out = spi1->recv(2);
+    ASSERT_EQ(out.size(), 1u);
+    EXPECT_EQ(out[0], 0xCDu);
+    // the f1xx SPI's contain walk rides the same span
+    auto* f1 = static_cast<qiling::hw::STM32F1xxSpi*>(ql.hw()->peripheral("spi1_f1"));
+    (void)f1;
+    EXPECT_TRUE(qiling::hw::QlPeripheral::contain(0x0C, 4, 0x0E, 2));
+    EXPECT_FALSE(qiling::hw::QlPeripheral::contain(0x0C, 4, 0x10, 4));
+}
