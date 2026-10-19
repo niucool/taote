@@ -8,6 +8,7 @@
 #include "qiling/hw/stm32f1xx_exti.hpp"
 #include "qiling/hw/stm32f1xx_simple.hpp"
 #include "qiling/hw/stm32f1xx_interactive.hpp"
+#include "qiling/hw/sam3xa.hpp"
 
 #include <algorithm>
 #include <map>
@@ -99,6 +100,48 @@ QlHwManager::QlHwManager(Qiling& ql) : ql_(&ql) {
             return it == kwargs.end() ? -1 : static_cast<std::int64_t>(it->second);
         };
         return std::make_unique<STM32F1xxI2c>(q, label, intn_of("ev_intn"), intn_of("er_intn"));
+    });
+    register_struct("SAM3xaUart", [](Qiling& q, const std::string& label, const PeripheralKwargs& kwargs) {
+        auto it = kwargs.find("intn");
+        return std::make_unique<Sam3xaUart>(q, label, it == kwargs.end() ? -1 : static_cast<std::int64_t>(it->second));
+    });
+    register_struct("SAM3xaPdc", [](Qiling& q, const std::string& label, const PeripheralKwargs&) {
+        return std::make_unique<Sam3xaPdc>(q, label);
+    });
+    register_struct("SAM3xaWdt", [](Qiling& q, const std::string& label, const PeripheralKwargs&) {
+        return std::make_unique<Sam3xaWdt>(q, label);
+    });
+    register_struct("SAM3xaEfc", [](Qiling& q, const std::string& label, const PeripheralKwargs&) {
+        return std::make_unique<Sam3xaEfc>(q, label);
+    });
+    register_struct("SAM3xaPwm", [](Qiling& q, const std::string& label, const PeripheralKwargs&) {
+        return std::make_unique<Sam3xaPwm>(q, label);
+    });
+    register_struct("SAM3xaTc", [](Qiling& q, const std::string& label, const PeripheralKwargs&) {
+        return std::make_unique<Sam3xaTc>(q, label);
+    });
+    register_struct("SAM3xaAdc", [](Qiling& q, const std::string& label, const PeripheralKwargs& kwargs) {
+        auto it = kwargs.find("intn");
+        return std::make_unique<Sam3xaAdc>(q, label, it == kwargs.end() ? -1 : static_cast<std::int64_t>(it->second));
+    });
+    register_struct("SAM3xaDac", [](Qiling& q, const std::string& label, const PeripheralKwargs& kwargs) {
+        auto it = kwargs.find("intn");
+        return std::make_unique<Sam3xaDac>(q, label, it == kwargs.end() ? -1 : static_cast<std::int64_t>(it->second));
+    });
+    register_struct("SAM3xaPio", [](Qiling& q, const std::string& label, const PeripheralKwargs& kwargs) {
+        auto it = kwargs.find("intn");
+        return std::make_unique<Sam3xaPio>(q, label, it == kwargs.end() ? -1 : static_cast<std::int64_t>(it->second));
+    });
+    register_struct("SAM3xaPmc", [](Qiling& q, const std::string& label, const PeripheralKwargs& kwargs) {
+        auto it = kwargs.find("intn");
+        return std::make_unique<Sam3xaPmc>(q, label, it == kwargs.end() ? -1 : static_cast<std::int64_t>(it->second));
+    });
+    register_struct("SAM3xaSpi", [](Qiling& q, const std::string& label, const PeripheralKwargs& kwargs) {
+        auto it = kwargs.find("intn");
+        return std::make_unique<Sam3xaSpi>(q, label, it == kwargs.end() ? -1 : static_cast<std::int64_t>(it->second));
+    });
+    register_struct("SAM3xaUotghs", [](Qiling& q, const std::string& label, const PeripheralKwargs&) {
+        return std::make_unique<Sam3xaUotghs>(q, label);
     });
     register_struct("STM32F1xxExti", [](Qiling& q, const std::string& label, const PeripheralKwargs& kwargs) {
         auto exti = std::make_unique<STM32F1xxExti>(q, label);

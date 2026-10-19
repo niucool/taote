@@ -61,6 +61,7 @@ add_library(qiling STATIC
     hw/stm32f1xx_exti.cpp
     hw/stm32f1xx_simple.cpp
     hw/stm32f1xx_interactive.cpp
+    hw/sam3xa.cpp
     loader/mcu.cpp
     os/macos/mach_msg.cpp
     os/macos/subsystems.cpp

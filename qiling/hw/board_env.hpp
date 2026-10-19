@@ -13,8 +13,8 @@
 // mirrors the degradation (the create returns null, the entity is absent).
 #pragma once
 
-#ifndef QILING_HW_STM32F103_BOARD_HPP
-#define QILING_HW_STM32F103_BOARD_HPP
+#ifndef QILING_HW_BOARD_ENV_HPP
+#define QILING_HW_BOARD_ENV_HPP
 
 #include <map>
 #include <string>
@@ -79,7 +79,79 @@ inline std::map<std::string, std::string> stm32f103_board_env() {
     };
 }
 
+// extensions/mcu/atmel/sam3x8e.py sam3x8e - the board env table. The
+// peripheral items reference the SAM3xa* structs; the upstream implements
+// 12 of them (the uart/pdc/wdt/adc/dac/pwm/efc/pio/pmc/spi/tc/uotghs) and
+// the rest degrade with the module-not-found warn (the port mirrors the
+// degradation: the create returns null, the entity stays absent).
+inline std::map<std::string, std::string> sam3x8e_board_env() {
+    return {
+        {"SRAM BB", "core;CortexMBitband;0x22000000;base=0x20000000;size=0x100000"},
+        {"PERIP BB", "core;CortexMBitband;0x42000000;base=0x40000000;size=0x100000"},
+        {"REMAP", "core;MemoryRemap;0x0;base=0x80000;size=0x80000"},
+        {"SYSTICK", "core;cm3_systick;0xE000E010"},
+        {"NVIC", "core;cm_nvic;0xE000E100"},
+        {"SCB", "core;cm4_scb;0xE000ED00"},
+        {"FLASH", "memory;0x80000;0x80000"},
+        {"SRAM", "memory;0x20000000;0x10000"},
+        {"RAM", "memory;0x20070000;0x18000"},
+        {"PERIP", "mmio;0x40000000;0x100000"},
+        {"PPB", "mmio;0xE0000000;0x100000"},
+        {"SRAM BBR", "mmio;0x22000000;0x4000000"},
+        {"PERIP BBR", "mmio;0x42000000;0x2000000"},
+        {"REMAP REGION", "mmio;0x0;0x80000"},
+        {"HSMCI", "peripheral;SAM3xaHsmci;0x40000000;intn=0x15"},
+        {"SSC", "peripheral;SAM3xaSsc;0x40004000;intn=0x1a"},
+        {"SPI0", "peripheral;SAM3xaSpi;0x40008000;intn=0x18"},
+        {"TC0", "peripheral;SAM3xaTc;0x40080000;intn=0x1b"},
+        {"TC1", "peripheral;SAM3xaTc;0x40084000;intn=0x1c"},
+        {"TC2", "peripheral;SAM3xaTc;0x40088000;intn=0x1d"},
+        {"TWI0", "peripheral;SAM3xaTwi;0x4008c000;intn=0x16"},
+        {"PDC_TWI0", "peripheral;SAM3xaPdc;0x4008c100"},
+        {"TWI1", "peripheral;SAM3xaTwi;0x40090000;intn=0x17"},
+        {"PDC_TWI1", "peripheral;SAM3xaPdc;0x40090100"},
+        {"PWM", "peripheral;SAM3xaPwm;0x40094000;intn=0x24"},
+        {"PDC_PWM", "peripheral;SAM3xaPdc;0x40094100"},
+        {"USART0", "peripheral;SAM3xaUart;0x40098000;intn=0x11"},
+        {"PDC_USART0", "peripheral;SAM3xaPdc;0x40098100"},
+        {"USART1", "peripheral;SAM3xaUart;0x4009c000;intn=0x12"},
+        {"PDC_USART1", "peripheral;SAM3xaPdc;0x4009c100"},
+        {"USART2", "peripheral;SAM3xaUart;0x400a0000;intn=0x13"},
+        {"PDC_USART2", "peripheral;SAM3xaPdc;0x400a0100"},
+        {"USART3", "peripheral;SAM3xaUart;0x400a4000;intn=0x14"},
+        {"PDC_USART3", "peripheral;SAM3xaPdc;0x400a4100"},
+        {"UOTGHS", "peripheral;SAM3xaUotghs;0x400ac000;intn=0x28"},
+        {"EMAC", "peripheral;SAM3xaEmac;0x400b0000;intn=0x2a"},
+        {"CAN0", "peripheral;SAM3xaCan;0x400b4000;intn=0x2b"},
+        {"CAN1", "peripheral;SAM3xaCan;0x400b8000;intn=0x2c"},
+        {"TRNG", "peripheral;SAM3xaTrng;0x400bc000;intn=0x29"},
+        {"ADC", "peripheral;SAM3xaAdc;0x400c0000;intn=0x25"},
+        {"PDC_ADC", "peripheral;SAM3xaPdc;0x400c0100"},
+        {"DMAC", "peripheral;SAM3xaDmac;0x400c4000;intn=0x27"},
+        {"DAC", "peripheral;SAM3xaDac;0x400c8000;intn=0x26"},
+        {"PDC_DAC", "peripheral;SAM3xaPdc;0x400c8100"},
+        {"SMC", "peripheral;SAM3xaSmc;0x400e0000;intn=0x9"},
+        {"MATRIX", "peripheral;SAM3xaMatrix;0x400e0400"},
+        {"PMC", "peripheral;SAM3xaPmc;0x400e0600;intn=0x5"},
+        {"UART", "peripheral;SAM3xaUart;0x400e0800;intn=0x8"},
+        {"PDC_UART", "peripheral;SAM3xaPdc;0x400e0900"},
+        {"CHIPID", "peripheral;SAM3xaChipid;0x400e0940"},
+        {"EFC0", "peripheral;SAM3xaEfc;0x400e0a00;intn=0x6"},
+        {"EFC1", "peripheral;SAM3xaEfc;0x400e0c00;intn=0x7"},
+        {"PIOA", "peripheral;SAM3xaPio;0x400e0e00;intn=0xb"},
+        {"PIOB", "peripheral;SAM3xaPio;0x400e1000;intn=0xc"},
+        {"PIOC", "peripheral;SAM3xaPio;0x400e1200;intn=0xd"},
+        {"PIOD", "peripheral;SAM3xaPio;0x400e1400;intn=0xe"},
+        {"RSTC", "peripheral;SAM3xaRstc;0x400e1a00;intn=0x1"},
+        {"SUPC", "peripheral;SAM3xaSupc;0x400e1a10;intn=0x0"},
+        {"RTT", "peripheral;SAM3xaRtt;0x400e1a30;intn=0x3"},
+        {"WDT", "peripheral;SAM3xaWdt;0x400e1a50;intn=0x4"},
+        {"RTC", "peripheral;SAM3xaRtc;0x400e1a60;intn=0x2"},
+        {"GPBR", "peripheral;SAM3xaGpbr;0x400e1a90"},
+    };
+}
+
 }  // namespace hw
 }  // namespace qiling
 
-#endif  // QILING_HW_STM32F103_BOARD_HPP
+#endif  // QILING_HW_BOARD_ENV_HPP

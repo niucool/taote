@@ -21,7 +21,8 @@
 #include "qiling/hw/stm32f1xx_exti.hpp"
 #include "qiling/hw/stm32f1xx_simple.hpp"
 #include "qiling/hw/stm32f1xx_interactive.hpp"
-#include "qiling/hw/stm32f103_board.hpp"
+#include "qiling/hw/sam3xa.hpp"
+#include "qiling/hw/board_env.hpp"
 #include "qiling/hw/stm32f1xx_gpio.hpp"
 #include "qiling/hw/stm32f4xx_usart.hpp"
 #include "qiling/exception.hpp"
@@ -800,4 +801,93 @@ TEST(HwManager, Stm32f103BoardAssemblesPeripheralsAndDegradesMissing) {
     exti->write_body(exti->kSwierOffset, 4, 1);
     ASSERT_EQ(nvic->pending_interrupts().size(), 1u);
     EXPECT_EQ(nvic->pending_interrupts().back(), 6);
+}
+
+// The sam3x8e board-table assembly: the board env rides the loader's
+// load_env walk; the 12 implemented SAM3xa families instantiate, the
+// unimplemented upstream names degrade to absent entities, and the walks
+// ride the adc START (the ISR.DRDY), the dac CDR (the ISR.EOC), the pio
+// SODR/CODR pin walks and the uart step (the RXRDY pend at intn 8).
+TEST(HwManager, Sam3x8eBoardAssemblesAndPeripheralsWalk) {
+    const auto hex_path = write_ihex_fixture();
+
+    QilingOptions options;
+    options.argv = {hex_path};
+    options.rootfs = ensure_hw_rootfs().string();
+    options.ostype = QL_OS::MCU;
+    options.archtype = QL_ARCH::CORTEX_M;
+    options.env = qiling::hw::sam3x8e_board_env();
+    Qiling ql(options);
+
+    // the implemented families ride the board table
+    EXPECT_NE(ql.hw()->peripheral("usart0"), nullptr);
+    EXPECT_NE(ql.hw()->peripheral("pwm"), nullptr);
+    EXPECT_NE(ql.hw()->peripheral("tc0"), nullptr);
+    EXPECT_NE(ql.hw()->peripheral("adc"), nullptr);
+    EXPECT_NE(ql.hw()->peripheral("dac"), nullptr);
+    EXPECT_NE(ql.hw()->peripheral("pioa"), nullptr);
+    EXPECT_NE(ql.hw()->peripheral("pmc"), nullptr);
+    EXPECT_NE(ql.hw()->peripheral("spi0"), nullptr);
+    EXPECT_NE(ql.hw()->peripheral("uotghs"), nullptr);
+    EXPECT_NE(ql.hw()->peripheral("pdc_uart"), nullptr);
+    EXPECT_NE(ql.hw()->peripheral("systick"), nullptr);
+    EXPECT_NE(ql.hw()->peripheral("nvic"), nullptr);
+
+    // the unimplemented upstream names degrade to absent entities
+    EXPECT_EQ(ql.hw()->peripheral("hsmci"), nullptr);
+    EXPECT_EQ(ql.hw()->peripheral("twi0"), nullptr);
+    EXPECT_EQ(ql.hw()->peripheral("emac"), nullptr);
+    EXPECT_EQ(ql.hw()->peripheral("dmac"), nullptr);
+    EXPECT_EQ(ql.hw()->peripheral("rstc"), nullptr);
+    EXPECT_EQ(ql.hw()->peripheral("gpbr"), nullptr);
+
+    // the adc CR.START rides the ISR.DRDY
+    auto* adc = static_cast<qiling::hw::Sam3xaAdc*>(ql.hw()->peripheral("adc"));
+    adc->write_body(adc->kCrOffset, 4, qiling::hw::sam3xa_adc::cr::START);
+    EXPECT_NE(adc->raw_read(adc->kIsrOffset, 4) & qiling::hw::sam3xa_adc::isr::DRDY, 0u);
+
+    // the dac CDR write rides the ISR.EOC
+    auto* dac = static_cast<qiling::hw::Sam3xaDac*>(ql.hw()->peripheral("dac"));
+    dac->write_body(dac->kCdrOffset, 4, 0x7ff);
+    EXPECT_NE(dac->raw_read(dac->kIsrOffset, 4) & qiling::hw::sam3xa_dac::isr::EOC, 0u);
+
+    // the pio SODR/CODR pin walks ride the PDSR + the hooks
+    auto* pioa = static_cast<qiling::hw::Sam3xaPio*>(ql.hw()->peripheral("pioa"));
+    std::size_t set_calls = 0;
+    pioa->hook_set(3, [&set_calls]() { ++set_calls; });
+    pioa->write_body(pioa->kSodrOffset, 4, 1u << 3);
+    EXPECT_EQ(pioa->pin(3), 1u);
+    EXPECT_EQ(set_calls, 1u);
+    pioa->write_body(pioa->kCodrOffset, 4, 1u << 3);
+    EXPECT_EQ(pioa->pin(3), 0u);
+
+    // the uart: the input byte + the IER.RXRDY + the CR.RXEN ride the step
+    // (the SR.RXRDY set + the nvic pend at intn 8)
+    auto* uart = static_cast<qiling::hw::Sam3xaUart*>(ql.hw()->peripheral("uart"));
+    auto* nvic = static_cast<qiling::hw::CortexMNvic*>(ql.hw()->peripheral("nvic"));
+    nvic->enable(8);
+    uart->send({'A'});
+    uart->write_body(uart->kCrOffset, 4, qiling::hw::sam3xa_uart::cr::RXEN);
+    uart->write_body(uart->kIerOffset, 4, qiling::hw::sam3xa_uart::ier::RXRDY);
+    uart->step();
+    EXPECT_EQ(nvic->pending_interrupts().size(), 1u);
+    EXPECT_EQ(nvic->pending_interrupts().back(), 8);
+    // the RHR read clears the RXRDY and rides the tube byte
+    EXPECT_EQ(uart->read_body(uart->kRhrOffset, 4), 'A');
+    EXPECT_EQ(uart->raw_read(uart->kSrOffset, 4) & qiling::hw::sam3xa_uart::sr::RXRDY, 0u);
+
+    // the pmc CKGR_MOR write rides the oscillator status bits
+    auto* pmc = static_cast<qiling::hw::Sam3xaPmc*>(ql.hw()->peripheral("pmc"));
+    pmc->write_body(0x20, 4, qiling::hw::sam3xa_pmc::ckgr_mor::MOSCXTEN |
+                                 qiling::hw::sam3xa_pmc::ckgr_mor::MOSCSEL);
+    const auto sr = pmc->raw_read(pmc->kSrOffset, 4);
+    EXPECT_NE(sr & qiling::hw::sam3xa_pmc::sr::MOSCXTS, 0u);
+    EXPECT_NE(sr & qiling::hw::sam3xa_pmc::sr::MOSCSELS, 0u);
+
+    // the spi TDR write rides the output tube (the TD mask)
+    auto* spi0 = static_cast<qiling::hw::Sam3xaSpi*>(ql.hw()->peripheral("spi0"));
+    spi0->write_body(spi0->kTdrOffset, 4, 0x1234);
+    const auto out = spi0->recv(2);
+    ASSERT_EQ(out.size(), 1u);
+    EXPECT_EQ(out[0], 0x34);
 }
