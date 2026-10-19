@@ -2171,3 +2171,91 @@ TEST(WinApiInterlocked, InitializeSListHeadRegistersHandleAtAddress) {
     ASSERT_NE(h, nullptr);
     EXPECT_EQ(h->id, kCells);
 }
+
+TEST(WinApiErrhandling, LastErrorCycleAndFilterSwap) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    // the SetLastError/GetLastError cycle
+    const auto* sle = ApiRegistry::instance().find("SetLastError");
+    ASSERT_NE(sle, nullptr);
+    const auto rs = sle->handler(ql, 0, ResolvedParams{{"dwErrCode", 0x57ull}});
+    EXPECT_FALSE(rs.has_value());  // the void body
+
+    const auto* gle = ApiRegistry::instance().find("GetLastError");
+    ASSERT_NE(gle, nullptr);
+    const auto rg = gle->handler(ql, 0, {});
+    ASSERT_TRUE(rg.has_value());
+    EXPECT_EQ(*rg, 0x57u);
+
+    // the SetErrorMode rides the verbatim 0
+    const auto* sem = ApiRegistry::instance().find("SetErrorMode");
+    ASSERT_NE(sem, nullptr);
+    const auto rm = sem->handler(ql, 0, ResolvedParams{{"uMode", 0x4ull}});
+    ASSERT_TRUE(rm.has_value());
+    EXPECT_EQ(*rm, 0u);
+
+    // the first filter call registers under the canonical name and returns 0
+    const auto* suf = ApiRegistry::instance().find("SetUnhandledExceptionFilter");
+    ASSERT_NE(suf, nullptr);
+    const auto r1 = suf->handler(ql, 0, ResolvedParams{{"lpTopLevelExceptionFilter", 0x2000ull}});
+    ASSERT_TRUE(r1.has_value());
+    EXPECT_EQ(*r1, 0u);
+
+    // the second call returns the previous filter and swaps the obj
+    const auto r2 = suf->handler(ql, 0, ResolvedParams{{"lpTopLevelExceptionFilter", 0x3000ull}});
+    ASSERT_TRUE(r2.has_value());
+    EXPECT_EQ(*r2, 0x2000u);
+
+    auto& os = ql.os<QlOsWindows>();
+    const auto* h = os.handle_manager().search("TopLevelExceptionHandler");
+    ASSERT_NE(h, nullptr);
+    EXPECT_EQ(reinterpret_cast<std::uint64_t>(h->obj), 0x3000u);
+}
+
+TEST(WinApiErrhandling, VectoredExceptionAddAndRemoveRideHandleManager) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    const auto* add = ApiRegistry::instance().find("AddVectoredExceptionHandler");
+    ASSERT_NE(add, nullptr);
+    const auto r = add->handler(ql, 0, ResolvedParams{
+        {"First", 0ull},
+        {"Handler", 0x4000ull},
+    });
+    ASSERT_TRUE(r.has_value());
+    EXPECT_NE(*r, 0u);  // the handle id
+
+    auto& os = ql.os<QlOsWindows>();
+    auto* h = os.handle_manager().get(*r);
+    ASSERT_NE(h, nullptr);
+    // the verbatim shape: the handle obj IS the 0x2d HookRet (not the handler
+    // address — the upstream Handle(obj=hook) rides the hook object)
+    ASSERT_NE(h->obj, nullptr);
+    ASSERT_NE(h->owned, nullptr);  // the HookRet stays alive via the owned slot
+
+    // the Remove body unregisters the 0x2d hook (the handle rides the
+    // HookRet) and returns the verbatim 0
+    const auto* rem = ApiRegistry::instance().find("RemoveVectoredExceptionHandler");
+    ASSERT_NE(rem, nullptr);
+    const auto rr = rem->handler(ql, 0, ResolvedParams{{"Handle", *r}});
+    ASSERT_TRUE(rr.has_value());
+    EXPECT_EQ(*rr, 0u);
+}
+
+TEST(WinApiErrhandling, RaiseExceptionPassthruOnX64) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    // the x8664 path: the passthru continues into the native dispatcher (the
+    // verbatim comment ride); the handler returns no value
+    const auto* re = ApiRegistry::instance().find("RaiseException");
+    ASSERT_NE(re, nullptr);
+    const auto r = re->handler(ql, 0, ResolvedParams{
+        {"dwExceptionCode", 0xE0000001ull},
+        {"dwExceptionFlags", 0ull},
+        {"nNumberOfArguments", 0ull},
+        {"lpArguments", 0ull},
+    });
+    EXPECT_FALSE(r.has_value());
+}
