@@ -1892,3 +1892,45 @@ TEST(PosixFileDes, IoFsTailReadvWritevPreadSendfileIoctl) {
     in.read(got.data(), 10);
     EXPECT_EQ(std::string(got.data(), got.size()), "ABCDEFGHIJ");
 }
+
+// The time family: the time/times/nanosleep rides (the host-sleep path; the
+// setitimer stub returns 0 verbatim).
+TEST(PosixTime, TimeFamilyTimeTimesNanosleepSetitimer) {
+    const std::vector<std::uint8_t> code = {
+        // time(nullptr) -> rax = the epoch seconds
+        0x48, 0xC7, 0xC0, 0xC9, 0x00, 0x00, 0x00,  // mov rax, 201 (time)
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00,  // mov rdi, 0
+        0x0F, 0x05,                                 // syscall
+        0x48, 0x89, 0x04, 0x25, 0x00, 0x22, 0x00, 0x01,  // mov [0x1002200], rax
+        // times(0x1002400)
+        0x48, 0xC7, 0xC0, 0x64, 0x00, 0x00, 0x00,  // mov rax, 100 (times)
+        0x48, 0xC7, 0xC7, 0x00, 0x24, 0x00, 0x01,  // mov rdi, 0x1002400
+        0x0F, 0x05,                                 // syscall
+        0x48, 0x89, 0x04, 0x25, 0x08, 0x22, 0x00, 0x01,  // mov [0x1002208], rax
+        // setitimer(0, 0, 0) -> 0
+        0x48, 0xC7, 0xC0, 0x26, 0x00, 0x00, 0x00,  // mov rax, 38 (setitimer on x86-64)
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00,  // mov rdi, 0
+        0x48, 0xC7, 0xC6, 0x00, 0x00, 0x00, 0x00,  // mov rsi, 0
+        0x48, 0xC7, 0xC2, 0x00, 0x00, 0x00, 0x00,  // mov rdx, 0
+        0x0F, 0x05,                                 // syscall
+        0x48, 0x89, 0x04, 0x25, 0x10, 0x22, 0x00, 0x01,  // mov [0x1002210], rax
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00,  // mov rax, 60 (exit)
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00,  // mov rdi, 0
+        0x0F, 0x05,                                 // syscall
+    };
+
+    QilingOptions options = posix_options(code);
+    Qiling ql(options);
+    ql.mem().write(0x1002400, std::vector<std::uint8_t>(16, 0));
+    ql.run();
+
+    // the time returns a plausible epoch (post-2020)
+    const auto t = ql.mem().read_ptr(0x1002200);
+    EXPECT_GT(t, 1577836800u);  // 2020-01-01
+    // the times returned a non-negative tick count
+    EXPECT_GE(ql.mem().read_ptr(0x1002208), 0u);
+    // the setitimer stub returns 0
+    EXPECT_EQ(ql.mem().read_ptr(0x1002210), 0u);
+    // the times buffer carries the 4 fields (the first non-zero, the rest 0)
+    EXPECT_GT(ql.mem().read_ptr(0x1002400), 0u);
+}

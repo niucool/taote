@@ -1,6 +1,13 @@
 #include <cstdio>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <ctime>
+#ifdef _WIN32
+#include <time.h>
+#else
+#include <sys/times.h>
+#include <unistd.h>
+#endif
 #ifdef _WIN32
 #include <io.h>
 #endif
@@ -530,6 +537,77 @@ std::optional<std::int64_t> syscall_mknodat(Qiling& ql, const std::vector<std::u
     { std::ofstream out(hpath, std::ios::binary); }
     std::filesystem::permissions(hpath, static_cast<std::filesystem::perms>(mode), ec);
     return ec ? -ec.value() : 0;
+}
+
+// time.py ql_syscall_time: int(time.time())
+std::optional<std::int64_t> syscall_time(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    (void)params;
+    return static_cast<std::int64_t>(std::time(nullptr));
+}
+
+// time.py __sleep_common: the tv_sec read (the timespec64 forces the 8-byte
+// sec field) + the nsec/1e9 add; the thread-management branch parks the
+// thread through the emu_stop + the sched_cb (the gevent.sleep analogue --
+// the port wakes via the management wake-at deadline), the single-thread
+// branch rides the host sleep
+std::optional<std::int64_t> sleep_common(Qiling& ql, std::uint64_t req, bool force_timespec64) {
+    const auto sec_size = force_timespec64 ? 8 : ql.arch().pointersize();
+    const auto nsec_size = ql.arch().pointersize();
+
+    double tv_sec = 0;
+    if (force_timespec64) {
+        tv_sec = static_cast<double>(ql.mem().read_ptr(req, 8));
+    } else {
+        tv_sec = static_cast<double>(ql.mem().read_ptr(req, sec_size));
+    }
+    tv_sec += static_cast<double>(ql.mem().read_ptr(req + sec_size, nsec_size)) / 1000000000.0;
+
+    // the thread-management branch: the upstream parks via the gevent.sleep
+    // with the FIXME "this seems to be incomplete"; the port has no timer
+    // wake machinery, so the sleep rides the host clock inside the handler
+    // (the documented deviation: the sleeping thread stalls the whole emu
+    // for the interval)
+    std::this_thread::sleep_for(std::chrono::duration<double>(tv_sec));
+    return 0;
+}
+
+std::optional<std::int64_t> syscall_nanosleep(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    return sleep_common(ql, params[0], false);
+}
+
+std::optional<std::int64_t> syscall_clock_nanosleep(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    return sleep_common(ql, params[2], false);
+}
+
+std::optional<std::int64_t> syscall_clock_nanosleep_time64(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    return sleep_common(ql, params[2], true);
+}
+
+// time.py ql_syscall_setitimer: the verbatim no-op (the FIXME comment)
+std::optional<std::int64_t> syscall_setitimer(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    (void)params;
+    return 0;
+}
+
+// time.py ql_syscall_times: the 4x u32 ms fields + the elapsed*100 return
+std::optional<std::int64_t> syscall_times(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    const auto tbuf = params[0];
+    if (tbuf != 0) {
+        // the times fields ride the clock-based approximation (the WIN32
+        // has no tms; the upstream uses os.times() - the ms conversion is
+        // the same shape)
+        const auto now = static_cast<std::uint64_t>(::clock()) * 10;  // the ms since the start
+        const auto put32 = [&](std::uint64_t at, std::uint64_t v) {
+            ql.mem().write(at, std::vector<std::uint8_t>{
+                static_cast<std::uint8_t>(v & 0xff), static_cast<std::uint8_t>((v >> 8) & 0xff),
+                static_cast<std::uint8_t>((v >> 16) & 0xff), static_cast<std::uint8_t>((v >> 24) & 0xff)});
+        };
+        put32(tbuf, now);        // the user
+        put32(tbuf + 4, 0);      // the system
+        put32(tbuf + 8, 0);      // the children user
+        put32(tbuf + 12, 0);     // the children system
+    }
+    return static_cast<std::int64_t>(::clock() * 10);
 }
 
 std::optional<std::int64_t> syscall_exit(Qiling& ql, const std::vector<std::uint64_t>& params) {
@@ -1737,6 +1815,12 @@ void register_builtin_syscalls() {
     registry.register_syscall({"ioctl", {PARAM_INTN, PARAM_INTN, PARAM_PTRX}, syscall_ioctl});
     registry.register_syscall({"sysinfo", {PARAM_PTRX}, syscall_sysinfo});
     registry.register_syscall({"mknodat", {PARAM_INTN, PARAM_PTRX, PARAM_INTN, PARAM_INTN}, syscall_mknodat});
+    registry.register_syscall({"time", {}, syscall_time});
+    registry.register_syscall({"nanosleep", {PARAM_PTRX, PARAM_PTRX}, syscall_nanosleep});
+    registry.register_syscall({"clock_nanosleep", {PARAM_INTN, PARAM_INTN, PARAM_PTRX, PARAM_PTRX}, syscall_clock_nanosleep});
+    registry.register_syscall({"clock_nanosleep_time64", {PARAM_INTN, PARAM_INTN, PARAM_PTRX, PARAM_PTRX}, syscall_clock_nanosleep_time64});
+    registry.register_syscall({"setitimer", {PARAM_INTN, PARAM_PTRX, PARAM_PTRX}, syscall_setitimer});
+    registry.register_syscall({"times", {PARAM_PTRX}, syscall_times});
     registry.register_syscall({"fstat64", {PARAM_INTN, PARAM_PTRX}, syscall_fstat64_pack64});    registry.register_syscall({"ftruncate", {PARAM_INTN, PARAM_INTN}, syscall_ftruncate});
     registry.register_syscall({"open", {PARAM_PTRX, PARAM_INTN, PARAM_INTN}, syscall_open});
     registry.register_syscall({"openat", {PARAM_INTN, PARAM_PTRX, PARAM_INTN, PARAM_INTN}, syscall_open});
