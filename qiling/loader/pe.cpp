@@ -5,6 +5,9 @@
 #include "qiling/core.hpp"
 #include "qiling/exception.hpp"
 #include "qiling/os/memory.hpp"
+#include "qiling/os/windows/windows.hpp"
+
+#include <filesystem>
 #include "qiling/os/os.hpp"
 
 namespace qiling {
@@ -88,7 +91,110 @@ std::uint64_t QlLoaderPE::load_image(const std::string& host_path, const std::st
         }
     }
 
+    // loader/pe.py init_exports: the exports ride the export_symbols map
+    // (ea-keyed) plus the image's own iat slice; the GetProcAddress self
+    // branch walks them verbatim
+    if (parsed->has_exports()) {
+        const auto* export_ = parsed->get_export();
+        std::map<std::string, std::uint64_t> iat_by_name;
+        std::map<std::uint64_t, std::uint64_t> iat_by_ordinal;
+
+        for (const LIEF::PE::ExportEntry& entry : export_->entries()) {
+            const std::uint64_t ea = base + entry.address();
+
+            ExportSymbol symbol;
+            symbol.address = ea;
+            symbol.name = entry.name();
+            symbol.ordinal = entry.ordinal();
+            export_symbols_[ea] = std::move(symbol);
+
+            if (!entry.name().empty()) {
+                iat_by_name[entry.name()] = ea;
+            }
+            iat_by_ordinal[entry.ordinal()] = ea;
+        }
+
+        // dll_name = os.path.basename(self.path).casefold() (verbatim)
+        const std::filesystem::path loaded(host_path);
+        std::string dll_name = loaded.filename().string();
+        for (auto& c : dll_name) {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+        import_address_table_[dll_name] = ImportTable{std::move(iat_by_name), std::move(iat_by_ordinal)};
+    }
+
     return base;
+}
+
+std::pair<std::string, std::string> QlLoaderPE::dll_path_elements(const std::string& name) const {
+    // loader/pe.py __get_path_elements: translate the dll virtual path into
+    // the host path
+    const std::size_t sep = name.find_last_of("\\/");
+    std::string dirname = sep == std::string::npos ? std::string() : name.substr(0, sep);
+    std::string basename = sep == std::string::npos ? name : name.substr(sep + 1);
+
+    // has_lib_ext: the dll/exe/sys/drv suffix check, the .dll append
+    const auto dot = basename.rfind('.');
+    const std::string ext = dot == std::string::npos ? std::string() : basename.substr(dot + 1);
+    std::string ext_lower = ext;
+    for (auto& c : ext_lower) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    if (!(ext_lower == "dll" || ext_lower == "exe" || ext_lower == "sys" || ext_lower == "drv")) {
+        basename += ".dll";
+    }
+
+    // if only filename was specified assume it is located at the system32
+    // folder to prevent potential dll hijacking (verbatim)
+    if (dirname.empty()) {
+        auto* os = static_cast<os::windows::QlOsWindows*>(&ql_->os());
+        dirname = os->winsys();
+    }
+
+    // reconstruct the dll virtual path, then the host path
+    const std::string vpath = dirname + "\\" + basename;
+    const std::string host_path = ql_->os().path()->virtual_to_host_path(vpath);
+
+    std::string folded = basename;
+    for (auto& c : folded) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    return {host_path, folded};
+}
+
+std::uint64_t QlLoaderPE::load_dll(const std::string& name) {
+    auto [dll_path, dll_name] = dll_path_elements(name);
+
+    if (dll_name.rfind("api-ms-win-", 0) == 0) {
+        // Usually we should not reach this point and instead imports from
+        // such DLLs should be redirected earlier (verbatim)
+        return 0;
+    }
+
+        // see if this dll was already loaded
+    if (const auto* image = get_image_by_name(dll_name, true)) {
+        return image->base;
+    }
+
+    std::error_code ec;
+    std::string dll_path_host = dll_path;
+        if (!std::filesystem::exists(dll_path_host, ec)) {
+        // posix hosts may not find the requested filename if it was saved
+        // under a different case. (verbatim comment; the casefold walk)
+        const auto folded = ql_->os().path()->host_casefold_path(dll_path_host);
+        if (!folded.has_value()) {
+            return 0;
+        }
+        dll_path_host = *folded;
+    }
+
+    const auto base = load_image(dll_path_host, dll_name);
+    (void)base;
+
+    // the loaded image's exports ride the same maps (the load_image's
+    // export-registration keyed the main image only; the dll path registers
+    // under the dll basename here)
+    return get_image_by_name(dll_name, true) ? get_image_by_name(dll_name, true)->base : 0;
 }
 
 void QlLoaderPE::run() {
@@ -133,8 +239,7 @@ void QlLoaderPE::run() {
         ql_->arch().regs().write(bp, top_of_stack);
     } else {
         // the PE image path
-        const auto base = load_image(ql_->path(), ql_->targetname());
-        (void)base;
+        pe_image_address_ = load_image(ql_->path(), ql_->targetname());
     }
 
     init_sp = ql_->arch().regs().arch_sp();

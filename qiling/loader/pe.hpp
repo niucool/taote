@@ -34,6 +34,29 @@ struct ImportSymbol {
     std::uint64_t ordinal = 0;
 };
 
+// one main-image export (loader/pe.py init_exports: the export_symbols walk)
+struct ExportSymbol {
+    std::uint64_t address;   // the absolute ea (the image base + the rva)
+    std::string name;        // empty for the ordinal-only exports
+    std::uint64_t ordinal = 0;
+};
+
+// one dll's import-address-table slice (loader/pe.py: the iat dict is keyed
+// by both the symbol name and the ordinal; the port keeps the two views)
+struct ImportTable {
+    std::map<std::string, std::uint64_t> by_name;
+    std::map<std::uint64_t, std::uint64_t> by_ordinal;
+
+    std::uint64_t lookup(const std::string& name) const {
+        const auto it = by_name.find(name);
+        return it == by_name.end() ? 0 : it->second;
+    }
+    std::uint64_t lookup(std::uint64_t ordinal) const {
+        const auto it = by_ordinal.find(ordinal);
+        return it == by_ordinal.end() ? 0 : it->second;
+    }
+};
+
 class QlLoaderPE final : public QlLoader {
 public:
     QlLoaderPE(Qiling* ql, bool libcache);
@@ -54,12 +77,33 @@ public:
     std::uint64_t stack_address() const noexcept { return stack_address_; }
     std::uint64_t stack_size() const noexcept { return stack_size_; }
 
+    // loader/pe.py: the main image base (pe_image_address)
+    std::uint64_t pe_image_address() const noexcept { return pe_image_address_; }
+
+    // loader/pe.py init_exports: the main-image exports keyed by the ea
+    const std::map<std::uint64_t, ExportSymbol>& export_symbols() const noexcept { return export_symbols_; }
+
+    // loader/pe.py: the import-address tables keyed by the casefolded dll
+    // basename (the by_name/by_ordinal views over one table)
+    const ImportTable* import_address_table_at(const std::string& dll) const {
+        const auto it = import_address_table_.find(dll);
+        return it == import_address_table_.end() ? nullptr : &it->second;
+    }
+
+    // loader/pe.py load_dll: resolve a dll by name (the .dll append, the
+    // winsys default, the loaded check), map it, and register its exports
+    std::uint64_t load_dll(const std::string& name);
+
     // loader/pe.py cmdline: `cmdline args...`
     const std::vector<std::uint8_t>& cmdline() const noexcept { return cmdline_; }
 
 private:
     // loads one PE image (the main executable or a dll) and returns its base
     std::uint64_t load_image(const std::string& host_path, const std::string& label);
+
+    // loader/pe.py __get_path_elements: the dll basename (the .dll append +
+    // the casefold) and the host path (the winsys default when nameless)
+    std::pair<std::string, std::string> dll_path_elements(const std::string& name) const;
 
     bool libcache_ = false;
     bool is_driver_ = false;
@@ -69,7 +113,10 @@ private:
     std::uint64_t dll_address_ = 0;
     std::uint64_t dll_size_ = 0;
     std::uint64_t dll_last_address_ = 0;
+    std::uint64_t pe_image_address_ = 0;
     std::map<std::uint64_t, ImportSymbol> import_symbols_;
+    std::map<std::uint64_t, ExportSymbol> export_symbols_;
+    std::map<std::string, ImportTable> import_address_table_;
     std::vector<std::uint8_t> cmdline_;
 };
 

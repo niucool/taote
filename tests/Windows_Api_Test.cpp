@@ -11,6 +11,7 @@
 #include "qiling/os/windows/dlls/dlls.hpp"
 #include "qiling/os/windows/windows.hpp"
 #include "qiling/os/windows/thread.hpp"
+#include "qiling/loader/pe.hpp"
 
 using namespace qiling;
 using namespace qiling::os;
@@ -1386,4 +1387,387 @@ TEST(WinApiMemoryapi, VirtualAllocFreeProtectQueryVerbatim) {
     });
     ASSERT_TRUE(f.has_value());
     EXPECT_EQ(*f, 1u);
+}
+
+// ---- the libloaderapi fixtures: the PE-mode helpers ----
+
+// the minimal PE64 builder carrying an export table: the export directory
+// rides the .text page after the code stub; the export "MinFunc" resolves to
+// the entry code (the rva 0x1000)
+static std::vector<std::uint8_t> build_minimal_pe64_with_exports() {
+    std::vector<std::uint8_t> pe(0x800, 0);
+    auto put16 = [&](std::size_t off, std::uint16_t v) {
+        pe[off] = static_cast<std::uint8_t>(v);
+        pe[off + 1] = static_cast<std::uint8_t>(v >> 8);
+    };
+    auto put32 = [&](std::size_t off, std::uint32_t v) {
+        for (int i = 0; i < 4; ++i) {
+            pe[off + i] = static_cast<std::uint8_t>(v >> (8 * i));
+        }
+    };
+    auto put64 = [&](std::size_t off, std::uint64_t v) {
+        for (int i = 0; i < 8; ++i) {
+            pe[off + i] = static_cast<std::uint8_t>(v >> (8 * i));
+        }
+    };
+
+    pe[0] = 'M';
+    pe[1] = 'Z';
+    put32(0x3c, 0x80);
+    put32(0x80, 0x00004550);
+    put16(0x84, 0x8664);
+    put16(0x86, 1);
+    put16(0x94, 0xf0);
+    put16(0x96, 0x22);
+
+    constexpr std::size_t OH = 0x98;
+    put16(OH + 0, 0x20b);
+    put32(OH + 16, 0x1000);
+    put32(OH + 20, 0x1000);
+    put64(OH + 24, 0x140000000);
+    put32(OH + 32, 0x1000);
+    put32(OH + 36, 0x200);
+    put32(OH + 56, 0x2000);
+    put32(OH + 60, 0x400);
+    put16(OH + 68, 2);
+    put32(OH + 76, 0x200);
+    put32(OH + 80, 0x1000);
+    put32(OH + 84, 0x100000);
+    put32(OH + 88, 0x1000);
+
+    // the export data directory (the index 0): the rva + the size
+    constexpr std::uint32_t kExportDirRaw = 0x240;  // inside .text raw space
+    constexpr std::uint32_t kExportDirRva = 0x1000 + (kExportDirRaw - 0x200);
+    put32(OH + 112, kExportDirRva);
+    put32(OH + 116, 40);
+
+    // the .text section header
+    const std::size_t sect = 0x98 + 0xf0;
+    pe[sect + 0] = '.';
+    pe[sect + 1] = 't';
+    pe[sect + 2] = 'e';
+    pe[sect + 3] = 'x';
+    pe[sect + 4] = 't';
+    put32(sect + 8, 0x1000);
+    put32(sect + 12, 0x1000);
+    put32(sect + 16, 0x600);   // the raw size covers the export structures
+    put32(sect + 20, 0x200);
+    put32(sect + 36, 0x60000020);
+
+    // the code stub: ret
+    pe[0x200] = 0xC3;
+
+    // the export structures at the fixed raw offsets (the rva = raw - 0x200 + 0x1000)
+    const auto rva_of = [](std::uint32_t raw) { return 0x1000 + (raw - 0x200); };
+
+    // the name strings
+    const std::string dll_name = "MINPE.dll";
+    for (std::size_t i = 0; i < dll_name.size(); ++i) {
+        pe[0x2a0 + i] = static_cast<std::uint8_t>(dll_name[i]);
+    }
+    pe[0x2a0 + dll_name.size()] = 0;
+    const std::string func_name = "MinFunc";
+    for (std::size_t i = 0; i < func_name.size(); ++i) {
+        pe[0x2c0 + i] = static_cast<std::uint8_t>(func_name[i]);
+    }
+    pe[0x2c0 + func_name.size()] = 0;
+
+    // the IMAGE_EXPORT_DIRECTORY at kExportDirRaw
+    put32(kExportDirRaw + 0, 0);        // Characteristics
+    put32(kExportDirRaw + 4, 0);        // TimeDateStamp
+    put16(kExportDirRaw + 8, 0);        // MajorVersion
+    put16(kExportDirRaw + 10, 0);       // MinorVersion
+    put32(kExportDirRaw + 12, rva_of(0x2a0));  // Name rva
+    put32(kExportDirRaw + 16, 1);       // Base
+    put32(kExportDirRaw + 20, 1);       // NumberOfFunctions
+    put32(kExportDirRaw + 24, 1);       // NumberOfNames
+    put32(kExportDirRaw + 28, rva_of(0x2b8));  // AddressOfFunctions
+    put32(kExportDirRaw + 32, rva_of(0x2c8));  // AddressOfNames
+    put32(kExportDirRaw + 36, rva_of(0x2d0));  // AddressOfNameOrdinals
+
+    // the EAT: the function rva (the code stub)
+    put32(0x2b8, 0x1000);
+    // the names array: the "MinFunc" rva
+    put32(0x2c8, rva_of(0x2c0));
+    // the ordinals: the index 0 (the ordinal 1 after the base)
+    put16(0x2d0, 0);
+
+    return pe;
+}
+
+TEST(WinApiLibloader, GetProcAddressSelfModuleByNameAndOrdinal) {
+    register_dlls();
+
+    const auto pe = build_minimal_pe64_with_exports();
+    const auto rootfs = std::filesystem::temp_directory_path() / "ql_libloader_rootfs";
+    std::filesystem::create_directories(rootfs / "Windows" / "registry");
+    const auto exe_path = rootfs / "minpe_test.exe";
+    {
+        std::ofstream out(exe_path, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(pe.data()), static_cast<std::streamsize>(pe.size()));
+    }
+
+    QilingOptions options;
+    options.argv = {exe_path.string()};
+    options.rootfs = rootfs.string();
+    options.ostype = QL_OS::WINDOWS;
+    options.archtype = QL_ARCH::X8664;
+    Qiling ql(options);
+
+    auto& loader = static_cast<loader::QlLoaderPE&>(ql.loader());
+    ASSERT_EQ(loader.pe_image_address(), 0x140000000u);
+
+    const auto* gp = ApiRegistry::instance().find("GetProcAddress");
+    ASSERT_NE(gp, nullptr);
+
+    // stage the "MinFunc" name in the guest scratch
+    const std::string name = "MinFunc";
+    ql.mem().write(kScratch, std::vector<std::uint8_t>(name.begin(), name.end()));
+    ql.mem().write(kScratch + name.size(), std::vector<std::uint8_t>{0});
+
+    // the by-name walk over the self module's export table
+    const auto by_name = gp->handler(ql, 0, ResolvedParams{
+        {"hModule", 0x140000000ull},
+        {"lpProcName", kScratch},
+    });
+    ASSERT_TRUE(by_name.has_value());
+    EXPECT_EQ(*by_name, 0x140001000ull);  // the image base + the code rva
+
+    // the ordinal walk (the ordinal 1 after the base)
+    const auto by_ord = gp->handler(ql, 0, ResolvedParams{
+        {"hModule", 0x140000000ull},
+        {"lpProcName", std::uint64_t{1}},
+    });
+    ASSERT_TRUE(by_ord.has_value());
+    EXPECT_EQ(*by_ord, 0x140001000ull);
+
+    // the unknown name: the 0
+    const std::string missing = "Nope";
+    ql.mem().write(kScratch + 0x20, std::vector<std::uint8_t>(missing.begin(), missing.end()));
+    ql.mem().write(kScratch + 0x20 + missing.size(), std::vector<std::uint8_t>{0});
+    const auto miss = gp->handler(ql, 0, ResolvedParams{
+        {"hModule", 0x140000000ull},
+        {"lpProcName", kScratch + 0x20},
+    });
+    ASSERT_TRUE(miss.has_value());
+    EXPECT_EQ(*miss, 0u);
+}
+
+TEST(WinApiLibloader, GetModuleHandleBasenameAndNull) {
+    register_dlls();
+
+    const auto pe = build_minimal_pe64_with_exports();
+    const auto rootfs = std::filesystem::temp_directory_path() / "ql_libloader_rootfs";
+    std::filesystem::create_directories(rootfs / "Windows" / "registry");
+    const auto exe_path = rootfs / "minpe_test.exe";
+    {
+        std::ofstream out(exe_path, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(pe.data()), static_cast<std::streamsize>(pe.size()));
+    }
+
+    QilingOptions options;
+    options.argv = {exe_path.string()};
+    options.rootfs = rootfs.string();
+    options.ostype = QL_OS::WINDOWS;
+    options.archtype = QL_ARCH::X8664;
+    Qiling ql(options);
+
+    // the null module name: the pe_image_address
+    const auto* gh = ApiRegistry::instance().find("GetModuleHandleA");
+    ASSERT_NE(gh, nullptr);
+    const auto r0 = gh->handler(ql, 0, ResolvedParams{{"lpModuleName", std::string("")}});
+    ASSERT_TRUE(r0.has_value());
+    EXPECT_EQ(*r0, 0x140000000u);
+
+    // the basename walk (the casefolded match)
+    const auto r1 = gh->handler(ql, 0, ResolvedParams{{"lpModuleName", std::string("minpe_test.exe")}});
+    ASSERT_TRUE(r1.has_value());
+    EXPECT_EQ(*r1, 0x140000000u);
+
+    // the missing module: the 0
+    const auto r2 = gh->handler(ql, 0, ResolvedParams{{"lpModuleName", std::string("ghost.dll")}});
+    ASSERT_TRUE(r2.has_value());
+    EXPECT_EQ(*r2, 0u);
+
+    // the Ex sibling writes the handle out
+    const auto* ghx = ApiRegistry::instance().find("GetModuleHandleExW");
+    ASSERT_NE(ghx, nullptr);
+    constexpr std::uint64_t kPeCell = 0x140001800ull;  // inside the mapped image
+    const auto r3 = ghx->handler(ql, 0, ResolvedParams{
+        {"dwFlags", std::uint64_t{0}},
+        {"lpModuleName", std::string("minpe_test.exe")},
+        {"phModule", kPeCell},
+    });
+    ASSERT_TRUE(r3.has_value());
+    EXPECT_EQ(*r3, 0x140000000u);
+    EXPECT_EQ(ql.mem().read_ptr(kPeCell, 8), 0x140000000u);
+}
+
+TEST(WinApiLibloader, GetModuleFileNameNarrowsAndEncodes) {
+    register_dlls();
+
+    const auto pe = build_minimal_pe64_with_exports();
+    const auto rootfs = std::filesystem::temp_directory_path() / "ql_libloader_rootfs";
+    std::filesystem::create_directories(rootfs / "Windows" / "registry");
+    const auto exe_path = rootfs / "minpe_test.exe";
+    {
+        std::ofstream out(exe_path, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(pe.data()), static_cast<std::streamsize>(pe.size()));
+    }
+
+    QilingOptions options;
+    options.argv = {exe_path.string()};
+    options.rootfs = rootfs.string();
+    options.ostype = QL_OS::WINDOWS;
+    options.archtype = QL_ARCH::X8664;
+    Qiling ql(options);
+
+    const auto* gfn_a = ApiRegistry::instance().find("GetModuleFileNameA");
+    ASSERT_NE(gfn_a, nullptr);
+    const auto r_a = gfn_a->handler(ql, 0, ResolvedParams{
+        {"hModule", 0x140000000ull},
+        {"lpFilename", kScratch},
+        {"nSize", std::uint64_t{0x100}},
+    });
+    ASSERT_TRUE(r_a.has_value());
+
+    // the A form: the virtual path (the rootfs-rebased); the upstream
+    // truncates to nSize-1 + the nul and returns min(len, nSize)
+    std::string got_a(reinterpret_cast<const char*>(ql.mem().read(kScratch, *r_a).data()), *r_a);
+    EXPECT_NE(got_a.find("minpe_test.exe"), std::string::npos);
+
+    // the W form: the utf-16le units decode to the same path
+    const auto* gfn_w = ApiRegistry::instance().find("GetModuleFileNameW");
+    ASSERT_NE(gfn_w, nullptr);
+    const auto r_w = gfn_w->handler(ql, 0, ResolvedParams{
+        {"hModule", 0x140000000ull},
+        {"lpFilename", kScratch + 0x200},
+        {"nSize", std::uint64_t{0x100}},
+    });
+    ASSERT_TRUE(r_w.has_value());
+    const auto wide = ql.mem().read(kScratch + 0x200, *r_w * 2);
+    std::string wide_narrow;
+    for (std::size_t i = 0; i + 1 < wide.size(); i += 2) {
+        wide_narrow.push_back(static_cast<char>(wide[i]));
+    }
+    EXPECT_EQ(wide_narrow, got_a);
+}
+
+TEST(WinApiLibloader, LoadLibraryAndFreeLibraryPassBodies) {
+    register_dlls();
+
+    const auto pe = build_minimal_pe64_with_exports();
+    const auto rootfs = std::filesystem::temp_directory_path() / "ql_libloader_rootfs";
+    std::filesystem::create_directories(rootfs / "Windows" / "registry");
+    const auto exe_path = rootfs / "minpe_test.exe";
+    {
+        std::ofstream out(exe_path, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(pe.data()), static_cast<std::streamsize>(pe.size()));
+    }
+    // the stub dll: a valid but import-free PE the load_dll can map (the
+    // System32 parent dir must exist for the ofstream to land the file)
+    std::filesystem::create_directories(rootfs / "Windows" / "System32");
+    const auto dll_path = rootfs / "Windows" / "System32" / "qldll.dll";
+    {
+        const auto dll_pe = build_minimal_pe64_with_exports();
+        std::ofstream out(dll_path, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(dll_pe.data()), static_cast<std::streamsize>(dll_pe.size()));
+        ASSERT_TRUE(out.good());
+    }
+
+    QilingOptions options;
+    options.argv = {exe_path.string()};
+    options.rootfs = rootfs.string();
+    options.ostype = QL_OS::WINDOWS;
+    options.archtype = QL_ARCH::X8664;
+    Qiling ql(options);
+
+    // LoadLibraryA: the dll base (the PE image base 0x140000000 is taken by
+    // the main image, so the dll lands on the profile dll_address)
+    const auto* load = ApiRegistry::instance().find("LoadLibraryA");
+    ASSERT_NE(load, nullptr);
+    const auto h1 = load->handler(ql, 0, ResolvedParams{{"lpLibFileName", std::string("qldll.dll")}});
+    ASSERT_TRUE(h1.has_value());
+    EXPECT_NE(*h1, 0u);
+
+    // the second load rides the already-loaded check (the same base)
+    const auto h2 = load->handler(ql, 0, ResolvedParams{{"lpLibFileName", std::string("qldll.dll")}});
+    ASSERT_TRUE(h2.has_value());
+    EXPECT_EQ(*h2, *h1);
+
+    // GetProcAddress over the loaded dll: the MinFunc export resolves
+    const auto* gp = ApiRegistry::instance().find("GetProcAddress");
+    ASSERT_NE(gp, nullptr);
+    const std::string fname = "MinFunc";
+    ql.mem().write(kScratch + 0x40, std::vector<std::uint8_t>(fname.begin(), fname.end()));
+    ql.mem().write(kScratch + 0x40 + fname.size(), std::vector<std::uint8_t>{0});
+    const auto proc = gp->handler(ql, 0, ResolvedParams{
+        {"hModule", *h1},
+        {"lpProcName", kScratch + 0x40},
+    });
+    ASSERT_TRUE(proc.has_value());
+    EXPECT_NE(*proc, 0u);
+
+    // the LoadLibraryExA/W + the FreeLibrary + the DisableThreadLibraryCalls
+    // ride their pass bodies
+    const auto* load_ex = ApiRegistry::instance().find("LoadLibraryExA");
+    ASSERT_NE(load_ex, nullptr);
+    const auto hex = load_ex->handler(ql, 0, ResolvedParams{
+        {"lpLibFileName", std::string("qldll.dll")},
+        {"hFile", std::uint64_t{0}},
+        {"dwFlags", std::uint64_t{0}},
+    });
+    ASSERT_TRUE(hex.has_value());
+    EXPECT_EQ(*hex, *h1);
+
+    const auto* free_ = ApiRegistry::instance().find("FreeLibrary");
+    ASSERT_NE(free_, nullptr);
+    const auto fr = free_->handler(ql, 0, ResolvedParams{{"hLibModule", *h1}});
+    ASSERT_TRUE(fr.has_value());
+    EXPECT_EQ(*fr, 1u);
+
+    const auto* dtl = ApiRegistry::instance().find("DisableThreadLibraryCalls");
+    ASSERT_NE(dtl, nullptr);
+    const auto dt = dtl->handler(ql, 0, ResolvedParams{{"hLibModule", *h1}});
+    ASSERT_TRUE(dt.has_value());
+    EXPECT_EQ(*dt, 1u);
+}
+
+TEST(WinApiLibloader, ResourceAndDefaultDirsBodies) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    // the LoadResource/LockResource identity bodies
+    const auto* load_res = ApiRegistry::instance().find("LoadResource");
+    ASSERT_NE(load_res, nullptr);
+    const auto lr = load_res->handler(ql, 0, ResolvedParams{
+        {"hModule", std::uint64_t{0x1234}}, {"hResInfo", kCells}});
+    ASSERT_TRUE(lr.has_value());
+    EXPECT_EQ(*lr, kCells);
+
+    const auto* lock_res = ApiRegistry::instance().find("LockResource");
+    ASSERT_NE(lock_res, nullptr);
+    const auto lk = lock_res->handler(ql, 0, ResolvedParams{{"hResData", kCells}});
+    ASSERT_TRUE(lk.has_value());
+    EXPECT_EQ(*lk, kCells);
+
+    // the SizeofResource: the verbatim 0x8
+    const auto* sizeof_res = ApiRegistry::instance().find("SizeofResource");
+    ASSERT_NE(sizeof_res, nullptr);
+    const auto sz = sizeof_res->handler(ql, 0, ResolvedParams{
+        {"hModule", std::uint64_t{0}}, {"hResInfo", std::uint64_t{0}}});
+    ASSERT_TRUE(sz.has_value());
+    EXPECT_EQ(*sz, 0x8u);
+
+    // the SetDefaultDllDirectories: the plain value rides the verbatim 1
+    const auto* sdd = ApiRegistry::instance().find("SetDefaultDllDirectories");
+    ASSERT_NE(sdd, nullptr);
+    const auto ok = sdd->handler(ql, 0, ResolvedParams{{"DirectoryFlags", std::uint64_t{0x100}}});
+    ASSERT_TRUE(ok.has_value());
+    EXPECT_EQ(*ok, 1u);
+
+    // the LOAD_LIBRARY_SEARCH_USER_DIRS value raises the NotImplemented
+    EXPECT_THROW(
+        sdd->handler(ql, 0, ResolvedParams{{"DirectoryFlags", std::uint64_t{0x400}}}),
+        QlErrorNotImplemented);
 }
