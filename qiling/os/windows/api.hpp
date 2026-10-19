@@ -41,6 +41,7 @@ inline constexpr int LCID_ = PARAM_PTRX;   // api.py: POINTER
 inline constexpr int DWORD_ = PARAM_INT32;
 inline constexpr int DWORD_PTR_ALIAS_ = PARAM_PTRX;
 inline constexpr int UINT_ = PARAM_INT32;
+inline constexpr int INT_ = PARAM_INT32;    // api.py: INT
 inline constexpr int HANDLE_ = PARAM_PTRX;
 inline constexpr int WORD_ALIAS_ = PARAM_INT32;
 inline constexpr int DWORDLONG_ = PARAM_INT64;
@@ -67,6 +68,8 @@ inline constexpr int LPCSTR_ = PARAM_PTRX + 1;    // STRING
 inline constexpr int PCSTR_ = PARAM_PTRX + 1;
 inline constexpr int LPCWSTR_ = PARAM_PTRX + 2;   // WSTRING
 inline constexpr int LPWSTR_W_ = PARAM_PTRX + 2;
+inline constexpr int PCNZCH_ = PARAM_PTRX + 1;    // api.py: STRING
+inline constexpr int PCNZWCH_ = PARAM_PTRX + 2;   // api.py: WSTRING
 
 // the GUID resolver placeholder
 inline constexpr int GUID_ = PARAM_PTRX + 3;

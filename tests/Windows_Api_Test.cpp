@@ -2277,7 +2277,192 @@ TEST(WinApiProfileapi, QueryPerformancePairRideVerbatimShapes) {
     const auto* qpf = ApiRegistry::instance().find("QueryPerformanceFrequency");
     ASSERT_NE(qpf, nullptr);
     const auto rf = qpf->handler(ql, 0, ResolvedParams{{"lpFrequency", kCells + 0x100}});
-    ASSERT_TRUE(rf.has_value());
     EXPECT_EQ(*rf, 1u);
     EXPECT_EQ(ql.mem().read_ptr(kCells + 0x100, 8), 10000000ull);
+}
+
+TEST(WinApiStringapiset, VerbatimTypeQueriesReturnOne) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    const auto* gsw = ApiRegistry::instance().find("GetStringTypeW");
+    ASSERT_NE(gsw, nullptr);
+    const auto r = gsw->handler(ql, 0, ResolvedParams{{"dwInfoType", 1ull}, {"lpSrcStr", kScratch}, {"cchSrc", 3ull}, {"lpCharType", kCells}});
+    ASSERT_TRUE(r.has_value());
+    EXPECT_EQ(*r, 1u);  // the TODO: implement verbatim body
+
+    const auto* gsea = ApiRegistry::instance().find("GetStringTypeExA");
+    ASSERT_NE(gsea, nullptr);
+    const auto re = gsea->handler(ql, 0, ResolvedParams{{"Locale", 0ull}, {"dwInfoType", 1ull}, {"lpSrcStr", std::string("abc")}, {"cchSrc", 3ull}, {"lpCharType", kCells}});
+    ASSERT_TRUE(re.has_value());
+    EXPECT_EQ(*re, 1u);
+}
+
+TEST(WinApiStringapiset, WideCharToMultiByteRidesCodepageWalk) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    // the wide "Hello" staged as the utf-16le image
+    const std::string hello_w = "Hello";
+    std::vector<std::uint8_t> wide;
+    for (const char c : hello_w) {
+        wide.push_back(static_cast<std::uint8_t>(c));
+        wide.push_back(0);
+    }
+    ql.mem().write(kScratch, wide);
+
+    const auto* wc2mb = ApiRegistry::instance().find("WideCharToMultiByte");
+    ASSERT_NE(wc2mb, nullptr);
+
+    // the CP_UTF8 with the exact count: the 5-byte image
+    const auto r1 = wc2mb->handler(ql, 0, ResolvedParams{
+        {"CodePage", 65001ull},  // CP_UTF8
+        {"dwFlags", 0ull},
+        {"lpWideCharStr", kScratch},
+        {"cchWideChar", 5ull},
+        {"lpMultiByteStr", kScratch + 0x100},
+        {"cbMultiByte", 0x40ull},
+        {"lpDefaultChar", 0ull},
+        {"lpUsedDefaultChar", 0ull},
+    });
+    ASSERT_TRUE(r1.has_value());
+    EXPECT_EQ(*r1, 5u);
+    EXPECT_EQ(ql.mem().read(kScratch + 0x100, 5), (std::vector<std::uint8_t>{'H', 'e', 'l', 'l', 'o'}));
+
+    // the cbMultiByte = 0 dry run returns the needed length, no write
+    const auto r2 = wc2mb->handler(ql, 0, ResolvedParams{
+        {"CodePage", 65001ull}, {"dwFlags", 0ull},
+        {"lpWideCharStr", kScratch}, {"cchWideChar", 5ull},
+        {"lpMultiByteStr", kScratch + 0x100}, {"cbMultiByte", 0ull},
+        {"lpDefaultChar", 0ull}, {"lpUsedDefaultChar", 0ull},
+    });
+    ASSERT_TRUE(r2.has_value());
+    EXPECT_EQ(*r2, 5u);
+
+    // the cchWideChar = -1 walks to the wide NUL terminator (inclusive)
+    ql.mem().write(kScratch + 0x200, std::vector<std::uint8_t>{'H', 0, 'i', 0, 0, 0});
+    const auto r3 = wc2mb->handler(ql, 0, ResolvedParams{
+        {"CodePage", 65001ull}, {"dwFlags", 0ull},
+        {"lpWideCharStr", kScratch + 0x200}, {"cchWideChar", 0xFFFFFFFFull},
+        {"lpMultiByteStr", kScratch + 0x100}, {"cbMultiByte", 0x40ull},
+        {"lpDefaultChar", 0ull}, {"lpUsedDefaultChar", 0ull},
+    });
+    ASSERT_TRUE(r3.has_value());
+    EXPECT_EQ(*r3, 3u);  // the "Hi\0" walk
+    EXPECT_EQ(ql.mem().read(kScratch + 0x100, 3)[2], 0);
+
+    // the non-ascii under the CP_ASCII: the strict flag (WC_ERR_INVALID_CHARS)
+    // rides the ERROR_NO_UNICODE_TRANSLATION, the replace flag rides '?'
+    ql.mem().write(kScratch + 0x300, std::vector<std::uint8_t>{'h', 0, 0xE9, 0, 'l', 0, 'l', 0, 'o', 0});  // the h\u00e9llo
+    const auto r4 = wc2mb->handler(ql, 0, ResolvedParams{
+        {"CodePage", 20127ull},  // CP_ASCII
+        {"dwFlags", 0x80ull},    // WC_ERR_INVALID_CHARS
+        {"lpWideCharStr", kScratch + 0x300}, {"cchWideChar", 5ull},
+        {"lpMultiByteStr", kScratch + 0x100}, {"cbMultiByte", 0x40ull},
+        {"lpDefaultChar", 0ull}, {"lpUsedDefaultChar", 0ull},
+    });
+    ASSERT_TRUE(r4.has_value());
+    EXPECT_EQ(*r4, 0u);
+    EXPECT_EQ(ql.os<QlOsWindows>().last_error(), 0x459u);  // the ERROR_NO_UNICODE_TRANSLATION
+
+    const auto r5 = wc2mb->handler(ql, 0, ResolvedParams{
+        {"CodePage", 20127ull}, {"dwFlags", 0ull},  // the replace
+        {"lpWideCharStr", kScratch + 0x300}, {"cchWideChar", 5ull},
+        {"lpMultiByteStr", kScratch + 0x100}, {"cbMultiByte", 0x40ull},
+        {"lpDefaultChar", 0ull}, {"lpUsedDefaultChar", 0ull},
+    });
+    ASSERT_TRUE(r5.has_value());
+    EXPECT_EQ(*r5, 5u);
+    EXPECT_EQ(ql.mem().read(kScratch + 0x100, 5), (std::vector<std::uint8_t>{'h', '?', 'l', 'l', 'o'}));
+}
+
+TEST(WinApiStringapiset, MultiByteToWideCharDryRunAndWrite) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    ql.mem().write(kScratch, std::vector<std::uint8_t>{'H', 'e', 'l', 'l', 'o'});
+    const auto* mb2wc = ApiRegistry::instance().find("MultiByteToWideChar");
+    ASSERT_NE(mb2wc, nullptr);
+
+    // the dry run (the cchWideChar = 0) returns the CHAR count
+    const auto r1 = mb2wc->handler(ql, 0, ResolvedParams{
+        {"CodePage", 65001ull}, {"dwFlags", 0ull},
+        {"lpMultiByteStr", kScratch}, {"cbMultiByte", 5ull},
+        {"lpWideCharStr", 0ull}, {"cchWideChar", 0ull},
+    });
+    ASSERT_TRUE(r1.has_value());
+    EXPECT_EQ(*r1, 5u);
+
+    // the write path: the utf-16le image
+    const auto r2 = mb2wc->handler(ql, 0, ResolvedParams{
+        {"CodePage", 65001ull}, {"dwFlags", 0ull},
+        {"lpMultiByteStr", kScratch}, {"cbMultiByte", 5ull},
+        {"lpWideCharStr", kScratch + 0x100}, {"cchWideChar", 0x20ull},
+    });
+    ASSERT_TRUE(r2.has_value());
+    EXPECT_EQ(*r2, 5u);
+    const auto got = ql.mem().read(kScratch + 0x100, 10);
+    EXPECT_EQ(got, (std::vector<std::uint8_t>{'H', 0, 'e', 0, 'l', 0, 'l', 0, 'o', 0}));
+
+    // the cbMultiByte = 0 rides the verbatim 0
+    const auto r3 = mb2wc->handler(ql, 0, ResolvedParams{
+        {"CodePage", 65001ull}, {"dwFlags", 0ull},
+        {"lpMultiByteStr", kScratch}, {"cbMultiByte", 0ull},
+        {"lpWideCharStr", kScratch + 0x100}, {"cchWideChar", 0x20ull},
+    });
+    ASSERT_TRUE(r3.has_value());
+    EXPECT_EQ(*r3, 0u);
+}
+
+TEST(WinApiStringapiset, CompareStringRidesCmpReturn) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    const auto* csa = ApiRegistry::instance().find("CompareStringA");
+    ASSERT_NE(csa, nullptr);
+
+    // the verbatim utils.cmp walk: the -1/0/1 returns
+    const auto r_less = csa->handler(ql, 0, ResolvedParams{
+        {"Locale", 0ull}, {"dwCmpFlags", 0ull},
+        {"lpString1", std::string("abc")}, {"cchCount1", 3ull},
+        {"lpString2", std::string("abd")}, {"cchCount2", 3ull},
+    });
+    ASSERT_TRUE(r_less.has_value());
+    EXPECT_EQ(*r_less, static_cast<std::uint64_t>(-1));
+
+    const auto r_equal = csa->handler(ql, 0, ResolvedParams{
+        {"Locale", 0ull}, {"dwCmpFlags", 0ull},
+        {"lpString1", std::string("abc")}, {"cchCount1", 3ull},
+        {"lpString2", std::string("abc")}, {"cchCount2", 3ull},
+    });
+    ASSERT_TRUE(r_equal.has_value());
+    EXPECT_EQ(*r_equal, 0u);
+
+    const auto r_greater = csa->handler(ql, 0, ResolvedParams{
+        {"Locale", 0ull}, {"dwCmpFlags", 0ull},
+        {"lpString1", std::string("b")}, {"cchCount1", 1ull},
+        {"lpString2", std::string("a")}, {"cchCount2", 1ull},
+    });
+    ASSERT_TRUE(r_greater.has_value());
+    EXPECT_EQ(*r_greater, 1u);
+
+    // the cchCount slice: the "abcd"[:2] vs the "abz"[:2] equal
+    const auto r_slice = csa->handler(ql, 0, ResolvedParams{
+        {"Locale", 0ull}, {"dwCmpFlags", 0ull},
+        {"lpString1", std::string("abcd")}, {"cchCount1", 2ull},
+        {"lpString2", std::string("abz")}, {"cchCount2", 2ull},
+    });
+    ASSERT_TRUE(r_slice.has_value());
+    EXPECT_EQ(*r_slice, 0u);
+
+    // the W pair: the resolved text rides the same cmp walk
+    const auto* csw = ApiRegistry::instance().find("CompareStringW");
+    ASSERT_NE(csw, nullptr);
+    const auto r_w = csw->handler(ql, 0, ResolvedParams{
+        {"Locale", 0ull}, {"dwCmpFlags", 0ull},
+        {"lpString1", std::string("abc")}, {"cchCount1", 3ull},
+        {"lpString2", std::string("abd")}, {"cchCount2", 3ull},
+    });
+    ASSERT_TRUE(r_w.has_value());
+    EXPECT_EQ(*r_w, static_cast<std::uint64_t>(-1));
 }
