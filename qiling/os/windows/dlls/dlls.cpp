@@ -15,6 +15,7 @@
 #include "qiling/os/windows/dlls/kernel32/libloaderapi.cpp"
 #include "qiling/os/windows/dlls/kernel32/sysinfoapi.cpp"
 #include "qiling/os/windows/dlls/kernel32/processenv.cpp"
+#include "qiling/os/windows/dlls/kernel32/interlockedapi.cpp"
 
 namespace qiling {
 namespace os {
@@ -29,6 +30,7 @@ void register_dlls() {
     win::register_libloaderapi_family();
     win::register_sysinfoapi_family();
     win::register_processenv_family();
+    win::register_interlockedapi_family();
 }
 
 // the static-init registration (the python module-import side effect)

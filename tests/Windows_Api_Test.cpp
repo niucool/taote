@@ -2152,3 +2152,22 @@ TEST(WinApiProcessenv, GetEnvironmentVariableReturnsZeroFlat) {
     ASSERT_TRUE(rw.has_value());
     EXPECT_EQ(*rw, 0u);
 }
+
+TEST(WinApiInterlocked, InitializeSListHeadRegistersHandleAtAddress) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    // the verbatim body: the handle id IS the ListHead address (the obj = []
+    // placeholder), the return rides the 0
+    const auto* ih = ApiRegistry::instance().find("InitializeSListHead");
+    ASSERT_NE(ih, nullptr);
+    const auto r = ih->handler(ql, 0, ResolvedParams{{"ListHead", kCells}});
+    ASSERT_TRUE(r.has_value());
+    EXPECT_EQ(*r, 0u);
+
+    // the handle manager answers at the ListHead id
+    auto& os = ql.os<QlOsWindows>();
+    const auto* h = os.handle_manager().get(kCells);
+    ASSERT_NE(h, nullptr);
+    EXPECT_EQ(h->id, kCells);
+}
