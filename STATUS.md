@@ -1487,6 +1487,8 @@ ntoskrnl/wudplatform defer with the driver path).
 | the stringapiset findings | — | ✅ | (1) the codec surface is narrower than the python one: the oem/utf-7/cpNNN (non-1252) requests fall back to the cp1252 through the verbatim availability probe (the python keeps the oem/utf-7 on the hosts where the codecs exist — the documented deviation); (2) the python utf-16 encode rides a BOM (the b'��' prefix) — the port mirrors it verbatim; (3) the 0xffffffff sentinel compares ride the RAW register value (the port's u64 param, not the int64 -1); (4) the CompareString returns are the python cmp values (-1/0/1), NOT the Win32 CSTR codes — the port returns the sign-wrapped u64s |
 | kernel32/timezoneapi | `dlls/kernel32/timezoneapi.py` (1) | ✅ | GetTimeZoneInformation (the TODO fail-for-now body: the TIME_ZONE_ID_INVALID return, no struct write) |
 | the timezoneapi findings | — | ✅ | the upstream python const rides -1 which the DWORD return contract surfaces as the 0xffffffff; the port pins the raw 0xffffffff shape |
+| kernel32/consoleapi | `dlls/kernel32/consoleapi.py` (1) | ✅ | GetConsoleMode (the verbatim 1, NO lpMode write) |
+| the consoleapi findings | — | ✅ | the mode body never writes the mode cell (the upstream quirk — the sentinel fixture pins it, the same no-write class as the GetVersionEx/profileapi bodies) |
 | the dlls aggregation | `dlls/__init__.py` | ✅ | dlls.hpp/.cpp: the register_dlls() re-seedable surface (the test isolation) + the per-family static-init |
 | the fixtures | tests/Windows_Api_Test.cpp | ✅ | the handleapi coverage/shapes + the get_param/api_get_int paths |
 
