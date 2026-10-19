@@ -6,6 +6,7 @@
 #include "qiling/exception.hpp"
 #include "qiling/os/memory.hpp"
 #include "qiling/os/windows/windows.hpp"
+#include "qiling/os/windows/structs.hpp"
 
 #include <filesystem>
 #include "qiling/os/os.hpp"
@@ -289,6 +290,11 @@ void QlLoaderPE::run() {
         cmdline_.assign(cmdline.begin(), cmdline.end());
     }
 
+    // loader/pe.py run(): the verbatim structure_last_addr seed
+    // ({32: FS_SEGMENT_ADDR, 64: GS_SEGMENT_ADDR}) — the single cursor the
+    // driver objects AND the TEB/PEB/LDR stack walk across BOTH paths
+    structure_last_addr_ = bits == 64 ? os::windows::GS_SEGMENT_ADDR : os::windows::FS_SEGMENT_ADDR;
+
     if (!ql_->code().empty()) {
         // the shellcode path (loader/pe.py load(pe=None))
         is_driver_ = false;
@@ -299,21 +305,22 @@ void QlLoaderPE::run() {
         mem.map(stack_address_, stack_size_, UC_PROT_ALL, "[stack]");
         mem.map(entry_point, static_cast<std::uint64_t>(ql_->os().code_ram_size()), UC_PROT_ALL, "[shellcode]");
         mem.write(entry_point, ql_->code());
-
         const auto top_of_stack = stack_address_ + stack_size_;
         const auto sp = bits == 64 ? "rsp" : "esp";
         const auto bp = bits == 64 ? "rbp" : "ebp";
         ql_->arch().regs().write(sp, top_of_stack);
         ql_->arch().regs().write(bp, top_of_stack);
+
+        // loader/pe.py load(pe=None): the TEB/PEB/LDR stack rides the
+        // shellcode path too (the upstream calls the same inits after the
+        // code write; the structure cursor seeds from the GS segment base)
+        init_teb();
+        init_peb();
+        init_ldr_data();
     } else {
         // the PE image path
         pe_image_address_ = load_image(ql_->path(), ql_->targetname());
 
-        // loader/pe.py load(): the driver branch seeds the driver-object /
-        // registry-path / eprocess riders (the CR8/CR4 setup verbatim); the
-        // structure cursor rides the dll list tail (the upstream shares the
-        // structure_last_addr cursor across the init_* walks)
-        structure_last_addr_ = dll_last_address_;
         if (is_driver_) {
             init_driver_object();
             init_registry_path();
@@ -326,6 +333,13 @@ void QlLoaderPE::run() {
             // OSXMMEXCPT. some drivers may check this at initialized
             // (verbatim)
             ql_->arch().regs().write("CR4", 0b0000011011111000);
+        } else {
+            // loader/pe.py: initialize thread information block, then add
+            // the image to the ldr table (verbatim)
+            init_teb();
+            init_peb();
+            init_ldr_data();
+            add_ldr_data_table_entry(std::filesystem::path(ql_->path()).filename().string());
         }
     }
 
@@ -445,6 +459,168 @@ void QlLoaderPE::init_registry_path() {
     (void)put16;
     structure_last_addr_ = nobj_addr;
     regitry_path_address_ = regpath_addr;
+}
+
+// ---- the TEB/PEB/LDR stack (the pe.py init_teb/init_peb/init_ldr_data/
+// add_ldr_data_table_entry walks; the windows.py runtime consumes the
+// addresses) ----
+
+namespace {
+
+void put_le(std::vector<std::uint8_t>& image, std::size_t off, std::uint64_t v, std::size_t width) {
+    for (std::size_t k = 0; k < width; ++k) {
+        image[off + k] = static_cast<std::uint8_t>((v >> (8 * k)) & 0xff);
+    }
+}
+
+}  // namespace
+
+using namespace os::win;
+
+// loader/pe.py init_teb: the TEB over the structure cursor (the x64 GS
+// segment base / the x86 FS segment base), the StackBase/StackLimit over the
+// profile stack, the self-referencing TebAddress and the PebAddress pointed
+// at the PEB that init_peb lays right after (16-aligned)
+void QlLoaderPE::init_teb() {
+    const std::uint64_t teb_addr = structure_last_addr_;
+    const std::uint64_t peb_addr = ql_->mem().align_up(teb_addr + TEB_SIZE, 0x10);
+
+    std::vector<std::uint8_t> image(TEB_SIZE, 0);
+    put_le(image, TEB_OFF_STACK_BASE, stack_address_ + stack_size_, 8);
+    put_le(image, TEB_OFF_STACK_LIMIT, stack_address_, 8);
+    put_le(image, TEB_OFF_TEB_ADDRESS, teb_addr, 8);
+    put_le(image, TEB_OFF_PEB_ADDRESS, peb_addr, 8);
+    ql_->mem().write(teb_addr, image);
+
+    structure_last_addr_ = peb_addr;
+    teb_address_ = teb_addr;
+}
+
+// loader/pe.py init_peb: the 0x7c8 PEB image with the ImageBaseAddress, the
+// LdrAddress pointing at the LDR laid right after, the ProcessParameters and
+// the ProcessHeap over the 0x100 heap chunks (the verbatim "Is ok to be all
+// \x00" comment) and the NumberOfProcessors from the HARDWARE profile
+void QlLoaderPE::init_peb() {
+    auto& os_win = static_cast<os::windows::QlOsWindows&>(ql_->os());
+
+    const std::uint64_t peb_addr = structure_last_addr_;
+    const std::uint64_t ldr_addr = ql_->mem().align_up(peb_addr + PEB_SIZE, 0x10);
+
+    std::vector<std::uint8_t> image(PEB_SIZE, 0);
+    put_le(image, PEB_OFF_IMAGE_BASE_ADDRESS, pe_image_address_, 8);
+    put_le(image, PEB_OFF_LDR_ADDRESS, ldr_addr, 8);
+    put_le(image, PEB_OFF_PROCESS_PARAMETERS, os_win.heap().alloc(0x100), 8);
+    put_le(image, PEB_OFF_PROCESS_HEAP, os_win.heap().alloc(0x100), 8);
+    put_le(image, PEB_OFF_NUMBER_OF_PROCESSORS,
+           static_cast<std::uint64_t>(ql_->profile().get_int("HARDWARE", "number_processors")), 4);
+    ql_->mem().write(peb_addr, image);
+
+    structure_last_addr_ = ldr_addr;
+    peb_address_ = peb_addr;
+}
+
+// loader/pe.py init_ldr_data: the PEB_LDR_DATA with the three order lists
+// self-linked (the Flink/Blink pointing at their own list-head cells)
+void QlLoaderPE::init_ldr_data() {
+    const std::uint64_t ldr_addr = structure_last_addr_;
+    const std::uint64_t nobj_addr = ql_->mem().align_up(ldr_addr + LDR_DATA_SIZE, 0x10);
+
+    std::vector<std::uint8_t> image(LDR_DATA_SIZE, 0);
+    for (const auto off : {LDR_DATA_OFF_IN_LOAD_ORDER,
+                           LDR_DATA_OFF_IN_MEMORY_ORDER,
+                           LDR_DATA_OFF_IN_INITIALIZATION_ORDER}) {
+        put_le(image, off, ldr_addr + off, 8);       // Flink
+        put_le(image, off + 8, ldr_addr + off, 8);   // Blink
+    }
+    ql_->mem().write(ldr_addr, image);
+
+    structure_last_addr_ = nobj_addr;
+    ldr_address_ = ldr_addr;
+}
+
+// loader/pe.py add_ldr_data_table_entry: the LDR_DATA_TABLE_ENTRY over the
+// heap with the DllBase, the FullDllName/BaseDllName wide strings and the
+// three-order Flink/Blink chains (the ldr_list-tail walk; the first entry
+// links against the LDR list heads)
+void QlLoaderPE::add_ldr_data_table_entry(const std::string& dll_name) {
+    auto& os_win = static_cast<os::windows::QlOsWindows&>(ql_->os());
+
+    const Image* image_rec = get_image_by_name(dll_name, true);
+    if (image_rec == nullptr) {
+        // the upstream asserts; the port keeps the assert-shaped throw (the
+        // image should have been added to loader.images first)
+        throw QlErrorBase("image should have been added to loader.images first");
+    }
+
+    const std::uint64_t entry_addr = os_win.heap().alloc(LDR_ENTRY_SIZE);
+
+    // populate_unistr: the utf-16le encode + the heap buffer with the NUL
+    // tail and the Length/MaximumLength/Buffer cells
+    const auto populate_unistr = [&](std::uint64_t entry_base, std::size_t ucs_off, const std::string& s) {
+        std::u16string encoded;
+        for (const char c : s) {
+            encoded.push_back(static_cast<char16_t>(static_cast<unsigned char>(c)));
+        }
+        const std::size_t ucslen = encoded.size() * 2;
+        const std::uint64_t ucsbuf = os_win.heap().alloc(ucslen + 2);
+
+        std::vector<std::uint8_t> bytes(ucslen + 2, 0);
+        for (std::size_t k = 0; k < encoded.size(); ++k) {
+            bytes[k * 2] = static_cast<std::uint8_t>(encoded[k] & 0xff);
+            bytes[k * 2 + 1] = static_cast<std::uint8_t>((encoded[k] >> 8) & 0xff);
+        }
+        ql_->mem().write(ucsbuf, bytes);
+
+        std::vector<std::uint8_t> ucs(UNICODE_STRING_SIZE, 0);
+        put_le(ucs, UNICODE_STRING_OFF_LENGTH, ucslen, 2);
+        put_le(ucs, UNICODE_STRING_OFF_MAXIMUM_LENGTH, ucslen + 2, 2);
+        put_le(ucs, UNICODE_STRING_OFF_BUFFER, ucsbuf, 8);
+        ql_->mem().write(entry_base + ucs_off, ucs);
+    };
+
+    std::vector<std::uint8_t> entry(LDR_ENTRY_SIZE, 0);
+    put_le(entry, LDR_ENTRY_OFF_DLL_BASE, image_rec->base, 8);
+    ql_->mem().write(entry_addr, entry);
+
+    const std::string full_name = os_win.winsys() + "\\" + dll_name;
+    populate_unistr(entry_addr, LDR_ENTRY_OFF_FULL_DLL_NAME, full_name);
+    populate_unistr(entry_addr, LDR_ENTRY_OFF_BASE_DLL_NAME, dll_name);
+
+    // the three-order link offsets ride the LDR_DATA list offsets (the
+    // InLoad/InMemory/InInitialization pairs map 1:1 over the entry)
+    const auto entry_links = std::array{
+        std::pair{LDR_ENTRY_OFF_IN_LOAD_ORDER_LINKS, LDR_DATA_OFF_IN_LOAD_ORDER},
+        std::pair{LDR_ENTRY_OFF_IN_MEMORY_ORDER_LINKS, LDR_DATA_OFF_IN_MEMORY_ORDER},
+        std::pair{LDR_ENTRY_OFF_IN_INITIALIZATION_ORDER_LINKS,
+                  LDR_DATA_OFF_IN_INITIALIZATION_ORDER},
+    };
+
+    for (const auto& [entry_off, ldr_off] : entry_links) {
+        std::uint64_t flink = 0;
+        std::uint64_t blink = 0;
+        if (!ldr_list_.empty()) {
+            const std::uint64_t last = ldr_list_.back();
+            // the Flink rides the last entry's current head link; the blink
+            // rides the LDR list head's Blink cell
+            flink = ql_->mem().read_ptr(last + entry_off, 8);
+            blink = ql_->mem().read_ptr(ldr_address_ + ldr_off + 8, 8);
+        } else {
+            flink = ql_->mem().read_ptr(ldr_address_ + ldr_off, 8);
+            blink = ql_->mem().read_ptr(ldr_address_ + ldr_off + 8, 8);
+        }
+        put_le(entry, entry_off, flink, 8);            // In*OrderLinks.Flink
+        put_le(entry, entry_off + 8, blink, 8);        // In*OrderLinks.Blink
+        ql_->mem().write(entry_addr + entry_off,
+                         std::vector<std::uint8_t>(entry.begin() + entry_off,
+                                                   entry.begin() + entry_off + 16));
+        ql_->mem().write_ptr(ldr_address_ + ldr_off, entry_addr + entry_off);       // head Flink
+        ql_->mem().write_ptr(ldr_address_ + ldr_off + 8, entry_addr + entry_off);   // head Blink
+        if (!ldr_list_.empty()) {
+            ql_->mem().write_ptr(ldr_list_.back() + entry_off, entry_addr + entry_off);
+        }
+    }
+
+    ldr_list_.push_back(entry_addr);
 }
 
 }  // namespace loader

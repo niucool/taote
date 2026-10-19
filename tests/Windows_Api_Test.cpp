@@ -3399,6 +3399,10 @@ TEST(WinApiNtdll, InfoClassWalksRideProfileValues) {
     ASSERT_TRUE(rdo.has_value());
     EXPECT_EQ(*rdo, 0xC0000353u);
 
+    // the wired PEB address (the loader laid it at the GS segment base)
+    const auto loader_peb_addr = static_cast<const qiling::loader::QlLoaderPE&>(ql.loader()).peb_address();
+    EXPECT_NE(loader_peb_addr, 0u);
+
     // ProcessBasicInformation: the PBI rides the profile pids + the placeholder PEB
     const auto rbi = qip->handler(ql, 0, ResolvedParams{
         {"ProcessHandle", 0ull},
@@ -3411,7 +3415,7 @@ TEST(WinApiNtdll, InfoClassWalksRideProfileValues) {
     EXPECT_EQ(*rbi, 0u);
     EXPECT_EQ(ql.mem().read_ptr(kScratch + 0x40 + 32, 8), 1996u);   // the UniqueProcessId (the profile pid)
     EXPECT_EQ(ql.mem().read_ptr(kScratch + 0x40 + 40, 8), 0u);      // the InheritedFromUniqueProcessId (the profile parent_pid)
-    EXPECT_EQ(ql.mem().read_ptr(kScratch + 0x40 + 8, 8), 0u);       // the PebBaseAddress (the TEB/PEB placeholder)
+    EXPECT_EQ(ql.mem().read_ptr(kScratch + 0x40 + 8, 8), loader_peb_addr);  // the PebBaseAddress (the wired PEB)
     EXPECT_EQ(ql.mem().read_ptr(kScratch + 0x20, 4), 48u);          // the ReturnLength
 
     // the ProcessCookie with a non-current handle: the STATUS_INVALID_PARAMETER
@@ -4937,4 +4941,68 @@ TEST(WinApiUser32, StubAndClipboardFamiliesRideVerbatimConstants) {
     const auto rscd2 = scd->handler(ql, 0, ResolvedParams{{"uFormat", 1ull}, {"hMem", kScratch}});
     ASSERT_TRUE(rscd2.has_value());
     EXPECT_EQ(*rscd2, 0u);
+}
+
+TEST(WinApiLoader, TebRidesGsSegmentBaseWithProfileStackCells) {
+    register_dlls();
+
+    const auto blob = std::vector<std::uint8_t>{0xC3};  // ret: the shellcode stub
+    Qiling ql(win_test_options());
+
+    // the TEB sits at the GS segment base (the x64 structure_last_addr seed)
+    const auto teb_addr = qiling::os::windows::GS_SEGMENT_ADDR;
+    const auto& loader = static_cast<const qiling::loader::QlLoaderPE&>(ql.loader());
+    ASSERT_EQ(loader.teb_address(), teb_addr);
+
+    // the StackBase/StackLimit ride the profile stack (the OS64 section)
+    EXPECT_EQ(ql.mem().read_ptr(teb_addr + qiling::os::win::TEB_OFF_STACK_BASE, 8), 0x7ffffffde000ull + 0x40000ull);
+    EXPECT_EQ(ql.mem().read_ptr(teb_addr + qiling::os::win::TEB_OFF_STACK_LIMIT, 8), 0x7ffffffde000ull);
+
+    // the self-referencing TebAddress and the PebAddress cell
+    EXPECT_EQ(ql.mem().read_ptr(teb_addr + qiling::os::win::TEB_OFF_TEB_ADDRESS, 8), teb_addr);
+    const auto peb_addr = ql.mem().read_ptr(teb_addr + qiling::os::win::TEB_OFF_PEB_ADDRESS, 8);
+    EXPECT_EQ(peb_addr, loader.peb_address());
+    EXPECT_EQ(peb_addr, ql.mem().align_up(teb_addr + qiling::os::win::TEB_SIZE, 0x10));
+
+    // the gs_base register points at the TEB region
+    EXPECT_EQ(ql.arch().regs().read("gsbase"), teb_addr);
+}
+
+TEST(WinApiLoader, PebAndLdrCellsRideTheImageAndTheListHeads) {
+    register_dlls();
+
+    const auto blob = std::vector<std::uint8_t>{0xC3};  // ret: the shellcode stub
+    Qiling ql(win_test_options());
+
+    const auto& loader = static_cast<const qiling::loader::QlLoaderPE&>(ql.loader());
+    const auto teb_addr = loader.teb_address();
+    const auto peb_addr = loader.peb_address();
+
+    // the PEB head cells: the ImageBaseAddress rides pe_image_address — 0 on
+    // the shellcode path (the upstream never sets it without a PE image)
+    EXPECT_EQ(ql.mem().read_ptr(peb_addr + qiling::os::win::PEB_OFF_IMAGE_BASE_ADDRESS, 8), 0u);
+    // the PEB.BeingDebugged byte (the not-being-debugged default)
+    EXPECT_EQ(ql.mem().read_ptr(peb_addr + qiling::os::win::PEB_OFF_BEING_DEBUGGED, 1), 0u);
+    // the ProcessParameters/ProcessHeap ride the 0x100 heap chunks
+    const auto params = ql.mem().read_ptr(peb_addr + qiling::os::win::PEB_OFF_PROCESS_PARAMETERS, 8);
+    const auto pheap = ql.mem().read_ptr(peb_addr + qiling::os::win::PEB_OFF_PROCESS_HEAP, 8);
+    EXPECT_NE(params, 0u);
+    EXPECT_NE(pheap, 0u);
+    // the NumberOfProcessors rides the HARDWARE profile (5 in windows.ql)
+    EXPECT_EQ(ql.mem().read_ptr(peb_addr + qiling::os::win::PEB_OFF_NUMBER_OF_PROCESSORS, 4), 5u);
+    // the LdrAddress rides the PEB-tail-aligned LDR
+    const auto ldr_addr = ql.mem().read_ptr(peb_addr + qiling::os::win::PEB_OFF_LDR_ADDRESS, 8);
+    EXPECT_EQ(ldr_addr, loader.ldr_address());
+
+    // the PEB_LDR_DATA: the three order lists self-linked (the empty-table
+    // state for the shellcode run — no image, no dll entries)
+    for (const auto off : {qiling::os::win::LDR_DATA_OFF_IN_LOAD_ORDER,
+                           qiling::os::win::LDR_DATA_OFF_IN_MEMORY_ORDER,
+                           qiling::os::win::LDR_DATA_OFF_IN_INITIALIZATION_ORDER}) {
+        EXPECT_EQ(ql.mem().read_ptr(ldr_addr + off, 8), ldr_addr + off);
+        EXPECT_EQ(ql.mem().read_ptr(ldr_addr + off + 8, 8), ldr_addr + off);
+    }
+
+    // the TEB.PebAddress cell rides the PEB the loader laid out
+    EXPECT_EQ(ql.mem().read_ptr(teb_addr + qiling::os::win::TEB_OFF_PEB_ADDRESS, 8), peb_addr);
 }

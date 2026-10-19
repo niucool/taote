@@ -91,6 +91,25 @@ void QlOsWindows::ensure_profile_state() {
         return;
     }
 
+    // the FS/GS segment regions (windows.py __setup_gdt: setup_fs/setup_gs —
+    // the upstream rides them at os-construction time, before the loader's
+    // TEB/PEB/LDR stack writes into the GS region; the guard keeps the
+    // load()-time re-entry idempotent)
+    if (!ql_->mem().is_available(FS_SEGMENT_ADDR, FS_SEGMENT_SIZE)) {
+        throw QlErrorBase("cannot map FS segment, memory location is taken");
+    }
+    ql_->mem().map(FS_SEGMENT_ADDR, FS_SEGMENT_SIZE, UC_PROT_ALL, "[FS]");
+
+    if (!ql_->mem().is_available(GS_SEGMENT_ADDR, GS_SEGMENT_SIZE)) {
+        throw QlErrorBase("cannot map GS segment, memory location is taken");
+    }
+    ql_->mem().map(GS_SEGMENT_ADDR, GS_SEGMENT_SIZE, UC_PROT_ALL, "[GS]");
+
+    // FS/GS base: the segment registers point at the region bases
+    if (ql_->arch().bits() == 64) {
+        ql_->arch().regs().write("gsbase", GS_SEGMENT_ADDR);
+    }
+
     const auto heap_base = static_cast<std::uint64_t>(profile().get_int(os_section_name(), "heap_address"));
     const auto heap_size = static_cast<std::uint64_t>(profile().get_int(os_section_name(), "heap_size"));
     heap_storage_ = std::make_unique<QlMemoryHeap>(ql_->mem(), heap_base, heap_base + heap_size);
@@ -162,17 +181,15 @@ void QlOsWindows::load() {
     auto& arch = ql().arch();
     auto& mem = ql().mem();
 
+    // the FS/GS regions ride ensure_profile_state (the ctor-time map — the
+    // upstream windows.py __init__ calls self.load() at construction); the
+    // is_available guards keep this path idempotent
     if (!mem.is_available(FS_SEGMENT_ADDR, FS_SEGMENT_SIZE)) {
         throw QlErrorBase("cannot map FS segment, memory location is taken");
     }
-    mem.map(FS_SEGMENT_ADDR, FS_SEGMENT_SIZE, UC_PROT_ALL, "[FS]");
-
     if (!mem.is_available(GS_SEGMENT_ADDR, GS_SEGMENT_SIZE)) {
         throw QlErrorBase("cannot map GS segment, memory location is taken");
     }
-    mem.map(GS_SEGMENT_ADDR, GS_SEGMENT_SIZE, UC_PROT_ALL, "[GS]");
-
-    // FS/GS base: the segment registers point at the region bases
     if (arch.bits() == 64) {
         arch.regs().write("gs_base", GS_SEGMENT_ADDR);
     }

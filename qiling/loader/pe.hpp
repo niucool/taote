@@ -89,16 +89,20 @@ public:
     // loader/pe.py: the dll load base (the dll_address profile value)
     std::uint64_t dll_address() const noexcept { return dll_address_; }
 
-    // loader/pe.py PEB.BeingDebugged (the debugapi rider): the PEB itself
-    // lands with the full TEB/PEB/LDR stack; the flag rides a placeholder
-    // default of 0 (the not-being-debugged state) until that slice wires
-    // the real PEB byte
+    // loader/pe.py PEB.BeingDebugged (the debugapi rider): the byte rides
+    // the real PEB image (the init_peb wiring; the not-being-debugged
+    // default of 0)
     std::uint8_t peb_being_debugged() const noexcept { return peb_being_debugged_; }
 
     // loader/pe.py TEB.PebAddress (the ntdll ProcessBasicInformation
-    // rider): the same TEB/PEB placeholder — the address rides 0 until the
-    // TEB/PEB/LDR stack slice wires the real layout
+    // rider): the init_peb-computed address
     std::uint64_t peb_address() const noexcept { return peb_address_; }
+
+    // loader/pe.py TEB.TebAddress (the gs_base rider) and the LDR address
+    // (PEB.LdrAddress), plus the ldr_list entry addresses
+    std::uint64_t teb_address() const noexcept { return teb_address_; }
+    std::uint64_t ldr_address() const noexcept { return ldr_address_; }
+    const std::vector<std::uint64_t>& ldr_list() const noexcept { return ldr_list_; }
 
     // loader/pe.py: the driver flag (the MH_KEXT... the PE 0xb ride — the
     // load_image parse sets it; the driver branch riders read it)
@@ -116,6 +120,14 @@ public:
     void init_eprocess();
     void init_driver_object();
     void init_registry_path();
+
+    // loader/pe.py init_teb / init_peb / init_ldr_data /
+    // add_ldr_data_table_entry — the TEB/PEB/LDR stack (the non-driver PE
+    // and the shellcode paths; the drivers skip them verbatim)
+    void init_teb();
+    void init_peb();
+    void init_ldr_data();
+    void add_ldr_data_table_entry(const std::string& dll_name);
 
     // loader/pe.py init_function_tables / lookup_function_entry — the
     // x64/.pdata RUNTIME_FUNCTION walk (the upstream parses the pefile
@@ -178,6 +190,12 @@ private:
     std::uint64_t structure_last_addr_ = 0;
     std::uint8_t peb_being_debugged_ = 0;
     std::uint64_t peb_address_ = 0;
+
+    // the TEB/PEB/LDR stack (the init_* walks seed them; the ldr_list
+    // mirrors the upstream self.ldr_list entry addresses)
+    std::uint64_t teb_address_ = 0;
+    std::uint64_t ldr_address_ = 0;
+    std::vector<std::uint64_t> ldr_list_;
     std::map<std::uint64_t, std::vector<RuntimeFunction>> function_tables_;
     std::map<std::uint64_t, std::uint64_t> function_table_lookup_;
     std::uint64_t pe_image_address_ = 0;

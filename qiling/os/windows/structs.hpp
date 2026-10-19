@@ -224,6 +224,118 @@ inline constexpr std::size_t HOSTENT_OFF_HADDRTYPE = 16;
 inline constexpr std::size_t HOSTENT_OFF_HLENGTH = 18;
 inline constexpr std::size_t HOSTENT_OFF_HADDRLIST = 24;
 
+// TEB (make_teb(64), the get_aligned_struct walk): the 13 native pointers
+// then the tail — CurrentSEH@0, StackBase@8, StackLimit@16, SubSystemTib@24,
+// FiberData@32, ArbitraryDataSlot@40, TebAddress@48, EnvironmentPointer@56,
+// ProcessID@64, ThreadID@72, RpcHandle@80, TlsAddress@88, PebAddress@96,
+// LastError i32@104, CriticalSectionsCount i32@108,
+// CsrClientThreadAddress@112, Win32ThreadInfo@120, Win32ClientInfo[124]@128,
+// ReservedWow64@256, CurrentLocale i32@264, FpSwStatusReg i32@268,
+// ReservedOS[216]@272 (488 bytes)
+inline constexpr std::size_t TEB_SIZE = 488;
+inline constexpr std::size_t TEB_OFF_CURRENT_SEH = 0;
+inline constexpr std::size_t TEB_OFF_STACK_BASE = 8;
+inline constexpr std::size_t TEB_OFF_STACK_LIMIT = 16;
+inline constexpr std::size_t TEB_OFF_SUB_SYSTEM_TIB = 24;
+inline constexpr std::size_t TEB_OFF_FIBER_DATA = 32;
+inline constexpr std::size_t TEB_OFF_ARBITRARY_DATA_SLOT = 40;
+inline constexpr std::size_t TEB_OFF_TEB_ADDRESS = 48;
+inline constexpr std::size_t TEB_OFF_ENVIRONMENT_POINTER = 56;
+inline constexpr std::size_t TEB_OFF_PROCESS_ID = 64;
+inline constexpr std::size_t TEB_OFF_THREAD_ID = 72;
+inline constexpr std::size_t TEB_OFF_RPC_HANDLE = 80;
+inline constexpr std::size_t TEB_OFF_TLS_ADDRESS = 88;
+inline constexpr std::size_t TEB_OFF_PEB_ADDRESS = 96;
+inline constexpr std::size_t TEB_OFF_LAST_ERROR = 104;
+inline constexpr std::size_t TEB_OFF_CRITICAL_SECTIONS_COUNT = 108;
+inline constexpr std::size_t TEB_OFF_CSR_CLIENT_THREAD_ADDRESS = 112;
+inline constexpr std::size_t TEB_OFF_WIN32_THREAD_INFO = 120;
+inline constexpr std::size_t TEB_OFF_WIN32_CLIENT_INFO = 128;
+inline constexpr std::size_t TEB_OFF_RESERVED_WOW64 = 256;
+inline constexpr std::size_t TEB_OFF_CURRENT_LOCALE = 264;
+inline constexpr std::size_t TEB_OFF_FP_SW_STATUS_REG = 268;
+inline constexpr std::size_t TEB_OFF_RESERVED_OS = 272;
+
+// PEB (make_peb(64), padded to the 0x7c8 expected size): InheritedAddressSpace
+// u8@0, ReadImageFileExecOptions u8@1, BeingDebugged u8@2, BitField u8@3,
+// Mutant@8, ImageBaseAddress@16, LdrAddress@24, ProcessParameters@32,
+// SubSystemData@40, ProcessHeap@48, FastPebLock@56, AtlThunkSListPtr@64,
+// IFEOKey@72, CrossProcessFlags i32@80, KernelCallbackTable@88,
+// SystemReserved i32@96, AtlThunkSListPtr32 i32@100, ApiSetMap@104,
+// TlsExpansionCounter i32@112, TlsBitmap@120, TlsBitmapBits[2]@128,
+// ReadOnlySharedMemoryBase@136, SharedData@144, ReadOnlyStaticServerData@152,
+// AnsiCodePageData@160, OemCodePageData@168, UnicodeCaseTableData@176,
+// NumberOfProcessors i32@184, NtGlobalFlag i32@188,
+// CriticalSectionTimeout@192, _padding to 0x7c8
+inline constexpr std::size_t PEB_SIZE = 0x7c8;
+inline constexpr std::size_t PEB_OFF_INHERITED_ADDRESS_SPACE = 0;
+inline constexpr std::size_t PEB_OFF_READ_IMAGE_FILE_EXEC_OPTIONS = 1;
+inline constexpr std::size_t PEB_OFF_BEING_DEBUGGED = 2;
+inline constexpr std::size_t PEB_OFF_BIT_FIELD = 3;
+inline constexpr std::size_t PEB_OFF_MUTANT = 8;
+inline constexpr std::size_t PEB_OFF_IMAGE_BASE_ADDRESS = 16;
+inline constexpr std::size_t PEB_OFF_LDR_ADDRESS = 24;
+inline constexpr std::size_t PEB_OFF_PROCESS_PARAMETERS = 32;
+inline constexpr std::size_t PEB_OFF_SUB_SYSTEM_DATA = 40;
+inline constexpr std::size_t PEB_OFF_PROCESS_HEAP = 48;
+inline constexpr std::size_t PEB_OFF_FAST_PEB_LOCK = 56;
+inline constexpr std::size_t PEB_OFF_ATL_THUNK_SLIST_PTR = 64;
+inline constexpr std::size_t PEB_OFF_IFEO_KEY = 72;
+inline constexpr std::size_t PEB_OFF_CROSS_PROCESS_FLAGS = 80;
+inline constexpr std::size_t PEB_OFF_KERNEL_CALLBACK_TABLE = 88;
+inline constexpr std::size_t PEB_OFF_SYSTEM_RESERVED = 96;
+inline constexpr std::size_t PEB_OFF_ATL_THUNK_SLIST_PTR32 = 100;
+inline constexpr std::size_t PEB_OFF_API_SET_MAP = 104;
+inline constexpr std::size_t PEB_OFF_TLS_EXPANSION_COUNTER = 112;
+inline constexpr std::size_t PEB_OFF_TLS_BITMAP = 120;
+inline constexpr std::size_t PEB_OFF_TLS_BITMAP_BITS = 128;
+inline constexpr std::size_t PEB_OFF_READONLY_SHARED_MEMORY_BASE = 136;
+inline constexpr std::size_t PEB_OFF_SHARED_DATA = 144;
+inline constexpr std::size_t PEB_OFF_READONLY_STATIC_SERVER_DATA = 152;
+inline constexpr std::size_t PEB_OFF_ANSI_CODE_PAGE_DATA = 160;
+inline constexpr std::size_t PEB_OFF_OEM_CODE_PAGE_DATA = 168;
+inline constexpr std::size_t PEB_OFF_UNICODE_CASE_TABLE_DATA = 176;
+inline constexpr std::size_t PEB_OFF_NUMBER_OF_PROCESSORS = 184;
+inline constexpr std::size_t PEB_OFF_NT_GLOBAL_FLAG = 188;
+inline constexpr std::size_t PEB_OFF_CRITICAL_SECTION_TIMEOUT = 192;
+
+// PEB_LDR_DATA (make_ldr_data(64)): Length u32@0, Initialized u32@4,
+// SsHandle@8, InLoadOrderModuleList@16, InMemoryOrderModuleList@32,
+// InInitializationOrderModuleList@48, EntryInProgress@64,
+// ShutdownInProgress@72, selfShutdownThreadId@80 (88 bytes)
+inline constexpr std::size_t LDR_DATA_SIZE = 88;
+inline constexpr std::size_t LDR_DATA_OFF_LENGTH = 0;
+inline constexpr std::size_t LDR_DATA_OFF_INITIALIZED = 4;
+inline constexpr std::size_t LDR_DATA_OFF_SS_HANDLE = 8;
+inline constexpr std::size_t LDR_DATA_OFF_IN_LOAD_ORDER = 16;
+inline constexpr std::size_t LDR_DATA_OFF_IN_MEMORY_ORDER = 32;
+inline constexpr std::size_t LDR_DATA_OFF_IN_INITIALIZATION_ORDER = 48;
+inline constexpr std::size_t LDR_DATA_OFF_ENTRY_IN_PROGRESS = 64;
+inline constexpr std::size_t LDR_DATA_OFF_SHUTDOWN_IN_PROGRESS = 72;
+inline constexpr std::size_t LDR_DATA_OFF_SELF_SHUTDOWN_THREAD_ID = 80;
+
+// LDR_DATA_TABLE_ENTRY (make_ldr_data_table_entry(64))
+inline constexpr std::size_t LDR_ENTRY_SIZE = 304;
+inline constexpr std::size_t LDR_ENTRY_OFF_IN_LOAD_ORDER_LINKS = 0;
+inline constexpr std::size_t LDR_ENTRY_OFF_IN_MEMORY_ORDER_LINKS = 16;
+inline constexpr std::size_t LDR_ENTRY_OFF_IN_INITIALIZATION_ORDER_LINKS = 32;
+inline constexpr std::size_t LDR_ENTRY_OFF_DLL_BASE = 48;
+inline constexpr std::size_t LDR_ENTRY_OFF_ENTRY_POINT = 56;
+inline constexpr std::size_t LDR_ENTRY_OFF_SIZE_OF_IMAGE = 64;
+inline constexpr std::size_t LDR_ENTRY_OFF_FULL_DLL_NAME = 72;
+inline constexpr std::size_t LDR_ENTRY_OFF_BASE_DLL_NAME = 88;
+inline constexpr std::size_t LDR_ENTRY_OFF_FLAGS = 104;
+inline constexpr std::size_t LDR_ENTRY_OFF_OBSOLETE_LOAD_COUNT = 112;
+inline constexpr std::size_t LDR_ENTRY_OFF_TLS_INDEX = 114;
+inline constexpr std::size_t LDR_ENTRY_OFF_HASH_LINKS = 120;
+
+// UNICODE_STRING (make_unicode_string(64)): Length u16@0, MaximumLength u16@2,
+// Buffer@8 (16 bytes)
+inline constexpr std::size_t UNICODE_STRING_SIZE = 16;
+inline constexpr std::size_t UNICODE_STRING_OFF_LENGTH = 0;
+inline constexpr std::size_t UNICODE_STRING_OFF_MAXIMUM_LENGTH = 2;
+inline constexpr std::size_t UNICODE_STRING_OFF_BUFFER = 8;
+
 }  // namespace win
 }  // namespace os
 }  // namespace qiling
