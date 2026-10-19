@@ -347,6 +347,64 @@ TEST(WinApiFileapi, FindFirstFileAWritesFindDataAndHandle) {
     EXPECT_EQ(std::string(name.begin(), name.end()), "C:\\qltest\\find.bin");
 }
 
+// the wildcard walk (pegasus test_find_files.cpp): FindFirstFileA's pattern
+// matcher is the case-insensitive FNMatch-lite — `*` runs and `?` singles —
+// over the parent directory's entries; a pattern without wildcards probes the
+// path directly and a miss answers INVALID_HANDLE_VALUE + ERROR_FILE_NOT_FOUND
+TEST(WinApiFileapi, FindFirstFileAWildcardWalkMatchesCaseInsensitively) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    const auto qltest = std::filesystem::path(ql.rootfs()) / "qltest";
+    std::filesystem::create_directories(qltest);
+    for (const auto& [name, size] : std::vector<std::pair<std::string, std::size_t>>{
+             {"alpha.txt", 3}, {"beta.bin", 7}, {"GAMMA.TXT", 11}}) {
+        std::ofstream f(qltest / name, std::ios::binary);
+        f << std::string(size, 'x');
+    }
+
+    const auto* find = ApiRegistry::instance().find("FindFirstFileA");
+    ASSERT_NE(find, nullptr);
+
+    const auto find_name = [&](const std::string& pattern) -> std::string {
+        ql.mem().write(kScratch, std::vector<std::uint8_t>(qiling::os::win::WIN32_FIND_DATAA_SIZE, 0));
+        const auto h = find->handler(ql, 0, ResolvedParams{
+            {"lpFileName", pattern},
+            {"lpFindFileData", kScratch},
+        });
+        EXPECT_TRUE(h.has_value());
+        if (!h.has_value() || *h == 0xffffffffffffffffull) {
+            return {};
+        }
+        const auto raw = ql.mem().read(kScratch + 44, 32);  // cFileName
+        return std::string(raw.begin(), raw.end()).c_str();
+    };
+
+    // *.txt matches the lowercase entry and the upper-case one alike (the
+    // matcher folds case); the .bin entry never matches
+    const auto first = find_name("C:\\qltest\\*.txt");
+    ASSERT_FALSE(first.empty());
+    EXPECT_TRUE(first == "alpha.txt" || first == "GAMMA.TXT") << first;
+
+    // the pattern case is folded too
+    const auto upper = find_name("C:\\qltest\\*.TXT");
+    ASSERT_FALSE(upper.empty());
+    EXPECT_TRUE(upper == "alpha.txt" || upper == "GAMMA.TXT") << upper;
+
+    // the other extension matches only the .bin entry
+    EXPECT_EQ(find_name("C:\\qltest\\*.bin"), "beta.bin");
+    // `?` matches exactly one character (b?ta.bin matches beta.bin)
+    EXPECT_EQ(find_name("C:\\qltest\\b?ta.bin"), "beta.bin");
+    EXPECT_TRUE(find_name("C:\\qltest\\b??.bin").empty());
+
+    // a wildcard pattern with no match answers INVALID_HANDLE_VALUE
+    EXPECT_TRUE(find_name("C:\\qltest\\*.dat").empty());
+    EXPECT_EQ(ql.os<QlOsWindows>().last_error(), qiling::os::win::ERROR_FILE_NOT_FOUND);
+
+    // a literal path that exists probes directly (no wildcard walk)
+    EXPECT_EQ(find_name("C:\\qltest\\beta.bin"), "C:\\qltest\\beta.bin");
+}
+
 TEST(WinApiFileapi, PassthroughAndNoOpHandlers) {
     register_dlls();
     Qiling ql(win_test_options());

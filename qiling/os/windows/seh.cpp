@@ -94,8 +94,8 @@ bool QlOsWindows::seh_fault_trampoline(uc_engine*, uc_mem_type access, std::uint
 // (the ql-layer mem hooks) still observe the fault (unicorn continues the
 // hook list on a false return).
 bool QlOsWindows::seh_on_fault(int access, std::uint64_t address) {
-    if (seh_sentinel_ == 0 || bits_ != 32) {
-        return false;  // the dispatch is not armed (the x64 VEH is a follow-up)
+    if (seh_sentinel_ == 0 || bits_ != 32 || !seh_dispatch_enabled_) {
+        return false;  // the dispatch is not armed (or switched off)
     }
 
     // the sentinel fetch: a guest SEH handler / filter returned — continue

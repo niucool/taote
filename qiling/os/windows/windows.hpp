@@ -116,6 +116,11 @@ public:
     void seh_clear_frames() { seh_frames_.clear(); }
     const std::vector<SehFrame>& seh_frames() const noexcept { return seh_frames_; }
 
+    // the dispatch switch (pegasus cfg.exceptions.dispatch_handlers): off
+    // leaves every guest fault on the ordinary failure path
+    void set_seh_dispatch(bool enabled) noexcept { seh_dispatch_enabled_ = enabled; }
+    bool seh_dispatch() const noexcept { return seh_dispatch_enabled_; }
+
     // the pending emu restart target armed by the dispatch / the continue
     // walk (0 = none); QlOsWindows::run consumes it after emu_start errors
     std::uint64_t seh_retarget() const noexcept { return seh_retarget_; }
@@ -173,6 +178,7 @@ private:
     std::uint64_t seh_fault_pc_ = 0;        // the repeat-guard key (pc)
     std::uint64_t seh_fault_addr_ = 0;      // the repeat-guard key (fault address)
     int seh_repeat_count_ = 0;
+    bool seh_dispatch_enabled_ = true;   // the set_seh_dispatch switch
     std::vector<SehFrame> seh_frames_;
 };
 

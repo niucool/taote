@@ -1688,3 +1688,64 @@ claimed "ExceptionContinueSearch", which is the value 0.
 
 **Suite state after this phase:** `518 passed / 0 failed / 3 skipped` on the Linux host
 (the three Windows-host-only real-dll e2e fixtures skip), 23 disabled (all non-PE).
+
+## Phase 17 — the pegasus test-suite parity pass
+
+**Done.** The whole reference suite (`../pegasus/tests/`, 48 TUs / 357 cases)
+was read and mapped in `tests/PEGASUS_TEST_PARITY.md`: every case is either
+ported (asserted through the qiling surfaces taote actually has), classified
+pegasus-only (the report/profiler/artifact/CLI/`EmuStruct`/unpacker layers and
+the JS engine, which are pegasus subsystems with no qiling counterpart), or
+skipped because the reference suite skips/disables it itself.
+
+The ported subset is the `PegasusParity.*` suite (`tests/Pegasus_Compat_Test.cpp`,
+11 cases) plus the wildcard-walk case in `Windows_Api_Test.cpp`, all riding
+`tests/Pe_Sample_Runner.hpp` over the seven vendored sample binaries in
+`tests/data/pegasus/`:
+
+| behaviour | taote test |
+|---|---|
+| argv delivery (10 tail arguments, argc + per-argument render) | `PegasusParity.ArgvPassedToExe` |
+| GetProcAddress: exported names resolve, a bogus name answers NULL | `PegasusParity.GetProcAddressMissingFunctionReturnsZero` |
+| NtCreateFile/NtReadFile over the fs mapper + the printed file content (both arches) | `PegasusParity.FileAccessEmulationX86/X64` |
+| dll entry points (DllMain → 1, two exports → 0x41414141/0x42424242) + MessageBox texts (both arches) | `PegasusParity.DllEmulationRunsX86/X64` |
+| PEB module population (the mapped main image + the loaded module list) | `PegasusParity.PEBModulesPopulated` |
+| the SEH dispatch script (7 formatted lines) / the switched-off dispatch | `PegasusParity.SehDispatchEnabled/Disabled` |
+| the shellcode load + run | `PegasusParity.ShellcodeLoadAndRun` |
+| the ascii/wide string readers feeding the stats log | `PegasusParity.ReadMemStringRoundTripsAndLogs` |
+| the FindFirstFileA wildcard semantics (case folding, `?`, the miss status) | `WinApiFileapi.FindFirstFileAWildcardWalkMatchesCaseInsensitively` |
+
+### The defects the parity pass surfaced (all fixed)
+
+1. **The 32-bit fcall tables never rebound `getNumSlots`.** The windows
+   `fcall_table_` entries were constructed through the
+   `unique_ptr<cc::QlCC>` shape, which cannot see the concrete convention, so
+   every accessor kept `nslots = 1`: an x86 64-bit head parameter
+   (`__stdio_common_vfprintf`'s `_Options`) advanced one stack slot instead of
+   two and shifted every following argument — `_Format` came out of the
+   `_Stream` cell, i.e. the address-1 read the earlier read_string guard had
+   only been papering over. `QlFunctionCall` gained the concrete-type
+   owned-pointer constructor (and a shared `rebind_slots<CC>()`).
+2. **`RtlInitUnicodeString` was the upstream `pass`.** The usermode samples
+   initialize their `OBJECT_ATTRIBUTES` name with it, so the `UNICODE_STRING`
+   stayed stack garbage and `NtCreateFile` answered
+   `STATUS_OBJECT_NAME_INVALID`; it now writes `Length`/`MaximumLength`/
+   `Buffer` per the kernel contract.
+3. **`read_wstring` skipped the stats string log** — the upstream delegates to
+   `read_string` (which logs); the port's standalone wide walk dropped it, so
+   every wide string was invisible to the tooling surface.
+4. **`NtOpenFile` and `NtReadFile` were missing** (the `NtCreateFile` /
+   `NtWriteFile` twins); the file-access samples resolve the NT quartet through
+   `GetProcAddress` and read through it. `NtCreateFile`/`NtOpenFile` now share
+   one body, and the disposition write-back only fires when the argument is a
+   pointer (the inline `ULONG` callers are left alone).
+
+Fixture-side corrections: the dll drive now passes
+`(HINSTANCE, DLL_PROCESS_ATTACH, NULL)` to the entry point (the CRT startup
+branches on the reason — without it `DllMain` never ran and the startup
+answered 0), and `MessageBoxA/W` decode their text/caption into the string log.
+
+**Suite state after this phase:** `530 passed / 0 failed / 3 skipped` on the
+Linux host (23 pre-existing disabled, all non-PE). The pegasus sample sweep is
+unchanged at 97 of 101 bins (the 2 tcp servers block in a real `accept`, the 2
+wdm drivers are kernel-mode).

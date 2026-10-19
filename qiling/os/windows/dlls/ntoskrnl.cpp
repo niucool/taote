@@ -313,11 +313,39 @@ void register_ntoskrnl_family() {
         return 0;
     };
 
-    // the Rtl string family: the passthru riders (the __wrapped__ None rides)
+    // void RtlInitUnicodeString(PUNICODE_STRING DestinationString, PCWSTR SourceString);
+    //
+    // The upstream rides the verbatim `pass` (the kernel drivers hand in
+    // pre-built structures), but the usermode samples routinely initialize
+    // their OBJECT_ATTRIBUTES name this way — leaving the struct untouched
+    // leaves Length/Buffer garbage and every NtCreateFile walk reads a
+    // bogus UNICODE_STRING. The kernel contract: no allocation, the Buffer
+    // points at the caller's string, MaximumLength = Length + sizeof(WCHAR)
     WinsdkApi("RtlInitUnicodeString", WinCc::Stdcall, {
         {"DestinationString", PVOID_},
         {"SourceString", PVOID_},
-    }, true) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto dest = api_get_int(get_param(params, "DestinationString"));
+        const auto src = api_get_int(get_param(params, "SourceString"));
+        if (dest == 0) {
+            return std::nullopt;
+        }
+        const auto ps = ql.arch().pointersize();
+
+        std::uint64_t len = 0;
+        if (src != 0) {
+            // the wide walk: the Length cell counts BYTES without the NUL
+            while (len < 0x10000) {
+                const auto unit = ql.mem().read_ptr(src + len, 2);
+                if (unit == 0) {
+                    break;
+                }
+                len += 2;
+            }
+        }
+        ql.mem().write_ptr(dest, len, 2);
+        ql.mem().write_ptr(dest + 2, src != 0 ? len + 2 : 0, 2);
+        ql.mem().write_ptr(dest + ps, src);
         return std::nullopt;
     };
 

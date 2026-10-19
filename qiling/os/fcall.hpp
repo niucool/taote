@@ -62,14 +62,9 @@ private:
         accessors_.emplace_back(os::PARAM_INTN, bind(0));
     }
 
-public:
-
-    // Concrete-convention construction: binds the static getNumSlots of the
-    // concrete convention into the default accessors (Python resolves
-    // cc.getNumSlots through the instance type; the C++ static member needs
-    // the concrete type at compile time).
+    // the concrete-convention slot counts (fcall.py cc.getNumSlots)
     template <typename CC>
-    explicit QlFunctionCall(CC& cc) : QlFunctionCall(static_cast<cc::QlCC&>(cc)) {
+    void rebind_slots() {
         const auto rebind = [this](int type, int nbits) {
             for (auto& [type_key, accessor] : accessors_) {
                 if (type_key == type) {
@@ -82,6 +77,31 @@ public:
         rebind(os::PARAM_INT32, 32);
         rebind(os::PARAM_INT64, 64);
         rebind(os::PARAM_INTN, 0);
+    }
+
+public:
+
+    // Concrete-convention construction: binds the static getNumSlots of the
+    // concrete convention into the default accessors (Python resolves
+    // cc.getNumSlots through the instance type; the C++ static member needs
+    // the concrete type at compile time).
+    //
+    // The OWNED-pointer spelling below is the one every os uses (the fcall
+    // tables hold unique_ptrs): without the rebind the 32-bit conventions
+    // leave the 64-bit types at one slot, so an x86 `unsigned __int64 _Options`
+    // head parameter shifts every following argument by a slot — the
+    // __stdio_common_vfprintf dispatch read _Format out of the _Stream cell
+    // and the samples' formatted output turned into the read-at-0x1 walk.
+    template <typename CC, typename = std::enable_if_t<!std::is_same_v<CC, cc::QlCC>>>
+    explicit QlFunctionCall(std::unique_ptr<CC> cc)
+        : cc_owner_(std::move(cc)), cc_(cc_owner_.get()) {
+        build_default_accessors();
+        rebind_slots<CC>();
+    }
+
+    template <typename CC>
+    explicit QlFunctionCall(CC& cc) : QlFunctionCall(static_cast<cc::QlCC&>(cc)) {
+        rebind_slots<CC>();
     }
 
     // custom accessor override (fcall.py: a mapping of parameter types to

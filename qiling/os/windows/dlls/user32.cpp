@@ -742,7 +742,13 @@ void register_user32_family() {
         {"lpText", LPCWSTR_},
         {"lpCaption", LPCWSTR_},
         {"uType", UINT_},
-    }) = [](Qiling&, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        // the message box texts are the observable output of the call: decode
+        // both through read_wstring (the stats string log — the tooling
+        // surface a real windows host gets from the dialog)
+        (void)api_get_string(ql, get_param(params, "lpText"));
+        (void)api_get_string(ql, get_param(params, "lpCaption"));
+
         const auto utype = api_get_int(get_param(params, "uType"));
 
         const auto buttons = utype & 0x0000000f;
@@ -768,7 +774,11 @@ void register_user32_family() {
         {"lpText", LPCSTR_},
         {"lpCaption", LPCSTR_},
         {"uType", UINT_},
-    }) = [](Qiling&, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        // the observable texts (see the MessageBoxW note)
+        (void)api_get_string(ql, get_param(params, "lpText"));
+        (void)api_get_string(ql, get_param(params, "lpCaption"));
+
         const auto utype = api_get_int(get_param(params, "uType"));
         const auto buttons = utype & 0x0000000f;
         static const std::map<std::uint64_t, std::uint64_t> press{

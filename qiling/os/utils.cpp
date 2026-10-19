@@ -121,6 +121,12 @@ std::string QlOsUtils::read_wstring(Qiling& ql, std::uint64_t address, int maxle
         out.push_back(static_cast<char>(0x80 | ((cu >> 6) & 0x3F)));
         out.push_back(static_cast<char>(0x80 | (cu & 0x3F)));
     }
+
+    // the decoded string feeds the stats log — the upstream's read_wstring
+    // delegates to read_string, which logs; the standalone walk above has to
+    // keep that contract (the wide strings would otherwise never reach the
+    // string log)
+    ql.os().stats().log_string(out);
     return out;
 }
 

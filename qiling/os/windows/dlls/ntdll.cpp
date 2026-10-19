@@ -337,6 +337,75 @@ std::pair<std::uint64_t, std::uint64_t> find_image_base_and_function_table(Qilin
     return {base_addr, function_table_addr};
 }
 
+// the NtCreateFile/NtOpenFile shared body (the NT file open surface: the
+// OBJECT_ATTRIBUTES name walk + the fs-mapper ride). `disposition_cell` is
+// the NtCreateFile CreateDisposition argument — the kernel writes the
+// resulting disposition back through it when it is a pointer (the callers
+// that pass the ULONG value inline stay untouched).
+std::optional<std::uint64_t> nt_open_file_body(Qiling& ql, const ResolvedParams& params,
+                                               std::uint64_t out_handle, std::uint64_t obj_attr,
+                                               std::uint64_t io_status, std::uint64_t disposition_cell) {
+    if (out_handle == 0 || obj_attr == 0) {
+        return static_cast<std::uint64_t>(0xc000000du);  // STATUS_INVALID_PARAMETER
+    }
+
+    // OBJECT_ATTRIBUTES: the ObjectName field rides at the 2nd pointer
+    // slot (Length, RootDirectory, ObjectName); the UNICODE_STRING body:
+    // Length/MaximumLength (the two u16s), then the Buffer pointer at the
+    // native alignment (the ps offset)
+    const auto ps = ql.arch().pointersize();
+    const auto name_struct = ql.mem().read_ptr(obj_attr + 2 * ps);
+    if (name_struct == 0) {
+        return static_cast<std::uint64_t>(0xc0000033u);  // STATUS_OBJECT_NAME_INVALID
+    }
+    const auto name_len = ql.mem().read_ptr(name_struct, 2);
+    const auto name_buf = ql.mem().read_ptr(name_struct + ps);
+    if (name_buf == 0 || name_len == 0) {
+        return static_cast<std::uint64_t>(0xc0000033u);  // STATUS_OBJECT_NAME_INVALID
+    }
+    auto name_bytes = ql.mem().read(name_buf, static_cast<std::size_t>(name_len));
+    // the NT object names are utf-16le verbatim (the OBJECT_ATTRIBUTES
+    // contract — the Length cell counts the bytes) — decode to the narrow
+    // dos-path form (the ascii subset; the non-ascii cells degrade)
+    std::string name;
+    for (std::size_t i = 0; i + 1 < name_bytes.size(); i += 2) {
+        name.push_back(static_cast<char>(name_bytes[i]));
+    }
+
+    // the \??\ prefix rides the NT object-manager namespace marker — the
+    // fs mapper wants the dos path (the C:\... body)
+    if (name.rfind("\\??\\", 0) == 0) {
+        name.erase(0, 4);
+    }
+
+    std::shared_ptr<QlFsMappedObject> f;
+    try {
+        f = w(ql).fs_mapper()->open(name, "r+");
+    } catch (const std::exception&) {
+        // the open miss rides the status (the FILE_OPEN on the missing
+        // path; the callers probe and continue)
+        ql.mem().write_ptr(out_handle, 0);
+        if (io_status != 0) {
+            ql.mem().write_ptr(io_status, static_cast<std::uint64_t>(0xc0000034u), 8);  // STATUS_OBJECT_NAME_NOT_FOUND
+        }
+        return static_cast<std::uint64_t>(0xc0000034u);
+    }
+    Handle new_handle(std::nullopt, f.get());
+    new_handle.owned = f;
+    w(ql).handle_manager().append(new_handle);
+
+    ql.mem().write_ptr(out_handle, new_handle.id);
+    // the disposition write-back only when the cell is a pointer (the
+    // NtCreateFile callers that pass the inline ULONG value are left alone)
+    if (disposition_cell >= 0x1000) {
+        ql.mem().write_ptr(disposition_cell, 1, 4);  // FILE_OPENED
+    }
+    if (io_status != 0) {
+        ql.mem().write_ptr(io_status, 0, 8);  // the status + the info cells
+    }
+    return 0;
+}
+
 }  // namespace
 
 void register_ntdll_family() {
@@ -1053,66 +1122,77 @@ void register_ntdll_family() {
         {"EaBuffer", PVOID_},
         {"EaLength", PVOID_},
     }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
-        const auto out_handle = api_get_int(get_param(params, "FileHandle"));
-        const auto obj_attr = api_get_int(get_param(params, "ObjectAttributes"));
-        const auto disposition_ptr = api_get_int(get_param(params, "CreateDisposition"));
-        if (out_handle == 0 || obj_attr == 0) {
-            return static_cast<std::uint64_t>(0xc000000du);  // STATUS_INVALID_PARAMETER
-        }
+        return nt_open_file_body(ql, params,
+                                 api_get_int(get_param(params, "FileHandle")),
+                                 api_get_int(get_param(params, "ObjectAttributes")),
+                                 api_get_int(get_param(params, "IoStatusBlock")),
+                                 api_get_int(get_param(params, "CreateDisposition")));
+    };
 
-        // OBJECT_ATTRIBUTES: the ObjectName field rides at the 2nd pointer
-        // slot (Length, RootDirectory, ObjectName); the UNICODE_STRING body:
-        // Length/MaximumLength (the two u16s), then the Buffer pointer at the
-        // native alignment (the ps offset)
-        const auto ps = ql.arch().pointersize();
-        const auto name_struct = ql.mem().read_ptr(obj_attr + 2 * ps);
-        if (name_struct == 0) {
-            return static_cast<std::uint64_t>(0xc0000033u);  // STATUS_OBJECT_NAME_INVALID
-        }
-        const auto name_len = ql.mem().read_ptr(name_struct, 2);
-        const auto name_buf = ql.mem().read_ptr(name_struct + ps);
-        if (name_buf == 0 || name_len == 0) {
-            return static_cast<std::uint64_t>(0xc0000033u);  // STATUS_OBJECT_NAME_INVALID
-        }
-        auto name_bytes = ql.mem().read(name_buf, static_cast<std::size_t>(name_len));
-        // the NT object names are utf-16le verbatim (the OBJECT_ATTRIBUTES
-        // contract — the Length cell counts the bytes) — decode to the narrow
-        // dos-path form (the ascii subset; the non-ascii cells degrade)
-        std::string name;
-        for (std::size_t i = 0; i + 1 < name_bytes.size(); i += 2) {
-            name.push_back(static_cast<char>(name_bytes[i]));
-        }
+    // NTSTATUS NtOpenFile(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES,
+    //                     PIO_STATUS_BLOCK, ULONG ShareAccess, ULONG OpenOptions);
+    // — the NtCreateFile twin without the disposition (the FILE_OPEN-only
+    // surface: the samples look the pair up through GetProcAddress and
+    // expect both to resolve)
+    WinsdkApi("NtOpenFile", WinCc::Stdcall, {
+        {"FileHandle", PVOID_},
+        {"DesiredAccess", PVOID_},
+        {"ObjectAttributes", PVOID_},
+        {"IoStatusBlock", PVOID_},
+        {"ShareAccess", PVOID_},
+        {"OpenOptions", PVOID_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        return nt_open_file_body(ql, params,
+                                 api_get_int(get_param(params, "FileHandle")),
+                                 api_get_int(get_param(params, "ObjectAttributes")),
+                                 api_get_int(get_param(params, "IoStatusBlock")),
+                                 0);
+    };
 
-        // the \??\ prefix rides the NT object-manager namespace marker — the
-        // fs mapper wants the dos path (the C:\... body)
-        if (name.rfind("\\??\\", 0) == 0) {
-            name.erase(0, 4);
-        }
+    // NTSTATUS NtReadFile(HANDLE FileHandle, HANDLE Event, PIO_APC_ROUTINE,
+    //                     PVOID ApcContext, PIO_STATUS_BLOCK, PVOID Buffer,
+    //                     ULONG Length, PLARGE_INTEGER ByteOffset, PULONG Key);
+    // — the parked-handle read (the NtWriteFile twin; the upstream has no
+    // reader, so the usermode samples' read loops only ever saw stub cells)
+    WinsdkApi("NtReadFile", WinCc::Stdcall, {
+        {"FileHandle", PVOID_},
+        {"Event", PVOID_},
+        {"ApcRoutine", PVOID_},
+        {"ApcContext", PVOID_},
+        {"IoStatusBlock", PVOID_},
+        {"Buffer", PVOID_},
+        {"Length", PVOID_},
+        {"ByteOffset", PVOID_},
+        {"Key", PVOID_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto h = api_get_int(get_param(params, "FileHandle"));
+        const auto io = api_get_int(get_param(params, "IoStatusBlock"));
+        const auto buf = api_get_int(get_param(params, "Buffer"));
+        const auto len = api_get_int(get_param(params, "Length"));
+        const auto off_ptr = api_get_int(get_param(params, "ByteOffset"));
 
-        std::shared_ptr<QlFsMappedObject> f;
-        try {
-            f = w(ql).fs_mapper()->open(name, "r+");
-        } catch (const std::exception&) {
-            // the open miss rides the status (the FILE_OPEN on the missing
-            // path; the callers probe and continue)
-            if (out_handle != 0) {
-                ql.mem().write_ptr(out_handle, 0);
+        const auto* handle = w(ql).handle_manager().get(h);
+        if (handle == nullptr || handle->obj == nullptr) {
+            return static_cast<std::uint64_t>(0xc0000008u);  // STATUS_INVALID_HANDLE
+        }
+        auto* file = static_cast<QlFsMappedObject*>(handle->obj);
+
+        // the explicit byte offset (the NULL pointer reads at the current
+        // position, the kernel's default)
+        if (off_ptr != 0) {
+            const auto offset = static_cast<std::uint64_t>(ql.mem().read_ptr(off_ptr, ql.arch().pointersize()));
+            if (offset != 0 || off_ptr != 0) {
+                file->lseek(offset, 0);
             }
-            if (const auto io = api_get_int(get_param(params, "IoStatusBlock")); io != 0) {
-                ql.mem().write_ptr(io, static_cast<std::uint64_t>(0xc0000034u), 8);  // STATUS_OBJECT_NAME_NOT_FOUND
-            }
-            return static_cast<std::uint64_t>(0xc0000034u);
         }
-        Handle new_handle(std::nullopt, f.get());
-        new_handle.owned = f;
-        w(ql).handle_manager().append(new_handle);
 
-        ql.mem().write_ptr(out_handle, new_handle.id);
-        if (disposition_ptr != 0) {
-            ql.mem().write_ptr(disposition_ptr, 1, 4);  // FILE_OPENED
+        const auto data = file->read(static_cast<std::size_t>(len));
+        if (buf != 0 && !data.empty()) {
+            ql.mem().write(buf, data);
         }
-        if (const auto io = api_get_int(get_param(params, "IoStatusBlock")); io != 0) {
-            ql.mem().write_ptr(io, 0, 8);  // the status + the info cells
+        if (io != 0) {
+            ql.mem().write_ptr(io, 0, 8);                    // the status
+            ql.mem().write_ptr(io + 8, data.size());          // the information
         }
         return 0;
     };
