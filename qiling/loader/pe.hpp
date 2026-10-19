@@ -93,6 +93,11 @@ public:
     // the real PEB byte
     std::uint8_t peb_being_debugged() const noexcept { return peb_being_debugged_; }
 
+    // loader/pe.py TEB.PebAddress (the ntdll ProcessBasicInformation
+    // rider): the same TEB/PEB placeholder — the address rides 0 until the
+    // TEB/PEB/LDR stack slice wires the real layout
+    std::uint64_t peb_address() const noexcept { return peb_address_; }
+
     // loader/pe.py init_exports: the main-image exports keyed by the ea
     const std::map<std::uint64_t, ExportSymbol>& export_symbols() const noexcept { return export_symbols_; }
 
@@ -127,6 +132,7 @@ private:
     std::uint64_t dll_size_ = 0;
     std::uint64_t dll_last_address_ = 0;
     std::uint8_t peb_being_debugged_ = 0;
+    std::uint64_t peb_address_ = 0;
     std::uint64_t pe_image_address_ = 0;
     std::map<std::uint64_t, ImportSymbol> import_symbols_;
     std::map<std::uint64_t, ExportSymbol> export_symbols_;

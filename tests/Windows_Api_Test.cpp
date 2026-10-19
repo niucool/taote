@@ -3351,3 +3351,285 @@ TEST(WinApiConsole23Psapi, VerbatimStubsAndConsoleWindowHandle) {
     ASSERT_TRUE(r5.has_value());
     EXPECT_EQ(*r5, 0u);
 }
+
+TEST(WinApiNtdll, InfoClassWalksRideProfileValues) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    // ProcessDebugFlags: the pack32(1) at the buffer + the length cell
+    const auto* qip = ApiRegistry::instance().find("ZwQueryInformationProcess");
+    ASSERT_NE(qip, nullptr);
+    const auto rf = qip->handler(ql, 0, ResolvedParams{
+        {"ProcessHandle", 0ull},
+        {"ProcessInformationClass", 31ull},   // ProcessDebugFlags,
+        {"ProcessInformation", kScratch},
+        {"ProcessInformationLength", 4ull},
+        {"ReturnLength", kScratch + 0x20},
+    });
+    ASSERT_TRUE(rf.has_value());
+    EXPECT_EQ(*rf, 0u);  // the STATUS_SUCCESS
+    EXPECT_EQ(ql.mem().read_ptr(kScratch, 4), 1u);  // the debugger NOT present
+    EXPECT_EQ(ql.mem().read_ptr(kScratch + 0x20, 4), 4u);
+
+    // ProcessDebugPort: the pack32(0)
+    const auto rp = qip->handler(ql, 0, ResolvedParams{
+        {"ProcessHandle", 0ull},
+        {"ProcessInformationClass", 7ull},   // ProcessDebugPort,
+        {"ProcessInformation", kScratch}, {"ProcessInformationLength", 4ull},
+        {"ReturnLength", kScratch + 0x20},
+    });
+    ASSERT_TRUE(rp.has_value());
+    EXPECT_EQ(*rp, 0u);
+    EXPECT_EQ(ql.mem().read_ptr(kScratch, 4), 0u);
+
+    // ProcessDebugObjectHandle: the STATUS_PORT_NOT_SET
+    const auto rdo = qip->handler(ql, 0, ResolvedParams{
+        {"ProcessHandle", 0ull},
+        {"ProcessInformationClass", 30ull},  // ProcessDebugObjectHandle,
+        {"ProcessInformation", kScratch}, {"ProcessInformationLength", 4ull},
+        {"ReturnLength", 0ull},
+    });
+    ASSERT_TRUE(rdo.has_value());
+    EXPECT_EQ(*rdo, 0xC0000353u);
+
+    // ProcessBasicInformation: the PBI rides the profile pids + the placeholder PEB
+    const auto rbi = qip->handler(ql, 0, ResolvedParams{
+        {"ProcessHandle", 0ull},
+        {"ProcessInformationClass", 0ull},   // ProcessBasicInformation,
+        {"ProcessInformation", kScratch + 0x40},
+        {"ProcessInformationLength", 48ull},
+        {"ReturnLength", kScratch + 0x20},
+    });
+    ASSERT_TRUE(rbi.has_value());
+    EXPECT_EQ(*rbi, 0u);
+    EXPECT_EQ(ql.mem().read_ptr(kScratch + 0x40 + 32, 8), 1996u);   // the UniqueProcessId (the profile pid)
+    EXPECT_EQ(ql.mem().read_ptr(kScratch + 0x40 + 40, 8), 0u);      // the InheritedFromUniqueProcessId (the profile parent_pid)
+    EXPECT_EQ(ql.mem().read_ptr(kScratch + 0x40 + 8, 8), 0u);       // the PebBaseAddress (the TEB/PEB placeholder)
+    EXPECT_EQ(ql.mem().read_ptr(kScratch + 0x20, 4), 48u);          // the ReturnLength
+
+    // the ProcessCookie with a non-current handle: the STATUS_INVALID_PARAMETER
+    const auto rc = qip->handler(ql, 0, ResolvedParams{
+        {"ProcessHandle", 0x1234ull},
+        {"ProcessInformationClass", 36ull},  // ProcessCookie,
+        {"ProcessInformation", kScratch}, {"ProcessInformationLength", 4ull},
+        {"ReturnLength", 0ull},
+    });
+    ASSERT_TRUE(rc.has_value());
+    EXPECT_EQ(*rc, 0xC000000Du);
+
+    // the ProcessCookie with the current pseudo-handle: the cookie rides 1
+    const auto rc2 = qip->handler(ql, 0, ResolvedParams{
+        {"ProcessHandle", ~0ull},  // the current-process pseudo-handle
+        {"ProcessInformationClass", 36ull},  // ProcessCookie,
+        {"ProcessInformation", kScratch}, {"ProcessInformationLength", 4ull},
+        {"ReturnLength", 0ull},
+    });
+    ASSERT_TRUE(rc2.has_value());
+    EXPECT_EQ(*rc2, 0u);
+    EXPECT_EQ(ql.mem().read_ptr(kScratch, 4), 1u);
+
+    // the unknown class: the STATUS_UNSUCCESSFUL
+    const auto ru = qip->handler(ql, 0, ResolvedParams{
+        {"ProcessHandle", 0ull},
+        {"ProcessInformationClass", 0x7777ull},
+        {"ProcessInformation", kScratch}, {"ProcessInformationLength", 4ull},
+        {"ReturnLength", 0ull},
+    });
+    ASSERT_TRUE(ru.has_value());
+    EXPECT_EQ(*ru, 0xC0000001u);
+
+    // the Nt sibling shares the body
+    EXPECT_NE(ApiRegistry::instance().find("NtQueryInformationProcess"), nullptr);
+
+    // the SetInformationProcess pair: the known classes ride the STATUS_SUCCESS
+    const auto* sip = ApiRegistry::instance().find("ZwSetInformationProcess");
+    ASSERT_NE(sip, nullptr);
+    ql.mem().write_ptr(kScratch, 0, 4);
+    const auto rs = sip->handler(ql, 0, ResolvedParams{
+        {"ProcessHandle", 0ull},
+        {"ProcessInformationClass", 31ull},   // ProcessDebugFlags,
+        {"ProcessInformation", kScratch},
+        {"ProcessInformationLength", 4ull},
+    });
+    EXPECT_FALSE(rs.has_value());  // the verbatim dropped return
+
+    // the unknown class on the set walk: the STATUS_UNSUCCESSFUL — but the
+    // verbatim hook drops the body return (the None), so the call surfaces
+    // no value
+    const auto rsu = sip->handler(ql, 0, ResolvedParams{
+        {"ProcessHandle", 0ull},
+        {"ProcessInformationClass", 0x7777ull},
+        {"ProcessInformation", kScratch}, {"ProcessInformationLength", 4ull},
+    });
+    EXPECT_FALSE(rsu.has_value());
+
+    // the ProcessDebugObjectHandle on the set walk: the STATUS_PORT_NOT_SET —
+    // likewise dropped by the verbatim wrapper
+    const auto rsd = sip->handler(ql, 0, ResolvedParams{
+        {"ProcessHandle", 0ull},
+        {"ProcessInformationClass", 30ull},  // ProcessDebugObjectHandle,
+        {"ProcessInformation", kScratch}, {"ProcessInformationLength", 4ull},
+    });
+    EXPECT_FALSE(rsd.has_value());  // the set-walk return drops verbatim
+}
+
+TEST(WinApiNtdll, QuerySystemInformationRidesBasicInfoLayout) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    const auto* qsi = ApiRegistry::instance().find("ZwQuerySystemInformation");
+    ASSERT_NE(qsi, nullptr);
+
+    // SystemBasicInformation: the x64 layout (64 bytes)
+    const auto r = qsi->handler(ql, 0, ResolvedParams{
+        {"SystemInformationClass", 0ull},    // SystemBasicInformation,
+        {"SystemInformation", kScratch},
+        {"SystemInformationLength", 0x100ull},
+        {"ReturnLength", kScratch + 0x100},
+    });
+    ASSERT_TRUE(r.has_value());
+    EXPECT_EQ(*r, 0u);
+
+    EXPECT_EQ(ql.mem().read_ptr(kScratch + 4, 4), 156250u);   // the TimerResolution
+    EXPECT_EQ(ql.mem().read_ptr(kScratch + 8, 4), 0x1000u);   // the PageSize
+    EXPECT_EQ(ql.mem().read_ptr(kScratch + 12, 4), 0x003FC38Au);
+    EXPECT_EQ(ql.mem().read_ptr(kScratch + 16, 4), 1u);
+    EXPECT_EQ(ql.mem().read_ptr(kScratch + 20, 4), 0x0046DFFFu);
+    EXPECT_EQ(ql.mem().read_ptr(kScratch + 24, 4), 1u);
+    EXPECT_EQ(ql.mem().read_ptr(kScratch + 32, 8), 0x10000u);  // the MinimumUserModeAddress
+    EXPECT_EQ(ql.mem().read_ptr(kScratch + 40, 8), 0x7FFFFFFEFFFFu);
+    EXPECT_EQ(ql.mem().read_ptr(kScratch + 48, 8), 0x3Fu);     // the ActiveProcessorsAffinityMask
+    EXPECT_EQ(ql.mem().read_ptr(kScratch + 56, 1), 6u);        // the NumberOfProcessors
+    EXPECT_EQ(ql.mem().read_ptr(kScratch + 0x100, 4), 64u);    // the ReturnLength
+
+    // the short buffer: the STATUS_INFO_LENGTH_MISMATCH
+    const auto rshort = qsi->handler(ql, 0, ResolvedParams{
+        {"SystemInformationClass", 0ull},    // SystemBasicInformation,
+        {"SystemInformation", kScratch},
+        {"SystemInformationLength", 32ull},
+        {"ReturnLength", kScratch + 0x100},
+    });
+    ASSERT_TRUE(rshort.has_value());
+    EXPECT_EQ(*rshort, 0xC0000004u);
+
+    // the unknown class: the verbatim NotImplemented raise
+    bool threw = false;
+    try {
+        (void)qsi->handler(ql, 0, ResolvedParams{
+            {"SystemInformationClass", 77ull},
+            {"SystemInformation", kScratch}, {"SystemInformationLength", 0x100ull}, {"ReturnLength", 0ull},
+        });
+    } catch (const QlErrorNotImplemented&) {
+        threw = true;
+    }
+    EXPECT_TRUE(threw);
+
+    // the Nt variant drops the return value (the verbatim missing return)
+    const auto* ntqsi = ApiRegistry::instance().find("NtQuerySystemInformation");
+    ASSERT_NE(ntqsi, nullptr);
+    const auto rnt = ntqsi->handler(ql, 0, ResolvedParams{
+        {"SystemInformationClass", 0ull},    // SystemBasicInformation,
+        {"SystemInformation", kScratch + 0x200},
+        {"SystemInformationLength", 0x100ull},
+        {"ReturnLength", 0ull},
+    });
+    EXPECT_FALSE(rnt.has_value());
+    EXPECT_EQ(ql.mem().read_ptr(kScratch + 0x200 + 4, 4), 156250u);  // the walk still ran
+}
+
+TEST(WinApiNtdll, SmallRtlStubsRideVerbatimBodies) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    // memcpy: the CDECL body copies the bytes and returns the dest
+    ql.mem().write(kScratch, std::vector<std::uint8_t>{1, 2, 3, 4, 5});
+    const auto* mc = ApiRegistry::instance().find("memcpy");
+    ASSERT_NE(mc, nullptr);
+    const auto rm = mc->handler(ql, 0, ResolvedParams{
+        {"dest", kScratch + 0x40}, {"src", kScratch}, {"count", 5ull},
+    });
+    ASSERT_TRUE(rm.has_value());
+    EXPECT_EQ(*rm, kScratch + 0x40);
+    const auto copied = ql.mem().read(kScratch + 0x40, 5);
+    EXPECT_EQ(copied, (std::vector<std::uint8_t>{1, 2, 3, 4, 5}));
+
+    // RtlAllocateHeap: the heap address
+    const auto* rah = ApiRegistry::instance().find("RtlAllocateHeap");
+    ASSERT_NE(rah, nullptr);
+    const auto rr = rah->handler(ql, 0, ResolvedParams{{"HeapHandle", 0ull}, {"Flags", 0ull}, {"Size", 0x20ull}});
+    ASSERT_TRUE(rr.has_value());
+    EXPECT_NE(*rr, 0u);
+
+    // wcsstr: the in-buffer find rides the dest + the offset; the miss rides 0
+    ql.mem().write(kScratch + 0x80, std::vector<std::uint8_t>{'h', 0, 'i', 0, ' ', 0, 'y', 0, 'o', 0, 'u', 0, 0, 0});
+    const auto* wstr = ApiRegistry::instance().find("wcsstr");
+    ASSERT_NE(wstr, nullptr);
+    const auto rw = wstr->handler(ql, 0, ResolvedParams{{"dest", kScratch + 0x80}, {"src", std::string("you")}});
+    ASSERT_TRUE(rw.has_value());
+    // the verbatim quirk: the upstream returns dest + str.index(src) — the
+    // CHAR index added to the BYTE pointer — the "you" sits at the char 3,
+    // so the returned pointer lands 3 bytes in (mid-sequence), not 6
+    EXPECT_EQ(*rw, kScratch + 0x80 + 3);
+
+    const auto rwm = wstr->handler(ql, 0, ResolvedParams{{"dest", kScratch + 0x80}, {"src", std::string("gone")}});
+    ASSERT_TRUE(rwm.has_value());
+    EXPECT_EQ(*rwm, 0u);
+
+    // CsrGetProcessId: the profile PROCESSES.csrss.exe
+    const auto* cgp = ApiRegistry::instance().find("CsrGetProcessId");
+    ASSERT_NE(cgp, nullptr);
+    const auto rc = cgp->handler(ql, 0, {});
+    ASSERT_TRUE(rc.has_value());
+    EXPECT_EQ(*rc, 1239u);
+
+    // LdrControlFlowGuardEnforced: the verbatim 0
+    const auto* cfg = ApiRegistry::instance().find("LdrControlFlowGuardEnforced");
+    ASSERT_NE(cfg, nullptr);
+    const auto rcf = cfg->handler(ql, 0, {});
+    ASSERT_TRUE(rcf.has_value());
+    EXPECT_EQ(*rcf, 0u);
+
+    // ZwYieldExecution: the STATUS_NO_YIELD_PERFORMED
+    const auto* zy = ApiRegistry::instance().find("ZwYieldExecution");
+    ASSERT_NE(zy, nullptr);
+    const auto rzy = zy->handler(ql, 0, {});
+    ASSERT_TRUE(rzy.has_value());
+    EXPECT_EQ(*rzy, 0x40000024u);
+
+    // ZwCreateDebugObject: the handle id IS the DebugObjectHandle cell address
+    const auto* zc = ApiRegistry::instance().find("ZwCreateDebugObject");
+    ASSERT_NE(zc, nullptr);
+    const auto rzc = zc->handler(ql, 0, ResolvedParams{
+        {"DebugObjectHandle", kCells}, {"DesiredAccess", 0ull},
+        {"ObjectAttributes", 0ull}, {"Flags", 0ull},
+    });
+    ASSERT_TRUE(rzc.has_value());
+    EXPECT_EQ(*rzc, 0u);  // the STATUS_SUCCESS
+    const auto* h = ql.os<QlOsWindows>().handle_manager().get(kCells);
+    ASSERT_NE(h, nullptr);
+    EXPECT_EQ(h->id, kCells);
+
+    // EtwNotificationRegister: the dummy handle written to the cell
+    const auto* etw = ApiRegistry::instance().find("EtwNotificationRegister");
+    ASSERT_NE(etw, nullptr);
+    const auto retw = etw->handler(ql, 0, ResolvedParams{
+        {"ProviderGuid", 0ull}, {"Type", 0ull}, {"CallbackFunction", 0ull},
+        {"CallbackContext", 0ull}, {"RegistrationHandle", kCells + 8},
+    });
+    ASSERT_TRUE(retw.has_value());
+    EXPECT_EQ(*retw, 0u);
+    const auto etw_id = ql.mem().read_ptr(kCells + 8, 8);
+    EXPECT_NE(etw_id, 0u);
+    EXPECT_NE(ql.os<QlOsWindows>().handle_manager().get(etw_id), nullptr);
+
+    // the passthru Rtl bodies ride the None returns
+    const auto* rre = ApiRegistry::instance().find("RtlRaiseException");
+    ASSERT_NE(rre, nullptr);
+    const auto rpass = rre->handler(ql, 0, ResolvedParams{{"ExceptionRecord", kCells}});
+    EXPECT_FALSE(rpass.has_value());
+
+    const auto* rde = ApiRegistry::instance().find("RtlDispatchException");
+    ASSERT_NE(rde, nullptr);
+    const auto rde_r = rde->handler(ql, 0, ResolvedParams{{"ExceptionRecord", kCells}, {"ContextRecord", kCells}});
+    EXPECT_FALSE(rde_r.has_value());
+}
