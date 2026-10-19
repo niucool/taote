@@ -311,12 +311,8 @@ inline constexpr std::uint32_t FILE_DEVICE_PMI = 0x00000045;
 #ifndef FILE_ANY_ACCESS
 inline constexpr std::uint32_t FILE_ANY_ACCESS = 0u;
 #endif
-#ifndef FILE_READ_DATA
-inline constexpr std::uint32_t FILE_READ_DATA = 1u;
-#endif
-#ifndef FILE_WRITE_DATA
-inline constexpr std::uint32_t FILE_WRITE_DATA = 2u;
-#endif
+// FILE_READ_DATA / FILE_WRITE_DATA: already defined in const.hpp (the winnt
+// access-right spellings, identical 0x1/0x2 values to wdm.h) — same namespace
 #ifndef METHOD_BUFFERED
 inline constexpr std::uint32_t METHOD_BUFFERED = 0u;
 #endif

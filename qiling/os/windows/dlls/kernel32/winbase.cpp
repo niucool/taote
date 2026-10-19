@@ -28,6 +28,18 @@
 #include <unistd.h>
 #endif
 
+// the CRT I/O spellings differ between MSVC and POSIX (the python os module
+// papers over this; the port keeps the shims local to the consumers)
+#if defined(_WIN32)
+#define QL_CRT_READ ::_read
+#define QL_CRT_WRITE ::_write
+#define QL_CRT_LSEEK ::_lseek
+#else
+#define QL_CRT_READ ::read
+#define QL_CRT_WRITE ::write
+#define QL_CRT_LSEEK ::lseek
+#endif
+
 namespace qiling {
 namespace os {
 namespace win {
@@ -328,7 +340,7 @@ void register_winbase_family() {
         }
 
         std::vector<std::uint8_t> buf(u_bytes, 0);
-        const auto n = ::_read(static_cast<int>(fileno), buf.data(), static_cast<unsigned>(u_bytes));
+        const auto n = QL_CRT_READ(static_cast<int>(fileno), buf.data(), static_cast<unsigned>(u_bytes));
         if (n < 0) {
             // the python os.read raises OSError (unhandled — the barrier)
             throw QlErrorBase("os.read failed");
@@ -357,7 +369,7 @@ void register_winbase_family() {
             return static_cast<std::uint64_t>(HFILE_ERROR);
         }
 
-        return static_cast<std::uint64_t>(::_lseek(static_cast<int>(fileno), static_cast<long>(offset), origin));
+        return static_cast<std::uint64_t>(QL_CRT_LSEEK(static_cast<int>(fileno), static_cast<long>(offset), origin));
     };
 
     // UINT _lwrite(
@@ -379,7 +391,7 @@ void register_winbase_family() {
         }
 
         const auto wbuf = ql.mem().read(buffer, u_bytes);
-        const auto n = ::_write(static_cast<int>(fileno), wbuf.data(), static_cast<unsigned>(u_bytes));
+        const auto n = QL_CRT_WRITE(static_cast<int>(fileno), wbuf.data(), static_cast<unsigned>(u_bytes));
         if (n < 0) {
             // the python os.write raises OSError (unhandled — the barrier)
             throw QlErrorBase("os.write failed");

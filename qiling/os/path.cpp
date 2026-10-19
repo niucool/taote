@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <filesystem>
 #include <system_error>
+#include <vector>
 
 #include "qiling/exception.hpp"
 
@@ -303,8 +304,14 @@ std::optional<std::string> QlOsPath::host_casefold_path(std::string_view hostpat
         return std::string(hostpath);
     }
 
-    // POSIX host emulating NT: case-insensitive component walk
+    // POSIX host emulating NT: case-insensitive component walk. path_parts
+    // strips the leading '/', so an absolute host path re-anchors at the
+    // root (the walk otherwise starts relative to the cwd and every
+    // absolute fold would miss)
     std::filesystem::path norm;
+    if (!hostpath.empty() && hostpath.front() == '/') {
+        norm = "/";
+    }
     for (const auto& part : path_parts(hostpath, false)) {
         bool found = false;
         std::error_code ec;

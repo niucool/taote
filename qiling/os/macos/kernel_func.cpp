@@ -48,8 +48,13 @@ std::vector<std::uint8_t> FileSystem::get_common_attr(const std::string& path,
     }
 
     // the host stat (the upstream's os.stat(real_path) — the dev/ino cells)
-    struct ::_stat64 st {};
+#if defined(_WIN32)
+    struct _stat64 st {};
     ::_stat64(real_path.c_str(), &st);
+#else
+    struct stat st {};
+    ::stat(real_path.c_str(), &st);
+#endif
 
     // the upstream keys the type checks off the VM path (verbatim quirk:
     // os.path.isdir(path)/os.path.islink(path), not the real path)

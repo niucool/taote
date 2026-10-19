@@ -28,6 +28,9 @@ namespace {
 
 // a registration guard: the registry is process-global, so the tests clear it
 struct RegistryScope {
+    // clear on both ends: the guard stands alone (the ctest per-test process
+    // split leaves the static-init registrations in place at entry)
+    RegistryScope() { ApiRegistry::instance().clear(); }
     ~RegistryScope() { ApiRegistry::instance().clear(); }
 };
 
@@ -3067,7 +3070,7 @@ TEST(WinApiWinbase, VerifyVersionInfoRidesCriteriaWalk) {
     ql.mem().write_ptr(asked + 276 + 6, 1, 1);  // wProductType
 
     // VER_MAJORVERSION | VER_EQUAL: the equal comparison holds
-    const auto cond_equal = static_cast<std::uint64_t>(VER_EQUAL) << (1 * 3);
+    const auto cond_equal = static_cast<std::uint64_t>(qiling::os::win::VER_EQUAL) << (1 * 3);
     const auto r = vvw->handler(ql, 0, ResolvedParams{
         {"lpVersionInformation", asked},
         {"dwTypeMask", 1ull << 1},          // VER_MAJORVERSION bit
@@ -3078,7 +3081,7 @@ TEST(WinApiWinbase, VerifyVersionInfoRidesCriteriaWalk) {
 
     // the asked major 9 with VER_GREATER: the emul (10) > the asked (9) → the 1
     ql.mem().write_ptr(asked + 4, 9, 4);
-    const auto cond_greater = static_cast<std::uint64_t>(VER_GREATER) << (1 * 3);
+    const auto cond_greater = static_cast<std::uint64_t>(qiling::os::win::VER_GREATER) << (1 * 3);
     const auto rg = vvw->handler(ql, 0, ResolvedParams{
         {"lpVersionInformation", asked},
         {"dwTypeMask", 1ull << 1},
@@ -3101,7 +3104,7 @@ TEST(WinApiWinbase, VerifyVersionInfoRidesCriteriaWalk) {
 
     // the VER_EQUAL cond with the mismatched minor: the res &= false → the 0 + the last_error
     ql.mem().write_ptr(asked + 8, 3, 4);  // the asked minor 3 (the profile rides 0)
-    const auto cond_eq_minor = static_cast<std::uint64_t>(VER_EQUAL) << (0 * 3);  // the bit 0 = the MINORVERSION
+    const auto cond_eq_minor = static_cast<std::uint64_t>(qiling::os::win::VER_EQUAL) << (0 * 3);  // the bit 0 = the MINORVERSION
     const auto rf2 = vvw->handler(ql, 0, ResolvedParams{
         {"lpVersionInformation", asked},
         {"dwTypeMask", 1ull << 0},          // VER_MINORVERSION bit
@@ -3315,10 +3318,10 @@ TEST(WinApiWinnt, InterlockedLongCycleAndVerSetConditionMask) {
     const auto rv = vsc->handler(ql, 0, ResolvedParams{
         {"ConditionMask", 0ull},
         {"TypeMask", (1ull << 1) | (1ull << 4)},  // the MAJOR + the SERVICEPACKMAJOR bits
-        {"Condition", static_cast<std::uint64_t>(VER_EQUAL)},
+        {"Condition", static_cast<std::uint64_t>(qiling::os::win::VER_EQUAL)},
     });
     ASSERT_TRUE(rv.has_value());
-    EXPECT_EQ(*rv, (static_cast<std::uint64_t>(VER_EQUAL) << 3) | static_cast<std::uint64_t>(VER_EQUAL) << (4 * 3));
+    EXPECT_EQ(*rv, (static_cast<std::uint64_t>(qiling::os::win::VER_EQUAL) << 3) | static_cast<std::uint64_t>(qiling::os::win::VER_EQUAL) << (4 * 3));
 
     // the zero condition rides the mask back untouched
     const auto rv0 = vsc->handler(ql, 0, ResolvedParams{
@@ -4485,7 +4488,7 @@ TEST(WinApiCrypt32, CryptStringToBinaryRidesBase64Decode) {
 
     // the length-query arm (the pbBinary = 0): the return = the decoded length
     const auto rlen = csa->handler(ql, 0, ResolvedParams{
-        {"pszString", std::string("aABpAA==")}, {"cchString", 8ull}, {"dwFlags", static_cast<std::uint64_t>(CRYPT_STRING_BASE64)},
+        {"pszString", std::string("aABpAA==")}, {"cchString", 8ull}, {"dwFlags", static_cast<std::uint64_t>(qiling::os::win::CRYPT_STRING_BASE64)},
         {"pbBinary", 0ull}, {"pcbBinary", kScratch}, {"pdwSkip", 0ull}, {"pdwFlags", 0ull},
     });
     ASSERT_TRUE(rlen.has_value());
@@ -4495,7 +4498,7 @@ TEST(WinApiCrypt32, CryptStringToBinaryRidesBase64Decode) {
     // size updates, the pdwFlags rides the source flag, the verbatim 1
     ql.mem().write_ptr(kScratch, 0x20, 4);
     const auto rw = csa->handler(ql, 0, ResolvedParams{
-        {"pszString", std::string("aABpAA==")}, {"cchString", 8ull}, {"dwFlags", static_cast<std::uint64_t>(CRYPT_STRING_BASE64)},
+        {"pszString", std::string("aABpAA==")}, {"cchString", 8ull}, {"dwFlags", static_cast<std::uint64_t>(qiling::os::win::CRYPT_STRING_BASE64)},
         {"pbBinary", kScratch + 0x40}, {"pcbBinary", kScratch}, {"pdwSkip", 0ull}, {"pdwFlags", kScratch + 4},
     });
     ASSERT_TRUE(rw.has_value());
@@ -4503,12 +4506,12 @@ TEST(WinApiCrypt32, CryptStringToBinaryRidesBase64Decode) {
     const auto w = ql.mem().read(kScratch + 0x40, 6);
     EXPECT_EQ(w, (std::vector<std::uint8_t>{'h', 0, 'i', 0, 0, 0}));
     EXPECT_EQ(ql.mem().read_ptr(kScratch, 4), 3u);
-    EXPECT_EQ(ql.mem().read_ptr(kScratch + 4, 4), CRYPT_STRING_BASE64);
+    EXPECT_EQ(ql.mem().read_ptr(kScratch + 4, 4), qiling::os::win::CRYPT_STRING_BASE64);
 
     // the small destination buffer: the verbatim NotImplemented
     ql.mem().write_ptr(kScratch, 1, 4);
     EXPECT_THROW((void)csa->handler(ql, 0, ResolvedParams{
-        {"pszString", std::string("aABpAA==")}, {"cchString", 8ull}, {"dwFlags", static_cast<std::uint64_t>(CRYPT_STRING_BASE64)},
+        {"pszString", std::string("aABpAA==")}, {"cchString", 8ull}, {"dwFlags", static_cast<std::uint64_t>(qiling::os::win::CRYPT_STRING_BASE64)},
         {"pbBinary", kScratch + 0x40}, {"pcbBinary", kScratch}, {"pdwSkip", 0ull}, {"pdwFlags", 0ull},
     }), QlErrorNotImplemented);
 
@@ -4523,7 +4526,7 @@ TEST(WinApiCrypt32, CryptStringToBinaryRidesBase64Decode) {
     const auto* csw = ApiRegistry::instance().find("CryptStringToBinaryW");
     ASSERT_NE(csw, nullptr);
     const auto rw2 = csw->handler(ql, 0, ResolvedParams{
-        {"pszString", std::string("aABpAA==")}, {"cchString", 8ull}, {"dwFlags", static_cast<std::uint64_t>(CRYPT_STRING_BASE64)},
+        {"pszString", std::string("aABpAA==")}, {"cchString", 8ull}, {"dwFlags", static_cast<std::uint64_t>(qiling::os::win::CRYPT_STRING_BASE64)},
         {"pbBinary", kScratch + 0x40}, {"pcbBinary", kScratch + 8}, {"pdwSkip", 0ull}, {"pdwFlags", 0ull},
     });
     ASSERT_TRUE(rw2.has_value());
@@ -4537,7 +4540,7 @@ TEST(WinApiCrypt32, CryptStringToBinaryRidesBase64Decode) {
         {"piInstalled", kScratch}, {"piAction", kScratch + 4},
     });
     ASSERT_TRUE(rmi.has_value());
-    EXPECT_EQ(*rmi, ERROR_INVALID_HANDLE);
+    EXPECT_EQ(*rmi, qiling::os::win::ERROR_INVALID_HANDLE);
 
     // the mscoree stub: the emu stop ride
     const auto* cor = ApiRegistry::instance().find("CorExitProcess");
@@ -4696,7 +4699,7 @@ TEST(WinApiShell32, FileInfoShellExecuteAndSpecialFolderRideVerbatimWalks) {
     ASSERT_NE(fi, nullptr);
     const auto r1 = fi->handler(ql, 0, ResolvedParams{
         {"pszPath", std::string("C:\t.exe")}, {"dwFileAttributes", 0ull}, {"psfi", kScratch},
-        {"cbFileInfo", 0ull}, {"uFlags", static_cast<std::uint64_t>(SHGFI_LARGEICON)},
+        {"cbFileInfo", 0ull}, {"uFlags", static_cast<std::uint64_t>(qiling::os::win::SHGFI_LARGEICON)},
     });
     ASSERT_TRUE(r1.has_value());
     EXPECT_EQ(*r1, 1u);
@@ -5086,6 +5089,13 @@ TEST(WinApiLoader, PebAndLdrCellsRideTheImageAndTheListHeads) {
 TEST(WinApiE2E, RealPeHelloRunsToExitProcess) {
     register_dlls();
 
+    // the real-dll fixture needs the host windows system dlls; skip on
+    // hosts without them (the stub-synthesized e2e below covers the loader
+    // path without the real dlls)
+    if (!std::filesystem::exists(std::filesystem::path("C:/Windows/System32/kernel32.dll"))) {
+        GTEST_SKIP() << "the real-dll fixture needs C:/Windows/System32/kernel32.dll (a windows host)";
+    }
+
     // the real compiled binary rides the PE path: the loader maps the
     // sections, resolves the import table against the rootfs kernel32.dll
     // (the real host dll copied into the fixture rootfs), and the api
@@ -5132,6 +5142,12 @@ TEST(WinApiE2E, RealPeHelloRunsToExitProcess) {
 TEST(WinApiE2E, RealPeHelloX86RunsThroughTheX86IatPath) {
     register_dlls();
 
+    // the real-dll fixture needs the host windows system dlls; skip on
+    // hosts without them (the stub-synthesized e2e covers the loader path)
+    if (!std::filesystem::exists(std::filesystem::path("C:/Windows/SysWOW64/kernel32.dll"))) {
+        GTEST_SKIP() << "the real-dll fixture needs C:/Windows/SysWOW64/kernel32.dll (a windows host)";
+    }
+
     // the 32-bit variant rides the same surface through the OS32 profile:
     // the FS-based TEB, the x86 IAT walk and the stdcall fcall shape
     const auto rootfs = win_ensure_rootfs();
@@ -5169,6 +5185,12 @@ TEST(WinApiE2E, RealPeHelloX86RunsThroughTheX86IatPath) {
 
 TEST(WinApiE2E, CrtLinkedBinaryRidesStartupAndFprintf) {
     register_dlls();
+
+    // the real-dll fixture needs the host windows system dlls; skip on
+    // hosts without them (the stub-synthesized e2e covers the loader path)
+    if (!std::filesystem::exists(std::filesystem::path("C:/Windows/System32/kernel32.dll"))) {
+        GTEST_SKIP() << "the real-dll fixture needs C:/Windows/System32/kernel32.dll (a windows host)";
+    }
 
     const auto rootfs = win_ensure_rootfs();
     std::filesystem::create_directories(rootfs / "Windows" / "System32");

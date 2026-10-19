@@ -1,5 +1,7 @@
 #include "qiling/core_hooks.hpp"
 
+#include <algorithm>
+
 #include <unicorn/unicorn.h>
 
 #include "qiling/exception.hpp"

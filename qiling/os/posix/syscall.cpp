@@ -7,6 +7,7 @@
 #else
 #include <sys/times.h>
 #include <unistd.h>
+#include <sys/resource.h>
 #endif
 #ifdef _WIN32
 #include <io.h>
@@ -1994,7 +1995,12 @@ std::optional<std::int64_t> syscall_sched_yield(Qiling& ql, const std::vector<st
 // ---- the clone dispatch (os/posix/syscall/sched.py) ----
 
 std::optional<std::int64_t> syscall_clone(Qiling& ql, const std::vector<std::uint64_t>& params) {
-    // sched.py ql_syscall_clone: the flag constants (verbatim)
+    // sched.py ql_syscall_clone: the flag constants (verbatim). glibc's sched.h
+    // (pulled in transitively) defines these as macros with identical values;
+    // drop them so the verbatim names below parse
+#undef CLONE_VM
+#undef CLONE_CHILD_SETTID
+#undef CLONE_CHILD_CLEARTID
     constexpr std::uint64_t CLONE_VM = 0x00000100;
     constexpr std::uint64_t CLONE_CHILD_SETTID = 0x01000000;
     constexpr std::uint64_t CLONE_CHILD_CLEARTID = 0x00200000;

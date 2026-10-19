@@ -91,7 +91,7 @@ void QlOsFreebsd::load() {
     // the sixth GDT slot (the code access + the long bit), the ss the fifth
     // (the data access + the granularity); the ds/es stay unset (the upstream
     // commented them out, verbatim)
-    constexpr std::uint32_t kSegSize = 4 << 30;
+    constexpr std::uint64_t kSegSize = 4ULL << 30;
     const auto cs_access =
         static_cast<std::uint8_t>(kAPresent | kAPriv3 | kADescCode | kACode | (1 << 1) /* CODE_R */);
     const auto cs_sel = make_selector(6, static_cast<std::uint8_t>((cs_access >> 5) & 0b11));

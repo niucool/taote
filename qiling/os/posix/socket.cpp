@@ -42,6 +42,9 @@ namespace {
 
 #ifdef _WIN32
 
+using HostSocketHandle = SOCKET;
+using HostSockLen = int;
+
 // the one-time winsock init (the python socket module does it internally)
 bool wsa_started() {
     static const bool ok = [] {
@@ -83,6 +86,9 @@ int host_socket_shutdown(std::uintptr_t handle, int how) {
 }
 
 #else
+
+using HostSocketHandle = int;
+using HostSockLen = socklen_t;
 
 std::uintptr_t host_socket_open(int domain, int socktype, int protocol) {
     const int fd = ::socket(domain, socktype, protocol);
@@ -303,56 +309,54 @@ bool QlSocket::setsockopt(int level, int optname, const std::vector<std::uint8_t
 std::pair<std::shared_ptr<QlSocket>, std::shared_ptr<QlSocket>> QlSocket::socketpair(int domain,
                                                                                      int socktype,
                                                                                      int protocol) {
-#ifdef _WIN32
-    // the winsock socketpair lacks — the loopback accept walk (the classic
-    // emulation: the listener + the connector on 127.0.0.1:0)
-    const SOCKET listener = ::socket(domain, socktype, protocol);
-    if (listener == INVALID_SOCKET) {
-        throw QlErrorBase("socketpair: listener failed");
+#ifndef _WIN32
+    // POSIX: the native socketpair serves the AF_UNIX family; the internet
+    // families lack it (Linux answers EOPNOTSUPP) — those ride the loopback
+    // walk below (the same one the winsock host takes)
+    if (domain == AF_UNIX) {
+        int sv[2] = {-1, -1};
+        if (::socketpair(domain, socktype, protocol, sv) != 0) {
+            throw QlErrorBase("socketpair failed");
+        }
+        return {std::shared_ptr<QlSocket>(new QlSocket(static_cast<std::uintptr_t>(sv[0]), domain, socktype, protocol)),
+                std::shared_ptr<QlSocket>(new QlSocket(static_cast<std::uintptr_t>(sv[1]), domain, socktype, protocol))};
     }
+#endif
+    // the winsock socketpair lacks (and the POSIX internet families lack
+    // the native one) — the loopback accept walk (the classic emulation: the
+    // listener + the connector on 127.0.0.1:0)
+    const HostSocketHandle listener = static_cast<HostSocketHandle>(host_socket_open(domain, socktype, protocol));
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = ::htonl(INADDR_LOOPBACK);
     addr.sin_port = 0;
     if (::bind(listener, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0 ||
         ::listen(listener, 1) != 0) {
-        ::closesocket(listener);
+        host_socket_close(static_cast<std::uintptr_t>(listener));
         throw QlErrorBase("socketpair: bind/listen failed");
     }
     sockaddr_in bound{};
-    int blen = sizeof(bound);
+    HostSockLen blen = sizeof(bound);
     ::getsockname(listener, reinterpret_cast<sockaddr*>(&bound), &blen);
 
-    const SOCKET client = ::socket(domain, socktype, protocol);
-    if (client == INVALID_SOCKET) {
-        ::closesocket(listener);
-        throw QlErrorBase("socketpair: client failed");
-    }
+    const HostSocketHandle client = static_cast<HostSocketHandle>(host_socket_open(domain, socktype, protocol));
     // the connect rides the BOUND address verbatim (the family, the loopback
     // addr, the ephemeral port off the getsockname)
     if (::connect(client, reinterpret_cast<sockaddr*>(&bound), sizeof(bound)) != 0) {
-        ::closesocket(client);
-        ::closesocket(listener);
+        host_socket_close(static_cast<std::uintptr_t>(client));
+        host_socket_close(static_cast<std::uintptr_t>(listener));
         throw QlErrorBase("socketpair: connect failed");
     }
     sockaddr_in peer{};
-    int plen = sizeof(peer);
-    const SOCKET server = ::accept(listener, reinterpret_cast<sockaddr*>(&peer), &plen);
-    ::closesocket(listener);
-    if (server == INVALID_SOCKET) {
-        ::closesocket(client);
+    HostSockLen plen = sizeof(peer);
+    const HostSocketHandle server = ::accept(listener, reinterpret_cast<sockaddr*>(&peer), &plen);
+    host_socket_close(static_cast<std::uintptr_t>(listener));
+    if (server == static_cast<HostSocketHandle>(-1)) {
+        host_socket_close(static_cast<std::uintptr_t>(client));
         throw QlErrorBase("socketpair: accept failed");
     }
     return {std::shared_ptr<QlSocket>(new QlSocket(static_cast<std::uintptr_t>(client), domain, socktype, protocol)),
             std::shared_ptr<QlSocket>(new QlSocket(static_cast<std::uintptr_t>(server), domain, socktype, protocol))};
-#else
-    int sv[2] = {-1, -1};
-    if (::socketpair(domain, socktype, protocol, sv) != 0) {
-        throw QlErrorBase("socketpair failed");
-    }
-    return {std::shared_ptr<QlSocket>(new QlSocket(static_cast<std::uintptr_t>(sv[0]), domain, socktype, protocol)),
-            std::shared_ptr<QlSocket>(new QlSocket(static_cast<std::uintptr_t>(sv[1]), domain, socktype, protocol))};
-#endif
 }
 
 std::vector<std::uint8_t> QlSocket::recv(std::size_t bufsize, int flags) {
@@ -542,7 +546,8 @@ QlSocket::RecvMsgResult QlSocket::recvmsg(std::size_t bufsize, std::size_t ancbu
         throw QlErrorBase("recvmsg: the host recvmsg failed");
     }
 
-    out.data.resize(static_cast<std::size_t>(n));
+    data.resize(static_cast<std::size_t>(n));
+    out.data = std::move(data);
     out.mflags = msg.msg_flags;
     collect_ancdata_posix(msg, out);
 #endif

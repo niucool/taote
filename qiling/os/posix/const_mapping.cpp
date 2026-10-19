@@ -32,9 +32,10 @@ constexpr int kWindowsFlags[kLinuxFlagCount] = {
 }  // namespace
 
 int ql_open_flag_mapping(QL_ARCH archtype, int flags) {
-    // the port runs on the MSVC host (the host table = the windows one); the
-    // non-x86 emulated tables land with their arch slices — the x86 tables
-    // match linux_x86_open_flags
+    // the host table rides the host OS: the MSVC CRT vocabulary on win32, the
+    // native POSIX one elsewhere (the x86 guest tables match
+    // linux_x86_open_flags; the non-x86 emulated tables land with their arch
+    // slices)
     (void)archtype;
 
     int ret = 0;
@@ -45,15 +46,22 @@ int ql_open_flag_mapping(QL_ARCH archtype, int flags) {
             continue;
         }
         if ((flags & ef) != 0) {
+#if defined(_WIN32)
             const auto hf = kWindowsFlags[i];
+#else
+            // the POSIX host: the native table (identity for the x86 guests)
+            const auto hf = kLinuxFlags[i];
+#endif
             if (hf != FLAG_UNSUPPORTED) {
                 ret |= hf;
             }
         }
     }
 
+#if defined(_WIN32)
     // NOTE: not sure why this one is needed (const_mapping.py, verbatim)
     ret |= WindowsX86OpenFlags::O_BINARY;
+#endif
 
     return ret;
 }

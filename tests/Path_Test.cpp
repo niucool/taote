@@ -97,7 +97,7 @@ TEST(QlOsPath, HostToVirtualRoundTrip) {
     QlOsPath path(fx.root.string(), "/", QL_OS::LINUX);
 
     EXPECT_EQ(path.host_to_virtual_path((fx.root / "bin" / "a.txt").string()), "/bin/a.txt");
-    EXPECT_THROW(path.host_to_virtual_path("C:\outside"), QlErrorBase);
+    EXPECT_THROW(path.host_to_virtual_path("C:\\outside"), QlErrorBase);
 }
 
 TEST(QlOsPath, SymlinkEscapeIsContained) {

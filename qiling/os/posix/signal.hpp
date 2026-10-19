@@ -10,6 +10,17 @@
 #include <optional>
 #include <vector>
 
+// glibc's <signal.h> aliases sa_handler onto the sigaction union member via
+// macro (transitively visible through many host headers); the guest struct
+// keeps the upstream field name, so drop the alias — the port never touches
+// the host struct sigaction members
+#ifdef sa_handler
+#undef sa_handler
+#endif
+#ifdef sa_sigaction
+#undef sa_sigaction
+#endif
+
 namespace qiling {
 namespace os {
 namespace posix {

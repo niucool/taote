@@ -21,7 +21,15 @@ using namespace qiling;
 
 namespace {
 
-// sched.py: the clone flag constants
+// sched.py: the clone flag constants. glibc's sched.h (transitively visible)
+// defines these as macros with identical values; drop them so the names parse
+#undef CLONE_VM
+#undef CLONE_FS
+#undef CLONE_FILES
+#undef CLONE_SIGHAND
+#undef CLONE_THREAD
+#undef CLONE_CHILD_SETTID
+#undef CLONE_CHILD_CLEARTID
 constexpr std::uint64_t CLONE_VM = 0x00000100;
 constexpr std::uint64_t CLONE_FS = 0x00000200;
 constexpr std::uint64_t CLONE_FILES = 0x00000400;

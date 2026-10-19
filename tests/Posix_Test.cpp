@@ -5,6 +5,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -945,8 +946,12 @@ TEST(PosixDir, Getdents64WalksDotDotDotThenEntries) {
     ASSERT_GE(names.size(), 4u);
     EXPECT_EQ(names[0], ".");
     EXPECT_EQ(names[1], "..");
-    EXPECT_EQ(names[2], "alpha.txt");
-    EXPECT_EQ(names[3], "beta.bin");
+    // the scandir order rides the host readdir (alphabetical on the NTFS
+    // host, hash order on ext4) — sort the tail for the host-agnostic check
+    std::vector<std::string> tail(names.begin() + 2, names.end());
+    std::sort(tail.begin(), tail.end());
+    EXPECT_EQ(tail[0], "alpha.txt");
+    EXPECT_EQ(tail[1], "beta.bin");
 }
 
 // the getcwd/chdir ride: chdir into an existing dir answers 0 and flips the

@@ -2,7 +2,11 @@
 
 #include <cerrno>
 #include <fcntl.h>
+#ifdef _WIN32
 #include <io.h>
+#else
+#include <unistd.h>
+#endif
 
 #include <sys/stat.h>
 
@@ -11,10 +15,26 @@
 #define QL_FILENO ::_fileno
 #define QL_FSEEK ::_fseeki64
 #define QL_FTELL ::_ftelli64
+#define QL_CRT_OPEN(path, flags, pmode) ::_open(path, flags, pmode)
+#define QL_CRT_FDOPEN ::_fdopen
+#define QL_CRT_CLOSE ::_close
+#define QL_CRT_READ ::_read
+#define QL_CRT_WRITE ::_write
+#define QL_CRT_DUP ::_dup
+#define QL_CRT_PIPE(fds, size, textmode) ::_pipe(fds, size, textmode)
+#define QL_O_BINARY _O_BINARY
 #else
 #define QL_FILENO ::fileno
 #define QL_FSEEK ::fseeko
 #define QL_FTELL ::ftello
+#define QL_CRT_OPEN(path, flags, pmode) ::open(path, flags, pmode)
+#define QL_CRT_FDOPEN ::fdopen
+#define QL_CRT_CLOSE ::close
+#define QL_CRT_READ ::read
+#define QL_CRT_WRITE ::write
+#define QL_CRT_DUP ::dup
+#define QL_CRT_PIPE(fds, size, textmode) ::pipe(fds)
+#define QL_O_BINARY 0
 #endif
 
 namespace qiling {
@@ -82,16 +102,22 @@ int QlFsMappedObject::fcntl(int, int) {
 std::shared_ptr<QlFile> QlFile::open(const std::string& path, int host_flags, int guest_mode) {
     // the flags arrive already mapped through ql_open_flag_mapping (fcntl.py
     // __do_open maps before the fs_mapper open) — the constants below are the
-    // HOST (windows CRT) spellings, passed straight to _open so the create /
+    // HOST spellings, passed straight to the host open so the create /
     // excl / trunc / append semantics stay exact
+#if defined(_WIN32)
     int pmode = _S_IREAD | _S_IWRITE;
     if ((guest_mode & 0x80) == 0) {
         // the guest mode without the owner-write bit (e.g. 0o444) denies the
         // host write bit (os.open passes the mode through)
         pmode = _S_IREAD;
     }
+#else
+    // the POSIX host passes the guest mode straight (the os.open shape; the
+    // kernel applies the umask)
+    const int pmode = guest_mode;
+#endif
 
-    const int fd = _open(path.c_str(), host_flags | _O_BINARY, pmode);
+    const int fd = QL_CRT_OPEN(path.c_str(), host_flags, pmode);
     if (fd == -1) {
         // fcntl.py __do_open catches the typed python os errors; the CRT
         // errno maps onto the same vocabulary
@@ -110,7 +136,28 @@ std::shared_ptr<QlFile> QlFile::open(const std::string& path, int host_flags, in
         }
     }
 
-    auto file = std::shared_ptr<QlFile>(new QlFile(path, _fdopen(fd, "rb+"), true));
+    // the stdio mode off the host flags (glibc's fdopen validates the access
+    // mode against the fd — the MSVC one never checks, which is why the
+    // hardcoded "rb+" survived upstream; the stream mode shapes after the
+    // open flags so the two hosts agree)
+    const char* stdio_mode = "rb";
+    switch (host_flags & O_ACCMODE) {
+        case O_WRONLY:
+            stdio_mode = (host_flags & O_APPEND) ? "ab" : "wb";
+            break;
+        case O_RDWR:
+            stdio_mode = (host_flags & O_APPEND) ? "ab+" : "rb+";
+            break;
+        default:
+            break;
+    }
+    std::FILE* stream = QL_CRT_FDOPEN(fd, stdio_mode);
+    if (stream == nullptr) {
+        QL_CRT_CLOSE(fd);
+        throw QlErrorBase("fdopen failed: " + path);
+    }
+
+    auto file = std::shared_ptr<QlFile>(new QlFile(path, stream, true));
     file->open_flags_ = host_flags;
     return file;
 }
@@ -342,7 +389,7 @@ int QlFile::fcntl(int fcntl_cmd, int fcntl_arg) {
 
 std::pair<std::shared_ptr<QlPipe>, std::shared_ptr<QlPipe>> QlPipe::open() {
     int fds[2] = {-1, -1};
-    if (_pipe(fds, 4096, _O_BINARY) != 0) {
+    if (QL_CRT_PIPE(fds, 4096, QL_O_BINARY) != 0) {
         throw QlErrorBase("pipe creation failed");
     }
     return {std::shared_ptr<QlPipe>(new QlPipe(fds[0])),
@@ -351,13 +398,13 @@ std::pair<std::shared_ptr<QlPipe>, std::shared_ptr<QlPipe>> QlPipe::open() {
 
 std::vector<std::uint8_t> QlPipe::read(std::size_t read_len) {
     std::vector<std::uint8_t> out(read_len, 0);
-    const auto n = _read(fd_, out.data(), static_cast<unsigned>(read_len));
+    const auto n = QL_CRT_READ(fd_, out.data(), static_cast<unsigned>(read_len));
     out.resize(n > 0 ? static_cast<std::size_t>(n) : 0);
     return out;
 }
 
 std::size_t QlPipe::write(const std::vector<std::uint8_t>& write_buf) {
-    const auto n = _write(fd_, write_buf.data(), static_cast<unsigned>(write_buf.size()));
+    const auto n = QL_CRT_WRITE(fd_, write_buf.data(), static_cast<unsigned>(write_buf.size()));
     return n > 0 ? static_cast<std::size_t>(n) : 0;
 }
 
@@ -367,7 +414,7 @@ int QlPipe::fileno() {
 
 void QlPipe::close() {
     if (fd_ != -1) {
-        _close(fd_);
+        QL_CRT_CLOSE(fd_);
         fd_ = -1;
     }
 }
@@ -378,7 +425,7 @@ std::uint64_t QlPipe::ioctl(std::uint64_t, std::uint64_t) {
 }
 
 std::shared_ptr<QlFsMappedObject> QlPipe::dup() {
-    return std::shared_ptr<QlPipe>(new QlPipe(_dup(fd_)));
+    return std::shared_ptr<QlPipe>(new QlPipe(QL_CRT_DUP(fd_)));
 }
 
 int QlPipe::fcntl(int, int) {
