@@ -9,6 +9,7 @@
 #include "qiling/hw/stm32f1xx_simple.hpp"
 #include "qiling/hw/stm32f1xx_interactive.hpp"
 #include "qiling/hw/sam3xa.hpp"
+#include "qiling/hw/gd32vf1xx.hpp"
 
 #include <algorithm>
 #include <map>
@@ -142,6 +143,36 @@ QlHwManager::QlHwManager(Qiling& ql) : ql_(&ql) {
     });
     register_struct("SAM3xaUotghs", [](Qiling& q, const std::string& label, const PeripheralKwargs&) {
         return std::make_unique<Sam3xaUotghs>(q, label);
+    });
+    register_struct("GD32VF1xxUsart", [](Qiling& q, const std::string& label, const PeripheralKwargs&) {
+        return std::make_unique<Gd32vf1xxUsart>(q, label);
+    });
+    register_struct("GD32VF1xxSpi", [](Qiling& q, const std::string& label, const PeripheralKwargs&) {
+        return std::make_unique<Gd32vf1xxSpi>(q, label);
+    });
+    register_struct("GD32VF1xxI2c", [](Qiling& q, const std::string& label, const PeripheralKwargs&) {
+        return std::make_unique<Gd32vf1xxI2c>(q, label);
+    });
+    register_struct("GD32VF1xxGpio", [](Qiling& q, const std::string& label, const PeripheralKwargs&) {
+        return std::make_unique<Gd32vf1xxGpio>(q, label);
+    });
+    register_struct("GD32VF1xxDma", [](Qiling& q, const std::string& label, const PeripheralKwargs&) {
+        return std::make_unique<Gd32vf1xxDma>(q, label);
+    });
+    register_struct("GD32VF1xxCrc", [](Qiling& q, const std::string& label, const PeripheralKwargs&) {
+        return std::make_unique<Gd32vf1xxCrc>(q, label);
+    });
+    register_struct("GD32VF1xxRcu", [](Qiling& q, const std::string& label, const PeripheralKwargs&) {
+        return std::make_unique<Gd32vf1xxRcu>(q, label);
+    });
+    register_struct("GD32VF1xxRtc", [](Qiling& q, const std::string& label, const PeripheralKwargs&) {
+        return std::make_unique<Gd32vf1xxRtc>(q, label);
+    });
+    register_struct("GD32VF1xxTimer", [](Qiling& q, const std::string& label, const PeripheralKwargs&) {
+        return std::make_unique<Gd32vf1xxTimer>(q, label);
+    });
+    register_struct("GD32VF1xxEclic", [](Qiling& q, const std::string& label, const PeripheralKwargs&) {
+        return std::make_unique<Gd32vf1xxEclic>(q, label);
     });
     register_struct("STM32F1xxExti", [](Qiling& q, const std::string& label, const PeripheralKwargs& kwargs) {
         auto exti = std::make_unique<STM32F1xxExti>(q, label);

@@ -151,6 +151,56 @@ inline std::map<std::string, std::string> sam3x8e_board_env() {
     };
 }
 
+// extensions/mcu/gd32vf1/gd32vf103.py gd32vf103 - the board env table (the
+// RISC-V N200 core riding the eclic; the upstream-implemented structs are
+// the usart/spi/i2c/gpio/dma/crc/rcu/rtc/timer/eclic and the rest degrade).
+inline std::map<std::string, std::string> gd32vf103_board_env() {
+    return {
+        {"ECLIC", "core;GD32VF1xxEclic;0xD2000000"},
+        {"FLASH", "memory;0x8000000;0x20000"},
+        {"BOOT", "memory;0x1fffb000;0x5000"},
+        {"SRAM", "memory;0x20000000;0x18000"},
+        {"PERIP", "mmio;0x40000000;0x40000"},
+        {"USBFS", "mmio;0x50000000;0x40000"},
+        {"FWDGT", "peripheral;GD32VF1xxFwdgt;0x40003000"},
+        {"BKP", "peripheral;GD32VF1xxBkp;0x40006c00"},
+        {"PMU", "peripheral;GD32VF1xxPmu;0x40007000"},
+        {"DAC", "peripheral;GD32VF1xxDac;0x40007400"},
+        {"AFIO", "peripheral;GD32VF1xxAfio;0x40010000"},
+        {"GPIOA", "peripheral;GD32VF1xxGpio;0x40010800"},
+        {"GPIOB", "peripheral;GD32VF1xxGpio;0x40010c00"},
+        {"GPIOC", "peripheral;GD32VF1xxGpio;0x40011000"},
+        {"GPIOD", "peripheral;GD32VF1xxGpio;0x40011400"},
+        {"GPIOE", "peripheral;GD32VF1xxGpio;0x40011800"},
+        {"CRC", "peripheral;GD32VF1xxCrc;0x40023000"},
+        {"USBFS_GLOBAL", "peripheral;GD32VF1xxUsbfs;0x50000000"},
+        {"USBFS_HOST", "peripheral;GD32VF1xxUsbfs;0x50000400"},
+        {"USBFS_DEVICE", "peripheral;GD32VF1xxUsbfs;0x50000800"},
+        {"USBFS_PWRCLK", "peripheral;GD32VF1xxUsbfs;0x50000e00"},
+        {"EXMC", "peripheral;GD32VF1xxExmc;0xa0000000"},
+        {"DBG", "peripheral;GD32VF1xxDbg;0xe0042000"},
+        {"TIMER1", "peripheral;GD32VF1xxTimer;0x40000000"},
+        {"TIMER2", "peripheral;GD32VF1xxTimer;0x40000400"},
+        {"TIMER3", "peripheral;GD32VF1xxTimer;0x40000800"},
+        {"TIMER4", "peripheral;GD32VF1xxTimer;0x40000c00"},
+        {"TIMER5", "peripheral;GD32VF1xxTimer;0x40001000"},
+        {"TIMER6", "peripheral;GD32VF1xxTimer;0x40001400"},
+        {"RTC", "peripheral;GD32VF1xxRtc;0x40002800"},
+        {"SPI1", "peripheral;GD32VF1xxSpi;0x40003800"},
+        {"SPI2", "peripheral;GD32VF1xxSpi;0x40003c00"},
+        {"USART1", "peripheral;GD32VF1xxUsart;0x40004400"},
+        {"USART2", "peripheral;GD32VF1xxUsart;0x40004800"},
+        {"I2C0", "peripheral;GD32VF1xxI2c;0x40005400"},
+        {"I2C1", "peripheral;GD32VF1xxI2c;0x40005800"},
+        {"TIMER0", "peripheral;GD32VF1xxTimer;0x40012c00"},
+        {"SPI0", "peripheral;GD32VF1xxSpi;0x40013000"},
+        {"USART0", "peripheral;GD32VF1xxUsart;0x40013800"},
+        {"DMA0", "peripheral;GD32VF1xxDma;0x40020000"},
+        {"DMA1", "peripheral;GD32VF1xxDma;0x40020400"},
+        {"RCU", "peripheral;GD32VF1xxRcu;0x40021000"},
+    };
+}
+
 }  // namespace hw
 }  // namespace qiling
 

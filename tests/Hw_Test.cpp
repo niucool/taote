@@ -22,6 +22,7 @@
 #include "qiling/hw/stm32f1xx_simple.hpp"
 #include "qiling/hw/stm32f1xx_interactive.hpp"
 #include "qiling/hw/sam3xa.hpp"
+#include "qiling/hw/gd32vf1xx.hpp"
 #include "qiling/hw/board_env.hpp"
 #include "qiling/hw/stm32f1xx_gpio.hpp"
 #include "qiling/hw/stm32f4xx_usart.hpp"
@@ -890,4 +891,53 @@ TEST(HwManager, Sam3x8eBoardAssemblesAndPeripheralsWalk) {
     const auto out = spi0->recv(2);
     ASSERT_EQ(out.size(), 1u);
     EXPECT_EQ(out[0], 0x34);
+}
+
+// The gd32vf103 board-table assembly: the board env rides the loader's
+// load_env walk; the implemented GD32VF1xx families instantiate (the eclic
+// core + the gpio/usart/spi/i2c/dma/crc/rcu/rtc/timer), the unimplemented
+// upstream names degrade, and the gpio BOP walk rides the set/reset halves.
+TEST(HwManager, Gd32vf103BoardAssemblesAndGpioWalks) {
+    // the gd32vf103 board rides the RISCV/eclic core upstream (no 0x0 vector
+    // mapping), so the fixture rides the standalone hw-manager create walks
+    // over the board env table (the full-os run lands with the RISCV slice)
+    auto ql = make_hw_ql();
+    qiling::hw::QlHwManager hw(ql);
+
+    const auto board = qiling::hw::gd32vf103_board_env();
+    (void)board;
+
+    // the implemented families create through the board struct names
+    const std::vector<std::string> implemented = {
+        "GD32VF1xxEclic", "GD32VF1xxGpio", "GD32VF1xxUsart", "GD32VF1xxSpi",
+        "GD32VF1xxI2c", "GD32VF1xxDma", "GD32VF1xxCrc", "GD32VF1xxRcu",
+        "GD32VF1xxRtc", "GD32VF1xxTimer"};
+    for (std::size_t i = 0; i < implemented.size(); ++i) {
+        const auto label = "entry" + std::to_string(i);
+        EXPECT_NE(hw.create(label, implemented[i], 0x40010000 + i * 0x100, {}), nullptr) << implemented[i];
+    }
+    // the upstream-unimplemented struct names degrade to null
+    for (const auto& missing : {"GD32VF1xxFwdgt", "GD32VF1xxPmu", "GD32VF1xxUsbfs", "GD32VF1xxExmc", "GD32VF1xxDbg"}) {
+        EXPECT_EQ(hw.create(missing, missing, 0x40020000, {}), nullptr) << missing;
+    }
+
+    // the gpio BOP walk: the low 16 set, the high 16 reset
+    auto* gpioa = static_cast<qiling::hw::Gd32vf1xxGpio*>(hw.peripheral("entry1"));
+    std::size_t set_calls = 0;
+    gpioa->hook_set(2, [&set_calls]() { ++set_calls; });
+    gpioa->write_body(gpioa->kBopOffset, 4, (1u << 2) | (1u << 20));
+    EXPECT_EQ(gpioa->pin(2), 1u);   // the BOP bit 2 sets the pin 2
+    EXPECT_EQ(gpioa->pin(4), 0u);   // the BOP bit 20 resets the pin 4
+    EXPECT_EQ(set_calls, 1u);
+
+    // the OCTL write walks the per-bit transitions (the pin 2 was set)
+    gpioa->write_body(gpioa->kOct1Offset, 4, (1u << 3) | (1u << 2));
+    EXPECT_EQ(gpioa->pin(3), 1u);
+    EXPECT_EQ(gpioa->pin(2), 1u);
+    gpioa->write_body(gpioa->kOct1Offset, 4, 1u << 3);  // the pin-2 bit falls -> reset_pin(2)
+    EXPECT_EQ(gpioa->pin(2), 0u);
+
+    // the usart STAT seed rides the TC|TXE bits
+    auto* usart0 = static_cast<qiling::hw::Gd32vf1xxUsart*>(hw.peripheral("entry2"));
+    EXPECT_EQ(usart0->raw_read(0x00, 4), 0xc0u);
 }
