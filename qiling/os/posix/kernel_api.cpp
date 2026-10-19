@@ -135,60 +135,15 @@ const bool kernel_api_extended_registered = [] {
 
         // the variadic args: each resolved param counts one native slot (the
         // upstream readEllipsis walks the resolved values, each defaulting to
-        // the PARAM_INTN accessor); the count comes from the format walk
-        const auto& ptypes = params;
+        // the PARAM_INTN accessor); the pull count comes from the shared
+        // count_va_pulls format pre-scan
         std::vector<int> slots;
-        slots.reserve(ptypes.size());
-        for (std::size_t k = 0; k < ptypes.size(); ++k) {
+        slots.reserve(params.size());
+        for (std::size_t k = 0; k < params.size(); ++k) {
             slots.push_back(os::PARAM_INTN);
         }
 
-        // pass 1: count the pulls (each conversion + each * width/precision)
-        std::size_t pulls = 0;
-        for (std::size_t k = 0; k + 1 < body.size(); ++k) {
-            if (body[k] != '%') {
-                continue;
-            }
-            std::size_t j = k + 1;
-            if (j >= body.size()) {
-                break;
-            }
-            if (body[j] == '%') {
-                k = j;
-                continue;
-            }
-            while (j < body.size() && std::string_view("-+0 #").find(body[j]) != std::string_view::npos) {
-                ++j;
-            }
-            if (j < body.size() && body[j] == '*') {
-                ++pulls;
-                ++j;
-            } else {
-                while (j < body.size() && std::isdigit(static_cast<unsigned char>(body[j]))) {
-                    ++j;
-                }
-            }
-            if (j < body.size() && body[j] == '.') {
-                ++j;
-                if (j < body.size() && body[j] == '*') {
-                    ++pulls;
-                    ++j;
-                } else {
-                    while (j < body.size() && std::isdigit(static_cast<unsigned char>(body[j]))) {
-                        ++j;
-                    }
-                }
-            }
-            while (j < body.size() && (std::string_view("hjltwzIL").find(body[j]) != std::string_view::npos ||
-                                       body.compare(j, 2, "hh") == 0 || body.compare(j, 2, "ll") == 0 ||
-                                       body.compare(j, 3, "I32") == 0 || body.compare(j, 3, "I64") == 0)) {
-                j += (body.compare(j, 3, "I32") == 0 || body.compare(j, 3, "I64") == 0) ? 3 : 1;
-            }
-            if (j < body.size()) {
-                ++pulls;
-                k = j;
-            }
-        }
+        const auto pulls = os::QlOsUtils::count_va_pulls(body);
 
         const auto args = ql.os().fcall().read_ellipsis(slots, pulls);
         std::size_t cursor = 0;

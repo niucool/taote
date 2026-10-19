@@ -4304,3 +4304,153 @@ TEST(WinApiMsvcrt, PAcmdlnRidesMsvcrtDllIat) {
     ASSERT_NE(wcmdln, nullptr);
     EXPECT_THROW((void)wcmdln->handler(ql, 0, {}), QlErrorBase);
 }
+
+TEST(WinApiMsvcrt, PrintfFamilyRendersThroughGuestBuffers) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    const auto wide = [](const char* s) {
+        std::vector<std::uint8_t> bytes;
+        for (const char* p = s; *p != '\0'; ++p) {
+            bytes.push_back(static_cast<std::uint8_t>(*p));
+            bytes.push_back(0);
+        }
+        bytes.push_back(0);
+        bytes.push_back(0);
+        return bytes;
+    };
+
+    // sprintf: the arglist chain rides the cells [42, ptr("str")]
+    ql.mem().write(kScratch, std::vector<std::uint8_t>{'s', 't', 'r', 0});
+    ql.mem().write_ptr(kScratch + 0x100, 42, 8);
+    ql.mem().write_ptr(kScratch + 0x108, kScratch, 8);
+    ql.mem().write(kScratch + 0x110, std::vector<std::uint8_t>{'n', '=', '%', 'd', ' ', 's', '=', '%', 's', 0});
+    const auto* sp = ApiRegistry::instance().find("sprintf");
+    ASSERT_NE(sp, nullptr);
+    const auto rsp = sp->handler(ql, 0, ResolvedParams{
+        {"buff", kScratch + 0x140}, {"format", std::string("n=%d s=%s")}, {"arglist", kScratch + 0x100},
+    });
+    ASSERT_TRUE(rsp.has_value());
+    EXPECT_EQ(*rsp, 10u);
+    const auto buf = ql.mem().read(kScratch + 0x140, 11);
+    EXPECT_EQ(std::string(buf.begin(), buf.end()), "n=42 s=str" + std::string(1, char(0)));
+
+    // the * width consumes its own slot: "%*d" with the chain [5, 42] -> "   42"
+    ql.mem().write_ptr(kScratch + 0x100, 5, 8);
+    ql.mem().write_ptr(kScratch + 0x108, 42, 8);
+    const auto rsp2 = sp->handler(ql, 0, ResolvedParams{
+        {"buff", kScratch + 0x140}, {"format", std::string("%*d")}, {"arglist", kScratch + 0x100},
+    });
+    ASSERT_TRUE(rsp2.has_value());
+    EXPECT_EQ(*rsp2, 5u);
+    const auto buf2 = ql.mem().read(kScratch + 0x140, 6);
+    EXPECT_EQ(std::string(buf2.begin(), buf2.end()), "   42" + std::string(1, char(0)));
+
+    // printf: the variadic slot rides the CC register (the RDX = the slot 1);
+    // the ms64 fcall binds the register slots (the handler-level ride without
+    // the emu — the RDX write stands in for the caller's register setup)
+    auto& os = ql.os<QlOsWindows>();
+    os.bind_fcall(WinCc::Ms64);
+    ql.arch().regs().write("RDX", 42);
+    const auto* pr = ApiRegistry::instance().find("printf");
+    ASSERT_NE(pr, nullptr);
+    const auto rpr = pr->handler(ql, 0, ResolvedParams{{"format", std::string("x=%x")}});
+    ASSERT_TRUE(rpr.has_value());
+    EXPECT_EQ(*rpr, 4u);  // "x=2a"
+
+    // wprintf: the wstring render rides the stdout write (the wide format
+    // resolution rides the os.call string resolver; the handler-level call
+    // passes the decoded form)
+    ql.arch().regs().write("RDX", 7);
+    const auto* wp = ApiRegistry::instance().find("wprintf");
+    ASSERT_NE(wp, nullptr);
+    const auto rwp = wp->handler(ql, 0, ResolvedParams{{"format", std::string("n=%d")}});
+    ASSERT_TRUE(rwp.has_value());
+    EXPECT_EQ(*rwp, 3u);  // "n=7"
+
+    // __stdio_common_vsprintf: the va_list walk over the _ArgList chain
+    ql.mem().write_ptr(kScratch + 0x100, 7, 8);
+    const auto* vs = ApiRegistry::instance().find("__stdio_common_vsprintf");
+    ASSERT_NE(vs, nullptr);
+    const auto rvs = vs->handler(ql, 0, ResolvedParams{
+        {"_Options", 0ull}, {"_Buffer", kScratch + 0x1a0}, {"_BufferCount", 0x40ull},
+        {"_Format", std::string("v=%u")}, {"_Locale", 0ull}, {"_ArgList", kScratch + 0x100},
+    });
+    ASSERT_TRUE(rvs.has_value());
+    EXPECT_EQ(*rvs, 3u);  // "v=7"
+    const auto vbuf = ql.mem().read(kScratch + 0x1a0, 4);
+    EXPECT_EQ(std::string(vbuf.begin(), vbuf.end()), "v=7" + std::string(1, char(0)));
+
+    // __stdio_common_vsnprintf: the same walk (the _MaxCount rides ignored —
+    // the verbatim TODO: take _BufferCount into account)
+    const auto* vsn = ApiRegistry::instance().find("__stdio_common_vsnprintf");
+    ASSERT_NE(vsn, nullptr);
+    const auto rvsn = vsn->handler(ql, 0, ResolvedParams{
+        {"_Options", 0ull}, {"_Buffer", kScratch + 0x1a0}, {"_BufferCount", 0x40ull},
+        {"_MaxCount", 4ull}, {"_Format", std::string("v=%u")}, {"_Locale", 0ull},
+        {"_ArgList", kScratch + 0x100},
+    });
+    ASSERT_TRUE(rvsn.has_value());
+    EXPECT_EQ(*rvsn, 3u);  // "v=7"
+
+    // __stdio_common_vswprintf: the wide render lands utf-16le (the format
+    // passes pre-decoded — the wide resolution rides the os.call resolver)
+    ql.mem().write_ptr(kScratch + 0x100, 9, 8);
+    const auto* vsw = ApiRegistry::instance().find("__stdio_common_vswprintf");
+    ASSERT_NE(vsw, nullptr);
+    const auto rvsw = vsw->handler(ql, 0, ResolvedParams{
+        {"_Options", 0ull}, {"_Buffer", kScratch + 0x1c0}, {"_BufferCount", 0x40ull},
+        {"_Format", std::string("w=%u")}, {"_Locale", 0ull}, {"_ArgList", kScratch + 0x100},
+    });
+    ASSERT_TRUE(rvsw.has_value());
+    EXPECT_EQ(*rvsw, 3u);  // "w=9"
+    const auto wbuf = ql.mem().read(kScratch + 0x1c0, 9);
+    EXPECT_EQ(wbuf, (std::vector<std::uint8_t>{'w', 0, '=', 0, '9', 0, 0, 0, 0}));
+
+    // __stdio_common_vfprintf: the stdout render through the _ArgList chain
+    ql.mem().write_ptr(kScratch + 0x100, kScratch, 8);
+    ql.mem().write(kScratch, std::vector<std::uint8_t>{'a', 'b', 'c', 0});
+    ql.mem().write_ptr(kScratch + 0x100, kScratch, 8);
+    const auto* vf = ApiRegistry::instance().find("__stdio_common_vfprintf");
+    ASSERT_NE(vf, nullptr);
+    const auto rvf = vf->handler(ql, 0, ResolvedParams{
+        {"_Options", 0ull}, {"_Stream", 0ull}, {"_Format", std::string("s=%s")},
+        {"_Locale", 0ull}, {"_ArgList", kScratch + 0x100},
+    });
+    ASSERT_TRUE(rvf.has_value());
+    EXPECT_EQ(*rvf, 5u);  // "s=abc"
+
+    // __stdio_common_vfwprintf: the wide stream render (the format passes
+    // pre-decoded)
+    ql.mem().write_ptr(kScratch + 0x100, 3, 8);
+    const auto* vfw = ApiRegistry::instance().find("__stdio_common_vfwprintf");
+    ASSERT_NE(vfw, nullptr);
+    const auto rvfw = vfw->handler(ql, 0, ResolvedParams{
+        {"_Options", 0ull}, {"_Stream", 0ull}, {"_Format", std::string("z=%d")},
+        {"_Locale", 0ull}, {"_ArgList", kScratch + 0x100},
+    });
+    ASSERT_TRUE(rvfw.has_value());
+    EXPECT_EQ(*rvfw, 3u);  // "z=3"
+
+    // the "_s" aliases ride the same bodies
+    const auto* vs_s = ApiRegistry::instance().find("__stdio_common_vsprintf_s");
+    ASSERT_NE(vs_s, nullptr);
+    ql.mem().write_ptr(kScratch + 0x100, 4, 8);
+    const auto rvs_s = vs_s->handler(ql, 0, ResolvedParams{
+        {"_Options", 0ull}, {"_Buffer", kScratch + 0x1e0}, {"_BufferCount", 0x40ull},
+        {"_Format", std::string("a=%i")}, {"_Locale", 0ull}, {"_ArgList", kScratch + 0x100},
+    });
+    ASSERT_TRUE(rvs_s.has_value());
+    EXPECT_EQ(*rvs_s, 3u);  // "a=4"
+    const auto sbuf = ql.mem().read(kScratch + 0x1e0, 4);
+    EXPECT_EQ(std::string(sbuf.begin(), sbuf.end()), "a=4" + std::string(1, char(0)));
+
+    const auto* vf_s = ApiRegistry::instance().find("__stdio_common_vfprintf_s");
+    ASSERT_NE(vf_s, nullptr);
+    const auto rvf_s = vf_s->handler(ql, 0, ResolvedParams{
+        {"_Options", 0ull}, {"_Stream", 0ull}, {"_Format", std::string("b=%u")},
+        {"_Locale", 0ull}, {"_ArgList", kScratch + 0x100},
+    });
+    ASSERT_TRUE(rvf_s.has_value());
+    EXPECT_EQ(*rvf_s, 3u);  // "b=4"
+}

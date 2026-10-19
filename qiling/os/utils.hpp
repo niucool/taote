@@ -61,6 +61,12 @@ public:
     static PrintfResult sprintf(Qiling& ql, std::uint64_t buff, const std::string& format,
                                 const ArgPuller& va_args, bool wstring = false);
 
+    // the variadic pull count for the port's bounded read_ellipsis: each %
+    // conversion + each * width/precision consumes one slot (the upstream
+    // generator is unbounded; the port's QlFunctionCall::read_ellipsis takes
+    // the count, so the call sites pre-scan the format body)
+    static std::size_t count_va_pulls(const std::string& format);
+
 private:
     // __common_printf: the format walk; returns the rendered text
     static std::pair<std::string, std::vector<std::uint64_t>> common_printf(

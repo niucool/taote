@@ -102,6 +102,68 @@ std::uint64_t getmainargs_body(Qiling& ql, const ResolvedParams& params, bool wi
     return 0;
 }
 
+// the variadic pull ladders (msvcrt.py hook_printf / hook_sprintf shapes; the
+// port's read_ellipsis is the count-bounded variant of the upstream infinite
+// generator, hence the pre-scan)
+
+// msvcrt.py hook_sprintf / __stdio_common_vsprintf: the va_list pointer-chain
+// walk riding the utils.py va_list generator; the upd_args(params) ride is
+// inert (the params dict dies after the hook returns)
+std::uint64_t sprintf_body(Qiling& ql, std::uint64_t buff, const std::string& format, std::uint64_t arglist,
+                           bool wstring) {
+    auto ptr = arglist;
+    const auto va_args = [&, ptr]() mutable -> std::uint64_t {
+        const auto v = ql.mem().read_ptr(ptr);
+        ptr += ql.arch().pointersize();
+        return v;
+    };
+
+    const auto result = QlOsUtils::sprintf(ql, buff, format, va_args, wstring);
+    return result.count;
+}
+
+// msvcrt.py __stdio_common_vsprintf (the _vsnprintf/_vswprintf/_vsnwprintf
+// variants share the body; the TODO: take _BufferCount into account verbatim
+// comment rides)
+std::uint64_t stdio_vsprintf_body(Qiling& ql, const ResolvedParams& params, bool wstring) {
+    const auto buff = api_get_int(get_param(params, "_Buffer"));
+    auto format = api_get_string(ql, get_param(params, "_Format"));
+    const auto arglist = api_get_int(get_param(params, "_ArgList"));
+
+    return sprintf_body(ql, buff, format, arglist, wstring);
+}
+
+// msvcrt.py hook_printf / hook_wprintf: the readEllipsis walk over the
+// pre-pulled slots
+std::uint64_t printf_body(Qiling& ql, const std::string& format, const std::vector<std::uint64_t>& args,
+                          bool wstring) {
+    std::size_t cursor = 0;
+    const auto pull = [&args, &cursor]() -> std::uint64_t {
+        return cursor < args.size() ? args[cursor++] : 0;
+    };
+
+    const auto result = QlOsUtils::printf(ql, format, pull, wstring);
+    return result.count;
+}
+
+// the va_list pointer-chain pull + the stdout render (the
+// __stdio_common_vfprintf/_vfwprintf body: the TODO: take _Stream into
+// account verbatim comment rides)
+std::uint64_t stdio_vfprintf_body(Qiling& ql, const ResolvedParams& params, bool wstring) {
+    auto format = api_get_string(ql, get_param(params, "_Format"));
+    const auto arglist = api_get_int(get_param(params, "_ArgList"));
+
+    auto ptr = arglist;
+    const auto va_args = [&, ptr]() mutable -> std::uint64_t {
+        const auto v = ql.mem().read_ptr(ptr);
+        ptr += ql.arch().pointersize();
+        return v;
+    };
+
+    const auto result = QlOsUtils::printf(ql, format, va_args, wstring);
+    return result.count;
+}
+
 }  // namespace
 
 void register_msvcrt_family() {
@@ -286,6 +348,189 @@ void register_msvcrt_family() {
     // the printf family (the sprintf/printf/wprintf + the __stdio_common
     // walkers) lands in the sub-slice 2 with the QlOsUtils::count_va_pulls
     // helper.
+
+    // int sprintf ( char * str, const char * format, ... );
+    WinsdkApi("sprintf", WinCc::Cdecl, {
+        {"buff", PVOID_},
+        {"format", LPCSTR_},
+        {"arglist", PVOID_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto buff = api_get_int(get_param(params, "buff"));
+        // NOTE: the verbatim `if format == 0: format = "(null)"` rides the
+        // py2 str/int comparison quirk — inert in the py3 (the decoded string
+        // never equals the int 0); the port keeps the raw walk
+        auto format = api_get_string(ql, get_param(params, "format"));
+        const auto arglist = api_get_int(get_param(params, "arglist"));
+
+        return sprintf_body(ql, buff, format, arglist, false);
+    };
+
+    // int printf(const char *format, ...)
+    WinsdkApi("printf", WinCc::Cdecl, {
+        {"format", LPCSTR_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        auto format = api_get_string(ql, get_param(params, "format"));
+
+        // the fcall readEllipsis: each named param skips one native slot; the
+        // pull count comes from the format walk (the port's bounded variant
+        // of the upstream infinite generator)
+        const std::vector<int> slots{os::PARAM_INTN};
+        const auto args = ql.os().fcall().read_ellipsis(slots, QlOsUtils::count_va_pulls(format));
+
+        return printf_body(ql, format, args, false);
+    };
+
+    // int wprintf(const wchar_t *format, ...)
+    WinsdkApi("wprintf", WinCc::Cdecl, {
+        {"format", LPCWSTR_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        auto format = api_get_string(ql, get_param(params, "format"));
+
+        const std::vector<int> slots{os::PARAM_INTN};
+        const auto args = ql.os().fcall().read_ellipsis(slots, QlOsUtils::count_va_pulls(format));
+
+        return printf_body(ql, format, args, true);
+    };
+
+    // the __stdio_common family (the ucrtbase printf machinery): the buffer
+    // flavours share the sprintf walk, the stream flavours the stdout walk;
+    // the "_s" versions are aliases to their non-"_s" counterparts (verbatim)
+    WinsdkApi("__stdio_common_vfprintf", WinCc::Cdecl, {
+        {"_Options", PARAM_INT64},
+        {"_Stream", PVOID_},
+        {"_Format", LPCSTR_},
+        {"_Locale", DWORD_},
+        {"_ArgList", PVOID_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        return stdio_vfprintf_body(ql, params, false);
+    };
+
+    WinsdkApi("__stdio_common_vfwprintf", WinCc::Cdecl, {
+        {"_Options", PARAM_INT64},
+        {"_Stream", PVOID_},
+        {"_Format", LPCWSTR_},
+        {"_Locale", DWORD_},
+        {"_ArgList", PVOID_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        return stdio_vfprintf_body(ql, params, true);
+    };
+
+    // the _vsprintf flavour: the _Buffer/_BufferCount/_Format/_Locale/_ArgList
+    // (the TODO: take _BufferCount into account verbatim comment rides)
+    WinsdkApi("__stdio_common_vsprintf", WinCc::Cdecl, {
+        {"_Options", PARAM_INT64},
+        {"_Buffer", PVOID_},
+        {"_BufferCount", PVOID_},
+        {"_Format", LPCSTR_},
+        {"_Locale", DWORD_},
+        {"_ArgList", PVOID_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        return stdio_vsprintf_body(ql, params, false);
+    };
+
+    // the _vsnprintf flavour: the _MaxCount joins (the verbatim extra param)
+    WinsdkApi("__stdio_common_vsnprintf", WinCc::Cdecl, {
+        {"_Options", PARAM_INT64},
+        {"_Buffer", PVOID_},
+        {"_BufferCount", PVOID_},
+        {"_MaxCount", PVOID_},
+        {"_Format", LPCSTR_},
+        {"_Locale", DWORD_},
+        {"_ArgList", PVOID_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        return stdio_vsprintf_body(ql, params, false);
+    };
+
+    WinsdkApi("__stdio_common_vswprintf", WinCc::Cdecl, {
+        {"_Options", PARAM_INT64},
+        {"_Buffer", PVOID_},
+        {"_BufferCount", PVOID_},
+        {"_Format", LPCWSTR_},
+        {"_Locale", DWORD_},
+        {"_ArgList", PVOID_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        return stdio_vsprintf_body(ql, params, true);
+    };
+
+    WinsdkApi("__stdio_common_vsnwprintf", WinCc::Cdecl, {
+        {"_Options", PARAM_INT64},
+        {"_Buffer", PVOID_},
+        {"_BufferCount", PVOID_},
+        {"_MaxCount", PVOID_},
+        {"_Format", LPCWSTR_},
+        {"_Locale", DWORD_},
+        {"_ArgList", PVOID_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        return stdio_vsprintf_body(ql, params, true);
+    };
+
+    // all the "_s" versions are aliases to their non-"_s" counterparts
+    // (verbatim); the port rides the same bodies
+    WinsdkApi("__stdio_common_vfprintf_s", WinCc::Cdecl, {
+        {"_Options", PARAM_INT64},
+        {"_Stream", PVOID_},
+        {"_Format", LPCSTR_},
+        {"_Locale", DWORD_},
+        {"_ArgList", PVOID_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        return stdio_vfprintf_body(ql, params, false);
+    };
+
+    WinsdkApi("__stdio_common_vfwprintf_s", WinCc::Cdecl, {
+        {"_Options", PARAM_INT64},
+        {"_Stream", PVOID_},
+        {"_Format", LPCWSTR_},
+        {"_Locale", DWORD_},
+        {"_ArgList", PVOID_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        return stdio_vfprintf_body(ql, params, true);
+    };
+
+    WinsdkApi("__stdio_common_vsprintf_s", WinCc::Cdecl, {
+        {"_Options", PARAM_INT64},
+        {"_Buffer", PVOID_},
+        {"_BufferCount", PVOID_},
+        {"_Format", LPCSTR_},
+        {"_Locale", DWORD_},
+        {"_ArgList", PVOID_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        return stdio_vsprintf_body(ql, params, false);
+    };
+
+    WinsdkApi("__stdio_common_vsnprintf_s", WinCc::Cdecl, {
+        {"_Options", PARAM_INT64},
+        {"_Buffer", PVOID_},
+        {"_BufferCount", PVOID_},
+        {"_MaxCount", PVOID_},
+        {"_Format", LPCSTR_},
+        {"_Locale", DWORD_},
+        {"_ArgList", PVOID_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        return stdio_vsprintf_body(ql, params, false);
+    };
+
+    WinsdkApi("__stdio_common_vswprintf_s", WinCc::Cdecl, {
+        {"_Options", PARAM_INT64},
+        {"_Buffer", PVOID_},
+        {"_BufferCount", PVOID_},
+        {"_Format", LPCWSTR_},
+        {"_Locale", DWORD_},
+        {"_ArgList", PVOID_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        return stdio_vsprintf_body(ql, params, true);
+    };
+
+    WinsdkApi("__stdio_common_vsnwprintf_s", WinCc::Cdecl, {
+        {"_Options", PARAM_INT64},
+        {"_Buffer", PVOID_},
+        {"_BufferCount", PVOID_},
+        {"_MaxCount", PVOID_},
+        {"_Format", LPCWSTR_},
+        {"_Locale", DWORD_},
+        {"_ArgList", PVOID_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        return stdio_vsprintf_body(ql, params, true);
+    };
 
     // int __lconv_init(void);
     WinsdkApi("__lconv_init", WinCc::Cdecl, {}) = [](Qiling&, std::uint64_t,
