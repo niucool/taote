@@ -260,6 +260,19 @@ void QlOsWindows::ensure_profile_state() {
         self->hook_winapi(address, size);
         return 0;
     }, 0, 0xffffffffffffffffull);
+
+    // the SEH dispatch hook (seh.hpp): the x86 exception machinery rides a
+    // raw unicorn mem-invalid hook — the ql-layer mem hooks always report
+    // the fault handled (the upstream _hook_mem_cb contract expects the
+    // callback to fix the state for the retry), while the SEH dispatch
+    // needs the not-handled return so the run loop can restart at the
+    // staged handler
+    if (bits_ == 32 && seh_hook_ == 0) {
+        if (seh_map_sentinel()) {
+            uc_hook_add(&ql_->arch().uc(), &seh_hook_, UC_HOOK_MEM_INVALID,
+                        reinterpret_cast<void*>(&seh_fault_trampoline), this, 1, 0);
+        }
+    }
 }
 
 std::uint64_t QlOsWindows::thread_manager_ret_addr() const noexcept {
@@ -373,11 +386,24 @@ void QlOsWindows::run() {
         ? exit_point_
         : (entry_point + ql_->code().size());
 
-    try {
-        ql_->emu_start(entry_point, exit_point, ql_->timeout(), ql_->count());
-    } catch (const QlErrorBase&) {
-        emu_error();
-        throw;
+    // the emulation with the SEH retarget loop: a dispatched guest fault
+    // (seh.hpp) arms seh_retarget_ and lets emu_start surface the error; the
+    // loop restarts at the staged target (the frame handler, the filter, the
+    // __except block, or the CONTEXT resume pc). A fault with no retarget
+    // is the ordinary failure path
+    std::uint64_t begin = entry_point;
+    while (true) {
+        try {
+            ql_->emu_start(begin, exit_point, ql_->timeout(), ql_->count());
+            break;
+        } catch (const QlErrorBase&) {
+            if (seh_retarget_ == 0) {
+                emu_error();
+                throw;
+            }
+            begin = seh_retarget_;
+            seh_retarget_ = 0;
+        }
     }
 
     // windows.py run tail: persist the registry diff + the summary lines

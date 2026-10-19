@@ -106,6 +106,19 @@ int host_socket_shutdown(std::uintptr_t handle, int how) {
     return ::shutdown(static_cast<int>(handle), how);
 }
 
+// the host send flags: MSG_NOSIGNAL keeps a write against a peer-closed
+// socket from raising SIGPIPE — the default disposition kills the host
+// process, while the guest expects the errno (a send to a shutdown peer is
+// an error, not a crash). The POSIX hosts without the flag (macOS rides
+// SO_NOSIGPIPE) pass the flags through unchanged
+int host_send_flags(int flags) {
+#ifdef MSG_NOSIGNAL
+    return flags | MSG_NOSIGNAL;
+#else
+    return flags;
+#endif
+}
+
 #endif
 
 // the host socket-type passthrough (the SOCK_* ABI values match on the
@@ -253,7 +266,11 @@ std::size_t QlSocket::write(const std::vector<std::uint8_t>& write_buf) {
                          reinterpret_cast<const char*>(write_buf.data()),
                          static_cast<int>(write_buf.size()), 0);
 #else
-    const ssize_t n = ::write(static_cast<int>(host_handle_), write_buf.data(), write_buf.size());
+    // the socket write rides the host send (the MSG_NOSIGNAL flag, see
+    // host_send_flags) — a ::write against a peer-closed socket raises
+    // SIGPIPE
+    const ssize_t n = ::send(static_cast<int>(host_handle_), write_buf.data(), write_buf.size(),
+                             host_send_flags(0));
 #endif
     return n < 0 ? 0 : static_cast<std::size_t>(n);
 }
@@ -387,7 +404,8 @@ std::int64_t QlSocket::send(const std::vector<std::uint8_t>& data, int flags) {
                          reinterpret_cast<const char*>(data.data()),
                          static_cast<int>(data.size()), flags);
 #else
-    const ssize_t n = ::send(static_cast<int>(host_handle_), data.data(), data.size(), flags);
+    const ssize_t n = ::send(static_cast<int>(host_handle_), data.data(), data.size(),
+                             host_send_flags(flags));
 #endif
     return n < 0 ? 0 : static_cast<std::int64_t>(n);
 }
@@ -418,7 +436,8 @@ std::int64_t QlSocket::sendto(const std::vector<std::uint8_t>& data, int flags, 
                            static_cast<int>(data.size()), flags,
                            reinterpret_cast<const sockaddr*>(&ss), slen);
 #else
-    const ssize_t n = ::sendto(static_cast<int>(host_handle_), data.data(), data.size(), flags,
+    const ssize_t n = ::sendto(static_cast<int>(host_handle_), data.data(), data.size(),
+                               host_send_flags(flags),
                                reinterpret_cast<const sockaddr*>(&ss), slen);
 #endif
     return n < 0 ? -1 : static_cast<std::int64_t>(n);

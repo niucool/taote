@@ -152,6 +152,7 @@ keystone linkage (unicorn pinned 2.1.4), `qiling/cc/`, x86/x86-64 first.
 | `qiling/os/windows/fncc.hpp/.cpp` | `qiling/os/windows/fncc.py` | Ported | `WinCc` {Stdcall/Cdecl/Ms64} (the windows.h macro-collision rename, `errno_value()`/QlStdcall precedent) + the `@winsdkapi` decorator as a static `ApiRegistry` (register/find by name, re-registration replaces, the names() coverage surface) + the `WinsdkApi` fluent builder |
 | `qiling/os/windows/handle.hpp/.cpp` | `qiling/os/windows/handle.py` | Ported | Handle (the 0xa0000000 id allocator), HandleManager (the stdio handles + the 8 registry hives pre-bound, search/search_by_obj/delete) |
 | `qiling/os/windows/windows.hpp/.cpp` | `qiling/os/windows/windows.py` | Ported (core) | QlOsWindows: the per-cc fcall table (32-bit mixes Stdcall/Cdecl; 64-bit always Ms64) + the per-call-site `bind_fcall` rebind, the FS/GS segment regions, `hook_winapi` dispatch over the ApiRegistry, `run()` with the emu_error discipline; the GDT managers, registry/clipboard/fiber/thread subsystems and the dlls tree port per their slices |
+| `qiling/os/windows/seh.hpp/.cpp` | *(no upstream counterpart — the pegasus `src/windows/winemu.cpp` dispatch_seh / `_dispatch_seh_x86` / `_continue_seh_x86`)* | Ported (x86) | the guest exception dispatch: the raw-`UC_HOOK_MEM_INVALID` first-chance hook (the ql-layer hooks always report handled, so the dispatch needs the raw seam), the `EXCEPTION_RECORD`/x86-`CONTEXT`/`EXCEPTION_POINTERS` build, the `fs:[0]` frame staging with the non-executable sentinel return page, the `QlOsWindows::run` retarget loop, the frame walk (filter → `__except` block → CONTEXT resume), the repeat guard; the x64 VEH walk is a follow-up (no fixture) |
 | `qiling/os/posix/syscall/abi.hpp/.cpp` | `qiling/os/posix/syscall/abi/` | Ported | QlSyscallABI + Intel32/Intel64/ARM/ARM64 derivatives (the register tables verbatim); `get_id`/`get_params`/`set_return_value`; the over-read raises (the ValueError analogue) |
 | `qiling/os/posix/syscall.hpp/.cpp` | `qiling/os/posix/syscall/unistd.py` | Ported (smoke set) | the static SyscallRegistry (the getattr resolution → static registration) + the unistd smoke set: exit/exit_group (the exit_code + stop), read/write (the fd bounds + the stdio streams), uname; the remaining syscall modules port per Phase 5 slices |
 | `qiling/os/posix/posix.hpp/.cpp` | `qiling/os/posix/posix.py` | Ported (core) | QlOsPosix: the syscall abi per arch, `load_syscall` (the registry + the user overrides via set_syscall), the KERNEL profile identity, the per-arch syscall-entry hooks (`syscall` insn for x86-64, int 0x80 for x86); the fd table, msq/shm/signal land with their slices |
@@ -1611,9 +1612,12 @@ raw-uc TbSemantics/ThreadClone probe suites); zero Windows tests are disabled.
    any binary.
 3. **The managed (.NET) binaries** — the CLR runtime host is a different runtime; the
    upstream stubs mscoree identically (CorExitProcess only). Upstream-faithful.
-4. **The x86 SEH fault dispatch** (the TEB.CurrentSEH field) — nothing in the upstream
-   walks the field; the fault-dispatch machinery (KiUserExceptionDispatcher) does not
-   exist upstream; unreachable without a slice the upstream itself lacks.
+4. **The x86 SEH fault dispatch** — LANDED (a deliberate extension beyond the upstream,
+   whose windows surface never dispatches guest exceptions). See the Phase 16 section:
+   `os/windows/seh.hpp/.cpp` rides the pegasus reference
+   (src/windows/winemu.cpp dispatch_seh / _dispatch_seh_x86 / _continue_seh_x86) and
+   `_except_handler4_common` walks the EH4 scope tables natively. The x64 VEH walk stays
+   unported (no fixture exercises it; the x86 dispatch is the shape every sample needs).
 5. **ntoskrnl.exe driver loading beyond the census'd handlers** — the 80-handler set + the
    driver-object/eprocess/KUSER riders landed (Phase 8); the deep driver emulation rides
    the same real-kernel-code boundary as everywhere else (the stub-synthesis path applies
@@ -1622,4 +1626,65 @@ raw-uc TbSemantics/ThreadClone probe suites); zero Windows tests are disabled.
 ### The full-suite state at close
 
 `516 passed / 0 failed / 23 disabled / 0 skipped` — the windows surface green end-to-end,
-tree clean at the closing commit.
+tree clean at the closing commit. (The current tallies live in the Phase 16 section: the
+suite grew to 518 with the Linux-host port and the SEH fixture.)
+
+## Phase 16 — the pegasus sample sweep + the guest SEH dispatch
+
+**Done.** Every Windows sample the port can serve emulates properly: 97 of the 101 bins in
+`../pegasus/tests/bins` run to exit 0. The four that do not:
+
+- `ws2_32_tcp_server_test_api_x86/x64.exe` — **block in a real `accept`** with no client.
+  Faithful: the same sample blocks on Windows, and the reference pegasus suite also runs it
+  into its 60 s harness timeout, asserting only the bind/listen/accept dispatch.
+- `wdm_test_x64/x86.sys` — kernel-mode drivers whose tests are `DISABLED_` in the reference
+  pegasus suite itself.
+
+The sweep also pinned one host-fatal defect: a guest `send` to a peer-closed socket raised
+`SIGPIPE` and killed the *host* process (the samples' tcp_client connects to nothing, then
+sends). `QlSocket::write/send/sendto` now ride `host_send_flags` (the `MSG_NOSIGNAL` bit) so
+the guest sees an error instead of the host dying.
+
+### The SEH dispatch (`os/windows/seh.hpp/.cpp`)
+
+Upstream qiling has no Windows exception dispatch at all, so `seh_test_x86.exe` (the
+VCRUNTIME140 EH4 consumer) had no path to its `__except` block. The port implements the
+pegasus design, riding the raw-unicorn-hook seam the ql-layer hooks cannot provide (they
+always report the fault handled, which is the opposite of what a dispatch needs):
+
+1. a raw `UC_HOOK_MEM_INVALID` hook (x86 only, registered at `ensure_profile_state`)
+   catches a guest read/write fault, builds the `EXCEPTION_RECORD` + the x86 `CONTEXT`
+   (+`EXCEPTION_POINTERS`) in a scratch page, writes the pointers cell at `establisher-4`
+   (the `ms_exc` convention the compiled filters read through `[ebp-0x14]`), stages the
+   `fs:[0]` frame-handler call with a **non-executable sentinel page** as the return address
+   and arms `seh_retarget_`;
+2. the hook returns *false* so `uc_emu_start` surfaces the error, and `QlOsWindows::run`
+   restarts the emulation at the armed target (the handler / the filter / the resume pc) —
+   the pegasus restart-loop idiom, since unicorn cannot be resumed mid-fault;
+3. the frame handler (the CRT trampoline) reaches the now-native `_except_handler4_common`,
+   which walks `{Next, Handler, ScopeTable^cookie, TryLevel}`, decodes the cookie-encoded
+   scope table and records the current TryLevel's `{EnclosingLevel, FilterFunc,
+   HandlerAddress}` for each frame;
+4. the trampoline's `ret` fetches the sentinel (a PROT fault) → `seh_continue` walks the
+   recorded frames: call the filter, and on `EXCEPTION_EXECUTE_HANDLER` jump to the
+   `__except` block, on `EXCEPTION_CONTINUE_EXECUTION` reload the saved CONTEXT (the handler
+   may have patched `Eip`), on `EXCEPTION_CONTINUE_SEARCH` advance a frame.
+
+A repeat guard (an identical `(pc, fault address)` storm > 16) keeps a handler that resumes
+without fixing anything from spinning forever; the walk stops on any frame or scope record
+outside the guest memory rather than reading through garbage addresses. The disposition
+codes are named in `seh.hpp` (`kExceptionExecuteHandler` 1 / `kExceptionContinueSearch` 0 /
+`kExceptionContinueExecution` 0xffffffff) — the earlier stubs answered 1 while their comments
+claimed "ExceptionContinueSearch", which is the value 0.
+
+### The fixtures
+
+- `WinApiSeh.ExceptHandler4CommonWalksTheChainAndRecordsScopes` — synthesizes the EH4
+  frame/scope-table images in guest memory (cookie, the 16-byte table header, two 12-byte
+  records, a two-link chain at TryLevel 1 → 0) and asserts the recorded frames, plus the
+  TryLevel -1 (no active scope), the wrong-cookie (the walk stops) and the chain-end arms.
+- The end-to-end proof is the sample itself: `seh_test_x86.exe` prints its `In filter` /
+  `Caught AV as expected` lines and exits 0.
+
+**Suite state after this phase:** `518 passed / 0 failed / 3 skipped` on the Linux host
+(the three Windows-host-only real-dll e2e fixtures skip), 23 disabled (all non-PE).

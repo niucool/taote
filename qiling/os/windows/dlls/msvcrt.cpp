@@ -353,27 +353,106 @@ void register_msvcrt_family() {
         return 1;
     };
 
-    // int _except_handler3/4 — the MSVC SEH scope-table walkers; the stub
-    // bodies answer EXCEPTION_CONTINUE_SEARCH (the seh_test exercises the
-    // real dispatch, which lands with the SEH slice)
+    // int _except_handler3 — the pre-EH4 MSVC scope-table walker; the stub
+    // body answers EXCEPTION_CONTINUE_SEARCH (the real walk needs the EH3
+    // frame layout, which no current sample exercises)
     WinsdkApi("_except_handler3", WinCc::Cdecl, {
         {"exception_record", PVOID_},
         {"establisher_frame", PVOID_},
         {"context_record", PVOID_},
         {"dispatcher_context", PVOID_},
     }) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
-        return 1;  // ExceptionContinueSearch
+        return qiling::os::windows::kExceptionContinueSearch;
     };
 
+    // int _except_handler4_common(
+    //     unsigned *Cookie, void (*FrameFunc)(void),
+    //     PEXCEPTION_RECORD, _EXCEPTION_REGISTRATION_RECORD *Establisher,
+    //     PCONTEXT, void *DispatcherContext);
+    //
+    // The MSVC EH4 runtime: walk the registration chain from the establisher
+    // outward, decode each frame's cookie-encoded scope table and record
+    // the current TryLevel's scope record ({EnclosingLevel, FilterFunc,
+    // HandlerAddress}) into the os SEH state — the dispatch walk
+    // (QlOsWindows::seh_continue) then calls the filters / the __except
+    // blocks. Answers EXCEPTION_CONTINUE_SEARCH: the frames carry the
+    // decision (pegasus msvcrt.cpp _except_handler4_common, verbatim shape)
     WinsdkApi("_except_handler4_common", WinCc::Cdecl, {
-        {"gs_helper", PVOID_},
-        {"cookie", PVOID_},
+        {"cookie_ptr", PVOID_},
+        {"frame_func", PVOID_},
         {"exception_record", PVOID_},
         {"establisher_frame", PVOID_},
         {"context_record", PVOID_},
         {"dispatcher_context", PVOID_},
-    }) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
-        return 1;
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto cookie_ptr = api_get_int(get_param(params, "cookie_ptr"));
+        auto establisher = api_get_int(get_param(params, "establisher_frame"));
+
+        std::uint32_t cookie = 0;
+        try {
+            cookie = static_cast<std::uint32_t>(ql.mem().read_ptr(cookie_ptr, 4));
+        } catch (...) {
+            return qiling::os::windows::kExceptionContinueSearch;
+        }
+
+        auto& os = w(ql);
+        os.seh_clear_frames();
+
+        // the EH4 registration layout: {Next, Handler, ScopeTable ^ cookie,
+        // TryLevel} — the scope table: the 16-byte {GSCookieOffset,
+        // GSCookieXOROffset, EHCookieOffset, EHCookieXOROffset} header then
+        // the 12-byte records; the walk stops at the chain end sentinel or
+        // the first frame the guest memory does not carry
+        for (int depth = 0; depth < 32; ++depth) {
+            if (establisher == 0 || establisher == 0xffffffffull ||
+                establisher < 0x1000 || establisher >= 0xfffff000) {
+                break;
+            }
+
+            std::uint64_t next = 0;
+            std::uint32_t scope_table = 0;
+            std::int32_t trylevel = -1;
+            try {
+                next = ql.mem().read_ptr(establisher, 4);
+                const auto encoded_scope = static_cast<std::uint32_t>(ql.mem().read_ptr(establisher + 8, 4));
+                const auto trylevel_raw = static_cast<std::int32_t>(
+                    static_cast<std::uint32_t>(ql.mem().read_ptr(establisher + 12, 4)));
+
+                scope_table = encoded_scope ^ cookie;
+                if (scope_table < 0x1000 || scope_table >= 0xfffff000) {
+                    break;  // a bogus decode: stop the walk
+                }
+
+                // the current TryLevel: -1 = no active scope, -2 = the
+                // outermost (pegasus maps it to the record 0)
+                trylevel = trylevel_raw;
+                if (trylevel == -2) {
+                    trylevel = 0;
+                }
+            } catch (...) {
+                break;  // the frame outside the guest memory: stop
+            }
+
+            if (trylevel >= 0) {
+                const auto record_addr = static_cast<std::uint64_t>(scope_table) + 16 +
+                                         static_cast<std::uint64_t>(trylevel) * 12;
+                try {
+                    qiling::os::windows::SehScopeRecord scope;
+                    scope.enclosing_level = static_cast<std::uint32_t>(ql.mem().read_ptr(record_addr, 4));
+                    scope.filter = static_cast<std::uint32_t>(ql.mem().read_ptr(record_addr + 4, 4));
+                    scope.handler = static_cast<std::uint32_t>(ql.mem().read_ptr(record_addr + 8, 4));
+                    os.seh_record_frame(establisher, scope);
+                } catch (...) {
+                    // the record outside the mapped scope table: stop
+                    break;
+                }
+            }
+
+            establisher = next;
+        }
+
+        // the frames carry the decision; the walk resumes at the sentinel
+        return qiling::os::windows::kExceptionContinueSearch;
     };
 
     // LONG __C_specific_handler(PEXCEPTION_RECORD, PEXCEPTION_FRAME, ...);
@@ -383,7 +462,7 @@ void register_msvcrt_family() {
         {"context_record", PVOID_},
         {"dispatcher_context", PVOID_},
     }) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
-        return 1;
+        return qiling::os::windows::kExceptionContinueSearch;
     };
 
     // char*** __cdecl __p___argv (void);

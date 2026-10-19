@@ -4532,6 +4532,127 @@ TEST(WinApiMsvcrt, PrintfFamilyRendersThroughGuestBuffers) {
     EXPECT_EQ(*rvf_s, 3u);  // "b=4"
 }
 
+// ---- the SEH dispatch (seh.cpp): the EH4 scope-table walk ----
+//
+// _except_handler4_common decodes the cookie-encoded scope tables of the
+// registration chain and records each frame's current TryLevel scope record
+// ({EnclosingLevel, FilterFunc, HandlerAddress}) for the dispatch walk. The
+// fixture synthesizes the EH4 frame/scope-table images in guest memory (the
+// same layout the MSVC __try prologue writes) and rides the registered
+// handler directly: the frames come back through the os accessor.
+TEST(WinApiSeh, ExceptHandler4CommonWalksTheChainAndRecordsScopes) {
+    register_dlls();
+
+    QilingOptions options;
+    options.code = std::vector<std::uint8_t>{0xC3};  // ret: the shellcode stub
+    options.rootfs = win_ensure_rootfs().string();
+    options.ostype = QL_OS::WINDOWS;
+    options.archtype = QL_ARCH::X86;  // the EH4 dispatch is the 32-bit shape
+    Qiling ql(std::move(options));
+
+    // the scratch page: the cookie cell, the scope table, the chain frames
+    constexpr std::uint64_t kPage = 0x40000000ull;
+    ql.mem().map(kPage, 0x3000, UC_PROT_ALL, "[seh-scratch]");
+
+    constexpr std::uint32_t kCookie = 0x0055aa33u;
+    constexpr std::uint64_t kCookieAddr = kPage;
+    constexpr std::uint64_t kTable = kPage + 0x100;
+    constexpr std::uint64_t kInner = kPage + 0x1000;
+    constexpr std::uint64_t kOuter = kPage + 0x2000;
+    constexpr std::uint32_t kHandlerAddr = 0x401000u;  // the EH4 trampoline
+    constexpr std::uint32_t kFilterInner = 0x401100u;
+    constexpr std::uint32_t kHandlerInner = 0x401120u;
+    constexpr std::uint32_t kFilterOuter = 0x401140u;
+    constexpr std::uint32_t kHandlerOuter = 0x401160u;
+
+    ql.mem().write_ptr(kCookieAddr, kCookie, 4);
+
+    // the scope table: the 16-byte {GSCookie*, EHCookie*} header, then the
+    // 12-byte {EnclosingLevel, FilterFunc, HandlerAddress} records
+    std::vector<std::uint8_t> table(16 + 2 * 12, 0);
+    const auto put32 = [&table](std::size_t off, std::uint32_t v) {
+        table[off + 0] = static_cast<std::uint8_t>(v);
+        table[off + 1] = static_cast<std::uint8_t>(v >> 8);
+        table[off + 2] = static_cast<std::uint8_t>(v >> 16);
+        table[off + 3] = static_cast<std::uint8_t>(v >> 24);
+    };
+    put32(16 + 0, 0xffffffffu);  // scope 0: the outermost level
+    put32(16 + 4, kFilterInner);
+    put32(16 + 8, kHandlerInner);
+    put32(16 + 12, 0);  // scope 1 encloses level 0
+    put32(16 + 16, kFilterOuter);
+    put32(16 + 20, kHandlerOuter);
+    ql.mem().write(kTable, table);
+
+    // the registration chain: {Next, Handler, ScopeTable ^ cookie, TryLevel}
+    // — the inner frame sits at TryLevel 1 and links to the outer frame at
+    // TryLevel 0, which ends the chain
+    const auto write_frame = [&ql](std::uint64_t frame, std::uint64_t next, std::uint32_t scope_xor,
+                                   std::int32_t trylevel) {
+        ql.mem().write_ptr(frame, next, 4);
+        ql.mem().write_ptr(frame + 4, kHandlerAddr, 4);
+        ql.mem().write_ptr(frame + 8, scope_xor, 4);
+        ql.mem().write_ptr(frame + 12, static_cast<std::uint32_t>(trylevel), 4);
+    };
+    write_frame(kOuter, 0xffffffffu, kTable ^ kCookie, 0);
+    write_frame(kInner, kOuter, kTable ^ kCookie, 1);
+
+    const auto* eh4 = ApiRegistry::instance().find("_except_handler4_common");
+    ASSERT_NE(eh4, nullptr);
+    const auto ret = eh4->handler(ql, 0, ResolvedParams{
+        {"cookie_ptr", kCookieAddr},
+        {"frame_func", std::uint64_t{0}},
+        {"exception_record", std::uint64_t{0}},
+        {"establisher_frame", kInner},
+        {"context_record", std::uint64_t{0}},
+        {"dispatcher_context", std::uint64_t{0}},
+    });
+    // the walk answers EXCEPTION_CONTINUE_SEARCH (0): the recorded frames
+    // carry the decision
+    ASSERT_TRUE(ret.has_value());
+    EXPECT_EQ(*ret, 0u);
+
+    auto& os = ql.os<QlOsWindows>();
+    ASSERT_EQ(os.seh_frames().size(), 2u);
+    EXPECT_EQ(os.seh_frames()[0].frame, kInner);
+    EXPECT_EQ(os.seh_frames()[0].scope.enclosing_level, 0u);
+    EXPECT_EQ(os.seh_frames()[0].scope.filter, kFilterOuter);
+    EXPECT_EQ(os.seh_frames()[0].scope.handler, kHandlerOuter);
+    EXPECT_FALSE(os.seh_frames()[0].searched);
+    EXPECT_FALSE(os.seh_frames()[0].scope.filter_called);
+    EXPECT_EQ(os.seh_frames()[1].frame, kOuter);
+    EXPECT_EQ(os.seh_frames()[1].scope.enclosing_level, 0xffffffffu);
+    EXPECT_EQ(os.seh_frames()[1].scope.filter, kFilterInner);
+    EXPECT_EQ(os.seh_frames()[1].scope.handler, kHandlerInner);
+
+    // TryLevel -1 (no active scope): the frame rides the chain but records
+    // nothing — the outer frame alone comes back
+    write_frame(kInner, kOuter, kTable ^ kCookie, -1);
+    const auto ret_off = eh4->handler(ql, 0, ResolvedParams{
+        {"cookie_ptr", kCookieAddr}, {"establisher_frame", kInner}});
+    ASSERT_TRUE(ret_off.has_value());
+    EXPECT_EQ(*ret_off, 0u);
+    ASSERT_EQ(os.seh_frames().size(), 1u);
+    EXPECT_EQ(os.seh_frames()[0].frame, kOuter);
+
+    // a wrong cookie decodes a bogus scope table: the walk stops at the
+    // first frame instead of reading through the garbage address
+    write_frame(kInner, kOuter, kTable ^ kCookie, 1);
+    ql.mem().write_ptr(kCookieAddr, 0xdeadbeefu, 4);
+    const auto ret_bogus = eh4->handler(ql, 0, ResolvedParams{
+        {"cookie_ptr", kCookieAddr}, {"establisher_frame", kInner}});
+    ASSERT_TRUE(ret_bogus.has_value());
+    EXPECT_EQ(*ret_bogus, 0u);
+    EXPECT_TRUE(os.seh_frames().empty());
+
+    // the chain end sentinel: no frame, no walk
+    const auto ret_end = eh4->handler(ql, 0, ResolvedParams{
+        {"cookie_ptr", kCookieAddr}, {"establisher_frame", 0xffffffffull}});
+    ASSERT_TRUE(ret_end.has_value());
+    EXPECT_EQ(*ret_end, 0u);
+    EXPECT_TRUE(os.seh_frames().empty());
+}
+
 TEST(WinApiCrypt32, CryptStringToBinaryRidesBase64Decode) {
     register_dlls();
     Qiling ql(win_test_options());

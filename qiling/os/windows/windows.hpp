@@ -15,6 +15,9 @@
 #include "qiling/os/windows/fiber.hpp"
 #include "qiling/os/windows/clipboard.hpp"
 #include "qiling/os/windows/thread.hpp"
+#include "qiling/os/windows/seh.hpp"
+
+#include <vector>
 
 namespace qiling {
 
@@ -105,11 +108,40 @@ public:
     std::uint64_t thread_manager_ret_addr() const noexcept;
     void set_thread_ret_addr(std::uint64_t addr) noexcept { thread_ret_addr_ = addr; }
 
+    // ---- the SEH dispatch (seh.hpp): the x86 exception machinery ----
+
+    // _except_handler4_common records one frame (the EH4 registration + the
+    // current TryLevel's scope record) per chain link
+    void seh_record_frame(std::uint64_t frame, const SehScopeRecord& scope);
+    void seh_clear_frames() { seh_frames_.clear(); }
+    const std::vector<SehFrame>& seh_frames() const noexcept { return seh_frames_; }
+
+    // the pending emu restart target armed by the dispatch / the continue
+    // walk (0 = none); QlOsWindows::run consumes it after emu_start errors
+    std::uint64_t seh_retarget() const noexcept { return seh_retarget_; }
+    void seh_consume_retarget() noexcept { seh_retarget_ = 0; }
+
     ~QlOsWindows() override;
 
 private:
     std::string_view os_section_name() const;
     std::string_view bits_section() const noexcept;
+
+    // the raw unicorn invalid-memory hook (registered at load() for the
+    // 32-bit arch): the first-chance SEH dispatch. Rides the raw uc level
+    // because the ql-layer mem hooks unconditionally report the fault
+    // handled (the upstream _hook_mem_cb contract: the registered hook is
+    // expected to fix the state and let the retry run) — the SEH dispatch
+    // needs the not-handled return so uc_emu_start surfaces the fault and
+    // the run loop restarts at the staged target
+    static bool seh_fault_trampoline(uc_engine* uc, uc_mem_type access, std::uint64_t address,
+                                     std::uint32_t size, std::int64_t value, void* user_data);
+    bool seh_on_fault(int access, std::uint64_t address);
+    bool seh_dispatch(std::uint64_t fault_addr, std::uint32_t access_type);
+    bool seh_continue();
+    void seh_build_context(std::uint64_t dest) const;
+    void seh_load_context();
+    bool seh_map_sentinel();
 
     std::map<WinCc, std::unique_ptr<QlFunctionCall>> fcall_table_;
     std::unique_ptr<QlMemoryHeap> heap_storage_;
@@ -132,6 +164,16 @@ private:
     bool main_thread_handle_appended_ = false;
     std::uint64_t thread_ret_addr_ = 0;
     int bits_ = 64;
+
+    // the SEH dispatch state (seh.hpp)
+    uc_hook seh_hook_ = 0;
+    std::uint64_t seh_sentinel_ = 0;        // the staged return page (mapped rw-noexec)
+    std::uint64_t seh_retarget_ = 0;        // the pending run-loop restart target
+    std::uint64_t seh_context_addr_ = 0;    // the mapped CONTEXT (the reload path)
+    std::uint64_t seh_fault_pc_ = 0;        // the repeat-guard key (pc)
+    std::uint64_t seh_fault_addr_ = 0;      // the repeat-guard key (fault address)
+    int seh_repeat_count_ = 0;
+    std::vector<SehFrame> seh_frames_;
 };
 
 }  // namespace windows
