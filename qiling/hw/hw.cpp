@@ -6,6 +6,7 @@
 #include "qiling/hw/stm32f4xx_usart.hpp"
 #include "qiling/hw/stm32f4xx_tim.hpp"
 #include "qiling/hw/stm32f1xx_exti.hpp"
+#include "qiling/hw/stm32f1xx_simple.hpp"
 
 #include <algorithm>
 #include <map>
@@ -55,6 +56,30 @@ QlHwManager::QlHwManager(Qiling& ql) : ql_(&ql) {
         };
         return std::make_unique<STM32F1xxTim>(q, label, intn_of("intn"), intn_of("brk_intn"),
                                               intn_of("cc_intn"), intn_of("trg_com_intn"), intn_of("up_intn"));
+    });
+    register_struct("STM32F1xxRcc", [](Qiling& q, const std::string& label, const PeripheralKwargs&) {
+        return std::make_unique<STM32F1xxRcc>(q, label);
+    });
+    register_struct("STM32F1xxFlash", [](Qiling& q, const std::string& label, const PeripheralKwargs&) {
+        return std::make_unique<STM32F1xxFlash>(q, label);
+    });
+    register_struct("STM32F1xxAdc", [](Qiling& q, const std::string& label, const PeripheralKwargs&) {
+        return std::make_unique<STM32F1xxAdc>(q, label);
+    });
+    register_struct("STM32F1xxSpi", [](Qiling& q, const std::string& label, const PeripheralKwargs&) {
+        return std::make_unique<STM32F1xxSpi>(q, label);
+    });
+    register_struct("CortexMBitband", [](Qiling& q, const std::string& label, const PeripheralKwargs& kwargs) {
+        const auto base = kwargs.find("base");
+        const auto size = kwargs.find("size");
+        return std::make_unique<CortexMBitband>(q, label, base == kwargs.end() ? 0 : base->second,
+                                                size == kwargs.end() ? 0 : size->second);
+    });
+    register_struct("MemoryRemap", [](Qiling& q, const std::string& label, const PeripheralKwargs& kwargs) {
+        const auto base = kwargs.find("base");
+        const auto size = kwargs.find("size");
+        return std::make_unique<MemoryRemap>(q, label, base == kwargs.end() ? 0 : base->second,
+                                             size == kwargs.end() ? 0 : size->second);
     });
     register_struct("STM32F1xxExti", [](Qiling& q, const std::string& label, const PeripheralKwargs& kwargs) {
         auto exti = std::make_unique<STM32F1xxExti>(q, label);

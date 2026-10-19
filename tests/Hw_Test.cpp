@@ -19,6 +19,7 @@
 #include "qiling/hw/stm32f4xx_tim.hpp"
 #include "qiling/hw/stm32f1xx_gpio.hpp"
 #include "qiling/hw/stm32f1xx_exti.hpp"
+#include "qiling/hw/stm32f1xx_simple.hpp"
 #include "qiling/hw/stm32f1xx_gpio.hpp"
 #include "qiling/hw/stm32f4xx_usart.hpp"
 #include "qiling/exception.hpp"
@@ -588,4 +589,75 @@ TEST(HwManager, Stm32f1xxExtiSwierWalkMirrorsGpioAndPendsNvic) {
     exti->write_body(exti->kSwierOffset, 4, 8);
     EXPECT_EQ(exti->raw_read(exti->kPrOffset, 4) & 8, 0u);
     EXPECT_EQ(nvic->pending_interrupts().size(), 1u);
+}
+
+// Batch 1: the simple register surfaces. The Rcc's rdyon step reflects the
+// on-bits into the ready bits; the Adc's CR2 self-clearing walks; the Spi's
+// tube-paired DR; the Bitband/Remap mem bridges.
+TEST(HwManager, Stm32f1xxSimplePeripheralsWalkRccAdcSpiBitband) {
+    const auto hex_path = write_ihex_fixture();
+
+    QilingOptions options;
+    options.argv = {hex_path};
+    options.rootfs = ensure_hw_rootfs().string();
+    options.ostype = QL_OS::MCU;
+    options.archtype = QL_ARCH::CORTEX_M;
+    options.env = {
+        {"FLASH", "memory;0x0;0x2000"},
+        {"SRAM", "memory;0x20000000;0x1000"},
+        {"PPB", "mmio;0xE000E000;0x1000"},
+        {"SYSTICK", "core;cm3_systick;0xE000E010"},
+        {"NVIC", "core;cm_nvic;0xE000E100"},
+        {"SCB", "core;cm4_scb;0xE000ED00"},
+        {"PERIP", "mmio;0x40000000;0x100000"},
+    };
+    Qiling ql(options);
+
+    auto& hw = *ql.hw();
+
+    // the Rcc: the HSION seed rides the rdyon step into the HSIRDY
+    auto* rcc = static_cast<qiling::hw::STM32F1xxRcc*>(hw.create("rcc", "STM32F1xxRcc", 0x40021000));
+    ASSERT_NE(rcc, nullptr);
+    rcc->step();
+    EXPECT_NE(rcc->raw_read(rcc->kCrOffset, 4) & qiling::hw::rcc::cr::HSIRDY, 0u);
+    // the HSE off: the HSERDY cleared (the CFGR/CSR pairs ride the same walk)
+    EXPECT_EQ(rcc->raw_read(rcc->kCrOffset, 4) & qiling::hw::rcc::cr::HSERDY, 0u);
+
+    // the Flash: the plain register surface (the KEYR write rides the store)
+    auto* flash = static_cast<qiling::hw::STM32F1xxFlash*>(hw.create("flash", "STM32F1xxFlash", 0x40022000));
+    ASSERT_NE(flash, nullptr);
+    flash->write_body(4, 4, 0x45670123);
+    EXPECT_EQ(flash->raw_read(4, 4), 0x45670123u);
+
+    // the Adc: the SWSTART self-clears and sets the EOS; the DR seed 0x7ff
+    auto* adc = static_cast<qiling::hw::STM32F1xxAdc*>(hw.create("adc1", "STM32F1xxAdc", 0x40012400));
+    ASSERT_NE(adc, nullptr);
+    EXPECT_EQ(adc->raw_read(adc->kDrOffset, 4), 0x7ffu);
+    adc->write_body(adc->kCr2Offset, 4, qiling::hw::adc::cr2::SWSTART);
+    EXPECT_NE(adc->raw_read(adc->kSrOffset, 4) & qiling::hw::adc::sr::EOS, 0u);
+    EXPECT_EQ(adc->raw_read(adc->kCr2Offset, 4) & qiling::hw::adc::cr2::SWSTART, 0u);
+
+    // the Spi: the DR write rides the output tube, the DR read rides the input
+    auto* spi1 = static_cast<qiling::hw::STM32F1xxSpi*>(hw.create("spi1", "STM32F1xxSpi", 0x40013000));
+    ASSERT_NE(spi1, nullptr);
+    spi1->write_body(spi1->kDrOffset, 4, 0xAB);
+    const auto out = spi1->recv(2);
+    ASSERT_EQ(out.size(), 1u);
+    EXPECT_EQ(out[0], 0xAB);
+    spi1->send({0x5A});
+    EXPECT_EQ(spi1->read(spi1->kDrOffset, 4), 0x5A);
+
+    // the Bitband: the aliased bit write flips the SRAM bit (the base
+    // 0x22000000 maps to the SRAM 0x20000000)
+    std::fprintf(stderr, "[bb-pre] creating\n");
+    auto* bb = static_cast<qiling::hw::CortexMBitband*>(
+        hw.create("sram_bb", "CortexMBitband", 0x22000000, {{"base", 0x20000000ull}, {"size", 0x100000ull}}));
+    ASSERT_NE(bb, nullptr);
+    std::fprintf(stderr, "[bb-pre] created\n");
+    bb->write_body(0, 4, 1);  // the SRAM bit 0 of the word 0
+    std::fprintf(stderr, "[bb-pre] write1 done\n");
+    EXPECT_NE(ql.mem().read_ptr(0x20000000, 4) & 1, 0u);
+    bb->write_body(0, 4, 0);
+    EXPECT_EQ(ql.mem().read_ptr(0x20000000, 4) & 1, 0u);
+    std::fprintf(stderr, "[bb] bit walk ok\n");
 }
