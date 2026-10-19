@@ -7,6 +7,7 @@
 #include "qiling/hw/stm32f4xx_tim.hpp"
 #include "qiling/hw/stm32f1xx_exti.hpp"
 #include "qiling/hw/stm32f1xx_simple.hpp"
+#include "qiling/hw/stm32f1xx_interactive.hpp"
 
 #include <algorithm>
 #include <map>
@@ -80,6 +81,24 @@ QlHwManager::QlHwManager(Qiling& ql) : ql_(&ql) {
         const auto size = kwargs.find("size");
         return std::make_unique<MemoryRemap>(q, label, base == kwargs.end() ? 0 : base->second,
                                              size == kwargs.end() ? 0 : size->second);
+    });
+    register_struct("STM32F1xxDma", [](Qiling& q, const std::string& label, const PeripheralKwargs& kwargs) {
+        auto dma = std::make_unique<STM32F1xxDma>(q, label);
+        for (std::size_t i = 0; i < STM32F1xxDma::kStreamCount; ++i) {
+            const auto key = "stream" + std::to_string(i) + "_intn";
+            const auto it = kwargs.find(key);
+            if (it != kwargs.end()) {
+                dma->set_stream_intn(i, static_cast<std::int64_t>(it->second));
+            }
+        }
+        return dma;
+    });
+    register_struct("STM32F1xxI2c", [](Qiling& q, const std::string& label, const PeripheralKwargs& kwargs) {
+        auto intn_of = [&kwargs](const char* key) {
+            const auto it = kwargs.find(key);
+            return it == kwargs.end() ? -1 : static_cast<std::int64_t>(it->second);
+        };
+        return std::make_unique<STM32F1xxI2c>(q, label, intn_of("ev_intn"), intn_of("er_intn"));
     });
     register_struct("STM32F1xxExti", [](Qiling& q, const std::string& label, const PeripheralKwargs& kwargs) {
         auto exti = std::make_unique<STM32F1xxExti>(q, label);

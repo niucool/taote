@@ -20,6 +20,7 @@
 #include "qiling/hw/stm32f1xx_gpio.hpp"
 #include "qiling/hw/stm32f1xx_exti.hpp"
 #include "qiling/hw/stm32f1xx_simple.hpp"
+#include "qiling/hw/stm32f1xx_interactive.hpp"
 #include "qiling/hw/stm32f1xx_gpio.hpp"
 #include "qiling/hw/stm32f4xx_usart.hpp"
 #include "qiling/exception.hpp"
@@ -660,4 +661,86 @@ TEST(HwManager, Stm32f1xxSimplePeripheralsWalkRccAdcSpiBitband) {
     bb->write_body(0, 4, 0);
     EXPECT_EQ(ql.mem().read_ptr(0x20000000, 4) & 1, 0u);
     std::fprintf(stderr, "[bb] bit walk ok\n");
+}
+
+// Batch 2: the interactive peripherals. The Dma stream walks one unit per
+// step (the mem copy with the size alignments + the MINC/PINC increments),
+// the last transfer clears the EN and pends the nvic; the I2c CR1 START
+// rides the generate_start walk (the SB + the master mode) and the DR write
+// in the master mode walks the data out to the output tube.
+TEST(HwManager, Stm32f1xxDmaStreamTransfersAndI2cMasterWalk) {
+    const auto hex_path = write_ihex_fixture();
+
+    QilingOptions options;
+    options.argv = {hex_path};
+    options.rootfs = ensure_hw_rootfs().string();
+    options.ostype = QL_OS::MCU;
+    options.archtype = QL_ARCH::CORTEX_M;
+    options.env = {
+        {"FLASH", "memory;0x0;0x2000"},
+        {"SRAM", "memory;0x20000000;0x1000"},
+        {"PPB", "mmio;0xE000E000;0x1000"},
+        {"SYSTICK", "core;cm3_systick;0xE000E010"},
+        {"NVIC", "core;cm_nvic;0xE000E100"},
+        {"SCB", "core;cm4_scb;0xE000ED00"},
+        {"DMA1", "core;STM32F1xxDma;0x40020000;stream1_intn=12"},
+        {"I2C1", "core;STM32F1xxI2c;0x40005400;ev_intn=31"},
+        {"PERIP", "mmio;0x40000000;0x100000"},
+    };
+    Qiling ql(options);
+
+    auto* dma1 = static_cast<qiling::hw::STM32F1xxDma*>(ql.hw()->peripheral("dma1"));
+    auto* i2c1 = static_cast<qiling::hw::STM32F4xxI2c*>(ql.hw()->peripheral("i2c1"));
+    auto* nvic = static_cast<qiling::hw::CortexMNvic*>(ql.hw()->peripheral("nvic"));
+    ASSERT_NE(dma1, nullptr);
+    ASSERT_NE(i2c1, nullptr);
+    ASSERT_NE(nvic, nullptr);
+    nvic->enable(12);
+    nvic->enable(31);
+
+    // the DMA stream 1: the memory-to-memory copy of 4 bytes from 0x20000100
+    // to 0x20000200 with the MINC
+    constexpr std::uint64_t kSrc = 0x20000100;
+    constexpr std::uint64_t kDst = 0x20000200;
+    ql.mem().write(kSrc, std::vector<std::uint8_t>{0x11, 0x22, 0x33, 0x44});
+    const std::uint64_t s1 = dma1->kStreamBaseOffset + 1 * dma1->kStreamSize;
+    dma1->write(s1, 4, qiling::hw::dma::EN | qiling::hw::dma::MINC | qiling::hw::dma::PSIZE_1 |
+                           qiling::hw::dma::MSIZE_1);  // the word-sized, mem-to-mem (the DIR 0)
+    dma1->write(s1 + 4, 4, 4);                        // the NDTR = 4
+    dma1->write(s1 + 8, 4, kSrc);                     // the PAR = the src
+    dma1->write(s1 + 12, 4, kDst);                    // the MAR = the dst
+
+    const auto before = nvic->pending_interrupts().size();
+    dma1->step();  // the 4 unit steps
+    dma1->step();
+    dma1->step();
+    dma1->step();
+
+    EXPECT_EQ(ql.mem().read(kDst, 4)[0], 0x11);
+    EXPECT_EQ(ql.mem().read(kDst + 3, 4)[0], 0x44);
+    // the last transfer: the EN cleared + the ISR TC bit set + the nvic pended
+    EXPECT_EQ(dma1->stream(1).ndtr, 0u);
+    EXPECT_EQ(dma1->stream(1).cr & qiling::hw::dma::EN, 0u);
+    EXPECT_NE(dma1->raw_read(dma1->kIsrOffset, 4) & (1u << 5), 0u);  // the stream-1 TC bit
+    ASSERT_GT(nvic->pending_interrupts().size(), before);
+    EXPECT_EQ(nvic->pending_interrupts().back(), 12);
+
+    // the I2C: the CR1 START rides the generate_start (the SB + the master)
+    i2c1->write_body(i2c1->kCr1Offset, 4, qiling::hw::i2c::cr1::START);
+    EXPECT_NE(i2c1->raw_read(i2c1->kSr1Offset, 4) & qiling::hw::i2c::sr1::SB, 0u);
+    EXPECT_TRUE(i2c1->is_master_mode());
+    EXPECT_EQ(i2c1->raw_read(i2c1->kCr1Offset, 4) & qiling::hw::i2c::cr1::START, 0u);  // the START self-clears
+
+    // the OAR1 set + the DR write in the master mode: the address match rides
+    // the ADDR/TXE/AF + the TRA (the slave-side ACK shape)
+    i2c1->write_body(i2c1->kOar1Offset, 4, 0x20 << 1);
+    i2c1->write_body(i2c1->kDrOffset, 4, 0x20);
+    EXPECT_NE(i2c1->raw_read(i2c1->kSr1Offset, 4) & qiling::hw::i2c::sr1::ADDR, 0u);
+    EXPECT_NE(i2c1->raw_read(i2c1->kSr2Offset, 4) & qiling::hw::i2c::sr2::TRA, 0u);
+
+    // the send_data ride: the DR in the TRA master mode sends to the tube
+    i2c1->write_body(i2c1->kDrOffset, 4, 0x77);
+    const auto out = i2c1->recv(2);
+    ASSERT_EQ(out.size(), 1u);
+    EXPECT_EQ(out[0], 0x77);
 }
