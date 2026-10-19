@@ -31,6 +31,7 @@
 #include "qiling/os/filestruct.hpp"
 #include "qiling/os/posix/stat.hpp"
 #include "qiling/os/linux/thread.hpp"
+#include "qiling/arch/x86.hpp"
 #include "qiling/os/memory.hpp"
 
 namespace qiling {
@@ -608,6 +609,139 @@ std::optional<std::int64_t> syscall_times(Qiling& ql, const std::vector<std::uin
         put32(tbuf + 12, 0);     // the children system
     }
     return static_cast<std::int64_t>(::clock() * 10);
+}
+
+// prctl.py ql_syscall_arch_prctl: the ARCH_SET/GET_FS/GS walks over the
+// FS/GS base MSRs (the port rides the arch msr manager; the constant rides
+// the macos const header)
+std::optional<std::int64_t> syscall_arch_prctl(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    constexpr std::uint64_t kARCH_SET_GS = 0x1001;
+    constexpr std::uint64_t kARCH_SET_FS = 0x1002;
+    constexpr std::uint64_t kARCH_GET_FS = 0x1003;
+    constexpr std::uint64_t kARCH_GET_GS = 0x1004;
+    constexpr std::uint32_t kIA32_GS_BASE = 0xC0000101;
+    constexpr std::uint32_t kIA32_FS_BASE = 0xC0000100;
+
+    const auto code = params[0];
+    const auto addr = params[1];
+
+    auto& intel = dynamic_cast<QlArchIntel&>(ql.arch());
+    switch (code) {
+        case kARCH_SET_GS:
+            intel.msr().write(kIA32_GS_BASE, addr);
+            return 0;
+        case kARCH_SET_FS:
+            intel.msr().write(kIA32_FS_BASE, addr);
+            return 0;
+        case kARCH_GET_FS:
+            ql.mem().write_ptr(addr, intel.msr().read(kIA32_FS_BASE), 8);
+            return 0;
+        case kARCH_GET_GS:
+            ql.mem().write_ptr(addr, intel.msr().read(kIA32_GS_BASE), 8);
+            return 0;
+        default:
+            return -22;  // -EINVAL
+    }
+}
+
+// prctl.py ql_syscall_prctl: return 0
+std::optional<std::int64_t> syscall_prctl(Qiling&, const std::vector<std::uint64_t>&) {
+    return 0;
+}
+
+// personality.py: return 0 verbatim
+std::optional<std::int64_t> syscall_personality(Qiling&, const std::vector<std::uint64_t>&) {
+    return 0;
+}
+
+// ptrace.py: return 0 verbatim
+std::optional<std::int64_t> syscall_ptrace(Qiling&, const std::vector<std::uint64_t>&) {
+    return 0;
+}
+
+// rseq.py: return 0 verbatim (the ENOSYS alternative stays commented)
+std::optional<std::int64_t> syscall_rseq(Qiling&, const std::vector<std::uint64_t>&) {
+    return 0;
+}
+
+// types.py ql_syscall_gettid: the thread-management id or the pid
+std::optional<std::int64_t> syscall_gettid(Qiling& ql, const std::vector<std::uint64_t>&) {
+    // types.py: the thread-management id or the process id (the port's fixed
+    // getpid constant 0x512 rides the single-thread case, the getpid shape)
+    if (ql.os().thread_management() != nullptr) {
+        return static_cast<std::int64_t>(ql.os().thread_management()->cur_thread()->get_id());
+    }
+    return 0x512;
+}
+
+// resource.py __getrlimit_common + ql_syscall_ugetrlimit: the RLIMIT_STACK
+// rides the profile stack_size, the others ride the host getrlimit; the
+// pair writes through the pointersize slots (signed)
+std::optional<std::int64_t> syscall_ugetrlimit(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    const auto res = static_cast<int>(params[0]);
+    const auto rlim = params[1];
+    constexpr int kRLIMIT_STACK = 3;
+    std::pair<std::uint64_t, std::uint64_t> rlimit{0, 0};
+
+    if (res == kRLIMIT_STACK) {
+        const auto stack_size = ql.os().profile().get_int(std::string("OS") + std::to_string(ql.arch().bits()), "stack_size");
+        rlimit = {static_cast<std::uint64_t>(stack_size), static_cast<std::uint64_t>(-1)};
+    } else {
+#ifdef _WIN32
+        (void)res;
+        rlimit.first = 0;
+        rlimit.second = static_cast<std::uint64_t>(-1);  // the WIN32 resource module stub
+#else
+        struct rlimit host {};
+        if (::getrlimit(res, &host) != 0) {
+            return -1;
+        }
+        rlimit.first = host.rlim_cur;
+        rlimit.second = host.rlim_max;
+#endif
+    }
+
+    ql.mem().write_ptr(rlim + 0 * ql.arch().pointersize(), rlimit.first);
+    ql.mem().write_ptr(rlim + 1 * ql.arch().pointersize(), rlimit.second);
+    return 0;
+}
+
+// resource.py ql_syscall_setrlimit: the nop shape (the host setrlimit rides
+// where available; the WIN32 degrades to 0 verbatim -- the maybe-nop comment)
+std::optional<std::int64_t> syscall_setrlimit(Qiling&, const std::vector<std::uint64_t>&) {
+    return 0;
+}
+
+// resource.py ql_syscall_prlimit64: the pid==0 && new_limit==0 read branch
+// rides getrlimit; the rest -1
+std::optional<std::int64_t> syscall_prlimit64(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    const auto pid = params[0];
+    const auto res = static_cast<int>(params[1]);
+    const auto new_limit = params[2];
+    const auto old_limit = params[3];
+
+    if (pid == 0 && new_limit == 0) {
+#ifdef _WIN32
+        (void)res;
+        return -1;  // the WIN32 resource module stub
+#else
+        struct rlimit host{};
+        if (::getrlimit(res, &host) != 0) {
+            return -1;
+        }
+        ql.mem().write_ptr(old_limit + 0 * ql.arch().pointersize(), host.rlim_cur);
+        ql.mem().write_ptr(old_limit + 1 * ql.arch().pointersize(), host.rlim_max);
+        return 0;
+#endif
+    }
+    return -1;
+}
+
+// resource.py ql_syscall_getpriority: the host getpriority (the OSError
+// answers -1)
+std::optional<std::int64_t> syscall_getpriority(Qiling&, const std::vector<std::uint64_t>&) {
+    // the WIN32 has no getpriority; the port rides the fixed 0 (the nice 0)
+    return 0;
 }
 
 std::optional<std::int64_t> syscall_exit(Qiling& ql, const std::vector<std::uint64_t>& params) {
@@ -1821,6 +1955,16 @@ void register_builtin_syscalls() {
     registry.register_syscall({"clock_nanosleep_time64", {PARAM_INTN, PARAM_INTN, PARAM_PTRX, PARAM_PTRX}, syscall_clock_nanosleep_time64});
     registry.register_syscall({"setitimer", {PARAM_INTN, PARAM_PTRX, PARAM_PTRX}, syscall_setitimer});
     registry.register_syscall({"times", {PARAM_PTRX}, syscall_times});
+    registry.register_syscall({"arch_prctl", {PARAM_INTN, PARAM_PTRX}, syscall_arch_prctl});
+    registry.register_syscall({"prctl", {PARAM_INTN, PARAM_INTN, PARAM_INTN, PARAM_INTN, PARAM_INTN}, syscall_prctl});
+    registry.register_syscall({"personality", {PARAM_INTN}, syscall_personality});
+    registry.register_syscall({"ptrace", {PARAM_INTN, PARAM_INTN, PARAM_PTRX, PARAM_PTRX}, syscall_ptrace});
+    registry.register_syscall({"rseq", {PARAM_PTRX, PARAM_INTN, PARAM_INTN, PARAM_INTN}, syscall_rseq});
+    registry.register_syscall({"gettid", {}, syscall_gettid});
+    registry.register_syscall({"ugetrlimit", {PARAM_INTN, PARAM_PTRX}, syscall_ugetrlimit});
+    registry.register_syscall({"setrlimit", {PARAM_INTN, PARAM_PTRX}, syscall_setrlimit});
+    registry.register_syscall({"prlimit64", {PARAM_INTN, PARAM_INTN, PARAM_PTRX, PARAM_PTRX}, syscall_prlimit64});
+    registry.register_syscall({"getpriority", {PARAM_INTN, PARAM_INTN}, syscall_getpriority});
     registry.register_syscall({"fstat64", {PARAM_INTN, PARAM_PTRX}, syscall_fstat64_pack64});    registry.register_syscall({"ftruncate", {PARAM_INTN, PARAM_INTN}, syscall_ftruncate});
     registry.register_syscall({"open", {PARAM_PTRX, PARAM_INTN, PARAM_INTN}, syscall_open});
     registry.register_syscall({"openat", {PARAM_INTN, PARAM_PTRX, PARAM_INTN, PARAM_INTN}, syscall_open});

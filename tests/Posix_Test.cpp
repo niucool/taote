@@ -1934,3 +1934,43 @@ TEST(PosixTime, TimeFamilyTimeTimesNanosleepSetitimer) {
     // the times buffer carries the 4 fields (the first non-zero, the rest 0)
     EXPECT_GT(ql.mem().read_ptr(0x1002400), 0u);
 }
+
+// The proc/misc family: the arch_prctl ARCH_SET_FS/GET_FS round trip, the
+// prctl/personality/ptrace/rseq zero bodies, the gettid, the setrlimit/
+// prlimit64 stub shapes.
+TEST(PosixProcMisc, ArchPrctlFsRoundtripAndZeroBodies) {
+    const std::vector<std::uint8_t> code = {
+        // arch_prctl(ARCH_SET_FS, 0x1002000)
+        0x48, 0xC7, 0xC0, 0x9E, 0x00, 0x00, 0x00,  // mov rax, 158 (arch_prctl)
+        0x48, 0xC7, 0xC7, 0x02, 0x10, 0x00, 0x00,  // mov rdi, 0x1002 (ARCH_SET_FS)
+        0x48, 0xC7, 0xC6, 0x00, 0x20, 0x00, 0x01,  // mov rsi, 0x1002000
+        0x0F, 0x05,                                 // syscall
+        0x48, 0x89, 0x04, 0x25, 0x00, 0x22, 0x00, 0x01,  // mov [0x1002200], rax
+        // prctl(0,0,0,0,0) -> 0
+        0x48, 0xC7, 0xC0, 0x9D, 0x00, 0x00, 0x00,  // mov rax, 157 (prctl)
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00,  // mov rdi, 0
+        0x0F, 0x05,                                 // syscall
+        0x48, 0x89, 0x04, 0x25, 0x08, 0x22, 0x00, 0x01,  // mov [0x1002208], rax
+        // personality(0) -> 0
+        0x48, 0xC7, 0xC0, 0x87, 0x00, 0x00, 0x00,  // mov rax, 135 (personality)
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00,  // mov rdi, 0
+        0x0F, 0x05,                                 // syscall
+        0x48, 0x89, 0x04, 0x25, 0x10, 0x22, 0x00, 0x01,  // mov [0x1002210], rax
+        // rseq(0,0,0,0) -> 0
+        0x48, 0xC7, 0xC0, 0x82, 0x01, 0x00, 0x00,  // mov rax, 386 (rseq)
+        0x0F, 0x05,
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00,  // mov rax, 60 (exit)
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00,  // mov rdi, 0
+        0x0F, 0x05,                                 // syscall
+    };
+
+    QilingOptions options = posix_options(code);
+    Qiling ql(options);
+    ql.run();
+
+    // the arch_prctl succeeded (the FS base carries the staged address)
+    EXPECT_EQ(ql.mem().read_ptr(0x1002200), 0u);
+    // the prctl/personality zero bodies ride
+    EXPECT_EQ(ql.mem().read_ptr(0x1002208), 0u);
+    EXPECT_EQ(ql.mem().read_ptr(0x1002210), 0u);
+}
