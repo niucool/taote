@@ -104,6 +104,61 @@ void write_startup_info(char* dst, int bits, std::uint64_t lp_desktop, std::uint
     put_ptr(off, h_std_error);
 }
 
+void write_systemtime(char* dst, std::uint16_t year, std::uint16_t month, std::uint16_t day_of_week,
+                      std::uint16_t day, std::uint16_t hour, std::uint16_t minute, std::uint16_t second,
+                      std::uint16_t milliseconds) {
+    const auto put16 = [&dst](std::size_t off, std::uint16_t v) {
+        dst[off] = static_cast<char>(v & 0xff);
+        dst[off + 1] = static_cast<char>((v >> 8) & 0xff);
+    };
+
+    put16(0, year);
+    put16(2, month);
+    put16(4, day_of_week);
+    put16(6, day);
+    put16(8, hour);
+    put16(10, minute);
+    put16(12, second);
+    put16(14, milliseconds);
+}
+
+void write_system_info(char* dst, int bits, std::uint64_t pe_image_address, std::uint64_t dll_upper_bound,
+                       std::uint64_t page_size, std::uint64_t allocation_granularity) {
+    const auto put16 = [&dst](std::size_t off, std::uint16_t v) {
+        dst[off] = static_cast<char>(v & 0xff);
+        dst[off + 1] = static_cast<char>((v >> 8) & 0xff);
+    };
+    const auto put32 = [&dst](std::size_t off, std::uint32_t v) {
+        dst[off] = static_cast<char>(v & 0xff);
+        dst[off + 1] = static_cast<char>((v >> 8) & 0xff);
+        dst[off + 2] = static_cast<char>((v >> 16) & 0xff);
+        dst[off + 3] = static_cast<char>((v >> 24) & 0xff);
+    };
+    const auto put_ptr = [&](std::size_t off, std::uint64_t v) {
+        for (std::size_t i = 0; i < static_cast<std::size_t>(bits / 8); ++i) {
+            dst[off + i] = static_cast<char>((v >> (i * 8)) & 0xff);
+        }
+    };
+
+    // the ctypes default-aligned shape: the anon union dword @0 (the
+    // wProcessorArchitecture/wReserved pair), the dwPageSize @4, the pointer
+    // fields aligned to the pointer width (the x64: 8/16/24, the x86: 8/12/16)
+    const auto ps = static_cast<std::size_t>(bits / 8);
+    std::memset(dst, 0, ps == 8 ? SYSTEM_INFO_SIZE_64 : SYSTEM_INFO_SIZE_32);
+
+    put32(0, 0);  // dwOemId (the anonymous union dword)
+    put32(4, static_cast<std::uint32_t>(page_size));
+    put_ptr(8, pe_image_address);
+    put_ptr(8 + ps, dll_upper_bound);
+    put_ptr(8 + 2 * ps, 0x3);  // dwActiveProcessorMask (the verbatim 0x3)
+    const std::size_t off = 8 + 3 * ps;
+    put32(off, 0x4);        // dwNumberOfProcessors (verbatim)
+    put32(off + 4, 0x24a);  // dwProcessorType (verbatim)
+    put32(off + 8, static_cast<std::uint32_t>(allocation_granularity));
+    put16(off + 12, 0x6);     // wProcessorLevel (verbatim)
+    put16(off + 14, 0x4601);  // wProcessorRevision (verbatim)
+}
+
 std::string make_sid_bytes(std::uint32_t subauthority) {
     // make_sid(1): Revision u8 @0, SubAuthorityCount u8 @1, the 6-byte
     // IdentifierAuthority (the Value u32 big-endian + the 2-byte pad) @2,

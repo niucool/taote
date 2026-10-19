@@ -188,6 +188,15 @@ std::uint64_t QlLoaderPE::load_dll(const std::string& name) {
         dll_path_host = *folded;
     }
 
+    // loader/pe.py: self.dll_size += dll_len (the GetSystemInfo rider; the
+    // port tracks the mapped length through the load_image's parse)
+    {
+        auto parsed = LIEF::PE::Parser::parse(dll_path_host);
+        if (parsed != nullptr) {
+            dll_size_ += parsed->virtual_size();
+        }
+    }
+
     const auto base = load_image(dll_path_host, dll_name);
     (void)base;
 

@@ -57,6 +57,24 @@ inline constexpr std::size_t WIN32_FIND_DATAA_OFF_ALTNAME = 44 + WIN_MAX_PATH;  
 void write_win32_find_dataa(char* dst, std::uint32_t attributes, std::uint64_t filetime_hnano,
                             std::uint64_t filesize, const std::string& filename);
 
+// ---- SYSTEMTIME (structs.py SYSTEMTIME) ----
+// the 16-byte layout: the 8 u16 fields in order (wYear, wMonth, wDayOfWeek,
+// wDay, wHour, wMinute, wSecond, wMilliseconds)
+inline constexpr std::size_t SYSTEMTIME_SIZE = 16;
+
+void write_systemtime(char* dst, std::uint16_t year, std::uint16_t month, std::uint16_t day_of_week,
+                      std::uint16_t day, std::uint16_t hour, std::uint16_t minute, std::uint16_t second,
+                      std::uint16_t milliseconds);
+
+// ---- SYSTEM_INFO (structs.py make_system_info(archbits)) ----
+// the ctypes default-aligned layout: the union dword @0, the dwPageSize @4,
+// the pointer fields aligned to the pointer width. x64: 48 bytes; x86: 36.
+inline constexpr std::size_t SYSTEM_INFO_SIZE_64 = 48;
+inline constexpr std::size_t SYSTEM_INFO_SIZE_32 = 36;
+
+void write_system_info(char* dst, int bits, std::uint64_t pe_image_address, std::uint64_t dll_upper_bound,
+                       std::uint64_t page_size, std::uint64_t allocation_granularity);
+
 // ---- Mutex (structs.py Mutex) ----
 // the sync-object record the synchapi family parks on the handle: the name,
 // the namespace prefix (''/'Global'), and the locked state. The CreateEvent

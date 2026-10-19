@@ -80,6 +80,13 @@ public:
     // loader/pe.py: the main image base (pe_image_address)
     std::uint64_t pe_image_address() const noexcept { return pe_image_address_; }
 
+    // loader/pe.py: the accumulated mapped dll size (the dll_size walk in
+    // load_dll; the GetSystemInfo upper-bound rider)
+    std::uint64_t dll_size() const noexcept { return dll_size_; }
+
+    // loader/pe.py: the dll load base (the dll_address profile value)
+    std::uint64_t dll_address() const noexcept { return dll_address_; }
+
     // loader/pe.py init_exports: the main-image exports keyed by the ea
     const std::map<std::uint64_t, ExportSymbol>& export_symbols() const noexcept { return export_symbols_; }
 

@@ -1771,3 +1771,199 @@ TEST(WinApiLibloader, ResourceAndDefaultDirsBodies) {
         sdd->handler(ql, 0, ResolvedParams{{"DirectoryFlags", std::uint64_t{0x400}}}),
         QlErrorNotImplemented);
 }
+
+TEST(WinApiSysinfo, GetVersionAndVersionExVerbatim) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    const auto* ver = ApiRegistry::instance().find("GetVersion");
+    ASSERT_NE(ver, nullptr);
+    const auto r = ver->handler(ql, 0, {});
+    ASSERT_TRUE(r.has_value());
+    EXPECT_EQ(*r, ((0x0004ull << 16) | 0x0004ull));
+
+    // the GetVersionEx pair: the verbatim 1 (no struct write, verbatim)
+    const auto* vex_a = ApiRegistry::instance().find("GetVersionExA");
+    ASSERT_NE(vex_a, nullptr);
+    const auto ra = vex_a->handler(ql, 0, ResolvedParams{{"lpVersionInformation", kCells}});
+    ASSERT_TRUE(ra.has_value());
+    EXPECT_EQ(*ra, 1u);
+
+    const auto* vex_w = ApiRegistry::instance().find("GetVersionExW");
+    ASSERT_NE(vex_w, nullptr);
+    const auto rw = vex_w->handler(ql, 0, ResolvedParams{{"lpVersionInformation", kCells}});
+    ASSERT_TRUE(rw.has_value());
+    EXPECT_EQ(*rw, 1u);
+}
+
+TEST(WinApiSysinfo, GetSystemInfoPacksCtypesLayout) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    const auto* info = ApiRegistry::instance().find("GetSystemInfo");
+    ASSERT_NE(info, nullptr);
+    const auto r = info->handler(ql, 0, ResolvedParams{{"lpSystemInfo", kCells}});
+    ASSERT_TRUE(r.has_value());
+    EXPECT_EQ(*r, 0u);  // the void body rides the 0 return
+
+    // the x64 SYSTEM_INFO layout (48 bytes): the verbatim values
+    EXPECT_EQ(ql.mem().read_ptr(kCells + 0, 4), 0u);        // dwOemId
+    EXPECT_EQ(ql.mem().read_ptr(kCells + 4, 4), 0x1000u);   // dwPageSize
+    // the shellcode mode: the pe_image_address rides 0 (the loader never
+    // loaded an image); the PE-mode rides the real base
+    EXPECT_EQ(ql.mem().read_ptr(kCells + 8, 8), 0ull);  // lpMinimumApplicationAddress
+    EXPECT_EQ(ql.mem().read_ptr(kCells + 24, 8), 0x3ull);   // dwActiveProcessorMask
+    EXPECT_EQ(ql.mem().read_ptr(kCells + 32, 4), 0x4u);     // dwNumberOfProcessors
+    EXPECT_EQ(ql.mem().read_ptr(kCells + 36, 4), 0x24au);   // dwProcessorType
+    EXPECT_EQ(ql.mem().read_ptr(kCells + 40, 4), 0xa000u); // dwAllocationGranularity (the pagesize*10)
+    EXPECT_EQ(ql.mem().read_ptr(kCells + 44, 2), 0x6u);     // wProcessorLevel
+    EXPECT_EQ(ql.mem().read_ptr(kCells + 46, 2), 0x4601u);  // wProcessorRevision
+
+    // the lpMaximumApplicationAddress = the dll_address + the dll_size
+    auto& loader = static_cast<loader::QlLoaderPE&>(ql.loader());
+    EXPECT_EQ(ql.mem().read_ptr(kCells + 16, 8),
+              loader.dll_address() + loader.dll_size());
+
+    // the native sibling shares the body
+    EXPECT_NE(ApiRegistry::instance().find("GetNativeSystemInfo"), nullptr);
+}
+
+TEST(WinApiSysinfo, GetLocalTimeAndTickCount) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    // GetLocalTime: the SYSTEMTIME struct walk over the wall clock
+    const auto* lt = ApiRegistry::instance().find("GetLocalTime");
+    ASSERT_NE(lt, nullptr);
+    const auto r = lt->handler(ql, 0, ResolvedParams{{"lpSystemTime", kCells}});
+    ASSERT_TRUE(r.has_value());
+    EXPECT_EQ(*r, 0u);
+
+    const auto year = ql.mem().read_ptr(kCells + 0, 2);
+    const auto month = ql.mem().read_ptr(kCells + 2, 2);
+    const auto dow = ql.mem().read_ptr(kCells + 4, 2);
+    EXPECT_GE(year, 2020u);   // the wall clock is live
+    EXPECT_LE(year, 2100u);
+    EXPECT_GE(month, 1u);
+    EXPECT_LE(month, 12u);
+    EXPECT_GE(dow, 1u);       // the isoweekday: the 1=Monday..7=Sunday
+    EXPECT_LE(dow, 7u);
+
+    // GetTickCount: the verbatim 200000
+    const auto* tick = ApiRegistry::instance().find("GetTickCount");
+    ASSERT_NE(tick, nullptr);
+    const auto t = tick->handler(ql, 0, {});
+    ASSERT_TRUE(t.has_value());
+    EXPECT_EQ(*t, 200000u);
+}
+
+TEST(WinApiSysinfo, GetSystemTimeAsFileTimeEpochWalk) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    const auto* ft = ApiRegistry::instance().find("GetSystemTimeAsFileTime");
+    ASSERT_NE(ft, nullptr);
+    const auto r = ft->handler(ql, 0, ResolvedParams{{"lpSystemTimeAsFileTime", kCells}});
+    EXPECT_FALSE(r.has_value());  // the void body (the no return)
+
+    // the 8-byte FILETIME: the 100ns ticks since the 1601 epoch; the value
+    // must exceed the 2020 wall-clock lower bound (2020-01-01 in the 1601
+    // epoch ~ 0x01d5bb0f...) and stay plausibly small
+    const auto hnano = ql.mem().read_ptr(kCells, 8);
+    EXPECT_GT(hnano, 132000000000000000ull);   // 2019-01-01
+    EXPECT_LT(hnano, 135000000000000000ull);   // 2100-01-01
+
+    // the Precise sibling: the verbatim microsecond-pack quirk (the raw u64
+    // = the microsecond-of-the-minute, NOT a filetime)
+    const auto* precise = ApiRegistry::instance().find("GetSystemTimePreciseAsFileTime");
+    ASSERT_NE(precise, nullptr);
+    const auto rp = precise->handler(ql, 0, ResolvedParams{{"lpSystemTimeAsFileTime", kCells + 0x40}});
+    ASSERT_TRUE(rp.has_value());
+    EXPECT_EQ(*rp, 0u);  // the verbatim return 0 (the precise body returns)
+    const auto quirky = ql.mem().read_ptr(kCells + 0x40, 8);
+    EXPECT_LT(quirky, 1000000ull);  // the microseconds within one minute
+}
+
+TEST(WinApiSysinfo, DirectoryQueriesRideProfilePaths) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    // the GetWindowsDirectory pair: the windir + the NUL, the utf-16le for W
+    const auto* wd_w = ApiRegistry::instance().find("GetWindowsDirectoryW");
+    ASSERT_NE(wd_w, nullptr);
+    const auto rw = wd_w->handler(ql, 0, ResolvedParams{
+        {"lpBuffer", kScratch}, {"uSize", std::uint64_t{0x100}}});
+    ASSERT_TRUE(rw.has_value());
+
+    const auto windir = ql.os<QlOsWindows>().windir();
+    EXPECT_EQ(*rw, windir.size());
+    const auto units = ql.mem().read(kScratch, windir.size() * 2 + 2);
+    std::string decoded_w;
+    for (std::size_t i = 0; i + 1 < units.size(); i += 2) {
+        decoded_w.push_back(static_cast<char>(units[i]));
+    }
+    // the encoded buffer: the path + the utf-16le nul terminator
+    EXPECT_EQ(decoded_w, windir + std::string(1, char(0)));
+    EXPECT_EQ(decoded_w.back(), char(0));
+
+    // the A form: the utf-8 (the latin-1 identity) bytes
+    const auto* wd_a = ApiRegistry::instance().find("GetWindowsDirectoryA");
+    ASSERT_NE(wd_a, nullptr);
+    const auto ra = wd_a->handler(ql, 0, ResolvedParams{
+        {"lpBuffer", kScratch + 0x100}, {"uSize", std::uint64_t{0x100}}});
+    ASSERT_TRUE(ra.has_value());
+    EXPECT_EQ(*ra, windir.size());
+    const auto narrow = ql.mem().read(kScratch + 0x100, windir.size() + 1);
+    EXPECT_EQ(std::string(narrow.begin(), narrow.end()), windir + std::string(1, char(0)));
+
+    // the GetSystemWindowsDirectory pair: the same windir body (the shared
+    // __GetWindowsDirectory, verbatim)
+    EXPECT_NE(ApiRegistry::instance().find("GetSystemWindowsDirectoryW"), nullptr);
+    EXPECT_NE(ApiRegistry::instance().find("GetSystemWindowsDirectoryA"), nullptr);
+    const auto* swd = ApiRegistry::instance().find("GetSystemWindowsDirectoryA");
+    const auto rswd = swd->handler(ql, 0, ResolvedParams{
+        {"lpBuffer", kScratch + 0x200}, {"uSize", std::uint64_t{0x100}}});
+    ASSERT_TRUE(rswd.has_value());
+    EXPECT_EQ(*rswd, windir.size());
+
+    // the GetSystemDirectory pair: the winsys
+    const auto* sd_w = ApiRegistry::instance().find("GetSystemDirectoryW");
+    ASSERT_NE(sd_w, nullptr);
+    const auto winsys = ql.os<QlOsWindows>().winsys();
+    const auto rsd = sd_w->handler(ql, 0, ResolvedParams{
+        {"lpBuffer", kScratch + 0x300}, {"uSize", std::uint64_t{0x100}}});
+    ASSERT_TRUE(rsd.has_value());
+    EXPECT_EQ(*rsd, winsys.size());
+    const auto units_sd = ql.mem().read(kScratch + 0x300, winsys.size() * 2 + 2);
+    std::string decoded_sd;
+    for (std::size_t i = 0; i + 1 < units_sd.size(); i += 2) {
+        decoded_sd.push_back(static_cast<char>(units_sd[i]));
+    }
+    EXPECT_EQ(decoded_sd, winsys + std::string(1, char(0)));
+
+    // the A sibling
+    const auto* sd_a = ApiRegistry::instance().find("GetSystemDirectoryA");
+    ASSERT_NE(sd_a, nullptr);
+    const auto rsda = sd_a->handler(ql, 0, ResolvedParams{
+        {"lpBuffer", kScratch + 0x400}, {"uSize", std::uint64_t{0x100}}});
+    ASSERT_TRUE(rsda.has_value());
+    EXPECT_EQ(*rsda, winsys.size());
+    const auto narrow_sd = ql.mem().read(kScratch + 0x400, winsys.size() + 1);
+    EXPECT_EQ(std::string(narrow_sd.begin(), narrow_sd.end()), winsys + std::string(1, char(0)));
+}
+
+TEST(WinApiSysinfo, GetSystemTimeMicrosecondPackQuirk) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    // GetSystemTime: the verbatim pack64 of the microsecond-of-the-minute
+    // (NOT a SYSTEMTIME struct write — the upstream quirk rides verbatim)
+    const auto* st = ApiRegistry::instance().find("GetSystemTime");
+    ASSERT_NE(st, nullptr);
+    const auto r = st->handler(ql, 0, ResolvedParams{{"lpSystemTime", kCells}});
+    ASSERT_TRUE(r.has_value());
+    EXPECT_EQ(*r, 0u);
+
+    const auto quirky = ql.mem().read_ptr(kCells, 8);
+    EXPECT_LT(quirky, 1000000ull);  // the microseconds within one minute
+}
