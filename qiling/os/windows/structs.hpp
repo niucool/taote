@@ -8,9 +8,13 @@
 #define QILING_OS_WINDOWS_STRUCTS_HPP
 
 #include <cstdint>
+#include <map>
 #include <string>
 
 namespace qiling {
+
+class Qiling;
+
 namespace os {
 namespace win {
 
@@ -52,6 +56,95 @@ inline constexpr std::size_t WIN32_FIND_DATAA_OFF_ALTNAME = 44 + WIN_MAX_PATH;  
 // fills dst (>= WIN32_FIND_DATAA_SIZE bytes) with the populated structure
 void write_win32_find_dataa(char* dst, std::uint32_t attributes, std::uint64_t filetime_hnano,
                             std::uint64_t filesize, const std::string& filename);
+
+// ---- STARTUPINFO (structs.py make_startup_info(archbits)) ----
+// the default-aligned ctypes shape: the pointers ride the arch bits. x64:
+// cb@0, lpReserved@8, lpDesktop@16, lpTitle@24, dwX@32, dwY@36, dwXSize@40,
+// dwYSize@44, dwXCountChars@48, dwYCountChars@52, dwFillAttribute@56,
+// dwFlags@60, wShowWindow@64, cbReserved2@66, lpReserved2@72, hStdInput@80,
+// hStdOutput@88, hStdError@96 — 104 bytes total. x86: the pointers 4 bytes,
+// the same order — 68 bytes total.
+inline constexpr std::size_t STARTUPINFO_SIZE_64 = 104;
+inline constexpr std::size_t STARTUPINFO_SIZE_32 = 68;
+
+void write_startup_info(char* dst, int bits, std::uint64_t lp_desktop, std::uint32_t dw_flags,
+                        std::uint64_t h_std_input, std::uint64_t h_std_output, std::uint64_t h_std_error);
+
+// ---- Token (structs.py Token) ----
+// the lazily-populated TokenInformationClass payload map; the ctor seeds
+// TokenUIAccess/TokenGroups with pack(0x1) and TokenIntegrityLevel with a
+// freshly-built SID (the root check rides the profile SYSTEM permission)
+class Token {
+public:
+    // structs.py Token.TokenInformationClass (the subset the emulated APIs
+    // touch; the full 49-value enum ports verbatim)
+    enum class TokenInformationClass : std::uint32_t {
+        TokenUser = 1,
+        TokenGroups = 2,
+        TokenPrivileges = 3,
+        TokenOwner = 4,
+        TokenPrimaryGroup = 5,
+        TokenDefaultDacl = 6,
+        TokenSource = 7,
+        TokenType = 8,
+        TokenImpersonationLevel = 9,
+        TokenStatistics = 10,
+        TokenRestrictedSids = 11,
+        TokenSessionId = 12,
+        TokenGroupsAndPrivileges = 13,
+        TokenSessionReference = 14,
+        TokenSandBoxInert = 15,
+        TokenAuditPolicy = 16,
+        TokenOrigin = 17,
+        TokenElevationType = 18,
+        TokenLinkedToken = 19,
+        TokenElevation = 20,
+        TokenHasRestrictions = 21,
+        TokenAccessInformation = 22,
+        TokenVirtualizationAllowed = 23,
+        TokenVirtualizationEnabled = 24,
+        TokenIntegrityLevel = 25,
+        TokenUIAccess = 26,
+        TokenMandatoryPolicy = 27,
+        TokenLogonSid = 28,
+        TokenIsAppContainer = 29,
+        TokenCapabilities = 30,
+        TokenAppContainerSid = 31,
+        TokenAppContainerNumber = 32,
+        TokenUserClaimAttributes = 33,
+        TokenDeviceClaimAttributes = 34,
+        TokenRestrictedUserClaimAttributes = 35,
+        TokenRestrictedDeviceClaimAttributes = 36,
+        TokenDeviceGroups = 37,
+        TokenRestrictedDeviceGroups = 38,
+        TokenSecurityAttributes = 39,
+        TokenIsRestricted = 40,
+        TokenProcessTrustLevel = 41,
+        TokenPrivateNameSpace = 42,
+        TokenSingletonAttributes = 43,
+        TokenBnoIsolation = 44,
+        TokenChildProcessFlags = 45,
+        TokenIsLessPrivilegedAppContainer = 46,
+        TokenOriginatingProcessTrustLevel = 48,
+        MaxTokenInfoClass = 49
+    };
+
+    explicit Token(Qiling& ql);
+
+    // Token.get(value): the packed bytes for the info class; the missing
+    // entry raises (the upstream QlErrorNotImplemented shape rides the
+    // caller)
+    const std::string& get(std::uint32_t value) const;
+
+private:
+    std::map<std::uint32_t, std::string> struct_;
+};
+
+// structs.py make_sid(auth_count=1): the packed 12-byte SID image
+// (Revision u8 @0, SubAuthorityCount u8 @1, the 6-byte IdentifierAuthority
+// big-endian image @2, SubAuthority[0] u32 LE @8). The subauthority rides
+// 0x1234 for the root profile, 545 otherwise (the verbatim FIXME shape).
+std::string make_sid_bytes(std::uint32_t subauthority);
 
 }  // namespace win
 }  // namespace os

@@ -12,6 +12,7 @@
 #include "qiling/os/windows/fncc.hpp"
 #include "qiling/os/windows/handle.hpp"
 #include "qiling/os/windows/registry.hpp"
+#include "qiling/os/windows/thread.hpp"
 
 namespace qiling {
 
@@ -71,13 +72,20 @@ public:
     QlMemoryHeap& heap() const noexcept { return *heap_; }
     HandleManager& handle_manager() const noexcept { return *handle_manager_; }
 
-    // windows.py thread_management (the QlWindowsThreadManagement instance;
-    // the typed surface lands with the thread-slice wiring; the name avoids
-    // the base QlOs::thread_management clash)
-    void* win_thread_management() const noexcept { return win_thread_management_; }
-    void set_win_thread_management(void* mgr) noexcept { win_thread_management_ = mgr; }
+    // windows.py __setup_components: the thread manager over the main thread
+    // (the scheduler hook rides install_hook at the construction)
+    QlWindowsThreadManagement& thread_manager() const noexcept { return *thread_manager_; }
+
+    // windows.py __init__: self.pid = profile.getint('KERNEL', 'pid')
+    std::uint32_t pid() const noexcept { return pid_; }
+
+    // windows.py: os.thread_manager.thread_ret_addr accessor (the thread
+    // create path writes the return address at the new stack top; forwards
+    // onto the manager, whose address lands at the install_hook)
+    std::uint64_t thread_manager_ret_addr() const noexcept;
     void set_thread_ret_addr(std::uint64_t addr) noexcept { thread_ret_addr_ = addr; }
-    std::uint64_t thread_manager_ret_addr() const noexcept { return thread_ret_addr_; }
+
+    ~QlOsWindows() override;
 
 private:
     std::string_view os_section_name() const;
@@ -94,7 +102,11 @@ private:
     std::string userprofile_;
     std::string username_;
     std::uint32_t last_error_ = 0;
-    void* win_thread_management_ = nullptr;  // the QlWindowsThreadManagement lands with the thread slice
+    // windows.py thread_management (the typed surface; __setup_components
+    // builds it over the main thread)
+    std::unique_ptr<QlWindowsThreadManagement> thread_manager_;
+    std::uint32_t pid_ = 0;
+    bool main_thread_handle_appended_ = false;
     std::uint64_t thread_ret_addr_ = 0;
     int bits_ = 64;
 };

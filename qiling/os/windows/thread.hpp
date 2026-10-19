@@ -33,6 +33,9 @@ public:
     // thread.py create: a new thread with a fresh stack and a prepared context
     static std::unique_ptr<QlWindowsThread> create(Qiling* ql, std::uint64_t stack_size, std::uint64_t func_addr,
                                                    std::uint64_t func_params, ThreadStatus status);
+    // the test-facing id-sequence reset (thread.py: QlWindowsThread.ID static;
+    // the python module reload resets it implicitly, the C++ static does not)
+    static void reset_id_sequence();
 
     // QlThread surface
     std::uint64_t get_id() const override { return id_; }
@@ -49,6 +52,10 @@ public:
     // the per-thread TLS slots (thread.py tls/tls_index)
     void set_tls(std::uint64_t index, std::uint64_t value) { tls_[index] = value; }
     std::optional<std::uint64_t> get_tls(std::uint64_t index) const;
+    bool has_tls(std::uint64_t index) const { return tls_.count(index) != 0; }
+    void erase_tls(std::uint64_t index) { tls_.erase(index); }
+    std::uint64_t tls_index() const noexcept { return tls_index_; }
+    std::uint64_t bump_tls_index() noexcept { return tls_index_++; }
 
     // thread.py waitfor / has_waitfor
     void waitfor(QlWindowsThread& thread) { waitfor_.push_back(&thread); }
@@ -79,18 +86,28 @@ public:
 
     QlWindowsThread* cur_thread() const noexcept { return cur_thread_; }
     void append(QlWindowsThread* thread) { threads_.push_back(thread); }
+    const std::vector<QlWindowsThread*>& threads() const noexcept { return threads_; }
+
+    // the ownership slot: the handlers create threads on the heap; the
+    // manager keeps them alive for the process lifetime (the python side
+    // rides the reference counting)
+    void append(std::unique_ptr<QlWindowsThread> thread);
+
+    std::size_t count() const noexcept { return threads_.size(); }
     std::uint64_t thread_ret_addr() const noexcept { return thread_ret_addr_; }
 
     // do_schedule: pick the next runnable thread; true when a switch happened
     bool do_schedule();
 
     void install_hook();
+    void release_hooks();
     void set_thread_ret_addr(std::uint64_t addr) noexcept { thread_ret_addr_ = addr; }
 
 private:
     Qiling* ql_ = nullptr;
     QlWindowsThread* cur_thread_ = nullptr;
     std::vector<QlWindowsThread*> threads_;
+    std::vector<std::unique_ptr<QlWindowsThread>> owned_;
     std::uint64_t icount_ = 0;
     std::uint64_t thread_ret_addr_ = 0;
     std::optional<HookRet> scheduler_hook_;

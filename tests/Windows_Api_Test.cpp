@@ -9,9 +9,14 @@
 #include "qiling/os/windows/api.hpp"
 #include "qiling/os/windows/fncc.hpp"
 #include "qiling/os/windows/dlls/dlls.hpp"
+#include "qiling/os/windows/windows.hpp"
+#include "qiling/os/windows/thread.hpp"
 
 using namespace qiling;
 using namespace qiling::os;
+using qiling::os::windows::QlOsWindows;
+using qiling::os::windows::QlWindowsThread;
+using qiling::os::windows::ThreadStatus;
 
 namespace {
 
@@ -155,7 +160,7 @@ TEST(WinApiFileapi, CreateFileWriteReadFileSizeCloseHandleRoundtrip) {
     const auto blob = std::vector<std::uint8_t>{0xC3};  // ret: the shellcode stub
     Qiling ql(win_test_options());
 
-    const auto guest_path = std::string("C:\qltest\sample.bin");
+    const auto guest_path = std::string("C:\\qltest\\sample.bin");
     const auto rootfs_file = std::filesystem::path(ql.rootfs()) / "qltest" / "sample.bin";
     std::filesystem::create_directories(rootfs_file.parent_path());
 
@@ -541,4 +546,321 @@ TEST(WinApiFileapi, PageFileMappingRoundTrip) {
     // the second unmap answers 0 for the deleted view handle
     const auto r_unmap2 = unmap->handler(ql, 0, ResolvedParams{{"lpBaseAddress", *view}});
     EXPECT_EQ(r_unmap2.value_or(1), 0u);
+}
+
+TEST(WinApiProcessthreads, GetCurrentQuartetAndIds) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    // GetCurrentProcessId: the profile KERNEL pid (windows.ql: 1996)
+    const auto* pid = ApiRegistry::instance().find("GetCurrentProcessId");
+    ASSERT_NE(pid, nullptr);
+    const auto r_pid = pid->handler(ql, 0, {});
+    ASSERT_TRUE(r_pid.has_value());
+    EXPECT_EQ(*r_pid, 1996u);
+
+    // GetCurrentProcess: the FIXME-verbatim pid return
+    const auto* proc = ApiRegistry::instance().find("GetCurrentProcess");
+    ASSERT_NE(proc, nullptr);
+    const auto r_proc = proc->handler(ql, 0, {});
+    ASSERT_TRUE(r_proc.has_value());
+    EXPECT_EQ(*r_proc, 1996u);
+
+    // GetCurrentThreadId / GetCurrentThread: the main thread's static id
+    const auto* tid = ApiRegistry::instance().find("GetCurrentThreadId");
+    ASSERT_NE(tid, nullptr);
+    const auto* thr = ApiRegistry::instance().find("GetCurrentThread");
+    ASSERT_NE(thr, nullptr);
+    const auto expected_tid = ql.os<QlOsWindows>().thread_manager().cur_thread()->get_id();
+    const auto r_tid = tid->handler(ql, 0, {});
+    const auto r_thr = thr->handler(ql, 0, {});
+    ASSERT_TRUE(r_tid.has_value());
+    ASSERT_TRUE(r_thr.has_value());
+    EXPECT_EQ(*r_tid, expected_tid);
+    EXPECT_EQ(*r_thr, expected_tid);
+}
+
+TEST(WinApiProcessthreads, TlsCycleAllocSetGetFree) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    const auto* alloc_ = ApiRegistry::instance().find("TlsAlloc");
+    ASSERT_NE(alloc_, nullptr);
+    const auto idx = alloc_->handler(ql, 0, {});
+    ASSERT_TRUE(idx.has_value());
+    EXPECT_EQ(*idx, 0u);  // the fresh thread's first slot
+
+    const auto* set_ = ApiRegistry::instance().find("TlsSetValue");
+    ASSERT_NE(set_, nullptr);
+    const auto r_set = set_->handler(ql, 0, ResolvedParams{
+        {"dwTlsIndex", *idx},
+        {"lpTlsValue", std::uint64_t{0x1234}},
+    });
+    ASSERT_TRUE(r_set.has_value());
+    EXPECT_EQ(*r_set, 1u);
+
+    const auto* get_ = ApiRegistry::instance().find("TlsGetValue");
+    ASSERT_NE(get_, nullptr);
+    const auto r_get = get_->handler(ql, 0, ResolvedParams{{"dwTlsIndex", *idx}});
+    ASSERT_TRUE(r_get.has_value());
+    EXPECT_EQ(*r_get, 0x1234u);
+    // the api explicitly clears the last error on success (verbatim comment)
+    EXPECT_EQ(ql.os<QlOsWindows>().last_error(), 0u);
+
+    // TlsFree releases the slot; the second free flags ERROR_INVALID_PARAMETER
+    const auto* free_ = ApiRegistry::instance().find("TlsFree");
+    ASSERT_NE(free_, nullptr);
+    const auto r_free = free_->handler(ql, 0, ResolvedParams{{"dwTlsIndex", *idx}});
+    ASSERT_TRUE(r_free.has_value());
+    EXPECT_EQ(*r_free, 1u);
+
+    ql.os<QlOsWindows>().set_last_error(0);
+    const auto r_free2 = free_->handler(ql, 0, ResolvedParams{{"dwTlsIndex", *idx}});
+    ASSERT_TRUE(r_free2.has_value());
+    EXPECT_EQ(*r_free2, 0u);
+    EXPECT_EQ(ql.os<QlOsWindows>().last_error(), 0x57u);  // ERROR_INVALID_PARAMETER
+}
+
+TEST(WinApiProcessthreads, TlsSetValueOnUnallocatedSlotFlagsError) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    const auto* set_ = ApiRegistry::instance().find("TlsSetValue");
+    ASSERT_NE(set_, nullptr);
+    const auto r = set_->handler(ql, 0, ResolvedParams{
+        {"dwTlsIndex", std::uint64_t{7}},
+        {"lpTlsValue", std::uint64_t{0}},
+    });
+    ASSERT_TRUE(r.has_value());
+    EXPECT_EQ(*r, 0u);
+    EXPECT_EQ(ql.os<QlOsWindows>().last_error(), 0x57u);  // ERROR_INVALID_PARAMETER
+}
+
+TEST(WinApiProcessthreads, GetStartupInfoPacksStructFields) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    const auto* si = ApiRegistry::instance().find("GetStartupInfoA");
+    ASSERT_NE(si, nullptr);
+    const auto r = si->handler(ql, 0, ResolvedParams{{"lpStartupInfo", kScratch}});
+    ASSERT_TRUE(r.has_value());
+    EXPECT_EQ(*r, 0u);  // STATUS_SUCCESS
+
+    // the x64 STARTUPINFO layout (104 bytes): the cb, the dw fields, the
+    // stdio handles, and the flags
+    EXPECT_EQ(ql.mem().read_ptr(kScratch, 4), 104u);                      // cb
+    EXPECT_EQ(ql.mem().read_ptr(kScratch + 40, 4), 100u);                 // dwXSize
+    EXPECT_EQ(ql.mem().read_ptr(kScratch + 44, 4), 100u);                 // dwYSize
+    EXPECT_EQ(ql.mem().read_ptr(kScratch + 48, 4), 132u);                 // dwXCountChars
+    EXPECT_EQ(ql.mem().read_ptr(kScratch + 52, 4), 128u);                 // dwYCountChars
+    EXPECT_EQ(ql.mem().read_ptr(kScratch + 56, 4), 0xffu);                // dwFillAttribute
+    EXPECT_EQ(ql.mem().read_ptr(kScratch + 60, 4), 0x40u);                // dwFlags
+    EXPECT_EQ(ql.mem().read_ptr(kScratch + 64, 2), 1u);                   // wShowWindow
+    EXPECT_EQ(ql.mem().read_ptr(kScratch + 80, 4), 0xfffffff6u);          // hStdInput
+    EXPECT_EQ(ql.mem().read_ptr(kScratch + 88, 4), 0xfffffff5u);          // hStdOutput
+    EXPECT_EQ(ql.mem().read_ptr(kScratch + 96, 4), 0xfffffff4u);          // hStdError
+
+    // the W sibling shares the body (the registration coverage)
+    EXPECT_NE(ApiRegistry::instance().find("GetStartupInfoW"), nullptr);
+}
+
+TEST(WinApiProcessthreads, CreateThreadSuspendedPreparesContext) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+#ifdef CREATE_SUSPENDED
+#undef CREATE_SUSPENDED
+#endif
+    constexpr std::uint32_t CREATE_SUSPENDED = 0x00000004;
+    constexpr std::uint64_t kStart = 0x140003000ull;
+    constexpr std::uint64_t kParam = 0x12345678ull;
+
+    const auto* ct = ApiRegistry::instance().find("CreateThread");
+    ASSERT_NE(ct, nullptr);
+    const auto r = ct->handler(ql, 0, ResolvedParams{
+        {"lpThreadAttributes", std::uint64_t{0}},
+        {"dwStackSize", std::uint64_t{0x10000}},
+        {"lpStartAddress", kStart},
+        {"lpParameter", kParam},
+        {"dwCreationFlags", CREATE_SUSPENDED},
+        {"lpThreadId", std::uint64_t{0}},
+    });
+    ASSERT_TRUE(r.has_value());
+    EXPECT_NE(*r, 0u);
+
+    // the thread handle resolves to a READY-status thread whose saved context
+    // rides the start address and the RCX parameter
+    auto& os = ql.os<QlOsWindows>();
+    auto* handle = os.handle_manager().get(*r);
+    ASSERT_NE(handle, nullptr);
+    auto* thread = static_cast<QlWindowsThread*>(handle->obj);
+    ASSERT_NE(thread, nullptr);
+    EXPECT_EQ(thread->status(), ThreadStatus::Ready);
+    const auto& saved = thread->saved_context();
+    const auto rip = saved.find("rip");
+    const auto rcx = saved.find("rcx");
+    ASSERT_NE(rip, saved.end());
+    ASSERT_NE(rcx, saved.end());
+    EXPECT_EQ(rip->second, kStart);
+    EXPECT_EQ(rcx->second, kParam);
+}
+
+TEST(WinApiProcessthreads, IsProcessorFeaturePresentXsaveExcluded) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    const auto* pf = ApiRegistry::instance().find("IsProcessorFeaturePresent");
+    ASSERT_NE(pf, nullptr);
+
+    const auto r_xsave = pf->handler(ql, 0, ResolvedParams{{"ProcessorFeature", std::uint64_t{0x17}}});
+    ASSERT_TRUE(r_xsave.has_value());
+    EXPECT_EQ(*r_xsave, 0u);  // the PF_XSAVE_ENABLED verbatim 0
+
+    const auto r_other = pf->handler(ql, 0, ResolvedParams{{"ProcessorFeature", std::uint64_t{1}}});
+    ASSERT_TRUE(r_other.has_value());
+    EXPECT_EQ(*r_other, 1u);
+}
+
+TEST(WinApiProcessthreads, OpenProcessTokenWritesHandle) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    const auto* tok = ApiRegistry::instance().find("OpenProcessToken");
+    ASSERT_NE(tok, nullptr);
+    const auto r = tok->handler(ql, 0, ResolvedParams{
+        {"ProcessHandle", 0xffffffffffffffffull},
+        {"DesiredAccess", std::uint64_t{0}},
+        {"TokenHandle", kCells},
+    });
+    ASSERT_TRUE(r.has_value());
+    EXPECT_EQ(*r, 1u);
+
+    // the token handle landed at the caller's PHANDLE cell
+    const auto written = ql.mem().read_ptr(kCells, 8);
+    EXPECT_NE(written, 0u);
+}
+
+TEST(WinApiProcessthreads, OpenThreadTokenWritesHandle) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    const auto* tok = ApiRegistry::instance().find("OpenThreadToken");
+    ASSERT_NE(tok, nullptr);
+    const auto r = tok->handler(ql, 0, ResolvedParams{
+        {"ThreadHandle", 0xffffffffffffffffull},
+        {"DesiredAccess", std::uint64_t{0}},
+        {"OpenAsSelf", std::uint64_t{0}},
+        {"TokenHandle", kCells},
+    });
+    ASSERT_TRUE(r.has_value());
+    EXPECT_EQ(*r, 1u);
+    EXPECT_NE(ql.mem().read_ptr(kCells, 8), 0u);
+}
+
+TEST(WinApiProcessthreads, OpenProcessGuardsCsrssAndZero) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    const auto* op = ApiRegistry::instance().find("OpenProcess");
+    ASSERT_NE(op, nullptr);
+
+    // the pid 0: the ERROR_INVALID_PARAMETER shape
+    auto r0 = op->handler(ql, 0, ResolvedParams{
+        {"dwDesiredAccess", std::uint64_t{0}},
+        {"bInheritHandle", std::uint64_t{0}},
+        {"dwProcessId", std::uint64_t{0}},
+    });
+    ASSERT_TRUE(r0.has_value());
+    EXPECT_EQ(*r0, 0u);
+    EXPECT_EQ(ql.os<QlOsWindows>().last_error(), 0x57u);
+
+    // the csrss.exe pid (the profile: 1239): the ERROR_ACCESS_DENIED shape
+    ql.os<QlOsWindows>().set_last_error(0);
+    auto rc = op->handler(ql, 0, ResolvedParams{
+        {"dwDesiredAccess", std::uint64_t{0}},
+        {"bInheritHandle", std::uint64_t{0}},
+        {"dwProcessId", std::uint64_t{1239}},
+    });
+    ASSERT_TRUE(rc.has_value());
+    EXPECT_EQ(*rc, 0u);
+    EXPECT_EQ(ql.os<QlOsWindows>().last_error(), 0x5u);
+
+    // any other pid answers the fixed 0xD10C
+    auto ro = op->handler(ql, 0, ResolvedParams{
+        {"dwDesiredAccess", std::uint64_t{0}},
+        {"bInheritHandle", std::uint64_t{0}},
+        {"dwProcessId", std::uint64_t{4242}},
+    });
+    ASSERT_TRUE(ro.has_value());
+    EXPECT_EQ(*ro, 0xD10Cu);
+}
+
+TEST(WinApiProcessthreads, PassThroughBodiesReturnOne) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    // GetThreadContext / GetThreadTimes: the verbatim 1 bodies
+    const auto* ctx = ApiRegistry::instance().find("GetThreadContext");
+    ASSERT_NE(ctx, nullptr);
+    const auto r_ctx = ctx->handler(ql, 0, ResolvedParams{{"hThread", 0xffffffffffffffffull}, {"lpContext", kCells}});
+    ASSERT_TRUE(r_ctx.has_value());
+    EXPECT_EQ(*r_ctx, 1u);
+
+    const auto* times = ApiRegistry::instance().find("GetThreadTimes");
+    ASSERT_NE(times, nullptr);
+    const auto r_times = times->handler(ql, 0, ResolvedParams{
+        {"hThread", 0xffffffffffffffffull},
+        {"lpCreationTime", std::uint64_t{0}},
+        {"lpExitTime", std::uint64_t{0}},
+        {"lpKernelTime", std::uint64_t{0}},
+        {"lpUserTime", std::uint64_t{0}},
+    });
+    ASSERT_TRUE(r_times.has_value());
+    EXPECT_EQ(*r_times, 1u);
+
+    // ExitThread: the verbatim pass body (the no-op, the no-crash)
+    const auto* exit_thread = ApiRegistry::instance().find("ExitThread");
+    ASSERT_NE(exit_thread, nullptr);
+    const auto r_exit = exit_thread->handler(ql, 0, ResolvedParams{{"dwExitCode", std::uint64_t{0}}});
+    EXPECT_FALSE(r_exit.has_value());
+}
+
+TEST(WinApiProcessthreads, ExitProcessAndTerminateProcessStopEmulation) {
+    register_dlls();
+
+    // ExitProcess: the emu_stop body
+    {
+        Qiling ql(win_test_options());
+        const auto* exit_ = ApiRegistry::instance().find("ExitProcess");
+        ASSERT_NE(exit_, nullptr);
+        const auto r = exit_->handler(ql, 0, ResolvedParams{{"uExitCode", std::uint64_t{0}}});
+        EXPECT_FALSE(r.has_value());
+        EXPECT_EQ(ql.emu_state(), QL_STATE::STOPPED);
+    }
+
+    // TerminateProcess over the self pid: the emu_stop body
+    {
+        Qiling ql(win_test_options());
+        const auto* term = ApiRegistry::instance().find("TerminateProcess");
+        ASSERT_NE(term, nullptr);
+        const auto r = term->handler(ql, 0, ResolvedParams{
+            {"hProcess", std::uint64_t{1996}},
+            {"uExitCode", std::uint64_t{0}},
+        });
+        ASSERT_TRUE(r.has_value());
+        EXPECT_EQ(*r, 1u);
+        EXPECT_EQ(ql.emu_state(), QL_STATE::STOPPED);
+    }
+
+    // TerminateProcess over a foreign pid: the plain 1 (no stop)
+    {
+        Qiling ql(win_test_options());
+        const auto* term = ApiRegistry::instance().find("TerminateProcess");
+        const auto r = term->handler(ql, 0, ResolvedParams{
+            {"hProcess", std::uint64_t{4242}},
+            {"uExitCode", std::uint64_t{0}},
+        });
+        ASSERT_TRUE(r.has_value());
+        EXPECT_EQ(*r, 1u);
+    }
 }

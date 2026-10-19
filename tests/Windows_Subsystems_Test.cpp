@@ -90,12 +90,15 @@ TEST(WindowsThread, SchedulingSkipsTerminatedCandidates) {
     // scheduler finds no candidate and stays on the current thread
     // (a live two-thread rotation needs the emulation-backed suspend/resume,
     // exercised through the fiber slice)
+    //
+    // the upstream scan rides (cur_thread.id + i) % len(threads): the parity
+    // of the main thread's static id decides whether the candidate lands on
+    // the worker or on the main thread itself; pin the sequence deterministically
+    QlWindowsThread::reset_id_sequence();
     QlWindowsThread main_t(nullptr, ThreadStatus::Running);
     QlWindowsThread worker(nullptr, ThreadStatus::Terminated);
-
     QlWindowsThreadManagement mgr(nullptr, &main_t);
     mgr.append(&worker);
-
     for (std::uint64_t i = 0; i < QlWindowsThreadManagement::TIME_SLICE; ++i) {
         EXPECT_FALSE(mgr.do_schedule());
         EXPECT_EQ(mgr.cur_thread(), &main_t);

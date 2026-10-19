@@ -11,6 +11,14 @@ namespace qiling {
 namespace os {
 namespace windows {
 
+QlOsWindows::~QlOsWindows() {
+    // release the hook handles explicitly while the uc engine is alive: the
+    // ~Qiling clears the arch utils before the os members destruct, so the
+    // HookRet destructors here must not touch uc
+    if (thread_manager_ != nullptr) thread_manager_->release_hooks();
+    if (hook_handle_.has_value()) hook_handle_->remove();
+}
+
 QlOsWindows::QlOsWindows(Qiling* ql) : QlOs(ql) {
     init_paths_if_managed();
 
@@ -57,6 +65,16 @@ QlOsWindows::QlOsWindows(Qiling* ql) : QlOs(ql) {
     if (auto* h = mgr.get(QL_STD_INPUT_HANDLE)) h->obj = &stdin_stream();
     if (auto* h = mgr.get(QL_STD_OUTPUT_HANDLE)) h->obj = &stdout_stream();
     if (auto* h = mgr.get(QL_STD_ERROR_HANDLE)) h->obj = &stderr_stream();
+
+    // the main-thread handle (windows.py __setup_components verbatim: the
+    // Handle(obj=main_thread) after the thread manager comes up; the ensure
+    // may run before this point so it skips the append when the manager is
+    // not there yet)
+    if (thread_manager_ != nullptr && !main_thread_handle_appended_) {
+        Handle main_thread_handle(std::nullopt, thread_manager_->cur_thread());
+        handle_manager_->append(main_thread_handle);
+        main_thread_handle_appended_ = true;
+    }
 }
 
 // the deferred profile reads (the heap + the path identities): runs from
@@ -80,6 +98,33 @@ void QlOsWindows::ensure_profile_state() {
     winsys_ = windir_ + "\\System32";
     userprofile_ = std::string(sysdrv) + "\\Users\\" + std::string(username);
     username_ = username;
+
+    // windows.py __init__: self.pid = self.profile.getint('KERNEL', 'pid')
+    pid_ = static_cast<std::uint32_t>(profile().get_int("KERNEL", "pid"));
+
+    // windows.py __setup_components: the main thread + the thread manager +
+    // the main-thread handle. install_hook defers to load(): the uc engine is
+    // not wired until the QlCoreHooks init completes after the os
+    // construction, and a hook_code registration at ctor time dereferences it
+    auto main_thread = std::make_unique<QlWindowsThread>(ql_);
+    auto mgr = std::make_unique<QlWindowsThreadManagement>(ql_, main_thread.get());
+    mgr->append(std::move(main_thread));
+    thread_manager_ = std::move(mgr);
+
+    // more handle manager: the main-thread handle (windows.py verbatim:
+    // Handle(obj=main_thread)). The ensure runs from the ctor head where the
+    // handle manager does not exist yet; the ctor-side tail appends it right
+    // after the manager comes up
+    if (handle_manager_ != nullptr && !main_thread_handle_appended_) {
+        Handle main_thread_handle(std::nullopt, thread_manager_->cur_thread());
+        handle_manager_->append(main_thread_handle);
+        main_thread_handle_appended_ = true;
+    }
+}
+
+std::uint64_t QlOsWindows::thread_manager_ret_addr() const noexcept {
+    // windows.py: os.thread_manager.thread_ret_addr (0 before the setup)
+    return thread_manager_ == nullptr ? thread_ret_addr_ : thread_manager_->thread_ret_addr();
 }
 
 std::string_view QlOsWindows::os_section_name() const {
@@ -98,6 +143,14 @@ QlFunctionCall& QlOsWindows::fcall_select(WinCc cc) {
 void QlOsWindows::load() {
     // windows.py load: the GDT/segments (FS/GS regions) + the api dispatch hook
     ensure_profile_state();
+
+    // the thread scheduler hook (windows.py __setup_components: the
+    // QlWindowsThreadManagement ctor hooks the code stream; the port defers
+    // the registration here where the uc engine is wired)
+    if (thread_manager_ != nullptr) {
+        thread_manager_->install_hook();
+        thread_ret_addr_ = thread_manager_->thread_ret_addr();
+    }
 
     auto& arch = ql().arch();
     auto& mem = ql().mem();

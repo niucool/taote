@@ -8,14 +8,21 @@ namespace os {
 namespace windows {
 
 namespace {
+std::uint64_t id_counter_ = 0;
 std::uint64_t next_thread_id() {
-    static std::uint64_t counter = 0;
-    return counter++;
+    return id_counter_++;
 }
 }  // namespace
 
 QlWindowsThread::QlWindowsThread(Qiling* ql, ThreadStatus status)
     : QlThread(ql), id_(next_thread_id()), status_(status) {}
+
+void QlWindowsThread::reset_id_sequence() {
+    // thread.py: QlWindowsThread.ID = 0 (the module-load state; the test
+    // determinism helper: the C++ static persists across the tests, the
+    // python module reload implicitly resets it)
+    id_counter_ = 0;
+}
 
 std::unique_ptr<QlWindowsThread> QlWindowsThread::create(Qiling* ql, std::uint64_t stack_size,
                                                          std::uint64_t func_addr, std::uint64_t func_params,
@@ -89,6 +96,15 @@ QlWindowsThreadManagement::QlWindowsThreadManagement(Qiling* ql, QlWindowsThread
 }
 
 void QlWindowsThreadManagement::install_hook() {
+    // thread.py __init__: self.thread_ret_addr = os.heap.alloc(8) rides the
+    // ctor; the port defers the alloc here so the pure-logic tests can build
+    // the manager without an engine (the install_hook runs from the os setup
+    // where the heap is live)
+    if (thread_ret_addr_ == 0 && ql_ != nullptr) {
+        auto* os = static_cast<os::windows::QlOsWindows*>(&ql_->os());
+        thread_ret_addr_ = os->heap().alloc(8);
+    }
+
     // thread.py: write the nop sled at the thread return address and hook the
     // code stream with the scheduler
     if (thread_ret_addr_ != 0) {
@@ -116,6 +132,18 @@ int QlWindowsThreadManagement::on_hook(std::uint64_t address, std::uint32_t size
     // thread.py: when another thread resumed, skip the remaining hooks of the
     // current address to avoid running them with the new context
     return switched ? static_cast<int>(QL_HOOK_BLOCK) : 0;
+}
+
+void QlWindowsThreadManagement::release_hooks() {
+    // the teardown helper: the ~Qiling clears the arch's uc handle before the
+    // os members destruct, so the scheduler hook releases explicitly while
+    // the engine is still alive
+    if (scheduler_hook_.has_value()) scheduler_hook_->remove();
+}
+
+void QlWindowsThreadManagement::append(std::unique_ptr<QlWindowsThread> thread) {
+    owned_.push_back(std::move(thread));
+    threads_.push_back(owned_.back().get());
 }
 
 bool QlWindowsThreadManagement::do_schedule() {

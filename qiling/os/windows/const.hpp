@@ -1005,6 +1005,10 @@ inline constexpr std::uint32_t FILE_TYPE_UNKNOWN = 0x0;
 #ifndef PF_XSAVE_ENABLED
 inline constexpr std::uint32_t PF_XSAVE_ENABLED = 0x17;
 #endif
+// the upstream const.py pins PF_XSAVE_ENABLED = 0x17 (23); the winnt.h macro
+// preempts the name with the decimal 17 on _WIN32, so the IsProcessorFeature
+//Present handler pins the upstream value explicitly under a different name
+inline constexpr std::uint32_t KAPI_PF_XSAVE_ENABLED_UPSTREAM = 0x17;
 #ifndef ProcessBasicInformation
 inline constexpr std::uint32_t ProcessBasicInformation = 0u;
 #endif
