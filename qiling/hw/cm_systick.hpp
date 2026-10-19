@@ -7,9 +7,12 @@
 // subclass bodies land as read_body/write_body overrides (the base read/
 // write run the ENTER/CALL/EXIT walk around them, the CALL intercept
 // replacing the body — the decorator's if/else verbatim).
+//
+// The implementation bodies ride timer.cpp (the TICKINT branch needs the
+// hw manager's full type, which cannot be included from the header without
+// the hw.hpp <-> peripheral.hpp cycle).
 #pragma once
 
-#include "qiling/hw/cm_nvic.hpp"
 #include "qiling/hw/peripheral.hpp"
 #include "qiling/exception.hpp"
 
@@ -33,8 +36,8 @@ public:
     QlTimerPeripheral(Qiling& ql, std::string label, std::size_t image_size)
         : QlPeripheral(ql, std::move(label), image_size) {}
 
-    void set_ratio(std::uint64_t ratio) { ratio_ = ratio; }
-    std::uint64_t ratio() const noexcept { return ratio_; }
+    virtual void set_ratio(std::uint64_t ratio) { ratio_ = ratio; }
+    virtual std::uint64_t ratio() const noexcept { return ratio_; }
 
     // timer.py save: (ratio, bytes(instance)) — the pair rides the vector
     // header (the first 8 bytes carry the ratio)
@@ -69,35 +72,8 @@ public:
     }
 
     // cm_systick.py step: the downcount walk (the COUNTFLAG set + the LOAD
-    // reload at zero; the TICKINT branch rides the NVIC slice — the hw
-    // manager carries no nvic yet, the branch is documented + deferred)
-    void step() override {
-        const auto ctrl = static_cast<std::uint32_t>(raw_read(0, 4));
-        if (!(ctrl & systick_ctrl::ENABLE)) {
-            return;
-        }
-
-        const auto val = static_cast<std::int64_t>(raw_read(8, 4));
-        if (val <= 0) {
-            const auto c = static_cast<std::uint32_t>(raw_read(0, 4));
-            raw_write(0, 4, c | systick_ctrl::COUNTFLAG);
-            raw_write(8, 4, raw_read(4, 4));  // VAL = LOAD
-        } else {
-            const auto next = static_cast<std::uint64_t>(val - ratio_);
-            raw_write(8, 4, next);
-
-            if (static_cast<std::int64_t>(next) <= 0) {
-                // cm_systick.py: the TICKINT branch — the pending rides the
-                // nvic entity (the negative IRQn delegates to the SCB inside)
-                if ((static_cast<std::uint32_t>(raw_read(0, 4)) & systick_ctrl::TICKINT) != 0) {
-                    auto* nvic = ql().hw() != nullptr ? ql().hw()->peripheral("nvic") : nullptr;
-                    if (nvic != nullptr) {
-                        dynamic_cast<CortexMNvic&>(*nvic).set_pending(static_cast<int>(IRQ::SYSTICK));
-                    }
-                }
-            }
-        }
-    }
+    // reload at zero; the TICKINT branch pends the nvic)
+    void step() override;
 
     // cm_systick.py read (the @monitor() body): the CTRL read clears the
     // COUNTFLAG

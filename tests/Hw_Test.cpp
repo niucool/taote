@@ -14,7 +14,9 @@
 #include "qiling/hw/hw.hpp"
 #include "qiling/hw/peripheral.hpp"
 #include "qiling/hw/cm_systick.hpp"
+#include "qiling/hw/cm_nvic.hpp"
 #include "qiling/hw/cm_scb.hpp"
+#include "qiling/hw/stm32f4xx_tim.hpp"
 #include "qiling/hw/stm32f1xx_gpio.hpp"
 #include "qiling/hw/stm32f4xx_usart.hpp"
 #include "qiling/exception.hpp"
@@ -470,4 +472,60 @@ TEST(HwManager, Stm32f1xxUsartTubesRideDrAndInterruptCheck) {
     const auto byte = usart->read(usart->kDrOffset, 4);
     EXPECT_EQ(byte, 0x62);
     EXPECT_EQ(usart->raw_read(usart->kSrOffset, 4) & qiling::hw::usart::sr::RXNE, 0u);
+}
+
+// The Tim family: the ARR/CNT walk under the CEN gate with the prescaler
+// division; the ARR match rides the update interrupt (the DIER.UIE + the
+// SR.UIF + the nvic pending with the up_intn).
+TEST(HwManager, Stm32f1xxTimStepWalkPendsUpdateInterrupt) {
+    const auto hex_path = write_ihex_fixture();
+
+    QilingOptions options;
+    options.argv = {hex_path};
+    options.rootfs = ensure_hw_rootfs().string();
+    options.ostype = QL_OS::MCU;
+    options.archtype = QL_ARCH::CORTEX_M;
+    options.env = {
+        {"FLASH", "memory;0x0;0x2000"},
+        {"SRAM", "memory;0x20000000;0x1000"},
+        {"PPB", "mmio;0xE000E000;0x1000"},
+        {"SYSTICK", "core;cm3_systick;0xE000E010"},
+        {"NVIC", "core;cm_nvic;0xE000E100"},
+        {"SCB", "core;cm4_scb;0xE000ED00"},
+        {"TIM2", "core;STM32F1xxTim;0x40000000;intn=28;up_intn=28"},
+        {"PERIP", "mmio;0x40000000;0x100000"},
+    };
+    Qiling ql(options);
+
+    auto* tim2 = static_cast<qiling::hw::STM32F4xxTim*>(ql.hw()->peripheral("tim2"));
+    auto* nvic = static_cast<qiling::hw::CortexMNvic*>(ql.hw()->peripheral("nvic"));
+    ASSERT_NE(tim2, nullptr);
+    ASSERT_NE(nvic, nullptr);
+    nvic->enable(28);
+
+    // the ARR=3 + the CEN + the UIE: the count rides the prescaler walk
+    tim2->write(tim2->kArrOffset, 4, 3);
+    tim2->write(tim2->kDierOffset, 4, qiling::hw::tim::dier::UIE);
+    tim2->write(tim2->kCr1Offset, 4, qiling::hw::tim::cr1::CEN);
+    tim2->write(tim2->kCr1Offset, 4, qiling::hw::tim::cr1::CEN);
+    tim2->write(tim2->kDierOffset, 4, qiling::hw::tim::dier::UIE);
+
+    const auto before = nvic->pending_interrupts().size();
+
+    tim2->step();  // the CNT 0 -> 1 (the prescale pass)
+    EXPECT_EQ(tim2->raw_read(tim2->kCntOffset, 4), 1u);
+    tim2->step();
+    tim2->step();  // the CNT reaches the ARR
+    tim2->step();  // the ARR match: the CNT reset + the UIF + the nvic pending
+
+    EXPECT_EQ(tim2->raw_read(tim2->kCntOffset, 4), 0u);
+    EXPECT_NE(tim2->raw_read(tim2->kSrOffset, 4) & qiling::hw::tim::sr::UIF, 0u);
+    ASSERT_GT(nvic->pending_interrupts().size(), before);
+    EXPECT_EQ(nvic->pending_interrupts().back(), 28);
+
+    // the ratio rides the prescaler division: the PSC=1 halves the count rate
+    tim2->write(tim2->kPscOffset, 4, 1);
+    tim2->write(tim2->kCntOffset, 4, 0);
+    tim2->step();
+    EXPECT_EQ(tim2->raw_read(tim2->kCntOffset, 4), 0u);  // the prescale holds the CNT
 }

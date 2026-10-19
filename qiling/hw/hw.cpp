@@ -4,6 +4,7 @@
 #include "qiling/hw/cm_systick.hpp"
 #include "qiling/hw/stm32f1xx_gpio.hpp"
 #include "qiling/hw/stm32f4xx_usart.hpp"
+#include "qiling/hw/stm32f4xx_tim.hpp"
 
 #include <algorithm>
 #include <map>
@@ -37,6 +38,22 @@ QlHwManager::QlHwManager(Qiling& ql) : ql_(&ql) {
             intn = static_cast<std::int64_t>(it->second);
         }
         return std::make_unique<STM32F1xxUsart>(q, label, intn);
+    });
+    register_struct("STM32F4xxTim", [](Qiling& q, const std::string& label, const PeripheralKwargs& kwargs) {
+        auto intn_of = [&kwargs](const char* key) {
+            const auto it = kwargs.find(key);
+            return it == kwargs.end() ? -1 : static_cast<std::int64_t>(it->second);
+        };
+        return std::make_unique<STM32F4xxTim>(q, label, intn_of("intn"), intn_of("brk_intn"),
+                                              intn_of("cc_intn"), intn_of("trg_com_intn"), intn_of("up_intn"));
+    });
+    register_struct("STM32F1xxTim", [](Qiling& q, const std::string& label, const PeripheralKwargs& kwargs) {
+        auto intn_of = [&kwargs](const char* key) {
+            const auto it = kwargs.find(key);
+            return it == kwargs.end() ? -1 : static_cast<std::int64_t>(it->second);
+        };
+        return std::make_unique<STM32F1xxTim>(q, label, intn_of("intn"), intn_of("brk_intn"),
+                                              intn_of("cc_intn"), intn_of("trg_com_intn"), intn_of("up_intn"));
     });
 }
 

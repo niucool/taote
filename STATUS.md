@@ -1161,6 +1161,21 @@ store targeting 0x40004C04 was the hand-arithmetic error (the DR = the base +
 4); the nvic's set_pending only queues the enabled interrupts (the ISER bit
 must ride the enable walk first — the firmware's NVIC_EnableIRQ shape).
 
+### Phase 13.6 — the board-profile slice 3: the Tim family (the STM32F4xxTim/F1xx + the const tables)
+
+| piece | upstream | state | notes |
+|---|---|---|---|
+| STM32F4xxTim | `hw/timer/stm32f4xx_tim.py` | ✅ | the 21-register image (CR1..OR), the ctor's derived-interrupt chain (the absent brk/cc/trg_com/up slots ride intn), the set_ratio override (the CNT + the prescale counter reset), the ratio/prescale overrides (the PSC division with the rounding), the send_update_interrupt (the DIER.UIE + the SR.UIF + the nvic pending), the step walk (the CEN gate, the ARR match resetting the CNT, the prescale division) |
+| STM32F1xxTim | `hw/timer/stm32f1xx_tim.py` | ✅ | the verbatim pass-through |
+| the const tables | `hw/const/stm32f4xx_tim.py` | ✅ | the TIM_CR1/CR2/SMCR/DIER/SR/EGR bit tables verbatim |
+| the fixture | `tests/Hw_Test.cpp` | ✅ | the CORTEX_M env walk creating the TIM2 (the intn=28 + the up_intn kwarg) — the ARR/CEN/UIE walk pends the nvic at the ARR match, the PSC=1 prescale holds the CNT |
+
+Findings: the QlTimerPeripheral's set_ratio/ratio became virtual for the Tim
+override (the base's ratio_ member rides the derived ctor chain); the cm_systick
+implementation moved to timer.cpp — the header cannot include hw/hw.hpp without
+the peripheral.hpp <-> hw.hpp cycle (the TICKINT branch's nvic lookup needs the
+full manager type).
+
 ### Phase 12 sub-slice 3 — socketpair + the send/recv family
 
 | piece | upstream | state | notes |
