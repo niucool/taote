@@ -1491,6 +1491,8 @@ ntoskrnl/wudplatform defer with the driver path).
 | the consoleapi findings | — | ✅ | the mode body never writes the mode cell (the upstream quirk — the sentinel fixture pins it, the same no-write class as the GetVersionEx/profileapi bodies) |
 | kernel32/wow64apiset | `dlls/kernel32/wow64apiset.py` (1) | ✅ | IsWow64Process (the x64 host raises the verbatim QlErrorNotImplemented; the 32-bit mode writes the FALSE byte + the 1) |
 | the wow64apiset findings | — | ✅ | the handler only ever runs on the 32-bit hosts (the x8664 fixture pins the raise); the true-byte spelling stays commented in the upstream (the port keeps the comment) |
+| kernel32/debugapi | `dlls/kernel32/debugapi.py` (4) + ioapiset | `dlls/kernel32/ioapiset.py` (1) | ✅ | the debug family: IsDebuggerPresent (the PEB.BeingDebugged read), CheckRemoteDebuggerPresent (the pack8 write + the 1), the OutputDebugStringA/W pair (the log-info pass); the io family: DeviceIoControl (the TODO verbatim 1) |
+| the debugapi/ioapiset findings | — | ✅ | (1) the PEB.BeingDebugged read rides a loader placeholder accessor (the default 0) — the real PEB byte wires with the TEB/PEB/LDR stack slice; (2) the DeviceIoControl body rides the TODO verbatim 1 (the control codes were never found upstream) |
 | the dlls aggregation | `dlls/__init__.py` | ✅ | dlls.hpp/.cpp: the register_dlls() re-seedable surface (the test isolation) + the per-family static-init |
 | the fixtures | tests/Windows_Api_Test.cpp | ✅ | the handleapi coverage/shapes + the get_param/api_get_int paths |
 
