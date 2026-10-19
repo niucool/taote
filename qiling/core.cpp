@@ -6,7 +6,6 @@
 #include "qiling/host.hpp"
 #include "qiling/log.hpp"
 #include "qiling/loader/blob.hpp"
-#include "qiling/hw/hw.hpp"
 #include "qiling/os/memory.hpp"
 #include "qiling/os/os.hpp"
 #include "qiling/profiles/inireader.hpp"
@@ -120,10 +119,9 @@ Qiling::Qiling(const QilingOptions& options) {
     // order: arch is constructed before mem, and stack_push uses ql.mem)
     arch().attach_memory(*mem_);
 
-    if (baremetal()) {
-        // core.py: `if self.baremetal: self._hw = select_component('hw', 'hw')(self)`
-        hw_ = std::make_unique<hw::QlHwManager>(*this);
-    }
+    // core.py: `if self.baremetal: self._hw = select_component('hw', 'hw')(self)`
+    // — the hw subsystem moved to the hw-backup branch with the rest of the
+    // baremetal surface; the MCU os/loader no longer construct on the trunk
 
     // run the loader
     loader().run();

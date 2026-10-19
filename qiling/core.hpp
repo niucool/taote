@@ -31,8 +31,6 @@ namespace qiling {
 
 class QlArch;
 class QlOs;
-namespace hw { class QlHwManager; }
-using QlHwManager = hw::QlHwManager;
 class UcContext;
 namespace loader { class QlLoader; }
 namespace os { class QlOsBlob; }
@@ -105,9 +103,7 @@ public:
     OsType& os() const { return static_cast<OsType&>(*os_); }
     loader::QlLoader& loader() const noexcept { return *loader_; }
 
-    // hw is created for baremetal emulations only (core.py `if self.baremetal`)
-    hw::QlHwManager* hw() const noexcept { return hw_.get(); }
-    bool baremetal() const noexcept;
+    bool baremetal() const noexcept;  // the MCU os is retired to the hw-backup branch
 
     // the active profile (core.py profile property)
     IniConfig& profile() const noexcept { return *profile_; }
@@ -211,7 +207,6 @@ public:
     std::unique_ptr<QlMemoryManager> mem_;
     std::unique_ptr<QlOs> os_;
     std::unique_ptr<loader::QlLoader> loader_;
-    std::unique_ptr<hw::QlHwManager> hw_;  // the baremetal half (OQ 9)
 
     IniConfig profile_default_;
     IniConfig* profile_ = nullptr;

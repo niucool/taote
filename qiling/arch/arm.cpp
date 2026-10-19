@@ -1,7 +1,6 @@
 #include "qiling/arch/arm.hpp"
 
-#include "qiling/hw/cm_nvic.hpp"
-#include "qiling/hw/hw.hpp"
+#include "qiling/core.hpp"
 #include "qiling/os/memory.hpp"
 
 #include <map>
@@ -304,11 +303,10 @@ void QlArchCORTEX_M::unicorn_exception_handler(int intno) {
     }
 
     if (it->second != IRQ::NOTHING) {
-        auto* p = ql_->hw() != nullptr ? ql_->hw()->peripheral("nvic") : nullptr;
-        if (p == nullptr) {
-            throw QlErrorBase("the cortex-m exception forwarding requires the nvic peripheral");
-        }
-        dynamic_cast<hw::CortexMNvic&>(*p).set_pending(static_cast<int>(it->second));
+        // the nvic forwarding rode the hw subsystem (retired to the hw-backup
+        // branch); the cortex-m baremetal composition no longer constructs on
+        // the trunk, so the forward path is unreachable and degrades here
+        throw QlErrorNotImplemented("the cortex-m exception forwarding requires the retired hw subsystem (hw-backup branch)");
     }
 }
 
@@ -318,46 +316,9 @@ void QlArchCORTEX_M::interrupt_handler(int intno) {
     }
 
     // cortex_m.py interrupt_handler: the priority/mask gates ride the nvic
-    // entity (the upstream reads ql.hw.nvic.get_priority(intno))
-    auto* nvic_ptr = ql_->hw() != nullptr ? ql_->hw()->peripheral("nvic") : nullptr;
-    if (nvic_ptr == nullptr) {
-        throw QlErrorBase("the cortex-m interrupt handler requires the nvic peripheral");
-    }
-    auto& nvic = dynamic_cast<hw::CortexMNvic&>(*nvic_ptr);
-
-    const auto basepri = regs().read("basepri") & 0xf0;
-    if (basepri != 0 && basepri <= nvic.get_priority(intno)) {
-        return;
-    }
-
-    if (intno > static_cast<int>(IRQ::HARD_FAULT) && (regs().read("primask") & 0x1)) {
-        return;
-    }
-
-    if (intno != static_cast<int>(IRQ::NMI) && (regs().read("faultmask") & 0x1)) {
-        return;
-    }
-
-    QlInterruptContext ctx(*this, ql_);
-    ctx.enter();
-
-    const auto isr = static_cast<std::uint64_t>(intno + 16);
-    const auto offset = isr * 4;
-
-    const auto entry = mem_->read_ptr(offset, 4);
-    const auto exc_return = using_psp() ? 0xFFFFFFFDull : 0xFFFFFFF9ull;
-
-    regs().write("ipsr", isr);
-    regs().write("pc", entry);
-    regs().write("lr", exc_return);
-
-    // cortex_m.py: the raw uc.emu_start (the nested-slice walk — the os run
-    // loop has returned when the nvic step drives this)
-    uc_engine& u = uc();
-    const uc_err err = uc_emu_start(&u, effective_pc(), 0, 0, 0xffffff);
-    if (err != UC_ERR_OK) {
-        throw QlErrorBase(std::string("interrupt handler emulation error: ") + uc_strerror(err));
-    }
+    // entity (the upstream reads ql.hw.nvic.get_priority(intno)) — the hw
+    // subsystem retired to the hw-backup branch; the path degrades here
+    throw QlErrorNotImplemented("the cortex-m interrupt handler requires the retired hw subsystem (hw-backup branch)");
 }
 
 }  // namespace qiling

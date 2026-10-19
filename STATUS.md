@@ -5,6 +5,15 @@ Legend (PORT_PLAN.md §13): **Ported** — exists and matches the Python source 
 **C++-only** — no Python counterpart (infrastructure) · **Deferred** — parked
 with its subsystem (resumes per PORT_PLAN.md §10 / OQ 9).
 
+**Scope note (post-Phase-13)**: the consumer surface is Windows PE + Linux ELF
+(+ the Mach-O read path). The `qiling/hw/` baremetal subsystem (the MCU
+device models: the STM32/SAM3XA/MK64F12/GD32VF1xx peripherals, the Cortex-M
+nvic/scb/systick, the MCU os/loader) is **retired from the trunk** and lives
+on the `hw-backup` branch (the last full state incl. the green Hw_Test
+fixtures). The select_os/select_loader MCU branches, the core hw_ manager and
+the cortex-m nvic forwarding degrade to QlErrorNotImplemented on the trunk;
+the QL_OS::MCU enum stays for the value-space parity.
+
 Rows are appended as phases land; the full future inventory is the tree in
 `MIRROR_LAYOUT_REORGANIZATION.md`.
 

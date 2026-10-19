@@ -15,10 +15,8 @@
 #include "qiling/os/qnx/qnx.hpp"
 #include "qiling/os/dos/dos.hpp"
 #include "qiling/loader/dos.hpp"
-#include "qiling/os/mcu.hpp"
 #include "qiling/os/uefi/uefi.hpp"
 #include "qiling/loader/pe_uefi.hpp"
-#include "qiling/loader/mcu.hpp"
 #include "qiling/arch/arm.hpp"
 #include "qiling/arch/arm64.hpp"
 #include "qiling/arch/mips.hpp"
@@ -293,10 +291,7 @@ LoaderFactory select_loader(QL_OS ostype, bool libcache) {
             return [](Qiling* ql) -> std::unique_ptr<loader::QlLoader> {
                 return std::make_unique<loader::QlLoaderPE_UEFI>(ql);
             };
-        case QL_OS::MCU:
-            return [](Qiling* ql) -> std::unique_ptr<loader::QlLoader> {
-                return std::make_unique<loader::QlLoaderMCU>(ql);
-            };
+        // the MCU loader retired to the hw-backup branch with the hw subsystem
         default:
             // the remaining per-format loaders (ELF/Mach-O/DOS/UEFI/...) land
             // with their phases; until then the module lookup degrades
@@ -338,10 +333,7 @@ OsFactory select_os(QL_OS ostype) {
             return [](Qiling* ql) -> std::unique_ptr<QlOs> {
                 return std::make_unique<os::uefi::QlOsUefi>(ql);
             };
-        case QL_OS::MCU:
-            return [](Qiling* ql) -> std::unique_ptr<QlOs> {
-                return std::make_unique<os::QlOsMcu>(ql);
-            };
+        // the MCU os retired to the hw-backup branch with the hw subsystem
         default:
             throw QlErrorNotImplemented("os layer for this os type is not implemented");
     }

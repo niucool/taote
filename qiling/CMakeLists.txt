@@ -50,21 +50,6 @@ add_library(qiling STATIC
     os/macos/kernel_func.cpp
     os/macos/kernel_api.cpp
     os/macos/ev.cpp
-    hw/hw.cpp
-    hw/timer.cpp
-    os/mcu.cpp
-    hw/cm_nvic.cpp
-    hw/cm_scb.cpp
-    hw/stm32f1xx_gpio.cpp
-    hw/stm32f4xx_usart.cpp
-    hw/stm32f4xx_tim.cpp
-    hw/stm32f1xx_exti.cpp
-    hw/stm32f1xx_simple.cpp
-    hw/stm32f1xx_interactive.cpp
-    hw/sam3xa.cpp
-    hw/gd32vf1xx.cpp
-    hw/mk64f12.cpp
-    loader/mcu.cpp
     os/macos/mach_msg.cpp
     os/macos/subsystems.cpp
     os/macos/utils.cpp
