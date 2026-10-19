@@ -1350,12 +1350,10 @@ closed (freebsd/qnx/dos/uefi/macos ✅, the socket family ✅, the hw/mcu phase
 kernel_api surface is complete (64/64). The genuinely remaining work, by
 priority:
 
-1. **The posix syscall gaps (48 registered-name diffs, prioritized)**:
+1. **The posix syscall gaps (prioritized)**:
    - the io/fs tail (~14: the readv/writev/pread64/sendfile/ioctl/faccessat/
      mknodat/fsync/fdatasync/fstat64/sysinfo/getrandom bodies — most are the
      small verbatim bodies over the done fd-table/fs-mapper surfaces);
-   - the ipc/msg/shm family (7: the ipc multiplexer + the msg.py/shm.py
-     bodies);
    - the time family (6: nanosleep/clock_nanosleep/setitimer/time/times);
    - the proc/misc family (~10: arch_prctl/prctl/personality/ptrace/rseq/
      getpriority/setrlimit/prlimit64/ugetrlimit/gettid);
@@ -1421,3 +1419,21 @@ pointer).
 | prlimit64 | `resource.py` | ✅ | the pid==0 && new_limit==0 read branch via the host getrlimit; the rest -1 (the WIN32 stubs) |
 | getpriority | `resource.py` | ✅ | the nice-0 fixed ride (the WIN32 has no getpriority) |
 | the fixture | `tests/Posix_Test.cpp` | ✅ | the arch_prctl FS round trip + the prctl/personality/rseq zero rides |
+
+### Phase 13.17 — the ipc/msg/shm family
+
+| piece | upstream | state | notes |
+|---|---|---|---|
+| msgget | `os/posix/syscall/msg.py` | ✅ | the IPC_PRIVATE/create walk, the MSGMNI cap, the S_IWUGO\\|S_IRUGO mode shape |
+| msgsnd/msgrcv | `msg.py` | ✅ | the mtype/mtext walk, the MSG_COPY/MSG_EXCEPT gates, the E2BIG/MSG_NOERROR branch, the S_IWUGO/S_IRUGO perms |
+| shmget | `os/posix/syscall/shm.py` | ✅ | the create/get_by_key walk, the IPC_CREAT/IPC_EXCL, the SHMMNI cap, the SHM_W\\|SHM_R perms |
+| shmat/shmdt | `shm.py` | ✅ | the shmaddr/SHM_RND alignment, the map + the attach list, the detach lookup |
+| ipc (the multiplexer) | `os/posix/syscall.py ql_syscall_ipc` | ✅ | the version hi-word + the lo-word call decode, the arg reshuffles, the msgrcv version-0 msgp/msgtyp pointer walk |
+| the fixture | `tests/Posix_Test.cpp` | ✅ | the direct msgget/msgsnd/msgrcv round trip (the sent bytes return through the queue) |
+| the multiplexer fixture | — | ⏸️ | the ipc number 117 is x86-32 only (the x86-64 117 = setresuid); exercising it needs an i386 dialect fixture (deferred) |
+
+**The family finding**: the msgrcv use-after-free — the port popped the queue
+entry before copying the payload (the upstream python keeps the popped object
+alive via the refcounting; the C++ `queue.erase` invalidated the `msg`
+pointer → the segfault). Fixed by copying the mtype/mtext before the erase.
+Also swept: the committed debug prints ([sysinfo]/[clone]/[disp]) removed.
