@@ -107,6 +107,17 @@ std::vector<std::string> IniConfig::sections() const {
     return out;
 }
 
+std::vector<std::string> IniConfig::option_keys(std::string_view section) const {
+    const auto it = sections_.find(section);
+    std::vector<std::string> out;
+    if (it == sections_.end()) {
+        return out;
+    }
+    out.reserve(it->second.size());
+    for (const auto& [key, _] : it->second) out.push_back(key);
+    return out;
+}
+
 bool IniConfig::has_section(std::string_view section) const { return sections_.find(section) != sections_.end(); }
 
 bool IniConfig::has_option(std::string_view section, std::string_view key) const {

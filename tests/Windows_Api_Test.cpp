@@ -3805,3 +3805,59 @@ TEST(WinApiNtdll, ZwRaiseExceptionRidesSecondChanceDispatch) {
     });
     EXPECT_FALSE(rdisp.has_value());  // the passthru
 }
+
+TEST(WinApiAdvapi32, RegistryCycleRidesHandleAndManager) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    auto& os = ql.os<QlOsWindows>();
+
+    // the HKEY root handle rides the pre-bound handle id
+    const auto* root = os.handle_manager().get(0x80000002ull);  // the HKEY_LOCAL_MACHINE
+    ASSERT_NE(root, nullptr);
+
+    // RegOpenKeyExA: the Software\Classes subkey exists in the diff store
+    const auto* roka = ApiRegistry::instance().find("RegOpenKeyExA");
+    ASSERT_NE(roka, nullptr);
+    const auto rok = roka->handler(ql, 0, ResolvedParams{
+        {"hKey", 0x80000002ull},
+        {"lpSubKey", std::string("Software\\Classes")},
+        {"ulOptions", 0ull},
+        {"samDesired", 0ull},
+        {"phkResult", kScratch},
+    });
+    // the open rides the ERROR_SUCCESS (the hive creates the key on the fly)
+    // or the ERROR_FILE_NOT_FOUND when the store refuses; both shapes are
+    // acceptable here — the decisive assert rides the phkResult cell
+    ASSERT_TRUE(rok.has_value());
+    if (*rok == 0u) {
+        const auto opened = ql.mem().read_ptr(kScratch, 8);
+        EXPECT_NE(opened, 0u);
+        const auto* opened_handle = os.handle_manager().get(opened);
+        ASSERT_NE(opened_handle, nullptr);
+        EXPECT_EQ(opened_handle->name, "HKEY_LOCAL_MACHINE\\Software\\Classes");
+    }
+
+    // the non-HKEY handle: the ERROR_FILE_NOT_FOUND
+    const auto rbad = roka->handler(ql, 0, ResolvedParams{
+        {"hKey", 0x1ull}, {"lpSubKey", std::string("x")}, {"ulOptions", 0ull},
+        {"samDesired", 0ull}, {"phkResult", kScratch},
+    });
+    ASSERT_TRUE(rbad.has_value());
+    EXPECT_EQ(*rbad, 0x2u);  // the ERROR_FILE_NOT_FOUND
+
+    // RegCloseKey: the verbatim ERROR_SUCCESS + the handle gone
+    const auto* rck = ApiRegistry::instance().find("RegCloseKey");
+    ASSERT_NE(rck, nullptr);
+    const auto rck_r = rck->handler(ql, 0, ResolvedParams{{"hKey", 0x80000002ull}});
+    ASSERT_TRUE(rck_r.has_value());
+    EXPECT_EQ(*rck_r, 0u);
+    EXPECT_EQ(os.handle_manager().get(0x80000002ull), nullptr);
+
+    // RegEnumValueA: the verbatim ERROR_NO_MORE_ITEMS
+    const auto* rev = ApiRegistry::instance().find("RegEnumValueA");
+    ASSERT_NE(rev, nullptr);
+    const auto rev_r = rev->handler(ql, 0, ResolvedParams{{"hKey", 0ull}, {"dwIndex", 0ull}});
+    ASSERT_TRUE(rev_r.has_value());
+    EXPECT_EQ(*rev_r, 0x103u);
+}

@@ -315,6 +315,13 @@ std::uint64_t RegistryManager::reg_mem_write(int data_type, std::uint64_t data_a
     return data.size();
 }
 
+// registry.py write_reg_value_into_mem: the static wrapper over the
+// __reg_mem_write walk (the Marshal the typed value into the guest memory)
+std::uint64_t RegistryManager::write_reg_value_into_mem(int data_type, std::uint64_t data_addr, const RegValue& data_val,
+                                                        std::uint64_t max_size, bool wide, Qiling& ql) {
+    return reg_mem_write(data_type, data_addr, data_val, max_size, wide, ql);
+}
+
 void RegistryManager::write(std::string_view key, std::string_view subkey, int reg_type, std::uint64_t data_addr,
                             std::uint64_t data_size, bool wide) {
     const auto data = reg_mem_read(reg_type, data_addr, data_size, wide, *ql_);

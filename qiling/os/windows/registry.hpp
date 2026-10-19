@@ -118,8 +118,13 @@ private:
                                        std::uint64_t max_size, bool wide, class Qiling& ql);
     static std::string read_string_at(class Qiling& ql, std::uint64_t addr, bool wide);
 
+public:
+    // registry.py access: record the key/item touch in the diff store (the
+    // python surface is public; the RegOpenKey profile-hit arm rides it)
     void access(std::string_view key, std::optional<std::string> item = std::nullopt,
                 std::optional<int> type = std::nullopt, std::optional<RegValue> value = std::nullopt);
+
+private:
 
     Qiling* ql_ = nullptr;
     std::string regdiff_;

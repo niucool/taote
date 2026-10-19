@@ -50,6 +50,9 @@ public:
     std::vector<std::string> sections() const;
     bool has_section(std::string_view section) const;
 
+    // the section's option keys in the stored (lowercased) order
+    std::vector<std::string> option_keys(std::string_view section) const;
+
     // Python raises NoSectionError for a missing section; this port throws QlErrorBase.
     // A missing option returns std::nullopt (the caller decides on fallback).
     bool has_option(std::string_view section, std::string_view key) const;
