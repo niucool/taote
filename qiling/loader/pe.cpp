@@ -294,6 +294,9 @@ void QlLoaderPE::run() {
         is_driver_ = false;
 
         auto& mem = ql_->mem();
+        // loader/pe.py load(): the stack map rides BOTH paths (the shellcode
+        // + the PE) before the branch; the port previously mapped it nowhere
+        mem.map(stack_address_, stack_size_, UC_PROT_ALL, "[stack]");
         mem.map(entry_point, static_cast<std::uint64_t>(ql_->os().code_ram_size()), UC_PROT_ALL, "[shellcode]");
         mem.write(entry_point, ql_->code());
 

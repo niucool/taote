@@ -520,9 +520,115 @@ void register_ntdll_family() {
 
     // ---- the passthru Rtl bodies (the verbatim `return` passes) ----
 
+    // NTSYSAPI VOID RtlRaiseException( PEXCEPTION_RECORD ExceptionRecord );
     WinsdkApi("RtlRaiseException", WinCc::Stdcall, {
         {"ExceptionRecord", PVOID_},
     }, true) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
+        return std::nullopt;
+    };
+
+    // NTSYSAPI NTSTATUS ZwRaiseException( ... );  (the passthru)
+    WinsdkApi("ZwRaiseException", WinCc::Stdcall, {
+        {"ExceptionRecord", PVOID_},
+        {"ContextRecord", PVOID_},
+        {"FirstChance", BOOLEAN_},
+    }, true) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto exception_ptr = api_get_int(get_param(params, "ExceptionRecord"));
+        const auto context_ptr = api_get_int(get_param(params, "ContextRecord"));
+        const auto first_chance = api_get_int(get_param(params, "FirstChance"));
+
+        if (first_chance) {
+            throw QlErrorNotImplemented("ZwRaiseException is not implemented for first-chance exceptions.");
+        }
+        // In Windows, an unhandled exception triggers the
+        // top-level unhandled exception filter, after which the process
+        // is terminated and error reporting services are called.  (verbatim
+        // comment tail rides the walk below)
+        std::uint64_t exception_code = 0;
+        if (exception_ptr != 0) {
+            exception_code = ql.mem().read_ptr(exception_ptr, 4);  // the code rides DWORD
+            ql.log().debug("[ZwRaiseException] ExceptionCode: 0x" + [&] {
+                char buf[16];
+                std::snprintf(buf, sizeof(buf), "%08X", static_cast<unsigned>(exception_code));
+                return std::string(buf);
+            }());
+        } else {
+            // the verbatim shape: the upstream logs the NULL record here and
+            // the later exit-code line raises the NameError (the unbound
+            // exception_code); the port carries the 0 default through
+            ql.log().debug("[ZwRaiseException] ExceptionRecord is NULL");
+        }
+
+        // NOTE: the port carries the 0 default through the NULL-record arm
+        // (the upstream raises the NameError at the exit-code line)
+
+        auto* handle = w(ql).handle_manager().search("TopLevelExceptionHandler");
+
+        if (handle == nullptr) {
+            ql.log().debug("[ZwRaiseException] No top-level exception filter was found.");
+            ql.log().info("The process exited with code 0x" + [&] {
+                char buf[16];
+                std::snprintf(buf, sizeof(buf), "%08X", static_cast<unsigned>(exception_code));
+                return std::string(buf);
+            }() + ".");
+
+            w(ql).set_exit_code(static_cast<int>(exception_code));
+
+            ql.emu_stop();
+            return std::nullopt;
+        }
+
+        // the verbatim order: the stack_read rides AFTER the filter check
+        // (the no-filter arm never touches the stack)
+        const auto ret_addr = ql.stack_read(0);
+
+        const auto exception_filter = reinterpret_cast<std::uint64_t>(handle->obj);
+
+        // allocate some memory for the EXCEPTION_POINTERS struct
+        // (make_exception_pointers: the record + the context native pair)
+        const auto epointers_size = ql.arch().bits() / 8 * 2;
+        const auto exception_pointers_ptr = w(ql).heap().alloc(epointers_size);
+        ql.mem().write_ptr(exception_pointers_ptr + 0, exception_ptr);
+        ql.mem().write_ptr(exception_pointers_ptr + 8, context_ptr);
+
+        ql.log().debug("[ZwRaiseException] Resuming execution at the top-level exception filter.");
+
+        // Hack: We are going to fake that the caller of ZwRaiseException
+        // actually called the unhandled exception filter instead.  (verbatim)
+        //
+        // We will create a hook which will be triggered when the unhandled
+        // exception filter returns, so that we may terminate execution.
+        // the verbatim leak: the post-filter hook outlives the handler (the
+        // python object persists; the port releases the RAII handle
+        // deliberately)
+        const std::uint64_t code = exception_code;
+        auto* leaked_hook = new HookRet(ql.hook_address([&ql, exception_pointers_ptr, code]() -> int {
+            // Free the exception pointers struct we allocated earlier.
+            // Might not be needed, since we are going to terminate the process
+            // soon, but we might as well free it.  (verbatim)
+            w(ql).heap().free(exception_pointers_ptr);
+
+            ql.log().debug("[ZwRaiseException] Returned from the unhandled exception filter.");
+            ql.log().info("The process exited with code 0x" + [&] {
+                char buf[16];
+                std::snprintf(buf, sizeof(buf), "%08X", static_cast<unsigned>(code));
+                return std::string(buf);
+            }() + ".");
+
+            w(ql).set_exit_code(static_cast<int>(code));
+
+            ql.emu_stop();
+            return 0;
+        }, ret_addr));
+        (void)leaked_hook;
+
+        // Resume execution at the registered unhandled exception filter.
+        // (the verbatim passthru + the call_native staging: the pointer arg
+        // and the return address ride the frame)
+        std::vector<std::pair<int, std::uint64_t>> exception_filter_args;
+        exception_filter_args.emplace_back(PARAM_PTRX, exception_pointers_ptr);
+        w(ql).fcall().call_native(exception_filter, exception_filter_args, ret_addr);
+
         return std::nullopt;
     };
 

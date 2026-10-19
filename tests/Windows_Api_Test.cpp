@@ -3758,3 +3758,50 @@ TEST(WinApiNtdll, QueryObjectAndProcedureLookupRideLoaderMaps) {
     EXPECT_EQ(*rlft, 0u);
     EXPECT_EQ(ql.mem().read_ptr(kScratch + 0x310, 4), 0u);
 }
+
+TEST(WinApiNtdll, ZwRaiseExceptionRidesSecondChanceDispatch) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    const auto* zr = ApiRegistry::instance().find("ZwRaiseException");
+    ASSERT_NE(zr, nullptr);
+
+    // the first-chance: the verbatim NotImplemented raise
+    bool threw = false;
+    try {
+        (void)zr->handler(ql, 0, ResolvedParams{
+            {"ExceptionRecord", kScratch}, {"ContextRecord", kScratch + 0x20}, {"FirstChance", 1ull},
+        });
+    } catch (const QlErrorNotImplemented&) {
+        threw = true;
+    }
+    EXPECT_TRUE(threw);
+
+    // the second-chance without the filter: the exit_code rides the record
+    // code + the emu_stop
+    ql.mem().write_ptr(kScratch, 0xC0000005ull, 4);  // the EXCEPTION_ACCESS_VIOLATION code
+    const auto rnf = zr->handler(ql, 0, ResolvedParams{
+        {"ExceptionRecord", kScratch}, {"ContextRecord", kScratch + 0x20}, {"FirstChance", 0ull},
+    });
+    EXPECT_FALSE(rnf.has_value());
+    EXPECT_EQ(ql.os<QlOsWindows>().exit_code(), static_cast<int>(0xC0000005u));
+    EXPECT_EQ(ql.emu_state(), QL_STATE::STOPPED);
+
+    // the second-chance with the registered filter: the call_native staging
+    // rides the EXCEPTION_POINTERS pair + the post-filter hook at the ret
+    const auto* suf = ApiRegistry::instance().find("SetUnhandledExceptionFilter");
+    ASSERT_NE(suf, nullptr);
+    const auto rfilter = suf->handler(ql, 0, ResolvedParams{{"lpTopLevelExceptionFilter", 0x5000ull}});
+    ASSERT_TRUE(rfilter.has_value());
+
+    // the shellcode rsp rides the bare stack top — stage the return address
+    // the api-hook flow would carry (the push decrements into the mapped
+    // region)
+    ql.stack_push(kScratch + 0x100);
+
+    ql.mem().write_ptr(kScratch + 0x40, 0xDEADBEEFull, 4);  // a fresh record code
+    const auto rdisp = zr->handler(ql, 0, ResolvedParams{
+        {"ExceptionRecord", kScratch + 0x40}, {"ContextRecord", kScratch + 0x60}, {"FirstChance", 0ull},
+    });
+    EXPECT_FALSE(rdisp.has_value());  // the passthru
+}
