@@ -2612,3 +2612,146 @@ TEST(WinApiFibersapi, FlsCycleAllocSetGetFree) {
     EXPECT_EQ(*rn, 0u);
     EXPECT_EQ(ql.os<QlOsWindows>().last_error(), 87u);  // the get_noerr did not touch it
 }
+
+TEST(WinApiWinnls, LocalePairsAndCodepageVerbatim) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    // the Set/GetThreadLocale pair rides the verbatim LOCALE_CUSTOM_DEFAULT
+    const auto* stl = ApiRegistry::instance().find("SetThreadLocale");
+    ASSERT_NE(stl, nullptr);
+    const auto rs = stl->handler(ql, 0, ResolvedParams{{"Locale", 0x409ull}});
+    ASSERT_TRUE(rs.has_value());
+    EXPECT_EQ(*rs, 0x0C00u);
+
+    const auto* gtl = ApiRegistry::instance().find("GetThreadLocale");
+    ASSERT_NE(gtl, nullptr);
+    const auto rg = gtl->handler(ql, 0, {});
+    ASSERT_TRUE(rg.has_value());
+    EXPECT_EQ(*rg, 0x0C00u);
+
+    // GetACP rides the verbatim OEM_US; GetCPInfo/IsValidCodePage ride the 1
+    const auto* gacp = ApiRegistry::instance().find("GetACP");
+    ASSERT_NE(gacp, nullptr);
+    const auto ra = gacp->handler(ql, 0, {});
+    ASSERT_TRUE(ra.has_value());
+    EXPECT_EQ(*ra, 437u);
+
+    const auto* gcp = ApiRegistry::instance().find("GetCPInfo");
+    ASSERT_NE(gcp, nullptr);
+    const auto rc = gcp->handler(ql, 0, ResolvedParams{{"CodePage", 437ull}, {"lpCPInfo", kCells}});
+    ASSERT_TRUE(rc.has_value());
+    EXPECT_EQ(*rc, 1u);
+
+    const auto* ivcp = ApiRegistry::instance().find("IsValidCodePage");
+    ASSERT_NE(ivcp, nullptr);
+    const auto rv = ivcp->handler(ql, 0, ResolvedParams{{"CodePage", 437ull}});
+    ASSERT_TRUE(rv.has_value());
+    EXPECT_EQ(*rv, 1u);
+}
+
+TEST(WinApiWinnls, GetLocaleInfoRidesEnUsTable) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    const auto* gli = ApiRegistry::instance().find("GetLocaleInfoA");
+    ASSERT_NE(gli, nullptr);
+
+    // the 0x409 locale + the 0x1004 LCType: the "utf-8" value, the utf-16le
+    // image at the lpLCData (the A-flavor quirk), the length includes the NUL
+    const auto r = gli->handler(ql, 0, ResolvedParams{
+        {"Locale", 0x409ull},
+        {"LCType", 0x1004ull},
+        {"lpLCData", kScratch},
+        {"cchData", 16ull},
+    });
+    ASSERT_TRUE(r.has_value());
+    EXPECT_EQ(*r, 6u);  // "utf-8" (5 chars) + the NUL — the CHAR count, verbatim
+
+    const auto wide = ql.mem().read(kScratch, *r * 2);
+    std::string got;
+    for (std::size_t i = 0; i + 1 < wide.size(); i += 2) {
+        got.push_back(static_cast<char>(wide[i]));
+    }
+    EXPECT_EQ(got, "utf-8" + std::string(1, char(0)));
+
+    // the cchData = 0 size query: no write, the same length
+    ql.mem().write(kScratch, std::vector<std::uint8_t>(0x20, 0x7E));
+    const auto r0 = gli->handler(ql, 0, ResolvedParams{
+        {"Locale", 0x409ull}, {"LCType", 0x1004ull},
+        {"lpLCData", kScratch}, {"cchData", 0ull},
+    });
+    ASSERT_TRUE(r0.has_value());
+    EXPECT_EQ(*r0, 6u);
+    EXPECT_EQ(ql.mem().read(kScratch, 0x20)[0], 0x7E);  // untouched
+
+    // the unknown locale: the ERROR_INVALID_PARAMETER + the 0
+    const auto rbad = gli->handler(ql, 0, ResolvedParams{
+        {"Locale", 0x0C00ull}, {"LCType", 0x1004ull},
+        {"lpLCData", kScratch}, {"cchData", 16ull},
+    });
+    ASSERT_TRUE(rbad.has_value());
+    EXPECT_EQ(*rbad, 0u);
+    EXPECT_EQ(ql.os<QlOsWindows>().last_error(), 0x57u);
+}
+
+TEST(WinApiWinnls, LcmapStringCopiesBytesVerbatim) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    ql.mem().write(kScratch, std::vector<std::uint8_t>{'h', 0, 'i', 0});
+    const auto* lcw = ApiRegistry::instance().find("LCMapStringW");
+    ASSERT_NE(lcw, nullptr);
+
+    // the W walk: the cchSrc * 2 bytes copied to the dest
+    const auto rw = lcw->handler(ql, 0, ResolvedParams{
+        {"Locale", 0x409ull}, {"dwMapFlags", 0ull},
+        {"lpSrcStr", kScratch}, {"cchSrc", 2ull},
+        {"lpDestStr", kScratch + 0x100}, {"cchDest", 2ull},
+    });
+    ASSERT_TRUE(rw.has_value());
+    EXPECT_EQ(*rw, 2u);
+    EXPECT_EQ(ql.mem().read(kScratch + 0x100, 4), (std::vector<std::uint8_t>{'h', 0, 'i', 0}));
+
+    // the cchDest = 0: no write, the cchSrc still returns
+    ql.mem().write(kScratch + 0x100, std::vector<std::uint8_t>(4, 0x7E));
+    const auto r0 = lcw->handler(ql, 0, ResolvedParams{
+        {"Locale", 0x409ull}, {"dwMapFlags", 0ull},
+        {"lpSrcStr", kScratch}, {"cchSrc", 2ull},
+        {"lpDestStr", kScratch + 0x100}, {"cchDest", 0ull},
+    });
+    ASSERT_TRUE(r0.has_value());
+    EXPECT_EQ(*r0, 2u);
+    EXPECT_EQ(ql.mem().read(kScratch + 0x100, 4), (std::vector<std::uint8_t>{0x7E, 0x7E, 0x7E, 0x7E}));
+
+    // the A walk: the cchSrc * 1 byte stride
+    ql.mem().write(kScratch + 0x200, std::vector<std::uint8_t>{'h', 'i'});
+    const auto* lca = ApiRegistry::instance().find("LCMapStringA");
+    ASSERT_NE(lca, nullptr);
+    const auto ra = lca->handler(ql, 0, ResolvedParams{
+        {"Locale", 0x409ull}, {"dwMapFlags", 0ull},
+        {"lpSrcStr", kScratch + 0x200}, {"cchSrc", 2ull},
+        {"lpDestStr", kScratch + 0x300}, {"cchDest", 2ull},
+    });
+    ASSERT_TRUE(ra.has_value());
+    EXPECT_EQ(*ra, 2u);
+    EXPECT_EQ(ql.mem().read(kScratch + 0x300, 2), (std::vector<std::uint8_t>{'h', 'i'}));
+}
+
+TEST(WinApiWinnls, UiLanguagesRideProfileSections) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    // the verbatim profile reads: USER.language / SYSTEM.language (1093)
+    const auto* gu = ApiRegistry::instance().find("GetUserDefaultUILanguage");
+    ASSERT_NE(gu, nullptr);
+    const auto ru = gu->handler(ql, 0, {});
+    ASSERT_TRUE(ru.has_value());
+    EXPECT_EQ(*ru, 1093u);
+
+    const auto* gs = ApiRegistry::instance().find("GetSystemDefaultUILanguage");
+    ASSERT_NE(gs, nullptr);
+    const auto rgs = gs->handler(ql, 0, {});
+    ASSERT_TRUE(rgs.has_value());
+    EXPECT_EQ(*rgs, 1093u);
+}

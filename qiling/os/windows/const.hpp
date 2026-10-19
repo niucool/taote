@@ -10,6 +10,8 @@
 #define QILING_OS_WINDOWS_CONST_HPP
 
 #include <cstdint>
+#include <map>
+#include <string>
 
 namespace qiling {
 namespace os {
@@ -594,6 +596,25 @@ inline constexpr std::uint32_t SystemLookasideInformation = 45u;
 #ifndef OEM_US
 inline constexpr std::uint32_t OEM_US = 437u;
 #endif
+
+// const.py LOCALE_EN_US — the int-keyed entries only (the python dict also
+// carries the string-keyed locale metadata entries — sName, xLocaleToken,
+// the format patterns — but the GetLocaleInfoA lookup indexes by the INT
+// LCType, so those keys are unreachable from the handler path; they carry
+// no handler-visible surface and ride as the dead data in the python
+// source). The 0x1005 value is the single-NUL string (the std::string(1,
+// char(0)) spelling).
+inline const std::map<std::uint32_t, std::string> LOCALE_EN_US = {
+    {0x1004, "utf-8"},
+    {0x1005, std::string(1, char(0))},
+    {0x1009, "1"},
+};
+
+// const.py LOCALE — the int-keyed view (the upstream also carries a
+// "default" STRING key which no int LCID lookup can ever reach)
+inline const std::map<std::uint32_t, const std::map<std::uint32_t, std::string>*> LOCALE = {
+    {0x409, &LOCALE_EN_US},
+};
 #ifndef SM_ARRANGE
 inline constexpr std::uint32_t SM_ARRANGE = 56u;
 #endif
