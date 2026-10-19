@@ -29,22 +29,12 @@ QlOsWindows::QlOsWindows(Qiling* ql) : QlOs(ql) {
 
     set_fcall(std::make_unique<QlFunctionCall>(std::make_unique<cc::QlCdecl>(arch)));
 
-    // the heap from the OS{bits} profile section
-    const auto heap_base = static_cast<std::uint64_t>(profile().get_int(os_section_name(), "heap_address"));
-    const auto heap_size = static_cast<std::uint64_t>(profile().get_int(os_section_name(), "heap_size"));
-    heap_storage_ = std::make_unique<QlMemoryHeap>(ql->mem(), heap_base, heap_base + heap_size);
-    heap_ = heap_storage_.get();
+    // the heap from the OS{bits} profile section — deferred: the Qiling ctor
+    // constructs the os before the profile loads (the profile reads SEH at
+    // ctor time, the pinned macos gotcha); ensure_profile_state() runs from
+    // load()/run() once the profile is live
     bits_ = static_cast<int>(arch.bits());
-
-    // the path identities (windows.py: systemdrive + windir + username)
-    const auto sysdrv = profile().get("PATH", "systemdrive").value_or("C:");
-    const auto windir = profile().get("PATH", "windir").value_or("\\Windows");
-    const auto username = profile().get("USER", "username").value_or("user");
-
-    windir_ = std::string(sysdrv) + std::string(windir);
-    winsys_ = windir_ + "\\System32";
-    userprofile_ = std::string(sysdrv) + "\\Users\\" + std::string(username);
-    username_ = username;
+    ensure_profile_state();
 
     // the pid from the KERNEL section
     // (posix shares the KERNEL section; windows reads it the same way)
@@ -69,6 +59,29 @@ QlOsWindows::QlOsWindows(Qiling* ql) : QlOs(ql) {
     if (auto* h = mgr.get(QL_STD_ERROR_HANDLE)) h->obj = &stderr_stream();
 }
 
+// the deferred profile reads (the heap + the path identities): runs from
+// load()/run() once the Qiling ctor has loaded the profile
+void QlOsWindows::ensure_profile_state() {
+    if (heap_ != nullptr) {
+        return;
+    }
+
+    const auto heap_base = static_cast<std::uint64_t>(profile().get_int(os_section_name(), "heap_address"));
+    const auto heap_size = static_cast<std::uint64_t>(profile().get_int(os_section_name(), "heap_size"));
+    heap_storage_ = std::make_unique<QlMemoryHeap>(ql_->mem(), heap_base, heap_base + heap_size);
+    heap_ = heap_storage_.get();
+
+    // the path identities (windows.py: systemdrive + windir + username)
+    const auto sysdrv = profile().get("PATH", "systemdrive").value_or("C:");
+    const auto windir = profile().get("PATH", "windir").value_or("\\Windows");
+    const auto username = profile().get("USER", "username").value_or("user");
+
+    windir_ = std::string(sysdrv) + std::string(windir);
+    winsys_ = windir_ + "\\System32";
+    userprofile_ = std::string(sysdrv) + "\\Users\\" + std::string(username);
+    username_ = username;
+}
+
 std::string_view QlOsWindows::os_section_name() const {
     // windows.py: OS{bits}
     return bits_ == 64 ? "OS64" : "OS32";
@@ -84,6 +97,8 @@ QlFunctionCall& QlOsWindows::fcall_select(WinCc cc) {
 
 void QlOsWindows::load() {
     // windows.py load: the GDT/segments (FS/GS regions) + the api dispatch hook
+    ensure_profile_state();
+
     auto& arch = ql().arch();
     auto& mem = ql().mem();
 
@@ -135,6 +150,8 @@ void QlOsWindows::hook_winapi(std::uint64_t address, std::uint32_t size) {
 
 void QlOsWindows::run() {
     // windows.py run: the explicit entry/exit overrides, then the emulation
+    ensure_profile_state();
+
     if (ql_->exit_point_set()) {
         set_exit_point(ql_->exit_point());
     }

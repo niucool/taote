@@ -40,6 +40,10 @@ public:
     // the registered winapi surface
     void load();
 
+    // the deferred profile reads (the heap + the path identities): the Qiling
+    // ctor builds the os before the profile loads, so load()/run() seed them
+    void ensure_profile_state();
+
     // windows.py hook_winapi — dispatch the registered api at the resolved
     // import address
     void hook_winapi(std::uint64_t address, std::uint32_t size);

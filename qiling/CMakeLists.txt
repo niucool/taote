@@ -64,6 +64,7 @@ add_library(qiling STATIC
     os/windows/clipboard.cpp
     os/windows/fiber.cpp
     os/windows/thread.cpp
+    os/windows/dlls/dlls.cpp
     os/blob/blob.cpp
     loader/loader.cpp
     loader/blob.cpp

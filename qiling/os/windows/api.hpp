@@ -29,6 +29,7 @@ inline constexpr int WCHAR_ = PARAM_INT16;
 
 inline constexpr int ACCESS_MASK_ = PARAM_INT32;
 inline constexpr int BOOLEAN_ = PARAM_INT32;
+inline constexpr int BOOL_ = PARAM_INT32;   // api.py: BOOL (the win32 BOOL is the 32-bit int)
 inline constexpr int NTSTATUS_ = PARAM_INT32;
 inline constexpr int WORD_ = PARAM_INT32;
 inline constexpr int EVENT_TYPE_ = PARAM_INT32;
@@ -55,6 +56,7 @@ inline constexpr int LPVOID_ = PARAM_PTRX;
 inline constexpr int LPDWORD_ = PARAM_PTRX;
 inline constexpr int LPSTR_ = PARAM_PTRX;
 inline constexpr int LPWSTR_ = PARAM_PTRX;
+inline constexpr int LPHANDLE_ = PARAM_PTRX;
 inline constexpr int PVOID_ = PARAM_PTRX;
 inline constexpr int DWORD_PTR_ = PARAM_PTRX;
 inline constexpr int ULONG_PTR_ = PARAM_PTRX;

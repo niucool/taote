@@ -11,9 +11,10 @@
 #include <functional>
 #include <map>
 #include <string>
+#include <utility>
 #include <vector>
 
-#include "qiling/const.hpp"
+#include "qiling/os/os.hpp"
 
 namespace qiling {
 
@@ -27,11 +28,24 @@ enum class WinCc : int { Stdcall = 1, Cdecl = 2, Ms64 = 3 };
 // the api.py type-alias surface: (name, type) pairs per API signature
 using ApiParams = std::vector<std::pair<std::string, int>>;
 
-// the api handler signature: (ql, pc, params-as-read) — the resolved values
-// arrive through the os.call orchestration
-class ApiRegistry;
+// the resolved-params shape the handlers read: the placeholder-typed entries
+// (the STRING/WSTRING families) arrive as the decoded strings, the plain-int
+// entries the raw values (the posix kernel_api ResolvedParams shape)
+using ResolvedParams = std::vector<std::pair<std::string, FcallValue>>;
 
-using ApiHandler = std::function<std::optional<std::uint64_t>(Qiling& ql, std::uint64_t pc)>;
+// the api handler signature: (ql, pc, resolved params) — the params resolve
+// through the os.call orchestration before the handler runs
+using ApiHandler = std::function<std::optional<std::uint64_t>(Qiling& ql, std::uint64_t pc,
+                                                              const ResolvedParams& params)>;
+
+// the resolved-params accessors (the posix kernel_api.cpp shapes, shared with
+// the dll modules): the string fallback reads the guest cstring at the raw
+// address; the int fallback answers 0 for the string-typed entries
+std::string api_get_string(Qiling& ql, const std::pair<std::string, FcallValue>& p);
+std::uint64_t api_get_int(const std::pair<std::string, FcallValue>& p);
+
+// the named lookup over the resolved params (the python params["name"] shape)
+const std::pair<std::string, FcallValue>& get_param(const ResolvedParams& params, std::string_view name);
 
 // one registered API implementation
 struct ApiEntry {
