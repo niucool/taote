@@ -3209,3 +3209,145 @@ TEST(WinApiWinbase, NameQueriesAndProfileIniRideProfileSections) {
     });
     EXPECT_FALSE(rwp.has_value());
 }
+
+TEST(WinApiTlhelp, SnapshotGateAndProcessWalk) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    // the TH32CS_SNAPPROCESS flag rides the 0xD10C handle
+    const auto* snap = ApiRegistry::instance().find("CreateToolhelp32Snapshot");
+    ASSERT_NE(snap, nullptr);
+    const auto r = snap->handler(ql, 0, ResolvedParams{{"dwFlags", 2ull}, {"th32ProcessID", 0ull}});
+    ASSERT_TRUE(r.has_value());
+    EXPECT_EQ(*r, 0xD10Cu);
+
+    // the other flags raise the verbatim NotImplemented
+    bool threw = false;
+    try {
+        (void)snap->handler(ql, 0, ResolvedParams{{"dwFlags", 4ull}, {"th32ProcessID", 0ull}});
+    } catch (const QlErrorNotImplemented&) {
+        threw = true;
+    }
+    EXPECT_TRUE(threw);
+
+    // Process32FirstW rides the verbatim 1
+    const auto* first = ApiRegistry::instance().find("Process32FirstW");
+    ASSERT_NE(first, nullptr);
+    const auto rf = first->handler(ql, 0, ResolvedParams{{"hSnapshot", 0xD10Cull}, {"lppe", kCells}});
+    ASSERT_TRUE(rf.has_value());
+    EXPECT_EQ(*rf, 1u);
+
+    // Process32NextW: the verbatim module-global counter — the returns ride
+    // a prefix of 1s followed by a suffix of 0s (the first two calls after
+    // the load ride 1; the fixture asserts only the shape, order-independent
+    // because the counter persists across the calls)
+    const auto* next = ApiRegistry::instance().find("Process32NextW");
+    ASSERT_NE(next, nullptr);
+    std::vector<std::uint64_t> returns;
+    for (int i = 0; i < 6; ++i) {
+        const auto rn = next->handler(ql, 0, ResolvedParams{{"hSnapshot", 0xD10Cull}, {"lppe", kCells}});
+        ASSERT_TRUE(rn.has_value());
+        returns.push_back(*rn);
+    }
+    // the monotone 1→0 transition: once the 0 appears it stays 0
+    bool seen_zero = false;
+    for (const auto v : returns) {
+        if (v == 0) {
+            seen_zero = true;
+        } else {
+            EXPECT_FALSE(seen_zero);
+        }
+    }
+    EXPECT_TRUE(seen_zero);  // the counter crossed 3 within the 6 calls
+}
+
+TEST(WinApiWinnt, InterlockedLongCycleAndVerSetConditionMask) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    // InterlockedExchange: the old rides back, the value lands
+    ql.mem().write_ptr(kCells, 0x11223344, 4);
+    const auto* ex = ApiRegistry::instance().find("InterlockedExchange");
+    ASSERT_NE(ex, nullptr);
+    const auto re = ex->handler(ql, 0, ResolvedParams{{"Target", kCells}, {"Value", 0x55667788ull}});
+    ASSERT_TRUE(re.has_value());
+    EXPECT_EQ(*re, 0x11223344u);
+    EXPECT_EQ(ql.mem().read_ptr(kCells, 4), 0x55667788u);
+
+    // InterlockedIncrement: the new value rides back
+    const auto* inc = ApiRegistry::instance().find("InterlockedIncrement");
+    ASSERT_NE(inc, nullptr);
+    const auto ri = inc->handler(ql, 0, ResolvedParams{{"Target", kCells}});
+    ASSERT_TRUE(ri.has_value());
+    EXPECT_EQ(*ri, 0x55667789u);
+
+    // InterlockedDecrement: the underflow wraps mod 2^32
+    ql.mem().write_ptr(kCells + 4, 0, 4);
+    const auto* dec = ApiRegistry::instance().find("InterlockedDecrement");
+    ASSERT_NE(dec, nullptr);
+    const auto rd = dec->handler(ql, 0, ResolvedParams{{"Target", kCells + 4}});
+    ASSERT_TRUE(rd.has_value());
+    EXPECT_EQ(*rd, 0xFFFFFFFFu);
+    EXPECT_EQ(ql.mem().read_ptr(kCells + 4, 4), 0xFFFFFFFFu);
+
+    // VerSetConditionMask: the masked condition rides the type-mask bits
+    const auto* vsc = ApiRegistry::instance().find("VerSetConditionMask");
+    ASSERT_NE(vsc, nullptr);
+    const auto rv = vsc->handler(ql, 0, ResolvedParams{
+        {"ConditionMask", 0ull},
+        {"TypeMask", (1ull << 1) | (1ull << 4)},  // the MAJOR + the SERVICEPACKMAJOR bits
+        {"Condition", static_cast<std::uint64_t>(VER_EQUAL)},
+    });
+    ASSERT_TRUE(rv.has_value());
+    EXPECT_EQ(*rv, (static_cast<std::uint64_t>(VER_EQUAL) << 3) | static_cast<std::uint64_t>(VER_EQUAL) << (4 * 3));
+
+    // the zero condition rides the mask back untouched
+    const auto rv0 = vsc->handler(ql, 0, ResolvedParams{
+        {"ConditionMask", 0xABCDull}, {"TypeMask", 1ull << 1}, {"Condition", 0ull},
+    });
+    ASSERT_TRUE(rv0.has_value());
+    EXPECT_EQ(*rv0, 0xABCDu);
+}
+
+TEST(WinApiConsole23Psapi, VerbatimStubsAndConsoleWindowHandle) {
+    register_dlls();
+    Qiling ql(win_test_options());
+
+    // the consoleapi2 verbatim 1s
+    const auto* sct = ApiRegistry::instance().find("SetConsoleTitleW");
+    ASSERT_NE(sct, nullptr);
+    const auto r1 = sct->handler(ql, 0, ResolvedParams{{"lpConsoleTitle", std::string("console")}});
+    ASSERT_TRUE(r1.has_value());
+    EXPECT_EQ(*r1, 1u);
+
+    const auto* gcs = ApiRegistry::instance().find("GetConsoleScreenBufferInfo");
+    ASSERT_NE(gcs, nullptr);
+    const auto r2 = gcs->handler(ql, 0, ResolvedParams{{"hConsoleOutput", 0x10ull}, {"lpConsoleScreenBufferInfo", kCells}});
+    ASSERT_TRUE(r2.has_value());
+    EXPECT_EQ(*r2, 1u);
+
+    const auto* scta = ApiRegistry::instance().find("SetConsoleTextAttribute");
+    ASSERT_NE(scta, nullptr);
+    const auto r3 = scta->handler(ql, 0, ResolvedParams{{"hConsoleOutput", 0x10ull}, {"wAttributes", 7ull}});
+    ASSERT_TRUE(r3.has_value());
+    EXPECT_EQ(*r3, 1u);
+
+    // GetConsoleWindow: the named handle rides a fresh id
+    const auto* gcw = ApiRegistry::instance().find("GetConsoleWindow");
+    ASSERT_NE(gcw, nullptr);
+    const auto r4 = gcw->handler(ql, 0, {});
+    ASSERT_TRUE(r4.has_value());
+    EXPECT_NE(*r4, 0u);
+    const auto* h = ql.os<QlOsWindows>().handle_manager().get(*r4);
+    ASSERT_NE(h, nullptr);
+    EXPECT_EQ(h->name, "console_window");
+
+    // the psapi K32 stub rides the verbatim 0
+    const auto* k32 = ApiRegistry::instance().find("K32GetModuleInformation");
+    ASSERT_NE(k32, nullptr);
+    const auto r5 = k32->handler(ql, 0, ResolvedParams{
+        {"hProcess", 0ull}, {"hModule", 0ull}, {"lpmodinfo", kCells}, {"cb", 0ull},
+    });
+    ASSERT_TRUE(r5.has_value());
+    EXPECT_EQ(*r5, 0u);
+}

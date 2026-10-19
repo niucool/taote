@@ -27,6 +27,9 @@
 #include "qiling/os/windows/dlls/kernel32/fibersapi.cpp"
 #include "qiling/os/windows/dlls/kernel32/winnls.cpp"
 #include "qiling/os/windows/dlls/kernel32/winbase.cpp"
+#include "qiling/os/windows/dlls/kernel32/tlhelp32.cpp"
+#include "qiling/os/windows/dlls/kernel32/winnt.cpp"
+#include "qiling/os/windows/dlls/kernel32/consoleapi23.cpp"
 
 namespace qiling {
 namespace os {
@@ -53,6 +56,11 @@ void register_dlls() {
     win::register_fibersapi_family();
     win::register_winnls_family();
     win::register_winbase_family();
+    win::register_tlhelp32_family();
+    win::register_winnt_family();
+    win::register_consoleapi2_family();
+    win::register_consoleapi3_family();
+    win::register_psapi_family();
 }
 
 // the static-init registration (the python module-import side effect)

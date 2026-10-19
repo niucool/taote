@@ -45,6 +45,9 @@ inline constexpr int INT_ = PARAM_INT32;    // api.py: INT
 inline constexpr int HANDLE_ = PARAM_PTRX;
 inline constexpr int WORD_ALIAS_ = PARAM_INT32;
 inline constexpr int DWORDLONG_ = PARAM_INT64;
+inline constexpr int ULONGLONG_ = PARAM_INT64;   // api.py: ULONGLONG
+inline constexpr int BYTE_ = PARAM_INT32;        // api.py: BYTE
+inline constexpr int LPCTSTR_W_ = PARAM_PTRX + 2;  // api.py: LPCTSTR (the W flavour)
 
 // the HANDLE family (api.py: HINSTANCE/HKEY/HMODULE/HWND/PSID/SC_HANDLE → HANDLE)
 inline constexpr int HINSTANCE_ = PARAM_PTRX;
