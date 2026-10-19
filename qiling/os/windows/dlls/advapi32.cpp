@@ -25,12 +25,21 @@ namespace {
 // one TU via the dlls.cpp include chain)
 
 // the verbatim __RegOpenKey body
+// the reg_* family's handle key: the real callers pass the 32-bit predefined
+// HKEY constants, and the x64 codegen's `mov rcx, imm32` SIGN-extends them
+// (0x80000001 arrives as 0xffffffff80000001); the real advapi32 truncates
+// internally. The verbatim-python lookup (handle.py get) keys the exact u64
+// and would miss — the mask rides here for the whole registry family.
+std::uint64_t reg_handle_id(std::uint64_t h_key) {
+    return h_key & 0xffffffffull;
+}
+
 std::optional<std::uint64_t> reg_open_key(Qiling& ql, const ResolvedParams& params) {
     const auto h_key = api_get_int(get_param(params, "hKey"));
     const auto lp_sub_key = api_get_string(ql, get_param(params, "lpSubKey"));
     const auto phk_result = api_get_int(get_param(params, "phkResult"));
 
-    auto* handle = w(ql).handle_manager().get(h_key);
+    auto* handle = w(ql).handle_manager().get(reg_handle_id(h_key));
 
     if (handle == nullptr || handle->name.rfind("HKEY", 0) != 0) {
         return ERROR_FILE_NOT_FOUND;
@@ -79,7 +88,7 @@ std::optional<std::uint64_t> reg_open_key(Qiling& ql, const ResolvedParams& para
 
 // the handle->name accessor (the s_hKey rebinding walks)
 std::string reg_key_name(Qiling& ql, std::uint64_t h_key) {
-    auto* handle = w(ql).handle_manager().get(h_key);
+    auto* handle = w(ql).handle_manager().get(reg_handle_id(h_key));
     return handle != nullptr ? handle->name : std::string();
 }
 
@@ -169,7 +178,7 @@ std::optional<std::uint64_t> reg_create_key(Qiling& ql, const ResolvedParams& pa
     const auto lp_sub_key = api_get_string(ql, get_param(params, "lpSubKey"));
     const auto phk_result = api_get_int(get_param(params, "phkResult"));
 
-    auto* handle = w(ql).handle_manager().get(h_key);
+    auto* handle = w(ql).handle_manager().get(reg_handle_id(h_key));
 
     if (handle == nullptr || handle->name.rfind("HKEY", 0) != 0) {
         return ERROR_FILE_NOT_FOUND;
@@ -340,7 +349,7 @@ void register_advapi32_family() {
         {"hKey", HKEY_},
     }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
         const auto h_key = api_get_int(get_param(params, "hKey"));
-        w(ql).handle_manager().delete_handle(h_key);
+        w(ql).handle_manager().delete_handle(reg_handle_id(h_key));
 
         return ERROR_SUCCESS;
     };
@@ -376,6 +385,23 @@ void register_advapi32_family() {
         {"lpdwDisposition", PVOID_},
     }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
         // fall back to the simple implementation  (verbatim)
+        return reg_create_key(ql, params);
+    };
+
+    // LSTATUS RegCreateKeyExA( ... ) — the ANSI twin of the ExW fallback
+    // (the upstream tables only the W variant; the A form rides the same
+    // simple body over the narrow string)
+    WinsdkApi("RegCreateKeyExA", WinCc::Stdcall, {
+        {"hKey", HKEY_},
+        {"lpSubKey", LPCSTR_},
+        {"Reserved", DWORD_},
+        {"lpClass", LPSTR_},
+        {"dwOptions", DWORD_},
+        {"samDesired", DWORD_},
+        {"lpSecurityAttributes", PVOID_},
+        {"phkResult", PVOID_},
+        {"lpdwDisposition", PVOID_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
         return reg_create_key(ql, params);
     };
 

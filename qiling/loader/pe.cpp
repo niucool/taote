@@ -231,7 +231,6 @@ std::pair<std::string, std::string> QlLoaderPE::dll_path_elements(const std::str
 
 std::uint64_t QlLoaderPE::load_dll(const std::string& name) {
     auto [dll_path, dll_name] = dll_path_elements(name);
-
     if (dll_name.rfind("api-ms-win-", 0) == 0) {
         // Usually we should not reach this point and instead imports from
         // such DLLs should be redirected earlier (verbatim)

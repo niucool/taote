@@ -55,7 +55,9 @@ inline std::filesystem::path write_stub_dll(
   for (std::size_t i = 0; i < exports.size(); ++i) {
     entries.emplace_back(exports[i], text_rva + static_cast<std::uint32_t>(i * 16));
   }
-  bin->set_export(LIEF::PE::Export(dll_name, entries));
+  if (!entries.empty()) {
+    bin->set_export(LIEF::PE::Export(dll_name, entries));
+  }
 
   LIEF::PE::Builder::config_t cfg;
   cfg.exports = true;

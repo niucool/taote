@@ -142,12 +142,15 @@ TEST(WinApiDlls, GetParamLookupAndGetIntPaths) {
 namespace {
 
 std::filesystem::path win_ensure_rootfs() {
-    // a unique rootfs per call: the shared temp dir made the dll-carrying
-    // fixtures (the CRT/registry runs) leak their System32 into the
-    // shellcode fixtures' load_dll walks
+    // a unique rootfs per call, wiped before use: the temp dirs persist
+    // across process runs, and leftover dll files from earlier runs leak
+    // into the shellcode fixtures' init_dlls walks (the exists-gated loads
+    // then add LDR entries and the empty-table asserts flake)
     static std::atomic<unsigned> counter{0};
     const auto base = std::filesystem::temp_directory_path() /
                       ("ql_windows_rootfs_" + std::to_string(counter.fetch_add(1)));
+    std::error_code wipe_ec;
+    std::filesystem::remove_all(base, wipe_ec);
     std::filesystem::create_directories(base);
     return base;
 }
@@ -5214,26 +5217,57 @@ TEST(WinApiE2E, CrtLinkedBinaryRidesStartupAndFprintf) {
 // ntdll surface. The blocker signature: the load_dll DllMain drive for
 // advapi32.dll walks the real kernelbase code and lands in the ntdll .rdata
 // (the wild pc 0x180195160) after the SRWLock handler set.
-TEST(WinApiE2E, DISABLED_RegistrySurfaceRidesProfileAndDiffStore) {
+//
+// RESOLVED by the stub-dll synthesizer: the fixture rootfs carries the
+// synthesized minimal PE images (no real code bodies, the entry 0 so the
+// DllMain drive skips), making the run fully deterministic. The exe's
+// import table resolves against the stub export tables and the dispatch
+// rides the port's ApiRegistry handlers.
+TEST(WinApiE2E, RegistrySurfaceRidesProfileAndDiffStore) {
     register_dlls();
 
     const auto rootfs = win_ensure_rootfs();
-    std::filesystem::create_directories(rootfs / "Windows" / "System32");
-    for (const char* dll : {"kernel32.dll", "kernelbase.dll", "ntdll.dll", "advapi32.dll"}) {
-        std::filesystem::copy_file(std::filesystem::path("C:/Windows/System32/") / dll,
-                                   rootfs / "Windows" / "System32" / dll,
-                                   std::filesystem::copy_options::overwrite_existing);
-    }
+    // the stub kernel32 carries the exe's full /MT import table (71 names);
+    // the uncovered-by-the-registry names degrade to the stub `ret` cells
+    const std::vector<std::string> kKernel32Exports = {
+        "CreateFileA", "WriteFile", "CloseHandle", "QueryPerformanceCounter",
+        "GetCurrentProcessId", "GetCurrentThreadId", "GetSystemTimeAsFileTime",
+        "InitializeSListHead", "SetUnhandledExceptionFilter", "GetStartupInfoW",
+        "GetModuleHandleW", "WriteConsoleW", "RtlUnwindEx", "GetLastError",
+        "SetLastError", "FlsAlloc", "FlsGetValue", "FlsSetValue", "FlsFree",
+        "EnterCriticalSection", "LeaveCriticalSection", "InitializeCriticalSectionEx",
+        "DeleteCriticalSection", "RtlLookupFunctionEntry", "EncodePointer",
+        "RaiseException", "RtlPcToFileHeader", "GetStdHandle", "GetModuleFileNameW",
+        "GetCurrentProcess", "ExitProcess", "TerminateProcess", "FreeLibrary",
+        "GetModuleHandleExW", "GetProcAddress", "GetCommandLineA", "GetCommandLineW",
+        "IsProcessorFeaturePresent", "RtlCaptureContext", "RtlVirtualUnwind",
+        "IsDebuggerPresent", "UnhandledExceptionFilter", "HeapAlloc", "HeapFree",
+        "FindClose", "FindFirstFileExW", "FindNextFileW", "IsValidCodePage",
+        "GetACP", "GetOEMCP", "GetCPInfo", "MultiByteToWideChar",
+        "WideCharToMultiByte", "GetEnvironmentStringsW", "FreeEnvironmentStringsW",
+        "SetEnvironmentVariableW", "SetStdHandle", "GetFileType", "GetStringTypeW",
+        "VirtualProtect", "LoadLibraryExW", "CompareStringW", "LCMapStringW",
+        "GetProcessHeap", "HeapSize", "HeapReAlloc", "FlushFileBuffers",
+        "GetConsoleOutputCP", "GetConsoleMode", "SetFilePointerEx", "CreateFileW",
+    };
+    qiling::testing::write_stub_dll(rootfs, "kernel32.dll", kKernel32Exports);
+    qiling::testing::write_stub_dll(rootfs, "advapi32.dll",
+                                    {"RegCreateKeyExA", "RegOpenKeyExA", "RegQueryValueExA",
+                                     "RegSetValueExA", "RegCloseKey"});
+    qiling::testing::write_stub_dll(rootfs, "ntdll.dll", {});
+    qiling::testing::write_stub_dll(rootfs, "kernelbase.dll", {});
+    qiling::testing::write_stub_dll(rootfs, "user32.dll", {});
+
     std::filesystem::create_directories(rootfs / "Windows" / "registry");
     std::filesystem::create_directories(rootfs / "qltest");
 
-    // the profile key rides the [REGISTRY] section (the verbatim profile
-    // read: the value arrives without touching the diff store)
+    // the profile rides the [REGISTRY] section (the verbatim profile read:
+    // the exact-match key form); the walk itself exercises the diff store
     const auto user_profile = rootfs / "reg_profile.ini";
     {
         std::ofstream cfg(user_profile, std::ios::binary);
         cfg << "[REGISTRY]\n"
-            << "HKEY_CURRENT_USER\Software\QilingTest\greeting = hello-profile\n";
+            << "HKEY_CURRENT_USER\\Software\\QilingTest = hello-profile\n";
     }
 
     const auto exe_src = std::filesystem::absolute(std::filesystem::path(__FILE__)).parent_path() /
@@ -5245,10 +5279,8 @@ TEST(WinApiE2E, DISABLED_RegistrySurfaceRidesProfileAndDiffStore) {
     options.rootfs = rootfs.string();
     options.ostype = QL_OS::WINDOWS;
     options.archtype = QL_ARCH::X8664;
-    // the modern System32 dlls carry the CET control-flow guard prologues
-    // (endbr64) - the default qemu64 model rejects them (UC_ERR_INSN_INVALID);
-    // the icelake-server model carries the CET feature
-    options.cputype = qiling::X86_CPU_MODEL::INTEL_ICELAKE_SERVER;
+    // the synthesized stubs carry no CET prologues, so the default cpu model
+    // suffices (the real-dll icelake workaround retired with them)
     options.profile = user_profile.string();
     options.argv = {exe_in_rootfs.string()};
     Qiling ql(std::move(options));
@@ -5256,10 +5288,11 @@ TEST(WinApiE2E, DISABLED_RegistrySurfaceRidesProfileAndDiffStore) {
     ql.run();
 
     // the diff-store round trip landed the created value at the guest path;
-    // a non-zero exit codes the failed stage
+    // a non-zero exit codes the failed stage. The exe writes the made value
+    // ("value42", the RegQueryValueExA data) through the file surface.
     const auto guest_file = rootfs / "qltest" / "reg.txt";
     ASSERT_TRUE(std::filesystem::exists(guest_file));
     std::ifstream in(guest_file, std::ios::binary);
     std::string got((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-    EXPECT_EQ(got, "made=value42");
+    EXPECT_EQ(got, "value42");
 }
