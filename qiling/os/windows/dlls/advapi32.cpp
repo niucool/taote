@@ -9,9 +9,11 @@
 #include "qiling/os/windows/const.hpp"
 #include "qiling/os/windows/fncc.hpp"
 #include "qiling/os/windows/registry.hpp"
+#include "qiling/os/windows/structs.hpp"
 #include "qiling/os/windows/windows.hpp"
 
 #include <string>
+#include <memory>
 
 namespace qiling {
 namespace os {
@@ -462,10 +464,299 @@ void register_advapi32_family() {
     };
 }
 
+// ---- sub-slice B: the token/SID and the SC-manager families (the separate
+// registration entry; the shared body lambdas live here) ----
+
+namespace {
+
+// the SID image builder (structs.py make_sid(auth_count): the Revision u8,
+// the SubAuthorityCount u8, the IdentifierAuthority BaseStructEB Value u32
+// big-endian + the 2-pad — the (5,) tuple fills the Value's first byte — and
+// the SubAuthority[count] u32 LE)
+std::string make_sid_image(const std::vector<std::uint32_t>& subauths) {
+    std::string sid(8 + 4 * subauths.size(), '\0');
+    sid[0] = '\x01';  // Revision
+    sid[1] = static_cast<char>(subauths.size());
+    // the IdentifierAuthority bytes: the {0,0,0,5,0,0} (the Value u32 BE of
+    // 5 rides the last significant byte, the 2-byte pad follows)
+    sid[5] = '\x05';
+    for (std::size_t i = 0; i < subauths.size(); ++i) {
+        const auto v = subauths[i];
+        sid[8 + 4 * i + 0] = static_cast<char>(v & 0xff);
+        sid[8 + 4 * i + 1] = static_cast<char>((v >> 8) & 0xff);
+        sid[8 + 4 * i + 2] = static_cast<char>((v >> 16) & 0xff);
+        sid[8 + 4 * i + 3] = static_cast<char>((v >> 24) & 0xff);
+    }
+    return sid;
+}
+
+// the verbatim singleton SID producers (the Administrators/Users/Guests/
+// Power Users group SIDs)
+std::string admin_sid_image()     { return make_sid_image({0x20, 0x220}); }  // S-1-5-32-544
+std::string users_sid_image()     { return make_sid_image({0x20, 0x221}); }  // S-1-5-32-545
+std::string guests_sid_image()    { return make_sid_image({0x20, 0x222}); }  // S-1-5-32-546
+std::string powerusers_sid_image() { return make_sid_image({0x20, 0x223}); } // S-1-5-32-547
+
+}  // namespace
+
+void register_advapi32_token_sc_families() {
+    using namespace qiling::os::api;
+
+    // BOOL GetTokenInformation( ... );
+    WinsdkApi("GetTokenInformation", WinCc::Stdcall, {
+        {"TokenHandle", HANDLE_},
+        {"TokenInformationClass", DWORD_},
+        {"TokenInformation", PVOID_},
+        {"TokenInformationLength", DWORD_},
+        {"ReturnLength", PVOID_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto token_handle = api_get_int(get_param(params, "TokenHandle"));
+        const auto token_information_class = api_get_int(get_param(params, "TokenInformationClass"));
+        const auto token_information = api_get_int(get_param(params, "TokenInformation"));
+        const auto token_information_length = api_get_int(get_param(params, "TokenInformationLength"));
+        const auto return_length = api_get_int(get_param(params, "ReturnLength"));
+
+        auto* handle = w(ql).handle_manager().get(token_handle);
+
+        if (handle == nullptr) {
+            w(ql).set_last_error(ERROR_INVALID_HANDLE);
+            return 0;
+        }
+
+        const auto* token = static_cast<const Token*>(handle->obj);
+        const auto& information_value = token->get(token_information_class);
+
+        const auto return_size = information_value.size();
+        ql.mem().write_ptr(return_length, return_size, 4);
+
+        ql.log().debug("The target is checking for its permissions");
+
+        if (return_size > static_cast<std::uint64_t>(token_information_length)) {
+            w(ql).set_last_error(ERROR_INSUFFICIENT_BUFFER);
+            return 0;
+        }
+
+        if (token_information != 0) {
+            ql.mem().write(token_information, std::vector<std::uint8_t>(information_value.begin(), information_value.end()));
+            return 1;
+        } else {
+            throw QlErrorNotImplemented("API not implemented");
+        }
+    };
+
+    // PUCHAR GetSidSubAuthorityCount( PSID pSid );
+    WinsdkApi("GetSidSubAuthorityCount", WinCc::Stdcall, {
+        {"pSid", PVOID_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto p_sid = api_get_int(get_param(params, "pSid"));
+
+        // SID address is used as its handle id  (verbatim; the offsetof
+        // SubAuthorityCount = 1)
+        (void)w(ql).handle_manager().get(p_sid);
+        return p_sid + 1;
+    };
+
+    // PDWORD GetSidSubAuthority( PSID pSid, DWORD nSubAuthority );
+    WinsdkApi("GetSidSubAuthority", WinCc::Stdcall, {
+        {"pSid", PVOID_},
+        {"nSubAuthority", DWORD_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto p_sid = api_get_int(get_param(params, "pSid"));
+        const auto n_sub_authority = api_get_int(get_param(params, "nSubAuthority"));
+
+        // SID address is used as its handle id  (verbatim; the offsetof
+        // SubAuthority = 8)
+        (void)w(ql).handle_manager().get(p_sid);
+        return p_sid + 8 + (4 * static_cast<std::uint64_t>(n_sub_authority));
+    };
+
+    // BOOL AllocateAndInitializeSid( ... );
+    WinsdkApi("AllocateAndInitializeSid", WinCc::Stdcall, {
+        {"pIdentifierAuthority", PVOID_},
+        {"nSubAuthorityCount", BYTE_},
+        {"nSubAuthority0", DWORD_},
+        {"nSubAuthority1", DWORD_},
+        {"nSubAuthority2", DWORD_},
+        {"nSubAuthority3", DWORD_},
+        {"nSubAuthority4", DWORD_},
+        {"nSubAuthority5", DWORD_},
+        {"nSubAuthority6", DWORD_},
+        {"nSubAuthority7", DWORD_},
+        {"pSid", PVOID_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto count = api_get_int(get_param(params, "nSubAuthorityCount"));
+        std::vector<std::uint32_t> subauths;
+        for (int i = 0; i < count && i < 8; ++i) {
+            subauths.push_back(static_cast<std::uint32_t>(
+                api_get_int(get_param(params, "nSubAuthority" + std::to_string(i)))));
+        }
+
+        const auto sid_image = make_sid_image(subauths);
+        const auto sid_addr = w(ql).heap().alloc(sid_image.size());
+        ql.mem().write(sid_addr, std::vector<std::uint8_t>(sid_image.begin(), sid_image.end()));
+
+        // Handle(obj=sid_obj, id=sid_addr) — the port parks the packed SID
+        // image on the handle's owned slot (the python struct object rides
+        // the reference)
+        auto parked = std::make_shared<std::string>(sid_image);
+        Handle handle(static_cast<std::uint64_t>(sid_addr), parked.get());
+        handle.owned = parked;
+        w(ql).handle_manager().append(handle);
+
+        const auto dest = api_get_int(get_param(params, "pSid"));
+        ql.mem().write_ptr(dest, sid_addr);
+
+        return 1;
+    };
+
+    // BOOL WINAPI CheckTokenMembership( ... );
+    WinsdkApi("CheckTokenMembership", WinCc::Stdcall, {
+        {"TokenHandle", HANDLE_},
+        {"SidToCheck", PVOID_},
+        {"IsMember", PVOID_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto token_handle = api_get_int(get_param(params, "TokenHandle"));
+        const auto sid_to_check = api_get_int(get_param(params, "SidToCheck"));
+
+        auto* handle = w(ql).handle_manager().get(sid_to_check);
+        const auto& sid = *static_cast<const std::string*>(handle->obj);
+        bool is_member = false;
+
+        // If TokenHandle is NULL, CheckTokenMembership uses the impersonation
+        // token of the calling thread.  (verbatim)
+        if (token_handle == 0) {
+            // For now, treat power users as admins  (verbatim)
+            if (sid == admin_sid_image() || sid == powerusers_sid_image()) {
+                is_member = ql.profile().get("SYSTEM", "permission").value_or("") == "root";
+            } else if (sid == users_sid_image()) {
+                // FIXME: is this true for all tokens? probably not...  (verbatim)
+                is_member = true;
+            } else if (sid == guests_sid_image()) {
+                is_member = false;
+            } else {
+                throw QlErrorNotImplemented("the SID does not match the default groups");
+            }
+        } else {
+            throw QlErrorNotImplemented("API not implemented");
+        }
+
+        ql.mem().write_ptr(api_get_int(get_param(params, "IsMember")), is_member ? 1 : 0);
+
+        return 1;
+    };
+
+    // PVOID FreeSid( PSID pSid );
+    WinsdkApi("FreeSid", WinCc::Stdcall, {
+        {"pSid", PVOID_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        // TODO: should also remove from ql.os.handle_manager ?  (verbatim)
+        w(ql).heap().free(api_get_int(get_param(params, "pSid")));
+
+        return 0;
+    };
+
+    // BOOL EqualSid( PSID pSid1, PSID pSid2 );
+    WinsdkApi("EqualSid", WinCc::Stdcall, {
+        {"pSid1", PVOID_},
+        {"pSid2", PVOID_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        // TODO once i have understood better how SID are wrote in memory.
+        // Fucking documentation  (verbatim comment; the body rides the 0)
+        (void)w(ql).handle_manager().get(api_get_int(get_param(params, "pSid2")));
+        return 0;
+    };
+
+    // SC_HANDLE OpenSCManagerA( ... );
+    WinsdkApi("OpenSCManagerA", WinCc::Stdcall, {
+        {"lpMachineName", LPCSTR_},
+        {"lpDatabaseName", LPCSTR_},
+        {"dwDesiredAccess", DWORD_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto lp_machine_name = api_get_string(ql, get_param(params, "lpMachineName"));
+        const auto lp_database_name = api_get_string(ql, get_param(params, "lpDatabaseName"));
+
+        const auto sc_handle_name = "sc_" + lp_machine_name + "_" + lp_database_name;
+        auto* new_handle = w(ql).handle_manager().search(sc_handle_name);
+
+        if (new_handle == nullptr) {
+            Handle handle(std::nullopt, nullptr, sc_handle_name);
+            w(ql).handle_manager().append(handle);
+            new_handle = w(ql).handle_manager().get(handle.id);
+        }
+
+        return new_handle->id;
+    };
+
+    // SC_HANDLE CreateServiceA( ... );
+    WinsdkApi("CreateServiceA", WinCc::Stdcall, {
+        {"hSCManager", PVOID_},
+        {"lpServiceName", LPCSTR_},
+        {"lpDisplayName", LPCSTR_},
+        {"dwDesiredAccess", DWORD_},
+        {"dwServiceType", DWORD_},
+        {"dwStartType", DWORD_},
+        {"dwErrorControl", DWORD_},
+        {"lpBinaryPathName", LPCSTR_},
+        {"lpLoadOrderGroup", LPCSTR_},
+        {"lpdwTagId", PVOID_},
+        {"lpDependencies", LPCSTR_},
+        {"lpServiceStartName", LPCSTR_},
+        {"lpPassword", LPCSTR_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto h_scm_manager = api_get_int(get_param(params, "hSCManager"));
+        const auto lp_service_name = api_get_string(ql, get_param(params, "lpServiceName"));
+        const auto lp_binary_path_name = api_get_string(ql, get_param(params, "lpBinaryPathName"));
+
+        w(ql).services()[lp_service_name] = lp_binary_path_name;
+        Handle new_handle(std::nullopt, reinterpret_cast<void*>(static_cast<std::uintptr_t>(h_scm_manager)), lp_service_name);
+        w(ql).handle_manager().append(new_handle);
+
+        return new_handle.id;
+    };
+
+    // SC_HANDLE OpenServiceA( ... );
+    WinsdkApi("OpenServiceA", WinCc::Stdcall, {
+        {"hSCManager", PVOID_},
+        {"lpServiceName", LPCSTR_},
+        {"dwDesiredAccess", DWORD_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto h_scm_manager = api_get_int(get_param(params, "hSCManager"));
+        const auto lp_service_name = api_get_string(ql, get_param(params, "lpServiceName"));
+
+        if (w(ql).services().count(lp_service_name) != 0) {
+            Handle new_handle(std::nullopt, reinterpret_cast<void*>(static_cast<std::uintptr_t>(h_scm_manager)), lp_service_name);
+            w(ql).handle_manager().append(new_handle);
+            return new_handle.id;
+        }
+
+        return 0;
+    };
+
+    // BOOL CloseServiceHandle( SC_HANDLE hSCObject );
+    WinsdkApi("CloseServiceHandle", WinCc::Stdcall, {
+        {"hSCObject", PVOID_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto h_sco = api_get_int(get_param(params, "hSCObject"));
+        w(ql).handle_manager().delete_handle(h_sco);
+
+        return 1;
+    };
+
+    // BOOL StartServiceA( ... );
+    WinsdkApi("StartServiceA", WinCc::Stdcall, {
+        {"hService", PVOID_},
+        {"dwNumServiceArgs", DWORD_},
+        {"lpServiceArgVectors", PVOID_},
+    }) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
+        return 1;
+    };
+}
+
 // the static-init registration (the python module-import side effect)
 namespace {
 const bool kAdvapi32Registered = [] {
     register_advapi32_family();
+    register_advapi32_token_sc_families();
     return true;
 }();
 }  // namespace

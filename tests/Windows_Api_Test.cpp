@@ -3861,3 +3861,158 @@ TEST(WinApiAdvapi32, RegistryCycleRidesHandleAndManager) {
     ASSERT_TRUE(rev_r.has_value());
     EXPECT_EQ(*rev_r, 0x103u);
 }
+
+TEST(WinApiAdvapi32, SidAndServiceFamiliesRideVerbatimWalks) {
+    register_dlls();
+    Qiling ql(win_test_options());  // the root profile: the permission = root
+
+    auto& os = ql.os<QlOsWindows>();
+
+    // AllocateAndInitializeSid: the S-1-5-32-544 admins image at the heap,
+    // the pSid cell rides the sid address (the handle id = the address)
+    const auto* aas = ApiRegistry::instance().find("AllocateAndInitializeSid");
+    ASSERT_NE(aas, nullptr);
+    const auto ra = aas->handler(ql, 0, ResolvedParams{
+        {"pIdentifierAuthority", 0ull}, {"nSubAuthorityCount", 2ull},
+        {"nSubAuthority0", 0x20ull}, {"nSubAuthority1", 0x220ull},
+        {"nSubAuthority2", 0ull}, {"nSubAuthority3", 0ull},
+        {"nSubAuthority4", 0ull}, {"nSubAuthority5", 0ull},
+        {"nSubAuthority6", 0ull}, {"nSubAuthority7", 0ull},
+        {"pSid", kScratch},
+    });
+    ASSERT_TRUE(ra.has_value());
+    EXPECT_EQ(*ra, 1u);
+    const std::uint64_t sid_addr = ql.mem().read_ptr(kScratch, 8);
+    EXPECT_NE(sid_addr, 0u);
+
+    // the SID image reads back: the Revision 1, the count 2, the subauths
+    // (the IdentifierAuthority rides the {0,0,0,5,0,0} approximation)
+    EXPECT_EQ(ql.mem().read_ptr(sid_addr, 1), 1u);
+    EXPECT_EQ(ql.mem().read_ptr(sid_addr + 1, 1), 2u);
+    EXPECT_EQ(ql.mem().read_ptr(sid_addr + 8, 4), 0x20u);
+    EXPECT_EQ(ql.mem().read_ptr(sid_addr + 12, 4), 0x220u);
+
+    // CheckTokenMembership: the impersonation arm (the TokenHandle = 0) —
+    // the admins match and the root profile rides the TRUE member
+    const auto* ctm = ApiRegistry::instance().find("CheckTokenMembership");
+    ASSERT_NE(ctm, nullptr);
+    const auto rctm = ctm->handler(ql, 0, ResolvedParams{
+        {"TokenHandle", 0ull}, {"SidToCheck", sid_addr}, {"IsMember", kScratch + 0x40},
+    });
+    ASSERT_TRUE(rctm.has_value());
+    EXPECT_EQ(*rctm, 1u);
+    EXPECT_EQ(ql.mem().read_ptr(kScratch + 0x40, 8), 1u);
+
+    // the guests SID: the NOT member
+    const auto rguest_a = aas->handler(ql, 0, ResolvedParams{
+        {"pIdentifierAuthority", 0ull}, {"nSubAuthorityCount", 2ull},
+        {"nSubAuthority0", 0x20ull}, {"nSubAuthority1", 0x222ull},
+        {"nSubAuthority2", 0ull}, {"nSubAuthority3", 0ull},
+        {"nSubAuthority4", 0ull}, {"nSubAuthority5", 0ull},
+        {"nSubAuthority6", 0ull}, {"nSubAuthority7", 0ull},
+        {"pSid", kScratch + 0x80},
+    });
+    ASSERT_TRUE(rguest_a.has_value());
+    const auto guests_addr = static_cast<std::uint64_t>(ql.mem().read_ptr(kScratch + 0x80, 8));
+    const auto rguest = ctm->handler(ql, 0, ResolvedParams{
+        {"TokenHandle", 0ull},
+        {"SidToCheck", guests_addr},
+        {"IsMember", kScratch + 0x40},
+    });
+    ASSERT_TRUE(rguest.has_value());
+    EXPECT_EQ(ql.mem().read_ptr(kScratch + 0x40, 8), 0u);
+
+    // GetSidSubAuthorityCount: the pSid+1 cell address
+    const auto* gsac = ApiRegistry::instance().find("GetSidSubAuthorityCount");
+    ASSERT_NE(gsac, nullptr);
+    const auto rgsac = gsac->handler(ql, 0, ResolvedParams{{"pSid", sid_addr}});
+    ASSERT_TRUE(rgsac.has_value());
+    EXPECT_EQ(*rgsac, sid_addr + 1);
+
+    // GetSidSubAuthority: the pSid+8+4n cell address
+    const auto* gsa = ApiRegistry::instance().find("GetSidSubAuthority");
+    ASSERT_NE(gsa, nullptr);
+    const auto rgsa = gsa->handler(ql, 0, ResolvedParams{{"pSid", sid_addr}, {"nSubAuthority", 1ull}});
+    ASSERT_TRUE(rgsa.has_value());
+    EXPECT_EQ(*rgsa, sid_addr + 12);
+
+    // FreeSid: the verbatim 0 (the heap freed)
+    const auto* fs = ApiRegistry::instance().find("FreeSid");
+    ASSERT_NE(fs, nullptr);
+    const auto rfs = fs->handler(ql, 0, ResolvedParams{{"pSid", sid_addr}});
+    ASSERT_TRUE(rfs.has_value());
+    EXPECT_EQ(*rfs, 0u);
+
+    // EqualSid: the verbatim 0 (the TODO comment rides)
+    const auto* es = ApiRegistry::instance().find("EqualSid");
+    ASSERT_NE(es, nullptr);
+    const auto res = es->handler(ql, 0, ResolvedParams{{"pSid1", 0ull}, {"pSid2", 0ull}});
+    ASSERT_TRUE(res.has_value());
+    EXPECT_EQ(*res, 0u);
+
+    // GetTokenInformation: the missing handle rides the ERROR_INVALID_HANDLE
+    const auto* gti = ApiRegistry::instance().find("GetTokenInformation");
+    ASSERT_NE(gti, nullptr);
+    const auto rgti = gti->handler(ql, 0, ResolvedParams{
+        {"TokenHandle", 0xDEADull}, {"TokenInformationClass", 26ull},
+        {"TokenInformation", kScratch}, {"TokenInformationLength", 0x20ull},
+        {"ReturnLength", kScratch + 0x20},
+    });
+    ASSERT_TRUE(rgti.has_value());
+    EXPECT_EQ(*rgti, 0u);
+    EXPECT_EQ(os.last_error(), 6u);  // the ERROR_INVALID_HANDLE
+
+    // the SC-manager cycle: the OpenSCManager/CreateService/OpenService/
+    // StartService/CloseServiceHandle walk
+    const auto* osc = ApiRegistry::instance().find("OpenSCManagerA");
+    ASSERT_NE(osc, nullptr);
+    const auto rsc = osc->handler(ql, 0, ResolvedParams{
+        {"lpMachineName", std::string("")}, {"lpDatabaseName", std::string("SCManager")}, {"dwDesiredAccess", 0ull},
+    });
+    ASSERT_TRUE(rsc.has_value());
+    EXPECT_NE(*rsc, 0u);
+
+    const auto* cs = ApiRegistry::instance().find("CreateServiceA");
+    ASSERT_NE(cs, nullptr);
+    const auto rcs = cs->handler(ql, 0, ResolvedParams{
+        {"hSCManager", *rsc}, {"lpServiceName", std::string("evil")},
+        {"lpDisplayName", std::string("evil")}, {"dwDesiredAccess", 0ull},
+        {"dwServiceType", 0ull}, {"dwStartType", 0ull}, {"dwErrorControl", 0ull},
+        {"lpBinaryPathName", std::string("C:\\evil.exe")}, {"lpLoadOrderGroup", std::string("")},
+        {"lpdwTagId", 0ull}, {"lpDependencies", std::string("")},
+        {"lpServiceStartName", std::string("")}, {"lpPassword", std::string("")},
+    });
+    ASSERT_TRUE(rcs.has_value());
+    EXPECT_NE(*rcs, 0u);
+    EXPECT_EQ(os.services().at("evil"), "C:\\evil.exe");
+
+    const auto* osv = ApiRegistry::instance().find("OpenServiceA");
+    ASSERT_NE(osv, nullptr);
+    const auto rosv = osv->handler(ql, 0, ResolvedParams{
+        {"hSCManager", *rsc}, {"lpServiceName", std::string("evil")}, {"dwDesiredAccess", 0ull},
+    });
+    ASSERT_TRUE(rosv.has_value());
+    EXPECT_NE(*rosv, 0u);
+
+    // the unknown service rides the 0
+    const auto rosv2 = osv->handler(ql, 0, ResolvedParams{
+        {"hSCManager", *rsc}, {"lpServiceName", std::string("ghost")}, {"dwDesiredAccess", 0ull},
+    });
+    ASSERT_TRUE(rosv2.has_value());
+    EXPECT_EQ(*rosv2, 0u);
+
+    const auto* ss = ApiRegistry::instance().find("StartServiceA");
+    ASSERT_NE(ss, nullptr);
+    const auto rss = ss->handler(ql, 0, ResolvedParams{
+        {"hService", *rosv}, {"dwNumServiceArgs", 0ull}, {"lpServiceArgVectors", 0ull},
+    });
+    ASSERT_TRUE(rss.has_value());
+    EXPECT_EQ(*rss, 1u);
+
+    const auto* csh = ApiRegistry::instance().find("CloseServiceHandle");
+    ASSERT_NE(csh, nullptr);
+    const auto rcsh = csh->handler(ql, 0, ResolvedParams{{"hSCObject", *rosv}});
+    ASSERT_TRUE(rcsh.has_value());
+    EXPECT_EQ(*rcsh, 1u);
+    EXPECT_EQ(os.handle_manager().get(*rosv), nullptr);
+}

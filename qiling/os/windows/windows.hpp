@@ -76,6 +76,10 @@ public:
     // windows.py __setup_components: the fiber manager (the Fls* family)
     FiberManager& fiber_manager() const noexcept { return *fiber_manager_; }
 
+    // advapi32.py `self.services = {}`: the service-name -> binary-path map
+    // (the CreateService/OpenService walk)
+    std::map<std::string, std::string>& services() noexcept { return services_; }
+
     QlMemoryHeap& heap() const noexcept { return *heap_; }
     HandleManager& handle_manager() const noexcept { return *handle_manager_; }
 
@@ -104,6 +108,7 @@ private:
     std::unique_ptr<HandleManager> handle_manager_;
     std::unique_ptr<registry::RegistryManager> registry_manager_;
     std::unique_ptr<FiberManager> fiber_manager_;
+    std::map<std::string, std::string> services_;
     std::optional<HookRet> hook_handle_;
     std::string windir_;
     std::string winsys_;
