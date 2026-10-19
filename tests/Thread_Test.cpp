@@ -160,9 +160,12 @@ TEST(ThreadManagement, SchedYieldContinuesRun) {
     const auto rootfs = std::filesystem::temp_directory_path() / "ql_thread_rootfs";
     std::filesystem::create_directories(rootfs);
 
-    // mov eax, 99 (sched_yield); syscall; exit_group(7)
+    // mov eax, 24 (sched_yield); syscall; exit_group(7)
+    // (the blob previously rode eax=99 = sysinfo on x86-64 — the write landed
+    // in the fall-through void; the sysinfo implementation now faults there,
+    // so the blob rides the real sched_yield number)
     const std::vector<std::uint8_t> code = {
-        0xB8, 0x63, 0x00, 0x00, 0x00,             // mov eax, 99
+        0xB8, 0x18, 0x00, 0x00, 0x00,             // mov eax, 24 (sched_yield)
         0x0F, 0x05,                                // syscall
         0x48, 0xC7, 0xC0, 0xE7, 0x00, 0x00, 0x00,  // mov rax, 231
         0x48, 0xC7, 0xC7, 0x07, 0x00, 0x00, 0x00,  // mov rdi, 7
@@ -177,6 +180,14 @@ TEST(ThreadManagement, SchedYieldContinuesRun) {
     options.multithread = true;
     Qiling ql(options);
 
+    // the fault tracer: the write-fault address + the pc (the bisect)
+    auto fault_hook = ql.hook_mem_unmapped([](int access, std::uint64_t address, std::uint32_t size, std::int64_t value) {
+        (void)value;
+        std::fprintf(stderr, "[fault] access=%d addr=%llx size=%u\n", access,
+                     (unsigned long long)address, size);
+        return 0;
+    });
+    (void)fault_hook;
     auto& os = ql.os<os::linux::QlOsLinux>();
     os.init_multithread();
     os.run_multithread();

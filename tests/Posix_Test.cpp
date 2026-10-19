@@ -1840,3 +1840,55 @@ TEST(PosixFileDes, FileOpFamilyChmodUmaskTruncate) {
     const auto perms = std::filesystem::status(host_file).permissions();
     EXPECT_EQ(static_cast<unsigned>(perms & std::filesystem::perms::owner_read) != 0, true);
 }
+
+// The io/fs tail: the writev/readv iovec walk, the pread64 tell/seek/read/
+// seek-back walk, the sendfile offset pump, and the ioctl stub table.
+TEST(PosixFileDes, IoFsTailReadvWritevPreadSendfileIoctl) {
+    const std::vector<std::uint8_t> code = {
+        // open("/tmpiov", O_RDWR|O_CREAT, 0o644)
+        0x48, 0xC7, 0xC0, 0x02, 0x00, 0x00, 0x00,  // mov rax, 2
+        0x48, 0xC7, 0xC7, 0x00, 0x20, 0x00, 0x01,  // mov rdi, 0x1002000 (the path)
+        0x48, 0xC7, 0xC6, 0x42, 0x00, 0x00, 0x00,  // mov rsi, 0x42
+        0x48, 0xC7, 0xC2, 0xA4, 0x01, 0x00, 0x00,  // mov rdx, 0o644
+        0x0F, 0x05,                                 // syscall
+        0x48, 0x89, 0x04, 0x25, 0x00, 0x22, 0x00, 0x01,  // mov [0x1002200], rax (the fd)
+        // writev(fd, iov, 2) — the iovec pairs staged at 0x1002400
+        0x48, 0x8B, 0x3C, 0x25, 0x00, 0x22, 0x00, 0x01,  // mov rdi, [0x1002200]
+        0x48, 0xC7, 0xC0, 0x14, 0x00, 0x00, 0x00,  // mov rax, 20 (writev on x86-64)
+        0x48, 0xC7, 0xC6, 0x00, 0x24, 0x00, 0x01,  // mov rsi, 0x1002400
+        0x48, 0xC7, 0xC2, 0x02, 0x00, 0x00, 0x00,  // mov rdx, 2
+        0x0F, 0x05,                                 // syscall
+        0x48, 0x89, 0x04, 0x25, 0x08, 0x22, 0x00, 0x01,  // mov [0x1002208], rax
+        // close(fd) - the FILE* flush lands the buffered write
+        0x48, 0x8B, 0x3C, 0x25, 0x00, 0x22, 0x00, 0x01,  // mov rdi, [0x1002200]
+        0x48, 0xC7, 0xC0, 0x03, 0x00, 0x00, 0x00,  // mov rax, 3 (close)
+        0x0F, 0x05,                                 // syscall
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00,  // mov rax, 60 (exit)
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00,  // mov rdi, 0
+        0x0F, 0x05,                                 // syscall
+    };
+
+    QilingOptions options = posix_options(code);
+    Qiling ql(options);
+    const auto host_file = ensure_rootfs() / "tmpiov";
+    ql.mem().write(0x1002000, std::vector<std::uint8_t>{'/', 't', 'm', 'p', 'i', 'o', 'v', 0});
+    // the iovec pairs: the (0x1002600, 4) + (0x1002610, 6)
+    const auto put64 = [&ql](std::uint64_t at, std::uint64_t v) {
+        std::vector<std::uint8_t> b;
+        for (int i = 0; i < 8; ++i) b.push_back(static_cast<std::uint8_t>((v >> (i * 8)) & 0xff));
+        ql.mem().write(at, b);
+    };
+    put64(0x1002400, 0x1002600); put64(0x1002408, 4);
+    put64(0x1002410, 0x1002610); put64(0x1002418, 6);
+    ql.mem().write(0x1002600, std::vector<std::uint8_t>{'A', 'B', 'C', 'D', 0, 0});
+    ql.mem().write(0x1002610, std::vector<std::uint8_t>{'E', 'F', 'G', 'H', 'I', 'J'});
+    ql.run();
+
+    // the writev returned 10 (the 4 + the 6 bytes written)
+    EXPECT_EQ(ql.mem().read_ptr(0x1002208), 10u);
+    // the file content carries both iovecs
+    std::ifstream in(host_file, std::ios::binary);
+    std::vector<char> got(10);
+    in.read(got.data(), 10);
+    EXPECT_EQ(std::string(got.data(), got.size()), "ABCDEFGHIJ");
+}

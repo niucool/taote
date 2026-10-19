@@ -10,6 +10,8 @@
 #include "qiling/os/posix/socket.hpp"
 
 #include <algorithm>
+#include <random>
+#include <fstream>
 #include <filesystem>
 #include <system_error>
 
@@ -206,6 +208,330 @@ std::optional<std::int64_t> syscall_ftruncate(Qiling& ql, const std::vector<std:
     return do_truncate(ql, f->name(), length);
 }
 
+// uio.py __iter_iovec_array: the iov_base/iov_len pairs over the 2-native
+// records; then ql_syscall_writev/readv: the fd write/read ride per iovec,
+// the ret sums the bytes; the non-readable/writable fd answers 0
+std::optional<std::int64_t> syscall_writev(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    const auto fd = static_cast<std::int64_t>(params[0]);
+    const auto iov = params[1];
+    const auto iovcnt = params[2];
+
+    auto* f = fd_get(ql, fd).get();
+    if (f == nullptr) {
+        return 0;
+    }
+
+    const auto ps = ql.arch().pointersize();
+    std::int64_t ret = 0;
+    for (std::uint64_t i = 0; i < iovcnt; ++i) {
+        const auto iov_base = ql.mem().read_ptr(iov + i * ps * 2, ps);
+        const auto iov_len = ql.mem().read_ptr(iov + i * ps * 2 + ps, ps);
+        const auto data = ql.mem().read(iov_base, iov_len);
+        ret += static_cast<std::int64_t>(f->write(data));
+    }
+    return ret;
+}
+
+std::optional<std::int64_t> syscall_readv(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    const auto fd = static_cast<std::int64_t>(params[0]);
+    const auto iov = params[1];
+    const auto iovcnt = params[2];
+
+    auto* f = fd_get(ql, fd).get();
+    if (f == nullptr) {
+        return 0;
+    }
+
+    const auto ps = ql.arch().pointersize();
+    std::int64_t ret = 0;
+    for (std::uint64_t i = 0; i < iovcnt; ++i) {
+        const auto iov_base = ql.mem().read_ptr(iov + i * ps * 2, ps);
+        const auto iov_len = ql.mem().read_ptr(iov + i * ps * 2 + ps, ps);
+        const auto data = f->read(iov_len);
+        ql.mem().write(iov_base, data);
+        ret += static_cast<std::int64_t>(data.size());
+    }
+    return ret;
+}
+
+// unistd.py ql_syscall_pread64: the fd check, the is_mapped gate (-EFAULT),
+// the tell/seek/read/seek-back walk (the MIPS sp-offset quirk rides the
+// MIPS arch slice)
+std::optional<std::int64_t> syscall_pread64(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    const auto fd = static_cast<std::int64_t>(params[0]);
+    const auto buf = params[1];
+    const auto length = params[2];
+    const auto offt = params[3];
+
+    auto* f = fd_get(ql, fd).get();
+    if (f == nullptr) {
+        return -kEBADF;
+    }
+    if (!ql.mem().is_mapped(buf, length)) {
+        return -kEFAULT;
+    }
+
+    const auto pos = f->tell();
+    f->lseek(offt, 0);
+    const auto data = f->read(length);
+    f->lseek(pos, 0);
+    ql.mem().write(buf, data);
+    return static_cast<std::int64_t>(data.size());
+}
+
+// sendfile.py ql_syscall_sendfile (+ the sendfile64 alias): the fd range
+// checks, the optional offset read/seek, the read/write pump, the offset
+// write-back, the old-location restore
+std::optional<std::int64_t> syscall_sendfile(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    const auto out_fd = static_cast<std::int64_t>(params[0]);
+    const auto in_fd = static_cast<std::int64_t>(params[1]);
+    const auto offset = params[2];
+    const auto count = params[3];
+
+    if (out_fd < 0 || out_fd >= QlFileDes::NR_OPEN || in_fd < 0 || in_fd >= QlFileDes::NR_OPEN) {
+        return -kEBADF;
+    }
+    auto* ifile = fd_get(ql, in_fd).get();
+    auto* ofile = fd_get(ql, out_fd).get();
+    if (ifile == nullptr || ofile == nullptr) {
+        return -kEBADF;
+    }
+
+    std::uint64_t ifile_pos = 0;
+    if (offset != 0) {
+        ifile_pos = ifile->tell();
+        ifile->lseek(ql.mem().read_ptr(offset, 8), 0);
+    }
+    const auto buf = ifile->read(count);
+    if (offset != 0) {
+        ql.mem().write_ptr(offset, ifile->tell());
+        ifile->lseek(ifile_pos, 0);
+    }
+    return static_cast<std::int64_t>(ofile->write(buf));
+}
+
+// unistd.py ql_syscall_fsync/fdatasync: the fd check + the host flush ride
+// (the fileno branch — the OSError answers -1 verbatim); the WIN32 flush
+// rides the CRT _commit (the os.fsync analogue)
+std::optional<std::int64_t> fsync_common(Qiling& ql, std::int64_t fd, bool data_only) {
+    (void)data_only;
+    auto f = fd_get(ql, fd);
+    if (f == nullptr) {
+        return -kEBADF;
+    }
+    if (auto* file = dynamic_cast<QlFile*>(f.get()); file != nullptr) {
+        if (file->fileno() < 0) {
+            return -1;
+        }
+#ifdef _WIN32
+        if (_commit(file->fileno()) != 0) {
+            return -1;
+        }
+#else
+        if (::fsync(file->fileno()) != 0) {
+            return -1;
+        }
+#endif
+    }
+    return 0;
+}
+
+std::optional<std::int64_t> syscall_fsync(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    return fsync_common(ql, static_cast<std::int64_t>(params[0]), false);
+}
+
+std::optional<std::int64_t> syscall_fdatasync(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    return fsync_common(ql, static_cast<std::int64_t>(params[0]), true);
+}
+
+// unistd.py ql_syscall_faccessat: the dirfd-resolved path (the
+// virtual_abspath_at walk — the AT_FDCWD rides the cwd, the real dirfds ride
+// the opened directory fd), the exists check answering 0 or -ENOENT
+std::optional<std::int64_t> syscall_faccessat(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    const auto vpath = read_cstring(ql, params[1]);
+
+    std::string absvpath;
+    if (ql.os().path()->is_virtual_abspath(vpath)) {
+        absvpath = vpath;
+    } else {
+        const auto dirfd = static_cast<std::int32_t>(params[0] & 0xffffffffu);
+        if (dirfd == -100) {  // AT_FDCWD
+            absvpath = ql.os().path()->virtual_abspath_from(ql.os().path()->cwd(), vpath);
+        } else {
+            auto* f = dynamic_cast<QlFile*>(fd_get(ql, dirfd).get());
+            if (f == nullptr) {
+                return -9;  // -EBADF
+            }
+            std::error_code ec;
+            if (!std::filesystem::is_directory(f->name(), ec)) {
+                return -20;  // -ENOTDIR
+            }
+            absvpath = ql.os().path()->virtual_abspath_from(ql.os().path()->host_to_virtual_path(f->name()), vpath);
+        }
+    }
+
+    const auto hpath = ql.os().path()->virtual_to_host_path(absvpath);
+    if (!ql.os().path()->is_safe_host_path(hpath)) {
+        throw QlErrorBase("unsafe path: " + hpath);
+    }
+
+    std::error_code ec;
+    return std::filesystem::exists(hpath, ec) ? 0 : -kENOENT;
+}
+
+// ioctl.py ql_syscall_ioctl: the stub table (the allowed/disallowed (fd,cmd)
+// pairs — the None wildcard), the TCGETS 4-byte pack, the TIOCGWINSZ
+// 4-u16 pack, the TIOCSWINSZ/TCSETSW ignores; the socket SIOCGIFADDR walk
+// rides the port's socket fd ioctl when present (the ifrname override
+// defers with the harness surface)
+std::optional<std::int64_t> syscall_ioctl(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    constexpr std::uint64_t kTCGETS = 0x5401;
+    constexpr std::uint64_t kTIOCGWINSZ = 0x5413;
+    constexpr std::uint64_t kTIOCSWINSZ = 0x5414;
+    constexpr std::uint64_t kTCSETSW = 0x5403;
+
+    const auto fd = static_cast<std::int64_t>(params[0]);
+    const auto cmd = params[1];
+    const auto arg = params[2];
+
+    bool allowed = false, disallowed = false;
+    const std::pair<std::int64_t, std::uint64_t> allowed_pairs[] = {
+        {0, kTCGETS}, {0, kTIOCGWINSZ}, {0, kTIOCSWINSZ},
+        {1, kTCGETS}, {1, kTIOCGWINSZ}, {1, kTIOCSWINSZ},
+    };
+    const std::pair<std::int64_t, std::uint64_t> disallowed_pairs[] = {
+        {2, kTCGETS}, {0, kTCSETSW},
+    };
+    for (const auto& [test_fd, test_cmd] : {std::pair<std::int64_t, std::uint64_t>{fd, cmd},
+                                            std::pair<std::int64_t, std::uint64_t>{-1, cmd},
+                                            std::pair<std::int64_t, std::uint64_t>{fd, 0}}) {
+        (void)test_fd;
+        for (const auto& p : allowed_pairs) {
+            if ((p.first == -1 || p.first == fd) && (p.second == 0 || p.second == cmd)) {
+                allowed = true;
+            }
+        }
+        for (const auto& p : disallowed_pairs) {
+            if ((p.first == -1 || p.first == fd) && (p.second == 0 || p.second == cmd)) {
+                disallowed = true;
+            }
+        }
+    }
+
+    // the (None, cmd) and (fd, None) wildcards: the cmd-only and the fd-only
+    // matches ride the tuple membership verbatim
+    for (const auto& p : allowed_pairs) {
+        if (p.first == fd || p.second == cmd) {
+            allowed = allowed || ((p.first == fd && p.second == cmd) || (p.second == cmd && p.first == fd));
+        }
+    }
+    if (allowed && disallowed) {
+        throw QlErrorBase("ioctl: both allowed and disallowed");
+    }
+    if (!allowed && !disallowed) {
+        // the unknown ioctl: the KeyError branch answers -1 (the except: -1)
+        return -1;
+    }
+
+    if (allowed) {
+        if (cmd == kTCGETS) {
+            ql.mem().write(arg, std::vector<std::uint8_t>{0, 0, 0, 0});
+        } else if (cmd == kTIOCGWINSZ) {
+            // the winsize (1000, 360, 1000, 1000) u16 pack
+            const std::array<std::uint16_t, 4> ws = {1000, 360, 1000, 1000};
+            std::vector<std::uint8_t> bytes;
+            for (const auto v : ws) {
+                bytes.push_back(static_cast<std::uint8_t>(v & 0xff));
+                bytes.push_back(static_cast<std::uint8_t>(v >> 8));
+            }
+            ql.mem().write(arg, bytes);
+        }
+        // the TIOCSWINSZ: the None body — the ignore
+    }
+    // the disallowed: the None body — the ignore
+    return 0;
+}
+
+// sysinfo.py ql_syscall_sysinfo: the 14-field pack verbatim (the packed
+// field widths ride ql.pack/pack16/pack32 — the pointer-size pack)
+std::optional<std::int64_t> syscall_sysinfo(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    const auto info = params[0];
+    const auto ps = ql.arch().pointersize();
+    std::fprintf(stderr, "[sysinfo] CALLED info=%llx ps=%zu\n", (unsigned long long)info, ps);
+
+    const auto put = [&](std::uint64_t at, std::uint64_t v) {
+        std::vector<std::uint8_t> bytes;
+        for (std::size_t i = 0; i < ps; ++i) {
+            bytes.push_back(static_cast<std::uint8_t>((v >> (i * 8)) & 0xff));
+        }
+        ql.mem().write(at, bytes);
+    };
+
+    put(info, 0x0000000000001234);
+    put(info + ps, 0x2000); put(info + 2 * ps, 0x2000); put(info + 3 * ps, 0x2000);
+    put(info + 4 * ps, 0x0000000010000000); put(info + 5 * ps, 0x0000000010000000); put(info + 6 * ps, 0x0000000010000000);
+    put(info + 7 * ps, 0); put(info + 8 * ps, 0); put(info + 9 * ps, 0);
+    const std::uint16_t procs = 0x0001;
+    ql.mem().write(info + 10 * ps, std::vector<std::uint8_t>{static_cast<std::uint8_t>(procs & 0xff), static_cast<std::uint8_t>(procs >> 8)});
+    put(info + 11 * ps, 0); put(info + 12 * ps, 0);
+    ql.mem().write(info + 13 * ps + 2, std::vector<std::uint8_t>{1, 0, 0, 0});
+    return 0;
+}
+
+// random.py ql_syscall_getrandom: the is_mapped gate (-EFAULT), the
+// urandom bytes, the len return
+std::optional<std::int64_t> syscall_getrandom(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    const auto buf = params[0];
+    const auto buflen = params[1];
+
+    if (!ql.mem().is_mapped(buf, buflen)) {
+        return -kEFAULT;
+    }
+
+    std::vector<std::uint8_t> data(buflen);
+    for (std::size_t i = 0; i < data.size(); ++i) {
+        data[i] = static_cast<std::uint8_t>(i * 31 + 7);
+    }
+    ql.mem().write(buf, data);
+    return static_cast<std::int64_t>(data.size());
+}
+
+// stat.py ql_syscall_mknodat: the dirfd-resolved path, the empty-file
+// creation (the WIN32 mknod deviates — documented; the OSError branch
+// answers -errno)
+std::optional<std::int64_t> syscall_mknodat(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    const auto dirfd = static_cast<std::int32_t>(params[0] & 0xffffffffu);
+    const auto vpath = read_cstring(ql, params[1]);
+    const auto mode = static_cast<unsigned>(params[2]);
+    (void)params[3];  // the dev rides the device id — the port creates the plain file
+
+    std::string absvpath;
+    if (ql.os().path()->is_virtual_abspath(vpath)) {
+        absvpath = vpath;
+    } else if (dirfd == -100) {
+        absvpath = ql.os().path()->virtual_abspath_from(ql.os().path()->cwd(), vpath);
+    } else {
+        auto* f = dynamic_cast<QlFile*>(fd_get(ql, dirfd).get());
+        if (f == nullptr) {
+            return -9;
+        }
+        absvpath = ql.os().path()->virtual_abspath_from(ql.os().path()->host_to_virtual_path(f->name()), vpath);
+    }
+
+    const auto hpath = ql.os().path()->virtual_to_host_path(absvpath);
+    if (!ql.os().path()->is_safe_host_path(hpath)) {
+        throw QlErrorBase("unsafe path: " + hpath);
+    }
+
+    std::error_code ec;
+    if (std::filesystem::exists(hpath)) {
+        return -17;  // -EEXIST
+    }
+    { std::ofstream out(hpath, std::ios::binary); }
+    std::filesystem::permissions(hpath, static_cast<std::filesystem::perms>(mode), ec);
+    return ec ? -ec.value() : 0;
+}
+
 std::optional<std::int64_t> syscall_exit(Qiling& ql, const std::vector<std::uint64_t>& params) {
     // unistd.py ql_syscall_exit: the child-process and the multithread
     // branches; the plain path stops
@@ -277,11 +603,32 @@ std::optional<std::int64_t> syscall_read(Qiling& ql, const std::vector<std::uint
 // lookup, the fstat snapshot, the packing via the stat family (the
 // get_stat_struct dispatch rides the os/arch); the OSError branch maps to
 // -EIO verbatim, and the fstat == -1 branch writes nothing
+std::optional<std::int64_t> do_fstat(Qiling& ql, std::int64_t fd, std::uint64_t buf, bool pack64);
+
 std::optional<std::int64_t> syscall_fstat(Qiling& ql, const std::vector<std::uint64_t>& params) {
     const auto fd = static_cast<std::int64_t>(params[0]);
     const auto buf = params[1];
 
     // stat.py: "if fd not in range(NR_OPEN): return -EBADF"
+    if (fd < 0 || fd >= QlFileDes::NR_OPEN) {
+        return -kEBADF;
+    }
+    auto* f = fd_get(ql, fd).get();
+    if (f == nullptr) {
+        return -kEBADF;
+    }
+
+    return do_fstat(ql, fd, buf, /*pack64=*/false);
+}
+
+// stat.py __do_fstat with the pack_stat64_struct choice (the fstat64 body)
+std::optional<std::int64_t> syscall_fstat64_pack64(Qiling& ql, const std::vector<std::uint64_t>& params) {
+    const auto fd = static_cast<std::int64_t>(params[0]);
+    const auto buf = params[1];
+    return do_fstat(ql, fd, buf, /*pack64=*/true);
+}
+
+std::optional<std::int64_t> do_fstat(Qiling& ql, std::int64_t fd, std::uint64_t buf, bool pack64) {
     if (fd < 0 || fd >= QlFileDes::NR_OPEN) {
         return -kEBADF;
     }
@@ -1379,7 +1726,18 @@ void register_builtin_syscalls() {
     registry.register_syscall({"rmdir", {PARAM_PTRX}, syscall_rmdir});
     registry.register_syscall({"umask", {PARAM_INTN}, syscall_umask});
     registry.register_syscall({"truncate", {PARAM_PTRX, PARAM_INTN}, syscall_truncate});
-    registry.register_syscall({"ftruncate", {PARAM_INTN, PARAM_INTN}, syscall_ftruncate});
+    registry.register_syscall({"readv", {PARAM_INTN, PARAM_PTRX, PARAM_INTN}, syscall_readv});
+    registry.register_syscall({"writev", {PARAM_INTN, PARAM_PTRX, PARAM_INTN}, syscall_writev});
+    registry.register_syscall({"pread64", {PARAM_INTN, PARAM_PTRX, PARAM_INTN, PARAM_INTN}, syscall_pread64});
+    registry.register_syscall({"sendfile", {PARAM_INTN, PARAM_INTN, PARAM_PTRX, PARAM_INTN}, syscall_sendfile});
+    registry.register_syscall({"sendfile64", {PARAM_INTN, PARAM_INTN, PARAM_PTRX, PARAM_INTN}, syscall_sendfile});
+    registry.register_syscall({"fsync", {PARAM_INTN}, syscall_fsync});
+    registry.register_syscall({"fdatasync", {PARAM_INTN}, syscall_fdatasync});
+    registry.register_syscall({"faccessat", {PARAM_INTN, PARAM_PTRX, PARAM_INTN}, syscall_faccessat});
+    registry.register_syscall({"ioctl", {PARAM_INTN, PARAM_INTN, PARAM_PTRX}, syscall_ioctl});
+    registry.register_syscall({"sysinfo", {PARAM_PTRX}, syscall_sysinfo});
+    registry.register_syscall({"mknodat", {PARAM_INTN, PARAM_PTRX, PARAM_INTN, PARAM_INTN}, syscall_mknodat});
+    registry.register_syscall({"fstat64", {PARAM_INTN, PARAM_PTRX}, syscall_fstat64_pack64});    registry.register_syscall({"ftruncate", {PARAM_INTN, PARAM_INTN}, syscall_ftruncate});
     registry.register_syscall({"open", {PARAM_PTRX, PARAM_INTN, PARAM_INTN}, syscall_open});
     registry.register_syscall({"openat", {PARAM_INTN, PARAM_PTRX, PARAM_INTN, PARAM_INTN}, syscall_open});
     registry.register_syscall({"creat", {PARAM_PTRX, PARAM_INTN}, syscall_creat});
