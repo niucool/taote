@@ -50,7 +50,7 @@ void register_handleapi_family() {
     WinsdkApi("CloseHandle", WinCc::Stdcall, {
         {"hObject", HANDLE_},
     }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
-        const auto value = static_cast<std::uint32_t>(api_get_int(get_param(params, "hObject")));
+        const auto value = api_get_int(get_param(params, "hObject"));
         auto& win = ql.os<os::windows::QlOsWindows>();
         const auto* handle = win.handle_manager().get(value);
 
@@ -82,7 +82,7 @@ void register_handleapi_family() {
         {"dwMask", DWORD_},
         {"dwFlags", DWORD_},
     }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
-        const auto val = static_cast<std::uint32_t>(api_get_int(get_param(params, "hObject")));
+        const auto val = api_get_int(get_param(params, "hObject"));
         auto& win = ql.os<os::windows::QlOsWindows>();
         auto* handle = win.handle_manager().get(val);
         handle->permissions = static_cast<std::uint32_t>(api_get_int(get_param(params, "dwFlags")));

@@ -24,12 +24,12 @@ void HandleManager::append(Handle handle) {
     handles_[handle.id] = std::move(handle);
 }
 
-Handle* HandleManager::get(std::uint32_t id) {
+Handle* HandleManager::get(std::uint64_t id) {
     const auto it = handles_.find(id);
     return it == handles_.end() ? nullptr : &it->second;
 }
 
-void HandleManager::delete_handle(std::uint32_t id) {
+void HandleManager::delete_handle(std::uint64_t id) {
     handles_.erase(id);
 }
 

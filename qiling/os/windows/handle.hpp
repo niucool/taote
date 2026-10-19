@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
 
@@ -22,18 +23,26 @@ public:
     // handle.py: the id allocator base
     static constexpr std::uint32_t ID_BASE = 0xa0000000;
 
-    std::uint32_t id = 0;
+    std::uint64_t id = 0;
     void* obj = nullptr;
     std::string name;
     std::optional<std::uint32_t> permissions;
 
-    explicit Handle(std::optional<std::uint32_t> id_ = std::nullopt, void* obj_ = nullptr,
+    // the type-erased ownership slot (filestruct.py: the python Handle keeps
+    // the python object alive via the reference; the C++ port type-erases the
+    // shared_ptr so the mapped file outlives the mapper call)
+    std::shared_ptr<void> owned;
+
+    // the ids widen to u64: the python Handle(id=...) rides arbitrary ints
+    // (the MapViewOfFile passes the heap address; the registry hive ids stay
+    // the u32 spellings)
+    explicit Handle(std::optional<std::uint64_t> id_ = std::nullopt, void* obj_ = nullptr,
                     std::string name_ = {}, std::optional<std::uint32_t> perms = std::nullopt)
         : id(next_id(id_)), obj(obj_), name(std::move(name_)), permissions(std::move(perms)) {}
 
 private:
-    static std::uint32_t next_id(std::optional<std::uint32_t> requested) {
-        static std::uint32_t counter = ID_BASE;
+    static std::uint64_t next_id(std::optional<std::uint64_t> requested) {
+        static std::uint64_t counter = ID_BASE;
         if (requested.has_value()) {
             return *requested;
         }
@@ -53,13 +62,13 @@ public:
     HandleManager();
 
     void append(Handle handle);
-    Handle* get(std::uint32_t id);
-    void delete_handle(std::uint32_t id);
+    Handle* get(std::uint64_t id);
+    void delete_handle(std::uint64_t id);
     Handle* search(const std::string& name);
     Handle* search_by_obj(void* obj);
 
 private:
-    std::map<std::uint32_t, Handle> handles_;
+    std::map<std::uint64_t, Handle> handles_;
 };
 
 }  // namespace os

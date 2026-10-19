@@ -6,12 +6,14 @@
 // call here.
 #include "qiling/os/windows/dlls/dlls.hpp"
 
+#include "qiling/os/windows/dlls/kernel32/fileapi.cpp"
 #include "qiling/os/windows/dlls/kernel32/handleapi.cpp"
 
 namespace qiling {
 namespace os {
 
 void register_dlls() {
+    win::register_fileapi_family();
     win::register_handleapi_family();
 }
 
