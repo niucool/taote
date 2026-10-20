@@ -782,9 +782,12 @@ void QlLoaderPE::init_security_cookie() {
         return;
     }
 
-    // the image base comes from the parse, so a relocated image still lands
-    // the cookie at its own cell
-    const std::uint64_t cookie_rva = cookie_va - parsed->imagebase();
+    // LIEF reports the load-config fields either as VAs or as RVAs depending on
+    // the build: a value below the image base can only be an RVA, and treating
+    // it as a VA underflows into a wild address (the x64 driver wrote into
+    // unmapped memory here)
+    const std::uint64_t image_base = parsed->imagebase();
+    const std::uint64_t cookie_rva = cookie_va >= image_base ? cookie_va - image_base : cookie_va;
 
     // a pseudo-random value with the two most significant bytes zero (the
     // upstream comment: `rol rcx, 10h; test cx, 0ffffh`), stable per run

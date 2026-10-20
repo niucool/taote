@@ -560,6 +560,11 @@ void QlOsWindows::run() {
             {qiling::os::api::LPVOID_, pe_loader.driver_object_address()},
             {qiling::os::api::LPVOID_, pe_loader.registry_path_address()},
         };
+        // the frame rides the guest's own calling convention: upstream's
+        // os.fcall object is CDECL, which would put a 64-bit driver's
+        // arguments on the stack while DriverEntry reads rcx/rdx (ms64) and
+        // then stores through the garbage it found there
+        set_fcall_ptr(fcall_select(default_cc_for("DriverEntry", ql_->arch().bits())));
         fcall().call_native(entry_point, args, kDriverReturnSentinel);
     }
 

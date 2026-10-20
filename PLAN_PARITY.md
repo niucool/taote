@@ -9,7 +9,7 @@ phase closes without its tests.
 
 | metric | pegasus | taote today | target |
 |---|---|---|---|
-| API sample sweep (`../pegasus/tests/bins`, 101 bins) | n/a (their suite asserts dispatch only) | **100 exit 0**, 0 blocked, 1 failed (`wdm_test_x64.sys`) | 99+ (met) |
+| API sample sweep (`../pegasus/tests/bins`, 101 bins) | n/a (their suite asserts dispatch only) | **101 exit 0**, 0 blocked, 0 failed (a 90 s per-sample budget; `antidbg.exe` alone needs ~40 s) | 99+ (met) |
 | PMA corpus (`~/source/capa-testfiles`, 32 PE samples) | 12 curated cases green (their CI), 38 with `PEGASUS_PMA_FULL=1` | **14 exit 0** (32-sample sweep), **1/12 green** (curated ctest cases, now with the reference guards) | ≥ 30 exit 0, all curated cases green |
 | reference-suite parity (`../pegasus/tests`, 357 cases) | 357 | **12 ported + 4 ported clusters**, rest mapped in `tests/PEGASUS_TEST_PARITY.md` | every *portable* row ported, none "deferred" |
 | taote suite | — | **540 passed / 0 failed / 3 skipped** | grows with every phase, stays 0-failed |
@@ -358,9 +358,17 @@ fetching it - the run's `until` address is now that sentinel, so unicorn stops
 *at* it before fetching. `wdm_test_x86.sys` runs 8 dispatches
 (`RtlInitUnicodeString` ×4, `MmGetSystemRoutineAddress` ×2, `IoCreateDeviceSecure`,
 `IoCreateSymbolicLink`) to **exit 0**, taking the sweep to **100/101**.
-`wdm_test_x64.sys` still fails (two `RtlInitUnicodeString` calls, then an
-unmapped write right after its entry's `sub rsp,0x20`), which is the remaining
-item of Phase 5.1/5.2.
+The 64-bit driver then needed one more thing, and it was a staging bug rather
+than a driver feature: the entry frame rode `os.fcall`, whose convention is
+CDECL, so a 64-bit `DriverEntry`'s two pointers went on the stack while the guest
+read `rcx`/`rdx` and stored through the garbage it found there (`rep stosq`
+faulting at `rdi = rbx + 0x70`). The frame is now staged with the guest's own
+convention (`default_cc_for("DriverEntry", bits)`, i.e. ms64/ms32), and
+`wdm_test_x64.sys` runs its 8 dispatches to exit 0 too.
+
+**The API sample sweep is now 101/101 exit 0** (0 blocked, 0 failed, with a 90 s
+per-sample wall-clock budget — `antidbg.exe` alone needs ~40 s under host load),
+against pegasus's 97/101. Phase 5.1/5.2 is complete.
 
 ### A return to the null page is the entry point returning
 
