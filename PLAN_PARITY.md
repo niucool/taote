@@ -174,13 +174,24 @@ PMA differential baseline (32 PE samples, measured this pass):
 
 | verdict | count |
 | --- | --- |
-| match | **5** (`03-03.exe_`, `12-02.exe_`, `16-02.exe_`, `18-01.exe_`, `20-02.exe_`) |
+| match | **5** (`03-03.exe_`, `10-03.exe_`, `12-02.exe_`, `16-02.exe_`, `20-02.exe_`) |
 | environment | 1 (`12-01.exe_`) |
-| reference_limit | 3 (`01-01.exe_`, `01-04.exe_`, `12-04.exe_`) |
-| diverged | 23 |
+| reference_limit | 5 (`01-01.exe_`, `01-04.exe_`, `12-04.exe_`, `14-01.exe_`, `18-01.exe_`) |
+| diverged | 21 |
 
-Measured after the PE-header fix below, with the same driver as the previous
-baseline (was 4 / 0 / 3 / 25). `16-02.exe_` is the header fix's direct win - it
+Measured after the two differ fixes below (the signed/unsigned return-value fold
+and the reference-timeout verdict); was 5 / 1 / 3 / 23 before them. The match
+list traded `18-01.exe_` for `10-03.exe_`: `10-03.exe_` is a real gain (its only
+finding was `CreateFileA` answering `-1` on the reference and
+`18446744073709551615` on taote for the same bit pattern, a normalization bug in
+the differ that made a matching run read as divergent), while `18-01.exe_` moved
+to `reference_limit` because the reference cannot finish that sample at all - its
+guest spins in a retry loop whose `Sleep` hook is a no-op on both sides, so the
+Python reference spends its whole budget there and ends on the harness timeout,
+while taote completes 3 dispatches in a second. `14-01.exe_` is the same timeout
+shape. Neither is a taote defect and neither trace is observable, so both are
+scored as reference limitations rather than as divergences. The reference is now
+given the same deterministic instruction budget as taote for exactly this reason. `16-02.exe_` is the header fix's direct win - it
 reads its own PE header, took the "not an MZ image" branch, and now runs the
 same trace as the reference. `12-01.exe_` is the module-load `environment`
 verdict the earlier pass's vocabulary added.

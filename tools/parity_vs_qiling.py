@@ -151,10 +151,20 @@ class Trace:
 
 
 def retval_key(value):
-    """Normalize a return value for comparison (pointers only compare as null/non-null)."""
+    """Normalize a return value for comparison (pointers only compare as null/non-null).
+
+    A negative return value is the signed reading of the same bit pattern the
+    other side reports unsigned (the reference's Python ints keep the handler's
+    -1 while taote's C++ returns 0xffffffffffffffff), so both fold to the
+    two's-complement 64-bit value before comparing.
+    """
 
     if value is None:
         return "null"
+    if isinstance(value, bool):
+        value = int(value)
+    if isinstance(value, int) and value < 0:
+        value &= 0xFFFFFFFFFFFFFFFF
     if is_pointerish(value):
         return "ptr"
     return str(value)
@@ -183,6 +193,21 @@ def module_load_divergence(ref: Trace, ours: Trace):
                 return i
         positional += 1
     return None
+
+
+def reference_timed_out(ref: Trace, ours: Trace):
+    """True when the reference never finished, so its trace is not observable.
+
+    A guest that spins - typically a network retry loop whose Sleep hook is a
+    no-op in both emulators, so the loop never waits - costs the Python reference
+    minutes of API dispatch and ends on the harness timeout, while taote finishes
+    the same run in a second. There is nothing to diff against, and it is the
+    reference's own cost, not a taote defect: the same sample alone in a quiet
+    tree often completes. Recorded as a reference limitation, with the timeout
+    named in the finding.
+    """
+
+    return ref.error_class == "timeout" and ours.error_class != "timeout"
 
 
 def reference_limited(ref: Trace, ours: Trace, findings, extensions):
@@ -436,7 +461,19 @@ def run_one(sample: Path, machine: str, rootfs: Path, argv, qiling_python, qilin
     ]
     if argv:
         ref_cmd += ["--argv", *argv]
+    if count:
+        # the same deterministic instruction budget taote gets: a guest that
+        # spins (a retry loop whose Sleep hook is a no-op on both sides) must
+        # stop on both sides, or the reference only ever ends on the timeout
+        ref_cmd += ["--count", str(count)]
     ref_raw, ref_err = run_json(ref_cmd, timeout)
+    if ref_raw is None and ref_err == "timeout":
+        # a timed-out reference run is usually host load, not the sample: one
+        # retry with a longer budget, so a measurement does not flip on it
+        seen, ref_raw = ref_err, None
+        ref_raw, ref_err = run_json(ref_cmd, timeout * 2)
+        if ref_raw is None:
+            ref_err = seen
     if ref_raw is None and ref_json.exists():
         ref_raw, ref_err = json.loads(ref_json.read_text()), None
     if ref_raw is None:
@@ -545,7 +582,8 @@ def main(argv=None) -> int:
                 "sample": sample.name,
                 "verdict": ("match" if not findings else
                             "environment" if any(sig.startswith("environment") for sig, _ in findings) else
-                            "reference_limit" if reference_limited(ref, ours, findings, extensions) else
+                            "reference_limit" if (reference_timed_out(ref, ours) or
+                                                  reference_limited(ref, ours, findings, extensions)) else
                             "diverged"),
                 "taote_extensions": extensions,
                 "reference": {"calls": len(ref.calls), "exit": ref.exit_code, "error": ref.error },
