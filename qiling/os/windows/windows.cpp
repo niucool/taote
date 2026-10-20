@@ -553,6 +553,17 @@ void QlOsWindows::run() {
             continue;
         } catch (const QlErrorBase& e) {
             if (seh_retarget_ == 0) {
+                // a control transfer to the null page is how a hosted entry
+                // point returns to its caller: the exe's entry does a bare
+                // `ret` with nothing under it (TCC's `mov eax,0; leave; ret`),
+                // so the popped return address is 0 and the emulator faults
+                // fetching it *before* any instruction executes. Nothing ran
+                // and nothing was damaged, so the run is finished, not crashed
+                // - the same reading pegasus's harness takes (PMA sweep:
+                // kernel32_file_find_test_api_x86.exe)
+                if (ql_->arch().regs().arch_pc() == 0) {
+                    break;
+                }
                 // an unhandled access violation ends the guest the way Windows
                 // does: the process exit code is STATUS_ACCESS_VIOLATION, and
                 // the entry-point error record carries the class

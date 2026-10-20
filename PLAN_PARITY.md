@@ -9,7 +9,7 @@ phase closes without its tests.
 
 | metric | pegasus | taote today | target |
 |---|---|---|---|
-| API sample sweep (`../pegasus/tests/bins`, 101 bins) | n/a (their suite asserts dispatch only) | **98 exit 0**, 0 blocked, 3 failed (`kernel32_file_find_test_api_x86.exe`, the two `wdm_test_*.sys` drivers) | 99+ (drivers land) |
+| API sample sweep (`../pegasus/tests/bins`, 101 bins) | n/a (their suite asserts dispatch only) | **99 exit 0**, 0 blocked, 2 failed (the two `wdm_test_*.sys` drivers) | 99+ (drivers land) |
 | PMA corpus (`~/source/capa-testfiles`, 32 PE samples) | 12 curated cases green (their CI), 38 with `PEGASUS_PMA_FULL=1` | **14 exit 0** (32-sample sweep), **1/12 green** (curated ctest cases, now with the reference guards) | ≥ 30 exit 0, all curated cases green |
 | reference-suite parity (`../pegasus/tests`, 357 cases) | 357 | **12 ported + 4 ported clusters**, rest mapped in `tests/PEGASUS_TEST_PARITY.md` | every *portable* row ported, none "deferred" |
 | taote suite | — | **540 passed / 0 failed / 3 skipped** | grows with every phase, stays 0-failed |
@@ -174,8 +174,9 @@ PMA differential baseline (32 PE samples, measured this pass):
 
 | verdict | count |
 | --- | --- |
-| match | **12** (`01-02.exe_`, `03-03.exe_`, `03-04.exe_`, `10-03.exe_`, `12-01.exe_`, `12-02.exe_`, `16-01.exe_`, `16-02.exe_`, `18-03.exe_`, `19-02.exe_`, `20-02.exe_`, `21-01.exe_`) |
+| match | **10** (`01-02.exe_`, `03-03.exe_`, `03-04.exe_`, `10-03.exe_`, `12-02.exe_`, `16-01.exe_`, `16-02.exe_`, `19-02.exe_`, `20-02.exe_`, `21-01.exe_`) |
 | environment | 0 |
+| blocked | 2 (`14-01.exe_`, `18-01.exe_` — the reference spins past the wall clock) |
 | reference_limit | 15 (`01-01.exe_`, `01-04.exe_`, `06-03.exe_`, `11-02.dll_`, `11-03.dll_`, `11-03.exe_`, `11-01.exe_`, `12-01.dll_`, `14-02.exe_`, `16-03.exe_`, `12-03.exe_`, `12-04.exe_`, `14-01.exe_`, `17-03.exe_`, `18-01.exe_`) |
 | diverged | 5 |
 
@@ -329,6 +330,27 @@ diverges at call #45 and now ends on `invalid_read`, so the change moved the gue
 further along without reaching the reference's trace. Recorded as the next unit
 with the corpus measurement it needs (the field is loader-level, so it must be
 scored over all 32 samples, not one).
+
+### A return to the null page is the entry point returning
+
+`kernel32_file_find_test_api_x86.exe` was the one non-driver failure left in the
+101-bin sweep: six dispatches, then `UC_ERR_FETCH_UNMAPPED`. Its entry does
+`mov eax,0; leave; ret` at `0x401050`, and nothing is under that frame — the
+popped return address is **0**, so the emulator faults fetching address 0 before
+any instruction there executes. Nothing ran and nothing was damaged: that is a
+hosted entry point returning to its caller, not a crash, and it is the reading
+pegasus's harness takes. `QlOsWindows::run()` now ends the run cleanly when the
+unhandled-fault pc is 0 (the entry-point error record and exit code stay
+untouched).
+
+Sweep after it: **99 exit 0, 0 blocked, 2 failed** — only the two `wdm_test_*.sys`
+kernel drivers remain (Phase 5). PMA corpus after it: **10 match / 0 environment /
+15 reference_limit / 2 blocked / 5 diverged** with raw taote exit-0 **23/32**
+(was 12/0/15/0/5 and 21/32): `12-01.exe_` and `18-03.exe_` moved from `match` to
+`reference_limit` because taote now *continues* past the guest's entry return and
+dispatches more than the faulting reference, which is the honest verdict;
+`14-01.exe_` and `18-01.exe_` are the new `blocked` status (the reference spins
+past the wall clock).
 
 ### Phase 5.4 (early): the socket wall-clock budget, and `blocked` as a status
 
