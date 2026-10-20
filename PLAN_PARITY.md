@@ -278,6 +278,20 @@ from 45 calls ending on `UnhandledExceptionFilter` to the reference's 46 calls
 with the allocator cluster gone (its `HeapAlloc`-vs-`VirtualAlloc` divergence was
 this branch, not a heap-handle problem).
 
+**`11-01.exe_` after the header fix: a stack-content divergence, one `ret`
+before the end.** All 45 leading dispatches now match in name *and* call site;
+only #45 differs (reference `ExitProcess` from `0x402ab3`, taote
+`UnhandledExceptionFilter` from `0x402c0d`). The `--code-trace` window
+`0x402900-0x402c30` shows why: at `0x4029f9 ret` the two guests pop *different
+return addresses* - the reference pops `0x4029fa` (its own next instruction) and
+taote pops `0x402acf` (the guest's SEH handler entry, i.e. the `Handler` field of
+its own registration record). So taote's guest stack is off by a slot by the time
+it reaches that `ret`, which means an earlier dispatch left `esp` unbalanced
+(`stdcall` cleanup vs the dispatcher's own) rather than the guest branching on a
+value. Next probe: `esp` before and after each of the last ten dispatches on both
+sides - that is a one-line comparison per call and it names the unbalancing
+handler directly.
+
 **`none vs invalid_insn` dissected (`03-04`, `11-01`, `16-01`).** On
 `11-01.exe_` both runs are identical through call #4 (`GetVersion`, `HeapCreate`,
 `GetVersionExA`, `GetEnvironmentVariableA`, `GetModuleHandleA` at the *same* call
