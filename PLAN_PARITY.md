@@ -165,12 +165,23 @@ python is present). Both are clean today; taote's only extra dispatches are
 `_initterm`, `_initterm_e` and `__acrt_iob_func`, which the reference leaves
 unimplemented.
 
-First clusters the differ already found (the work order for the rest of the
-phase): the reference **aborts a run** with `Windows API Implementation Error`
-when one of its own handlers raises (GetProcAddress.exe, most PMA samples),
-`GetProcAddress` is dispatched by taote *outside* the guest's call in 18-01.exe
-(reference logs it from the guest's call), and taote's console/CRT startup
-dispatches more handlers than the reference for the same binary.
+First clusters the differ found, and what they turned out to be:
+
+* **fixed (harness)**: the reference maps guest paths against its rootfs, so a
+  sample living outside it raised `'<path>' is not in the subpath of '<rootfs>'`
+  from its own path mapper and aborted the run with `Windows API Implementation
+  Error`. That is what made GetProcAddress.exe and most PMA samples look like
+  reference handler faults. The differ now stages each sample inside the seeded
+  rootfs; GetProcAddress.exe went from 162 aborted calls to 216 calls to exit 0.
+* **open**: with the abort gone, GetProcAddress.exe has exactly one divergence
+  left - the reference dispatches `FreeLibrary` once and taote does not (taote
+  does register a `FreeLibrary` handler, so the guest's call is being resolved
+  or reached differently; the next unit of work).
+* **not a divergence**: taote's CRT startup dispatches `_initterm`,
+  `_initterm_e` and `__acrt_iob_func`, which the reference leaves unimplemented -
+  the harness reports those as extensions.
+* PMA 18-01.exe is differential-clean (`LoadLibraryA`, `GetProcAddress`,
+  `ExitProcess`, same return values).
 
 ## Phase 2 — the qiling-surface completions the corpora need
 

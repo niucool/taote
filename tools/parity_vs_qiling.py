@@ -307,10 +307,19 @@ def prepare_rootfs(rootfs_src: Path, work: Path, samples, machine: str):
     cmd = [sys.executable, str(HERE / "stub_dlls.py"), "--out", str(system32), "--machine", machine]
     cmd += ["--from-pe", *[str(s) for s in samples]]
     subprocess.run(cmd, check=True, capture_output=True)
+
+    # the reference maps guest paths against the rootfs: a sample living outside
+    # it raises `'<path>' is not in the subpath of '<rootfs>'` from its own path
+    # mapper, which reads like an emulation fault. Stage every sample inside.
+    for sample in samples:
+        target = dst / "Windows" / sample.name
+        if not target.exists():
+            shutil.copy2(sample, target)
     return dst
 
 
-def run_one(sample: Path, machine: str, rootfs: Path, argv, qiling_python, qiling_repo, taote_trace, work: Path, timeout, count):
+def run_one(sample: Path, machine: str, rootfs: Path, argv, qiling_python, qiling_repo, taote_trace, work: Path, timeout, count,
+            ref_sample=None):
     """Run both emulators on one sample and return (ref_raw, taote_raw)."""
 
     ref_json = work / (sample.name + ".qiling.json")
@@ -322,7 +331,7 @@ def run_one(sample: Path, machine: str, rootfs: Path, argv, qiling_python, qilin
         "--qiling",
         str(qiling_repo),
         "--sample",
-        str(sample),
+        str(ref_sample or sample),
         "--rootfs",
         str(rootfs),
         "--out",
@@ -416,6 +425,7 @@ def main(argv=None) -> int:
         if rootfs is None:
             results.append({"sample": sample.name, "verdict": "skipped", "reason": f"unsupported machine for {sample.name}"})
             continue
+        ref_sample = (rootfs / "Windows" / sample.name) if rootfs is not None else sample
         ref_raw, our_raw = run_one(
             sample,
             machine,
@@ -427,8 +437,9 @@ def main(argv=None) -> int:
             work,
             args.timeout,
             args.count,
+            ref_sample=ref_sample,
         )
-        ref = Trace(ref_raw, rootfs_sample_path=sample)
+        ref = Trace(ref_raw, rootfs_sample_path=ref_sample)
         ours = Trace(our_raw)
         findings, clusters = diff_traces(ref, ours)
         extensions = sorted(n for n in ours.sequence() if n in ref.unimplemented)
