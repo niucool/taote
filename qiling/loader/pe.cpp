@@ -776,7 +776,13 @@ void QlLoaderPE::init_security_cookie() {
         return;
     }
 
-    const auto& config = parsed->load_configuration();
+    // a PE without a load-config directory has no /GS cell at all - LIEF hands
+    // back a null pointer, and dereferencing it segfaulted the host
+    // (PMA 10-03.sys_)
+    const auto* config = parsed->load_configuration();
+    if (config == nullptr) {
+        return;
+    }
     const std::uint64_t cookie_va = config->security_cookie();
     if (cookie_va == 0) {
         return;

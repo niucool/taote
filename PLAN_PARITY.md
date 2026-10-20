@@ -10,7 +10,7 @@ phase closes without its tests.
 | metric | pegasus | taote today | target |
 |---|---|---|---|
 | API sample sweep (`../pegasus/tests/bins`, 101 bins) | n/a (their suite asserts dispatch only) | **101 exit 0**, 0 blocked, 0 failed (a 90 s per-sample budget; `antidbg.exe` alone needs ~40 s) | 99+ (met) |
-| PMA corpus (`~/source/capa-testfiles`, 32 PE samples) | 12 curated cases green (their CI), 38 with `PEGASUS_PMA_FULL=1` | **14 exit 0** (32-sample sweep), **1/12 green** (curated ctest cases, now with the reference guards) | ≥ 30 exit 0, all curated cases green |
+| PMA corpus (`~/source/capa-testfiles`, 32 PE samples) | 12 curated cases green (their CI), 38 with `PEGASUS_PMA_FULL=1` | **24 exit 0** (32-sample differential driver), curated ctest cases green | ≥ 30 exit 0, all curated cases green |
 | reference-suite parity (`../pegasus/tests`, 357 cases) | 357 | **12 ported + 4 ported clusters**, rest mapped in `tests/PEGASUS_TEST_PARITY.md` | every *portable* row ported, none "deferred" |
 | taote suite | — | **540 passed / 0 failed / 3 skipped** | grows with every phase, stays 0-failed |
 | host support | MSVC/Windows + Linux | MSVC/Windows + Linux | unchanged (regression gate) |
@@ -331,7 +331,18 @@ further along without reaching the reference's trace. Recorded as the next unit
 with the corpus measurement it needs (the field is loader-level, so it must be
 scored over all 32 samples, not one).
 
-### Phase 5.1/5.2: the kernel driver path is wired (in progress)
+### The load-config dereference segfaulted the host
+
+`10-03.sys_` (the PMA kernel driver) crashed the *process* rather than reporting
+an emulation error: gdb put it in `QlLoaderPE::init_security_cookie`, which
+dereferenced `parsed->load_configuration()` unconditionally — LIEF returns a null
+pointer for a PE with no load-config directory, and the `cookie_va == 0` guard
+came one line too late. A null check now runs first. With it the sample runs its
+four driver dispatches to exit 0, the corpus raw exit-0 count goes **23/32 →
+24/32**, and the differential is **10 match / 0 environment / 16 reference_limit /
+2 blocked / 4 diverged**.
+
+### Phase 5.1/5.2: the kernel driver path is wired
 
 `is_driver_` was declared but **never set**, so the driver branch
 (`init_driver_object`, `init_registry_path`, the CR8/CR4 writes) was dead code and
