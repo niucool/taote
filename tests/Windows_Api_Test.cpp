@@ -5411,8 +5411,11 @@ TEST(WinApiRegistry, RegHiveReadsARealHiveFile) {
     EXPECT_TRUE(reg.exists("HKEY_LOCAL_MACHINE\\SOFTWARE\\Test"));
     EXPECT_FALSE(reg.exists("HKEY_LOCAL_MACHINE\\SOFTWARE\\Nope"));
 
-    // the value walk itself (the vk cell: name, type, data offsets) is the next
-    // item - the key walk above is what this test pins today
+    const auto value = reg.read("HKEY_LOCAL_MACHINE\\SOFTWARE\\Test", "Greeting", 1);
+    ASSERT_TRUE(value.first.has_value());
+    EXPECT_EQ(*value.first, 1);  // REG_SZ
+    ASSERT_TRUE(value.second.has_value());
+    EXPECT_EQ(std::get<std::string>(*value.second), "hi");
     const auto missing = reg.read("HKEY_LOCAL_MACHINE\\SOFTWARE\\Test", "Absent", 1);
     EXPECT_FALSE(missing.first.has_value());
     EXPECT_FALSE(missing.second.has_value());

@@ -366,10 +366,14 @@ hbin, a root key with a subkey list, and a subkey - and pins the walk: the root
 and the subkey exist, a missing key does not.
 
 The **value walk** (the `vk` cell: `NameLength` at +2, `DataLength`/`DataOffset`
-at +4/+8, `Type` at +0xc, the name at +0x14, and the inline-data bit) is written
-but not yet verified: the fixture's `REG_SZ` read still comes back empty, so the
-test asserts only the key walk. That is the next unit in this phase, and it is
-named here rather than left to look finished.
+at +4/+8, `Type` at +0xc, the name at +0x14, and the inline-data bit) is verified
+too now. The symptom the previous pass recorded ("the fixture's REG_SZ read comes
+back empty") was one wrong read: the value's name length is a **u16 after the
+two-byte `vk` signature** (`rd32(vk) & 0xffff` was returning the signature bytes
+`vk` themselves, and the second spelling of the same read still used `vk + 0x0`
+after the first was fixed). With it the fixture reads `REG_SZ` "hi" back as a
+string, and `WinApiRegistry.RegHiveReadsARealHiveFile` asserts the type, the
+value and the missing-value arm.
 
 Phase 2's other remaining item is the **NT registry hive parser** (`RegHive`'s
 pre-existing-hive read path; today it defers and the create/delete/write path is

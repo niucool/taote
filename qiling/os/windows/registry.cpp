@@ -372,7 +372,7 @@ std::size_t RegHive::find_value(std::size_t nk, std::string_view name) const {
         if (vk == std::string::npos || vk + 0x14 > data_.size() || std::memcmp(data_.data() + vk, "vk", 2) != 0) {
             continue;
         }
-        const auto name_len = static_cast<std::size_t>(rd32(data_, vk + 0x0));
+        const auto name_len = static_cast<std::size_t>(rd32(data_, vk + 2) & 0xffffu);
         if (vk + 0x14 + name_len > data_.size()) {
             continue;
         }
