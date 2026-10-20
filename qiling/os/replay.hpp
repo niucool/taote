@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <fstream>
 #include <sstream>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -27,6 +28,17 @@ namespace os {
 class QlApiReplay {
 public:
     enum class Mode { Off, Record, Replay };
+
+    struct Entry {
+        std::string name;
+        std::uint64_t retval = 0;
+        int last_error = 0;
+        // a pointer answer is an address *this* run handed out (a heap chunk, a
+        // module base): serving it back would send the guest to memory that does
+        // not exist here, so only the small scalar answers are served and a
+        // pointer answer is re-derived by running the handler (and verified)
+        bool servable = true;
+    };
 
     // open the store in one of the modes; a failure to open leaves the store
     // off (the run continues, only without replay)
@@ -62,6 +74,7 @@ public:
                 entry.retval = field.empty() ? 0 : std::stoull(field);
                 std::getline(parts, field, '\t');
                 entry.last_error = field.empty() ? 0 : std::stoi(field);
+                entry.servable = entry.retval < 0x10000;
                 entries_.push_back(entry);
             }
         }
@@ -72,6 +85,8 @@ public:
 
     bool active() const noexcept { return mode_ != Mode::Off; }
     bool replaying() const noexcept { return mode_ == Mode::Replay; }
+    // true when every recorded dispatch has been served
+    bool exhausted() const noexcept { return mode_ == Mode::Replay && cursor_ >= entries_.size(); }
 
     // write one dispatch to the recording (no-op unless recording)
     void record(const std::string& name, std::uint64_t retval, int last_error) {
@@ -111,6 +126,21 @@ public:
         return true;
     }
 
+    // serve the next recorded answer for `name` (the replay path: the handler is
+    // not run at all, so no registry/file/network side effect happens and the
+    // guest sees exactly the answer the recording holds)
+    std::optional<Entry> take(const std::string& name) {
+        if (mode_ != Mode::Replay || cursor_ >= entries_.size()) {
+            return std::nullopt;
+        }
+        if (entries_[cursor_].name != name) {
+            mismatches_.push_back(std::to_string(cursor_) + ": recorded " + entries_[cursor_].name +
+                                  ", replayed " + name);
+            return std::nullopt;
+        }
+        return entries_[cursor_++];
+    }
+
     std::size_t recorded() const noexcept { return entries_.size(); }
     std::size_t mismatches() const noexcept { return mismatches_.size(); }
     const std::vector<std::string>& mismatch_log() const noexcept { return mismatches_; }
@@ -120,12 +150,6 @@ public:
     }
 
 private:
-    struct Entry {
-        std::string name;
-        std::uint64_t retval = 0;
-        int last_error = 0;
-    };
-
     Mode mode_ = Mode::Off;
     std::ofstream out_;
     std::vector<Entry> entries_;

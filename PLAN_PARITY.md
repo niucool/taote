@@ -352,10 +352,25 @@ dispatch the recording does not carry is one too. ctest 542 cases. The corpus is
 unchanged (**24/32 exit 0**, differential **10 / 0 / 16 / 2 / 4**) - the store is
 opt-in, so a default run behaves exactly as before.
 
-**Still open in 5.5:** the store *verifies* a run; it does not yet *serve* the
-recorded values back (a replay that skips the handler and answers from the
-recording, which needs the frame unwind to be driven by the api's own slot count
-rather than the handler's). That is the remaining half of this phase.
+**The serving half is in, opt-in.** `--replay-serve` (with `--replay-api`)
+answers each dispatch from the recording without running the handler, unwinding
+the frame through the same `call` path the handler would have used so the guest
+cannot tell the difference. Two limits are inherent and now documented rather
+than discovered later:
+
+* a **pointer** answer is an address *this* run handed out, so serving it would
+  send the guest to memory that does not exist — entries with a value above
+  0x10000 are re-derived by the real handler (and verified), which keeps the
+  cursor aligned by consuming the entry exactly once;
+* an API that also **writes guest memory** (a `WIN32_FIND_DATA`, a `printf`
+  buffer) cannot be reproduced by its return value alone, so a served run of
+  such a sample produces the same dispatch sequence and exit code but not the
+  same output.
+
+That is why the default is verify-only: `argv_test_x64.exe` records 15
+dispatches and both the verify-only and the served run reproduce all 15 with
+**zero mismatches** and the same exit code, while a sample whose APIs write
+buffers stays honest in verify mode.
 
 ### Phase 5.3: the x64 virtual unwinder
 

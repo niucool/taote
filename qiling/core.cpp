@@ -37,6 +37,7 @@ Qiling::Qiling(const QilingOptions& options) {
     // the replay store's paths ride the options (PLAN_PARITY Phase 5.5)
     api_record_path_ = options.api_record_path;
     api_replay_path_ = options.api_replay_path;
+    api_replay_serve_ = options.api_replay_serve;
 
     // ---- argv setup (core.py) ----
     if (!options.argv.empty()) {

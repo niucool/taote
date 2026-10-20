@@ -506,6 +506,27 @@ void QlOsWindows::hook_winapi(std::uint64_t address, std::uint32_t size) {
         }
     };
 
+    // the serving half of the replay: the recording answers, the handler never
+    // runs, so the run is bit-reproducible even on a host whose registry or
+    // filesystem differs (the frame is unwound through the same `call` path the
+    // handler would have used, so the guest cannot tell the difference)
+    bool replay_consumed = false;
+    if (replay_.replaying() && ql_->api_replay_serve()) {
+        auto served = replay_.take(imported->name);
+        replay_consumed = served.has_value();
+        if (served && served->servable) {
+            set_fcall_ptr(fcall_select(api != nullptr ? api->cc : default_cc_for(imported->name, bits_)));
+            set_last_error(served->last_error);
+            const auto proto = api != nullptr ? api->params : ApiParams{};
+            call(address, imported->name,
+                 [served](std::uint64_t, const QlFunctionCall::Params&) -> std::optional<std::uint64_t> {
+                     return served->retval;
+                 },
+                 proto, nullptr, nullptr, api != nullptr && api->passthru);
+            return;
+        }
+    }
+
     if (api == nullptr) {
         // the unsupported-import discipline: answer a zero return value through
         // the calling convention so the caller's frame stays balanced (the stub
@@ -553,14 +574,16 @@ void QlOsWindows::hook_winapi(std::uint64_t address, std::uint32_t size) {
          },
          api->params, nullptr, nullptr, api->passthru);
 
-    // the answer the environment gave is what a replay re-produces (the
-    // dispatch returns nothing, so the recorded value is the guest's return
-    // register - what the guest actually sees)
-    std::optional<std::uint64_t> answer;
-    if (replay_.active()) {
-        answer = ql_->arch().regs().read(ql_->arch().bits() == 64 ? "rax" : "eax");
+    // the answer the environment gave is what a replay re-produces; an entry the
+    // serving path already consumed (a pointer answer, re-derived by the real
+    // handler) must not be verified a second time or the cursor drifts
+    if (!replay_consumed) {
+        std::optional<std::uint64_t> answer;
+        if (replay_.active()) {
+            answer = ql_->arch().regs().read(ql_->arch().bits() == 64 ? "rax" : "eax");
+        }
+        replay_answer(answer);
     }
-    replay_answer(answer);
 }
 
 void QlOsWindows::run() {

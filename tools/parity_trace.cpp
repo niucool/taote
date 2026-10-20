@@ -19,7 +19,7 @@
 //                     [--code-trace FILE] [--code-trace-range BEGIN END]
 //                     [--mem-watch FILE BEGIN SIZE] [--dump-heap FILE]
 //                     [--dump-images FILE] [--dump-mem FILE BEGIN SIZE]
-//                     [--record-api FILE] [--replay-api FILE]
+//                     [--record-api FILE] [--replay-api FILE] [--replay-serve]
 #include <LIEF/PE.hpp>
 
 #include <algorithm>
@@ -85,6 +85,7 @@ int main(int argc, char** argv) {
     std::string code_trace;
     std::string api_record;
     std::string api_replay;
+    bool replay_serve = false;
     std::string rootfs;
     std::string dump_mem;
     std::string dump_images;
@@ -119,6 +120,8 @@ int main(int argc, char** argv) {
             api_record = argv[++i];
         } else if (arg == "--replay-api" && i + 1 < argc) {
             api_replay = argv[++i];
+        } else if (arg == "--replay-serve") {
+            replay_serve = true;
         } else if (arg == "--rootfs" && i + 1 < argc) {
             rootfs = argv[++i];
         } else if (arg == "--dump-mem" && i + 3 < argc) {
@@ -311,6 +314,7 @@ int main(int argc, char** argv) {
     // re-check a later run against the recording (PLAN_PARITY Phase 5.5)
     opts.api_record = api_record;
     opts.api_replay = api_replay;
+    opts.api_replay_serve = replay_serve;
 
     // the shared rootfs: the differential seeds one tree for both emulators so
     // their stub dll export sets (and the paths the guest sees) cannot differ

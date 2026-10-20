@@ -215,6 +215,7 @@ struct SampleOptions {
     std::optional<std::filesystem::path> rootfs;
     std::string api_record;   // the deterministic-replay store (Phase 5.5)
     std::string api_replay;
+    bool api_replay_serve = false;
 };
 
 inline SampleOutcome run_pe_sample(const std::string& bin_name, const SampleOptions& opts = {}) {
@@ -339,6 +340,7 @@ inline SampleOutcome run_pe_sample(const std::string& bin_name, const SampleOpti
         options.count = opts.count;
         options.api_record_path = opts.api_record;
         options.api_replay_path = opts.api_replay;
+        options.api_replay_serve = opts.api_replay_serve;
         options.argv.push_back(exe_in_rootfs.string());
         for (const auto& a : opts.argv) {
             options.argv.push_back(a);

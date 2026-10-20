@@ -89,6 +89,10 @@ struct QilingOptions {
     // the second (both empty = off)
     std::string api_record_path;
     std::string api_replay_path;
+    // serve the recorded answers instead of only verifying them (a served call
+    // never runs its handler, so its guest-memory side effects do not happen;
+    // the default is verify-only for exactly that reason)
+    bool api_replay_serve = false;
 
     // an import whose name has no registered handler (and no rootfs module
     // implementing it): Continue answers a zero return value through the
@@ -147,6 +151,7 @@ public:
     // the deterministic-replay store paths (empty = off)
     const std::string& api_record_path() const noexcept { return api_record_path_; }
     const std::string& api_replay_path() const noexcept { return api_replay_path_; }
+    bool api_replay_serve() const noexcept { return api_replay_serve_; }
     QL_VERBOSE verbose() const noexcept { return verbose_; }
     void set_verbose(QL_VERBOSE v);
 
@@ -229,6 +234,7 @@ private:
     QL_STOP stop_options_ = QL_STOP::NONE;
     std::string api_record_path_;
     std::string api_replay_path_;
+    bool api_replay_serve_ = false;
     QL_VERBOSE verbose_ = QL_VERBOSE::DEFAULT;
     // the macho driver loadbase override (0 = the verbatim default)
     std::uint64_t driver_loadbase_ = 0;
