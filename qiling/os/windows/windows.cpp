@@ -270,6 +270,9 @@ void QlOsWindows::ensure_profile_state() {
             self->ql_->emu_stop();
             return 1;
         }
+        if (self->seh_check_cpu_exception(address)) {
+            return 1;  // the exception was staged: the run loop restarts there
+        }
         self->hook_winapi(address, size);
         return 0;
     }, 0, 0xffffffffffffffffull);
@@ -325,7 +328,7 @@ namespace {
 // reference PMA cases assert against
 std::string classify_emulation_error(const std::string& text) {
     auto has = [&text](const char* needle) { return text.find(needle) != std::string::npos; };
-    if (has("Invalid memory fetch") || has("failed to fetch")) return "invalid_fetch";
+    if (has("Invalid memory fetch") || has("failed to fetch") || has("non-executable memory")) return "invalid_fetch";
     if (has("Invalid memory write") || has("failed to write memory")) return "invalid_write";
     if (has("Invalid memory read") || has("failed to read memory")) return "invalid_read";
     if (has("Invalid memory access")) return "invalid_access";
@@ -515,7 +518,14 @@ void QlOsWindows::run() {
     while (true) {
         try {
             ql_->emu_start(begin, exit_point, ql_->timeout(), ql_->count());
-            break;
+            if (seh_retarget_ == 0) {
+                break;
+            }
+            // a CPU-exception dispatch stopped the emulation cleanly (no
+            // unicorn error to bubble up): restart at the staged target
+            begin = seh_retarget_;
+            seh_retarget_ = 0;
+            continue;
         } catch (const QlErrorBase& e) {
             if (seh_retarget_ == 0) {
                 emu_error();

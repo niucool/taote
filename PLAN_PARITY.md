@@ -65,6 +65,14 @@ cause class, not a per-sample bug.
 3. **CPU exceptions (`UC_ERR_EXCEPTION`: 16-03.exe).** Guest `int3`/`div` must
    route through the same dispatch as AVs (`STATUS_*` record + frame walk);
    today only read/write faults dispatch.
+   Status: **landed for `div`/`idiv`.** The trace hook pre-checks the
+   instruction (the operand group + a zero divisor in a register), stages an
+   `EXCEPTION_RECORD` with `STATUS_INTEGER_DIVIDE_BY_ZERO` (0xC0000094) through
+   the same `seh_dispatch` the AV path uses (the record's code is now a
+   parameter), and stops; the run loop restarts at the armed retarget when
+   `emu_start` returns *without* an error. 16-03.exe no longer reports
+   `UC_ERR_EXCEPTION`; it now faults fetching from a non-executable page, i.e.
+   the dispatch itself works and the remaining problem is the target.
 4. **Hangs (14-01.exe).** The guards from 1. are the mechanism; add the
    virtual-clock slice so `Sleep`/timeouts do not stall the run.
 5. **The AV-exit tail (14-02.exe).** An unhandled exception should end the run

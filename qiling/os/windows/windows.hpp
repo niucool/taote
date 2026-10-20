@@ -184,7 +184,14 @@ private:
     static bool seh_fault_trampoline(uc_engine* uc, uc_mem_type access, std::uint64_t address,
                                      std::uint32_t size, std::int64_t value, void* user_data);
     bool seh_on_fault(int access, std::uint64_t address);
-    bool seh_dispatch(std::uint64_t fault_addr, std::uint32_t access_type);
+    bool seh_dispatch(std::uint64_t fault_addr, std::uint32_t access_type,
+                      std::uint32_t exception_code = 0xC0000005u);
+
+    // the CPU-exception slice (PLAN_PARITY.md Phase 1.3): the guest `div`/`idiv`
+    // with a zero divisor is staged into the same fs:[0] dispatch the memory
+    // faults use (unicorn surfaces it as UC_ERR_EXCEPTION, which no memory hook
+    // can catch, so the trace hook pre-checks the instruction)
+    bool seh_check_cpu_exception(std::uint64_t pc);
     bool seh_continue();
     void seh_build_context(std::uint64_t dest) const;
     void seh_load_context();

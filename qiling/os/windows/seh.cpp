@@ -113,9 +113,59 @@ bool QlOsWindows::seh_on_fault(int access, std::uint64_t address) {
     return seh_dispatch(address, access == UC_MEM_WRITE_UNMAPPED ? 1u : 0u);
 }
 
+// the div/idiv pre-check: the trace hook runs before every instruction, so a
+// zero divisor can be turned into the guest exception unicorn would otherwise
+// surface as an uncatchable UC_ERR_EXCEPTION
+bool QlOsWindows::seh_check_cpu_exception(std::uint64_t pc) {
+    if (bits_ != 32 || !seh_dispatch_enabled_ || seh_sentinel_ == 0 || seh_retarget_ != 0) {
+        return false;
+    }
+
+    std::vector<std::uint8_t> code;
+    try {
+        code = ql_->mem().read(pc, 3);
+    } catch (...) {
+        return false;
+    }
+    if (code.size() < 2) {
+        return false;
+    }
+
+    const auto op = code[0];
+    if (op != 0xF6 && op != 0xF7) {  // the div/idiv group
+        return false;
+    }
+    const auto modrm = code[1];
+    if ((modrm & 0xC0) != 0xC0) {  // only the register forms are decoded
+        return false;
+    }
+    const auto reg = (modrm >> 3) & 7;
+    if (reg != 6 && reg != 7) {  // /6 = div, /7 = idiv
+        return false;
+    }
+
+    // the operand register (the 8-bit forms alias the classic high bytes)
+    static const char* k32[] = {"eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi"};
+    static const char* k8[] = {"al", "cl", "dl", "bl", "ah", "ch", "dh", "bh"};
+    const auto& regs = ql_->arch().regs();
+    const auto divisor = regs.read(op == 0xF6 ? k8[modrm & 7] : k32[modrm & 7]);
+    const auto width = op == 0xF6 ? 8 : 32;
+    if ((divisor & ((1ull << width) - 1)) != 0) {
+        return false;
+    }
+
+    // STATUS_INTEGER_DIVIDE_BY_ZERO against the div instruction itself
+    if (!seh_dispatch(pc, 0u, 0xC0000094u)) {
+        return false;
+    }
+    ql_->emu_stop();
+    return true;
+}
+
 // pegasus _dispatch_seh_x86: stage the fs:[0] frame handler call and arm the
 // retarget. Returns true when the dispatch took the fault.
-bool QlOsWindows::seh_dispatch(std::uint64_t fault_addr, std::uint32_t access_type) {
+bool QlOsWindows::seh_dispatch(std::uint64_t fault_addr, std::uint32_t access_type,
+                                std::uint32_t exception_code) {
     auto& regs = ql_->arch().regs();
     auto& mem = ql_->mem();
 
@@ -170,7 +220,7 @@ bool QlOsWindows::seh_dispatch(std::uint64_t fault_addr, std::uint32_t access_ty
     // EXCEPTION_RECORD: the ACCESS_VIOLATION code, the faulting pc, the
     // read/write type + the faulting address in the info params
     std::vector<std::uint8_t> rec(SEH_RECORD_SIZE, 0);
-    put_u32(rec, 0, 0xC0000005);  // ExceptionCode = STATUS_ACCESS_VIOLATION
+    put_u32(rec, 0, exception_code);  // ExceptionCode (AV by default)
     put_u32(rec, 4, 0);           // ExceptionFlags
     put_u32(rec, 8, 0);           // ExceptionRecord (nested chains: none)
     put_u32(rec, 12, static_cast<std::uint32_t>(pc));
