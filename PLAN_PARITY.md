@@ -386,6 +386,20 @@ instruction streams agree up to and including the `call dword ptr [0x40b064]`
 at `0x401033` (both at `sp` 0xffffb550), and the two runs disagree only about
 *what that slot held*.
 
+That probe exists now (`--dump-mem FILE BEGIN SIZE` with a new
+`SampleOptions::after_run` hook, run on both the clean and the faulting path),
+and it **falsifies the slot hypothesis**: at run end taote's `0x40b064` holds
+`0x100210d0`, the stub cell, exactly like the reference - and the stub cell
+*does* execute on taote (a stub-range code trace shows
+`100210d0 1 ffffb550`, one byte, `0xC3`). The stub's `ret` therefore pops a
+different value in the two runs even though `sp` at the call and at the stub
+cell is identical: the reference pops `0x401039` (its own next instruction),
+taote pops `0x406f6c` (a runtime-generated thunk inside the sample), and taote
+carries on from there into its `UnhandledExceptionFilter` path. So this is the
+same shape the `11-01` unit ended on - same `sp`, different memory at the popped
+slot - and the next probe is a write watch over the stack frame around
+`0xffffb550` (not the IAT slot) on both sides.
+
 Scored, and it lands: over the 32-sample corpus the differential is
 **5 match / 1 environment / 3 reference_limit / 23 diverged** before and after,
 and the raw exit-0 count is 13/32 before and after. No sample changes verdict

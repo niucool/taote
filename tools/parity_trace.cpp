@@ -18,10 +18,11 @@
 //                     [--max-api-count N] [--dump-imports FILE] [--out FILE]
 //                     [--code-trace FILE] [--code-trace-range BEGIN END]
 //                     [--mem-watch FILE BEGIN SIZE] [--dump-heap FILE]
-//                     [--dump-images FILE]
+//                     [--dump-images FILE] [--dump-mem FILE BEGIN SIZE]
 #include <LIEF/PE.hpp>
 
 #include <algorithm>
+#include <iomanip>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -81,9 +82,12 @@ int main(int argc, char** argv) {
     std::string out_path;
     std::string dump_imports;
     std::string code_trace;
+    std::string dump_mem;
     std::string dump_images;
     std::string dump_heap;
     std::string mem_watch;
+    std::uint64_t dump_mem_begin = 0;
+    std::uint64_t dump_mem_size = 0;
     std::uint64_t mem_watch_begin = 0;
     std::uint64_t mem_watch_size = 0;
     std::uint64_t code_begin = 0;
@@ -107,6 +111,10 @@ int main(int argc, char** argv) {
             opts.max_api_count = parse_u64(argv[++i]);
         } else if (arg == "--dump-imports" && i + 1 < argc) {
             dump_imports = argv[++i];
+        } else if (arg == "--dump-mem" && i + 3 < argc) {
+            dump_mem = argv[++i];
+            dump_mem_begin = parse_u64(argv[++i]);
+            dump_mem_size = parse_u64(argv[++i]);
         } else if (arg == "--dump-images" && i + 1 < argc) {
             dump_images = argv[++i];
         } else if (arg == "--dump-heap" && i + 1 < argc) {
@@ -260,6 +268,29 @@ int main(int argc, char** argv) {
                 }
                 for (const auto b : raw) {
                     out << (b >= 0x20 && b < 0x7f ? static_cast<char>(b) : '.');
+                }
+                out << "\n";
+            }
+        };
+    }
+
+    // the run-end memory window: "what did this cell hold when the guest
+    // stopped", which is how an IAT slot / stack cell divergence is settled
+    if (!dump_mem.empty()) {
+        opts.after_run = [&dump_mem, &dump_mem_begin, &dump_mem_size](qiling::Qiling& ql) {
+            std::ofstream out(dump_mem);
+            std::vector<std::uint8_t> raw;
+            try {
+                raw = ql.mem().read(dump_mem_begin, dump_mem_size);
+            } catch (const std::exception& e) {
+                out << "unreadable: " << e.what() << "\n";
+                return;
+            }
+            out << std::hex;
+            for (std::size_t i = 0; i < raw.size(); i += 4) {
+                out << (dump_mem_begin + i) << ": ";
+                for (std::size_t j = i; j < std::min(i + 4, raw.size()); ++j) {
+                    out << std::setw(2) << std::setfill('0') << static_cast<unsigned>(raw[j]) << " ";
                 }
                 out << "\n";
             }

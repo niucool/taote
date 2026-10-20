@@ -203,6 +203,7 @@ struct SampleOptions {
     std::vector<std::pair<std::string, std::string>> files;              // rootfs path -> content
     std::map<std::string, std::vector<std::string>> stub_extras;         // dll -> extra exports
     std::function<void(Qiling&)> configure;                             // per-run tweaks
+    std::function<void(Qiling&)> after_run;                             // post-run probe (a memory dump)
     std::uint64_t max_api_count = 0;                                     // the api budget guard
     std::uint64_t timeout = 0;                                           // seconds (0 = none)
     std::uint64_t count = 0;                                             // instruction budget (0 = none)
@@ -265,6 +266,7 @@ inline SampleOutcome run_pe_sample(const std::string& bin_name, const SampleOpti
         }
     };
 
+    Qiling* ql_after = nullptr;  // the post-run probe's handle (set once the run owns it)
     try {
         const auto plan = plan_for(sample);
         const auto rootfs = make_rootfs(fs::path(bin_name).stem().string());
@@ -326,6 +328,7 @@ inline SampleOutcome run_pe_sample(const std::string& bin_name, const SampleOpti
 
         ql_storage = std::make_unique<Qiling>(std::move(options));
         Qiling& ql = *ql_storage;
+        ql_after = &ql;
         capture_path = rootfs / "guest_stdout.txt";
 
         // the guest stdout capture (the printf/puts renders land here)
@@ -409,9 +412,19 @@ inline SampleOutcome run_pe_sample(const std::string& bin_name, const SampleOpti
             out.exit_code = ql.os().exit_code();
         }
 
+        if (opts.after_run) {
+            opts.after_run(ql);
+        }
+
         capture_stats();
     } catch (const std::exception& e) {
         out.error = e.what();
+        if (opts.after_run && ql_after != nullptr) {
+            try {
+                opts.after_run(*ql_after);
+            } catch (...) {
+            }
+        }
         capture_stats();
     } catch (...) {
         out.error = "unknown exception";
