@@ -331,6 +331,29 @@ further along without reaching the reference's trace. Recorded as the next unit
 with the corpus measurement it needs (the field is loader-level, so it must be
 scored over all 32 samples, not one).
 
+### Phase 5.3: the x64 virtual unwinder
+
+`RtlVirtualUnwind` was a pure passthru (`std::nullopt`), which is what the guest's
+own `__C_specific_handler` / `__CxxFrameHandler3` calls to move one frame up: the
+CONTEXT came back unchanged, so every x64 C++ exception walked the wrong frame.
+It now reads the RUNTIME_FUNCTION's UNWIND_INFO and replays the prologue codes
+backwards — `UWOP_PUSH_NONVOL` (restores the register from the stack),
+`UWOP_ALLOC_LARGE`/`SMALL` (rsp), `UWOP_SET_FPREG` (rsp from the frame
+register), the `SAVE_NONVOL`/`SAVE_XMM128` slot widths, and `UWOP_PUSH_MACHFRAME`
+— then pops the return address into Rip and reports the handler RVA
+(4-aligned after the code array) when `UNW_FLAG_EHANDLER` is set, filling
+EstablisherFrame and HandlerData as Windows does.
+
+`WinApiNtdll.RtlVirtualUnwindReplaysThePrologueCodes` builds a synthetic
+RUNTIME_FUNCTION + UNWIND_INFO + CONTEXT64 in a scratch page and pins the whole
+path: rbx restored from its saved slot, rsp moved past the saved slot and the
+return address, Rip set to the caller's resume address, EstablisherFrame equal to
+the unwound rsp, and the handler RVA returned with the EHANDLER flag.
+ctest is 541 cases. The PMA corpus is unchanged at **24/32 exit 0** and the
+differential at **10 / 0 / 16 / 2 / 4** — no corpus sample reaches its
+`RtlVirtualUnwind` path yet, so this unit is covered by the new test rather than
+by a number.
+
 ### The load-config dereference segfaulted the host
 
 `10-03.sys_` (the PMA kernel driver) crashed the *process* rather than reporting

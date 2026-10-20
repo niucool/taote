@@ -710,8 +710,135 @@ void register_ntdll_family() {
         {"HandlerData", PVOID_},
         {"EstablisherFrame", PVOID_},
         {"ContextPointers", PVOID_},
-    }, true) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
-        return std::nullopt;
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        // The x64 unwinder: the guest's own __C_specific_handler /
+        // __CxxFrameHandler3 calls this to move one frame up, so a passthru
+        // left it holding an unchanged CONTEXT and every C++ exception walked
+        // the wrong frame. The RUNTIME_FUNCTION gives the UNWIND_INFO, and the
+        // prologue codes say what the prologue did to rsp and the saved
+        // registers; replaying them backwards is the virtual unwind.
+        const auto control_pc = api_get_int(get_param(params, "ControlPc"));
+        const auto function_entry = api_get_int(get_param(params, "FunctionEntry"));
+        const auto context_record = api_get_int(get_param(params, "ContextRecord"));
+        const auto handler_type_ptr = api_get_int(get_param(params, "HandlerType"));
+        const auto handler_data_ptr = api_get_int(get_param(params, "HandlerData"));
+        const auto establisher_frame_ptr = api_get_int(get_param(params, "EstablisherFrame"));
+
+        if (ql.arch().bits() != 64 || function_entry == 0 || context_record == 0) {
+            return std::nullopt;
+        }
+
+        // the RUNTIME_FUNCTION triple: two RVAs of code plus the unwind-info RVA
+        const auto table_entry = [&](std::size_t off) {
+            return static_cast<std::uint64_t>(ql.mem().read_ptr(function_entry + off, 4));
+        };
+        const auto unwind_rva = table_entry(8);
+
+        const auto* image = ql.loader().find_containing_image(control_pc);
+        // a synthetic RUNTIME_FUNCTION (the unit tests build one in a scratch
+        // page) has no image to rebase against, so its third field is taken as
+        // an absolute address
+        const auto unwind_va = image != nullptr ? image->base + unwind_rva : unwind_rva;
+        if (unwind_va == 0) {
+            return std::nullopt;
+        }
+
+        const auto byte = [&](std::uint64_t at) {
+            return static_cast<std::uint64_t>(ql.mem().read_ptr(at, 1));
+        };
+        const auto slot = [&](std::size_t i) { return unwind_va + 4 + i * 2; };
+
+        const auto version_flags = byte(unwind_va);
+        const auto count_of_codes = byte(unwind_va + 2);
+        const auto frame_field = byte(unwind_va + 3);
+        const auto frame_register = frame_field & 0xf;
+        const auto frame_offset = frame_field >> 4;
+
+        // the x64 CONTEXT register slots (kontxt.h: Rax@0x78 .. Rip@0xf8)
+        const auto ctx_reg_off = [](int reg) -> std::size_t {
+            static const std::size_t kOrder[16] = {0x78, 0x80, 0x88, 0x90, 0x98, 0xa0,
+                                                   0xa8, 0xb0, 0xb8, 0xc0, 0xc8, 0xd0,
+                                                   0xd8, 0xe0, 0xe8, 0xf0};
+            return kOrder[reg & 15];
+        };
+        constexpr std::size_t kCtxRip = 0xf8;
+
+        auto rsp = static_cast<std::uint64_t>(ql.mem().read_ptr(context_record + ctx_reg_off(4), 8));
+        const auto read_ctx_reg = [&](int reg) {
+            return static_cast<std::uint64_t>(ql.mem().read_ptr(context_record + ctx_reg_off(reg), 8));
+        };
+
+        // replay the prologue backwards (the codes are stored in prologue order)
+        for (std::size_t i = 0; i < count_of_codes; ++i) {
+            const auto code = slot(i);
+            const auto op_info = byte(code + 1);
+            switch (byte(code) & 0xf) {
+                case 0:  // UWOP_PUSH_NONVOL: the saved register sits at rsp
+                    ql.mem().write_ptr(context_record + ctx_reg_off(static_cast<int>(op_info)),
+                                       ql.mem().read_ptr(rsp, 8), 8);
+                    rsp += 8;
+                    break;
+                case 1:  // UWOP_ALLOC_LARGE
+                    if (op_info == 0) {
+                        const auto size = static_cast<std::uint64_t>(ql.mem().read_ptr(code + 2, 2)) * 8;
+                        rsp += size;
+                        i += 1;
+                    } else {
+                        const auto size = static_cast<std::uint64_t>(ql.mem().read_ptr(code + 2, 4));
+                        rsp += size;
+                        i += 2;
+                    }
+                    break;
+                case 2:  // UWOP_ALLOC_SMALL
+                    rsp += static_cast<std::uint64_t>(op_info) * 8 + 8;
+                    break;
+                case 3:  // UWOP_SET_FPREG: rsp came from the frame register
+                    if (frame_register != 0) {
+                        rsp = read_ctx_reg(static_cast<int>(frame_register)) -
+                              static_cast<std::uint64_t>(frame_offset) * 16;
+                    }
+                    break;
+                case 4:  // UWOP_SAVE_NONVOL
+                    i += 1;
+                    break;
+                case 5:  // UWOP_SAVE_NONVOL_FAR
+                    i += 2;
+                    break;
+                case 8:  // UWOP_SAVE_XMM128
+                    i += 1;
+                    break;
+                case 9:  // UWOP_SAVE_XMM128_FAR
+                    i += 2;
+                    break;
+                case 10:  // UWOP_PUSH_MACHFRAME
+                    rsp += op_info != 0 ? 0x30 : 0x28;
+                    break;
+                default:
+                    break;
+            }
+        }
+
+        // pop the return address: the frame above resumes there
+        const auto return_address = static_cast<std::uint64_t>(ql.mem().read_ptr(rsp, 8));
+        rsp += 8;
+
+        ql.mem().write_ptr(context_record + ctx_reg_off(4), rsp, 8);
+        ql.mem().write_ptr(context_record + kCtxRip, return_address, 8);
+        if (establisher_frame_ptr != 0) {
+            ql.mem().write_ptr(establisher_frame_ptr, rsp, 8);
+        }
+
+        const bool has_handler = (version_flags >> 3) & 1;  // UNW_FLAG_EHANDLER
+        if (handler_type_ptr != 0) {
+            ql.mem().write_ptr(handler_type_ptr, 0, 4);
+        }
+        if (handler_data_ptr != 0) {
+            // the handler RVA follows the prologue codes, 4-aligned
+            const auto codes_end = unwind_va + 4 + static_cast<std::uint64_t>(count_of_codes) * 2;
+            const auto handler_rva = static_cast<std::uint64_t>(ql.mem().read_ptr((codes_end + 3) & ~3ull, 4));
+            ql.mem().write_ptr(handler_data_ptr, handler_rva, 8);
+        }
+        return has_handler ? 1 : 0;
     };
 
     WinsdkApi("RtlUnwindEx", WinCc::Stdcall, {

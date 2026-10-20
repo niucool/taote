@@ -5331,6 +5331,70 @@ TEST(WinApiLoader, PebAndLdrCellsRideTheImageAndTheListHeads) {
     EXPECT_EQ(ql.mem().read_ptr(teb_addr + qiling::os::win::TEB_OFF_PEB_ADDRESS, 8), peb_addr);
 }
 
+TEST(WinApiNtdll, RtlVirtualUnwindReplaysThePrologueCodes) {
+    register_dlls();
+
+    // the x64 unwinder the C++ runtime rides: a RUNTIME_FUNCTION whose
+    // UNWIND_INFO records one UWOP_PUSH_NONVOL (rbx) and the EHANDLER flag,
+    // a CONTEXT with rsp pointing at the saved rbx + the return address
+    Qiling ql(win_test_options());
+
+    constexpr std::uint64_t kTable = 0x40000000;   // a scratch page (the profile
+    constexpr std::uint64_t kUnwind = 0x40000100;  // already maps 0x140000000)
+    constexpr std::uint64_t kStack = 0x40000200;
+    constexpr std::uint64_t kContext = 0x40000300;
+    constexpr std::uint64_t kHandlerType = 0x40000400;
+    constexpr std::uint64_t kHandlerData = 0x40000408;
+    constexpr std::uint64_t kEstablisher = 0x40000410;
+    constexpr std::uint64_t kRetAddr = 0x140005678;
+    constexpr std::uint64_t kSavedRbx = 0x1122334455667788ULL;
+
+    ql.mem().map(kTable, 0x1000, UC_PROT_ALL, "rtl virtual unwind");
+
+    // BeginAddress/EndAddress/UnwindInfoAddress (all "RVAs"; the synthetic
+    // frame has no image, so the third field is read as the address itself)
+    ql.mem().write_ptr(kTable + 0, 0x1000, 4);
+    ql.mem().write_ptr(kTable + 4, 0x1100, 4);
+    ql.mem().write_ptr(kTable + 8, kUnwind, 4);
+
+    // Version 1, UNW_FLAG_EHANDLER (1 << 3), SizeOfProlog 4, 1 code, no frame
+    // register; the code is (offset 0, UWOP_PUSH_NONVOL, rbx)
+    ql.mem().write(kUnwind, std::vector<std::uint8_t>{0x09, 0x04, 0x01, 0x00, 0x00, 0x03, 0x00, 0x00, 0xef, 0xbe, 0xad, 0xde});
+
+    ql.mem().write_ptr(kStack + 0, kSavedRbx, 8);
+    ql.mem().write_ptr(kStack + 8, kRetAddr, 8);
+
+    // the CONTEXT64 slots the unwinder reads and writes: Rbx@0x90, Rsp@0x98,
+    // Rip@0xf8
+    ql.mem().write_ptr(kContext + 0x98, kStack, 8);
+    ql.mem().write_ptr(kContext + 0xf8, 0xdeadbeef, 8);
+
+    const auto* api = ApiRegistry::instance().find("RtlVirtualUnwind");
+    ASSERT_NE(api, nullptr);
+    const auto r = api->handler(ql, 0, ResolvedParams{
+                                          {"HandlerType", kHandlerType},
+                                          {"ImageBase", 0ull},
+                                          {"ControlPc", kTable + 0x10},
+                                          {"FunctionEntry", kTable},
+                                          {"ContextRecord", kContext},
+                                          {"HandlerData", kHandlerData},
+                                          {"EstablisherFrame", kEstablisher},
+                                          {"ContextPointers", 0ull},
+                                      });
+    ASSERT_TRUE(r.has_value());
+    EXPECT_EQ(*r, 1u);  // UNW_FLAG_EHANDLER set
+
+    // the prologue's push is undone: rbx restored, rsp past the saved slot
+    EXPECT_EQ(ql.mem().read_ptr(kContext + 0x90, 8), kSavedRbx);
+    EXPECT_EQ(ql.mem().read_ptr(kContext + 0x98, 8), kStack + 16);
+    // the frame above resumes at the saved return address
+    EXPECT_EQ(ql.mem().read_ptr(kContext + 0xf8, 8), kRetAddr);
+    // the establishment frame is the unwound rsp, and the handler RVA rides
+    // right after the prologue codes
+    EXPECT_EQ(ql.mem().read_ptr(kEstablisher, 8), kStack + 16);
+    EXPECT_EQ(ql.mem().read_ptr(kHandlerData, 8), 0xdeadbeefu);
+}
+
 TEST(WinApiLoader, X86LoaderLayoutsAreTheUpstreamWordSizeOnes) {
     // upstream builds the loader's own structures from make_teb/make_peb/
     // make_ldr_data/make_ldr_data_table_entry/make_unicode_string(bits): on an
