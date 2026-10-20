@@ -181,9 +181,18 @@ First clusters the differ found, and what they turned out to be:
   `GetLastError` at #27) and never reaches either call. taote *does* answer a
   handle for the same API at #138 (`0x14003f000`), so the difference is which
   requests it is willing to satisfy - the reference synthesizes a module for a
-  request taote declines. Next unit: make `LoadLibraryExW`/`LoadLibraryA`
-  answer a stable synthetic module handle for an unknown module (the reference's
-  behaviour) instead of 0, then re-run the differential over the PMA set.
+  request taote declines.
+* **attempted and reverted**: answering a stable synthetic module handle
+  (`0x7f000000 + fnv1a(name) % 0x0fff * 0x1000`) from `LoadLibraryA`/
+  `LoadLibraryExW` when the rootfs carries no such module. It moved the trace
+  (taote started dispatching `GetProcAddress` from #25) but did **not** reach
+  parity: 211 calls vs the reference's 216, still no `FreeLibrary`, and the PMA
+  raw sweep stayed at 14/32. A pseudo-handle that maps no image is not the
+  reference's behaviour - the reference maps a synthesized *image with an export
+  table*, which is what makes the subsequent `GetProcAddress` resolve and the
+  guest reach `FreeLibrary`. The next unit has to load a real synthesized module
+  image (taote's loader already builds those for imports) rather than a numeric
+  handle.
 * **not a divergence**: taote's CRT startup dispatches `_initterm`,
   `_initterm_e` and `__acrt_iob_func`, which the reference leaves unimplemented -
   the harness reports those as extensions.
