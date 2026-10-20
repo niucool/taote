@@ -10,7 +10,7 @@ phase closes without its tests.
 | metric | pegasus | taote today | target |
 |---|---|---|---|
 | API sample sweep (`../pegasus/tests/bins`, 101 bins) | n/a (their suite asserts dispatch only) | **97 exit 0**, 2 block in `accept`, 2 kernel `.sys` | 99+ (drivers land) |
-| PMA corpus (`~/source/capa-testfiles`, 33 samples) | 12 curated cases green (their CI), 38 with `PEGASUS_PMA_FULL=1` | **17 exit 0**, 1 hang, 15 fault | ≥ 30 exit 0, all curated cases green |
+| PMA corpus (`~/source/capa-testfiles`, 33 samples) | 12 curated cases green (their CI), 38 with `PEGASUS_PMA_FULL=1` | **17 exit 0** (33-sample sweep), **0/12 green** (curated ctest cases) | ≥ 30 exit 0, all curated cases green |
 | reference-suite parity (`../pegasus/tests`, 357 cases) | 357 | **12 ported + 4 ported clusters**, rest mapped in `tests/PEGASUS_TEST_PARITY.md` | every *portable* row ported, none "deferred" |
 | taote suite | — | **530 passed / 0 failed / 3 skipped** | grows with every phase, stays 0-failed |
 | host support | MSVC/Windows + Linux | MSVC/Windows + Linux | unchanged (regression gate) |

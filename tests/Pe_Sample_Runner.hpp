@@ -192,6 +192,7 @@ struct SampleOptions {
     std::vector<std::pair<std::string, std::string>> files;              // rootfs path -> content
     std::map<std::string, std::vector<std::string>> stub_extras;         // dll -> extra exports
     std::function<void(Qiling&)> configure;                             // per-run tweaks
+    std::optional<std::filesystem::path> sample_path;                                // run an out-of-tree sample (the PMA corpus)
 };
 
 inline SampleOutcome run_pe_sample(const std::string& bin_name, const SampleOptions& opts = {}) {
@@ -199,7 +200,7 @@ inline SampleOutcome run_pe_sample(const std::string& bin_name, const SampleOpti
     namespace fs = std::filesystem;
 
     SampleOutcome out;
-    const fs::path sample = bins_dir() / bin_name;
+    const fs::path sample = opts.sample_path ? *opts.sample_path : bins_dir() / bin_name;
     if (!fs::exists(sample)) {
         out.error = "missing fixture: " + sample.string();
         return out;
@@ -267,7 +268,11 @@ inline SampleOutcome run_pe_sample(const std::string& bin_name, const SampleOpti
             opts.configure(ql);
         }
 
-        if (sample.extension() == ".dll" && !plan.exports_own.empty()) {
+        const auto file_name = lower(sample.filename().string());
+        const bool is_dll = file_name.size() > 4 &&
+                            (file_name.compare(file_name.size() - 4, 4, ".dll") == 0 ||
+                             file_name.compare(file_name.size() - 5, 5, ".dll_") == 0);
+        if (is_dll && !plan.exports_own.empty()) {
             // drive the DllMain and every export: stage a return address into
             // a mapped ret cell so each entry returns cleanly to the driver
             const auto& loader = static_cast<const loader::QlLoaderPE&>(ql.loader());

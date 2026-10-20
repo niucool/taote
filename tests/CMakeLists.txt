@@ -19,6 +19,7 @@ add_executable(qiling_tests
     Arch_Ppc_Test.cpp
     Arch_Riscv_Test.cpp
     Pegasus_Compat_Test.cpp
+    Pma_Compat_Test.cpp
 )
 
 # QILING_SOURCE_DIR lets the suites reach the bundled .ql profiles without install steps.
