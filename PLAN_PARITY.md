@@ -193,6 +193,20 @@ First clusters the differ found, and what they turned out to be:
   guest reach `FreeLibrary`. The next unit has to load a real synthesized module
   image (taote's loader already builds those for imports) rather than a numeric
   handle.
+* **root cause narrowed to rootfs content, not semantics**: `QlLoaderPE::load_dll`
+  (`qiling/loader/pe.cpp`, the `!std::filesystem::exists(dll_path_host, ec)`
+  gate) answers 0 for a module the rootfs does not carry, and taote has no
+  loader-side synthesis at all - the import stub DLLs taote runs against are the
+  ones *written into the rootfs* by `tests/Pe_Sample_Runner.hpp` and (for the
+  differential) by `tools/stub_dlls.py`. The reference answers a base for the
+  same request only because in this run it was handed a real image with a real
+  export table, so its guest's later `GetProcAddress` can resolve where taote's
+  cannot. That is an environment difference (nobody has the genuine
+  `user32.dll` on a Linux host), not a handler-semantics difference: the
+  differential must classify it as such instead of chasing it. Next unit:
+  teach `parity_vs_qiling.py` to mark a divergence as `environment` when the
+  reference's answer comes from a module the harness itself synthesized with a
+  different export set, and only chase the remainder.
 * **not a divergence**: taote's CRT startup dispatches `_initterm`,
   `_initterm_e` and `__acrt_iob_func`, which the reference leaves unimplemented -
   the harness reports those as extensions.
