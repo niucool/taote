@@ -331,6 +331,34 @@ further along without reaching the reference's trace. Recorded as the next unit
 with the corpus measurement it needs (the field is loader-level, so it must be
 scored over all 32 samples, not one).
 
+### Phase 1.2 + 2: the dynamic-import cluster, and the census verdict
+
+Phase 1.2 was "the dynamic-import cluster diagnosis with the census output
+(biggest single block: 5 samples)". With 1.9's differential in place, the census
+and the cluster can both be stated as measurements instead of per-sample
+disassembly:
+
+* `tools/gap_census /tmp/pma_corpus` finds **169 distinct import names** taote has
+  no handler for. Every one of them is also unimplemented in the reference - the
+  only near-misses (`Process32First`, `Process32Next`, `RtlUnwind`) are false
+  positives of a prefix match: the reference implements `Process32FirstW` /
+  `Process32NextW` (as does taote) and no `RtlUnwind` (only `RtlUnwindEx`, which
+  taote also has). **taote's handler surface is a superset of the reference's on
+  this corpus**, which is what 1.9 recorded as the "taote extension" rule.
+* The dynamic-import cluster is therefore closed rather than pending: the samples
+  that resolve imports at runtime (`LoadLibraryA`/`GetProcAddress`) are scored by
+  the differential like any other, and the four that still diverge do so because
+  the *guest* faults (`01-01.dll_`, `03-02.dll_`, `05-01.dll_`, `17-02.dll_`),
+  not because an import failed to resolve. 10 match / 0 environment /
+  16 reference_limit / 2 blocked / 4 diverged.
+
+Phase 2's remaining item is the **NT registry hive parser** (`RegHive`'s
+pre-existing-hive read path; today it defers and the create/delete/write path is
+live). The measured trigger for it has not arrived: the differential's rootfs
+carries the minimal empty hives the reference itself needs, so both emulators
+answer "key not found" and there is no divergence to score. It stays open and
+documented as the one Phase 2 gap, with that condition named.
+
 ### Phase 5.5: the deterministic API replay store
 
 A malware run is only reproducible if the *answers* its environment gives it are:
