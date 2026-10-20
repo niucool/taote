@@ -174,13 +174,19 @@ PMA differential baseline (32 PE samples, measured this pass):
 
 | verdict | count |
 | --- | --- |
-| match | **4** (`03-03.exe_`, `12-02.exe_`, `18-01.exe_`, `20-02.exe_`) |
-| environment | 0 |
+| match | **5** (`03-03.exe_`, `12-02.exe_`, `16-02.exe_`, `18-01.exe_`, `20-02.exe_`) |
+| environment | 1 (`12-01.exe_`) |
 | reference_limit | 3 (`01-01.exe_`, `01-04.exe_`, `12-04.exe_`) |
-| diverged | 25 |
+| diverged | 23 |
+
+Measured after the PE-header fix below, with the same driver as the previous
+baseline (was 4 / 0 / 3 / 25). `16-02.exe_` is the header fix's direct win - it
+reads its own PE header, took the "not an MZ image" branch, and now runs the
+same trace as the reference. `12-01.exe_` is the module-load `environment`
+verdict the earlier pass's vocabulary added.
 
 Cluster table (samples per signature, after the `reference_limit` split):
-dispatch count differs 26, extra dispatch
+dispatch count differs 19, extra dispatch
 20, missing dispatch 12, exit code differs 5, error class differs (invalid_write
 vs none) 4, (none vs invalid_insn) 3, stdout differs 2, (invalid_fetch vs none) 2,
 dispatch order differs 2, then singles for invalid_read/invalid_fetch,
