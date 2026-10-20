@@ -5523,6 +5523,93 @@ TEST(WinApiNtdll, RtlVirtualUnwindReplaysThePrologueCodes) {
     EXPECT_EQ(ql.mem().read_ptr(kHandlerData, 8), 0xdeadbeefu);
 }
 
+TEST(WinApiStats, IndicatorsRecordFileAndRegistryAccess) {
+    // PLAN_PARITY Phase 3 item 2: the handlers that perform a file/registry
+    // operation record a (kind, target) indicator, which is the fact pegasus's
+    // PMA cases assert ("the sample touched this file", "this key").
+    register_dlls();
+
+    auto options = win_test_options();
+    options.archtype = QL_ARCH::X86;
+    const auto rootfs = win_ensure_rootfs();
+    options.rootfs = rootfs.string();
+    options.code = std::vector<std::uint8_t>{0xC3};
+    std::filesystem::create_directories(rootfs / "Windows" / "registry");
+    std::filesystem::create_directories(rootfs / "qltest");
+    Qiling ql{options};
+
+    constexpr std::uint64_t kScratch = 0x40000000;
+    ql.mem().map(kScratch, 0x2000, UC_PROT_ALL, "indicator scratch");
+
+    // the guest strings the handlers read
+    const auto write_cstr = [&ql](std::uint64_t at, const std::string& text) {
+        std::vector<std::uint8_t> bytes(text.begin(), text.end());
+        bytes.push_back(0);
+        ql.mem().write(at, bytes);
+    };
+    write_cstr(kScratch + 0x100, "ind");
+    write_cstr(kScratch + 0x120, "v");
+    write_cstr(kScratch + 0x140, "qltest\\ind.txt");
+    write_cstr(kScratch + 0x160, "hello");
+
+    const auto& stats = ql.os().stats();
+
+    // the registry write records the key\value pair
+    const auto* set_value = ApiRegistry::instance().find("RegSetValueExA");
+    ASSERT_NE(set_value, nullptr);
+    const auto reg = set_value->handler(ql, 0, ResolvedParams{
+                                                   {"hKey", 0x80000001ull},  // HKEY_CURRENT_USER
+                                                   {"lpValueName", kScratch + 0x100},
+                                                   {"Reserved", 0ull},
+                                                   {"dwType", 1ull},  // REG_SZ
+                                                   {"lpData", kScratch + 0x120},
+                                                   {"cbData", 2ull},
+                                               });
+    ASSERT_TRUE(reg.has_value());
+    EXPECT_EQ(*reg, 0u);  // ERROR_SUCCESS
+
+    const auto reg_writes = stats.indicators().find("reg_write_value");
+    ASSERT_NE(reg_writes, stats.indicators().end());
+    ASSERT_FALSE(reg_writes->second.empty());
+    EXPECT_EQ(reg_writes->second.back().target, "HKEY_CURRENT_USER\\ind");
+
+    // the file create + write record the guest path
+    const std::uint64_t kFileHandle = kScratch + 0x300;
+    const auto* create_file = ApiRegistry::instance().find("CreateFileA");
+    ASSERT_NE(create_file, nullptr);
+    const auto created = create_file->handler(ql, 0, ResolvedParams{
+                                                      {"lpFileName", kScratch + 0x140},
+                                                      {"dwDesiredAccess", 0x40000000ull},  // GENERIC_WRITE
+                                                      {"dwShareMode", 0ull},
+                                                      {"lpSecurityAttributes", 0ull},
+                                                      {"dwCreationDisposition", 2ull},  // CREATE_ALWAYS
+                                                      {"dwFlagsAndAttributes", 0ull},
+                                                      {"hTemplateFile", 0ull},
+                                                  });
+    ASSERT_TRUE(created.has_value());
+    ASSERT_NE(*created, 0xffffffffffffffffull);
+
+    const auto* write_file = ApiRegistry::instance().find("WriteFile");
+    ASSERT_NE(write_file, nullptr);
+    const auto written = write_file->handler(ql, 0, ResolvedParams{
+                                                     {"hFile", *created},
+                                                     {"lpBuffer", kScratch + 0x160},
+                                                     {"nNumberOfBytesToWrite", 5ull},
+                                                     {"lpNumberOfBytesWritten", kFileHandle},
+                                                     {"lpOverlapped", 0ull},
+                                                 });
+    ASSERT_TRUE(written.has_value());
+    EXPECT_EQ(*written, 1u);
+
+    const auto files = stats.indicators().find("file_create");
+    ASSERT_NE(files, stats.indicators().end());
+    ASSERT_FALSE(files->second.empty());
+    EXPECT_EQ(files->second.back().target, "qltest\\ind.txt");
+    const auto writes = stats.indicators().find("file_write");
+    ASSERT_NE(writes, stats.indicators().end());
+    EXPECT_EQ(writes->second.back().target, "qltest\\ind.txt");
+}
+
 TEST(WinApiLoader, X86LoaderLayoutsAreTheUpstreamWordSizeOnes) {
     // upstream builds the loader's own structures from make_teb/make_peb/
     // make_ldr_data/make_ldr_data_table_entry/make_unicode_string(bits): on an

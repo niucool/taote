@@ -357,6 +357,18 @@ int main(int argc, char** argv) {
         js << ",\"address\":" << c.address << "}";
     }
     js << "]";
+    js << ",\"indicators\":[";
+    {
+        bool first_ind = true;
+        for (const auto& [kind, events] : outcome.indicators) {
+            for (const auto& ev : events) {
+                js << (first_ind ? "" : ",") << "{\"kind\":\"" << json_escape(ev.kind) << "\",\"target\":\""
+                   << json_escape(ev.target) << "\",\"position\":" << ev.position << "}";
+                first_ind = false;
+            }
+        }
+    }
+    js << "]";
     js << ",\"stdout\":\"" << json_escape(outcome.output) << "\"";
     js << ",\"strings\":[";
     std::size_t i = 0;

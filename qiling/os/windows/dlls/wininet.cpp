@@ -96,6 +96,7 @@ void register_wininet_family() {
             const auto url = params.empty() ? std::string() : api_get_string(ql, get_param(params, "lpszUrl"));
             if (!url.empty()) {
                 ql.os().stats().log_string(url);
+                ql.os().stats().log_indicator("net_http", url);
             }
         }
         return 0;  // qiling parity: the verbatim pass-through (None -> 0)
@@ -113,6 +114,7 @@ void register_wininet_family() {
             const auto url = params.empty() ? std::string() : api_get_string(ql, get_param(params, "lpszUrl"));
             if (!url.empty()) {
                 ql.os().stats().log_string(url);
+                ql.os().stats().log_indicator("net_http", url);
             }
         }
         return 0;  // qiling parity: the verbatim pass-through (None -> 0)

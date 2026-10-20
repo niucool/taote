@@ -514,6 +514,7 @@ void register_ws2_32_family() {
     }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
         const auto out = api_get_int(get_param(params, "ppResult"));
         const auto node = api_get_string(ql, get_param(params, "pNodeName"));
+        ql.os().stats().log_indicator("net_dns", node);
 
         auto& heap = w(ql).heap();
         const auto ps = ql.arch().pointersize();

@@ -7,6 +7,7 @@ namespace qiling {
 void QlOsStats::clear() {
     syscalls_.clear();
     strings_.clear();
+    indicators_.clear();
     position_ = 0;
 }
 
@@ -73,6 +74,13 @@ void QlOsStats::log_api_call(std::uint64_t address, std::string_view name, std::
     syscalls_[key].push_back(ApiCallRecord{address, key, std::string(dll), std::move(params), retval,
                                            retval_present, retaddr, position_});
     ++position_;
+}
+
+void QlOsStats::log_indicator(std::string_view kind, std::string_view target) {
+    if (target.empty()) {
+        return;
+    }
+    indicators_[std::string(kind)].push_back(IndicatorEvent{std::string(kind), std::string(target), position_});
 }
 
 void QlOsStats::log_unsupported_api(std::string_view name) {

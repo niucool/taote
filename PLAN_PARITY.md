@@ -969,6 +969,26 @@ scalar as `ProcessorFeature=0xa`. ctest 544 cases. The corpus does not move
 (24/32 exit 0, differential 10 / 0 / 16 / 2 / 4) - this is analysis surface, not
 emulation.
 
+### Phase 3 item 2: indicator events
+
+The handlers that perform a file, registry or network operation record a
+`(kind, target)` indicator - `file_open`/`file_create`/`file_read`/`file_write`,
+`reg_open_key`/`reg_create_key`/`reg_read_value`/`reg_write_value`/
+`reg_list_subkeys`, `net_dns`/`net_http` - in `QlOsStats::indicators()`, which is
+what a PMA expectation ("the sample touched this file", "this key") reads.
+`file_open` vs `file_create` follows the existence check the handler already
+makes; the file handles now keep their guest path so a later read/write can name
+the file it touched; `getaddrinfo` records the node name and `InternetOpenUrlA/W`
+the URL.
+
+`WinApiStats.IndicatorsRecordFileAndRegistryAccess` drives the real
+`RegSetValueExA`, `CreateFileA` and `WriteFile` handlers and asserts
+`reg_write_value` = `HKEY_CURRENT_USER\ind` and `file_create`/`file_write` =
+`qltest\ind.txt`; the trace tool emits the indicators array, and the
+`advapi32_reg_create`/`kernel32_file_read` samples show the same records through
+a real run. Corpus unchanged (24/32 exit 0, differential 10/0/16/2/4); ctest 545
+cases.
+
 ## Phase 4 — deliberately not ported (documented non-goals)
 
 * **JS engine** (`test_js_*`, 54 cases) — excluded by instruction; qiling hooks

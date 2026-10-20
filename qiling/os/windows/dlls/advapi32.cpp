@@ -73,6 +73,8 @@ std::optional<std::uint64_t> reg_open_key(Qiling& ql, const ResolvedParams& para
             }
         }
 
+        ql.os().stats().log_indicator("reg_open_key", key);
+
         // new handle
         Handle new_handle(std::nullopt, nullptr, key);
         w(ql).handle_manager().append(new_handle);
@@ -112,6 +114,7 @@ std::optional<std::uint64_t> reg_query_value(Qiling& ql, const ResolvedParams& p
     // if the key is not specified in profile, proceed to registry manager
     // (verbatim comment)
     const auto keyname = s_hkey + "\\" + lp_value_name;
+    ql.os().stats().log_indicator("reg_read_value", keyname);
     auto value = ql.profile().get("REGISTRY", keyname);
 
     if (!value.has_value()) {
@@ -191,6 +194,7 @@ std::optional<std::uint64_t> reg_create_key(Qiling& ql, const ResolvedParams& pa
 
         if (!w(ql).registry_manager().exists(keyname)) {
             w(ql).registry_manager().create(keyname);
+            ql.os().stats().log_indicator("reg_create_key", keyname);
         }
 
         auto* existing = w(ql).handle_manager().search_by_obj(const_cast<void*>(static_cast<const void*>(keyname.c_str())));
@@ -247,6 +251,7 @@ std::optional<std::uint64_t> reg_set_value_ex(Qiling& ql, const ResolvedParams& 
     }
 
     w(ql).registry_manager().write(s_hkey, lp_value_name, dw_type, lp_data, static_cast<std::uint64_t>(cb_data), wide);
+    ql.os().stats().log_indicator("reg_write_value", s_hkey + "\\" + lp_value_name);
 
     return ERROR_SUCCESS;
 }
@@ -883,7 +888,9 @@ void register_advapi32_token_sc_families() {
         {"lpClass", PVOID_},
         {"lpcchClass", PVOID_},
         {"lpftLastWriteTime", PVOID_},
-    }) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto h_key = api_get_int(get_param(params, "hKey"));
+        ql.os().stats().log_indicator("reg_list_subkeys", reg_key_name(ql, h_key));
         return 259;  // ERROR_NO_MORE_ITEMS
     };
 }

@@ -33,6 +33,17 @@ struct ApiCallRecord {
     std::uint64_t position;
 };
 
+// the behavioural indicator surface (PLAN_PARITY Phase 3 item 2): pegasus
+// answers "did the sample touch this file/registry key/domain" from typed
+// events, so the same facts are recorded as (kind, target) pairs -
+// file_open/file_create/file_read/file_write, reg_open_key/reg_create_key/
+// reg_read_value/reg_write_value/reg_list_subkeys, net_dns/net_http
+struct IndicatorEvent {
+    std::string kind;
+    std::string target;
+    std::uint64_t position = 0;
+};
+
 class QlOsStats {
 public:
     QlOsStats() = default;
@@ -61,6 +72,11 @@ public:
     // the api dispatch count (the max_api_count guard reads it)
     std::size_t api_count() const noexcept { return api_count_; }
 
+    // log_indicator — record a behavioural indicator (file/registry/network)
+    void log_indicator(std::string_view kind, std::string_view target);
+
+    const std::map<std::string, std::vector<IndicatorEvent>>& indicators() const noexcept { return indicators_; }
+
     // log_string — record string appearance (tokenized by spaces)
     void log_string(std::string_view s);
 
@@ -73,6 +89,7 @@ public:
 private:
     std::map<std::string, std::vector<ApiCallRecord>> syscalls_;
     std::map<std::string, std::set<std::uint64_t>> strings_;
+    std::map<std::string, std::vector<IndicatorEvent>> indicators_;
     std::set<std::string> unsupported_apis_;
     std::size_t api_count_ = 0;
     std::uint64_t position_ = 0;

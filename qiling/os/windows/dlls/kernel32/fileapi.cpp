@@ -472,6 +472,7 @@ void register_fileapi_family() {
 
         const auto data = obj->read(static_cast<std::size_t>(nNumberOfBytesToRead));
 
+        win.stats().log_indicator("file_read", handle->name);
         ql.mem().write(lpBuffer, data);
         ql.mem().write_ptr(lpNumberOfBytesRead, static_cast<std::int64_t>(data.size()), 4);
 
@@ -512,6 +513,7 @@ void register_fileapi_family() {
             ql.mem().write_ptr(lpNumberOfBytesWritten, static_cast<std::int64_t>(data.size()), 4);
             return 1;
         }
+        win.stats().log_indicator("file_write", handle->name);
 
         auto* obj = fs_object_of(handle);
         if (obj == nullptr) {
@@ -556,6 +558,10 @@ void register_fileapi_family() {
             // only create a file if it does not exist. if it does, error
             w(ql).set_last_error(ERROR_FILE_EXISTS);
         }
+
+        // the behavioural indicator (PLAN_PARITY Phase 3 item 2): an existing
+        // file is opened, a missing one is created
+        w(ql).stats().log_indicator(file_exists ? "file_open" : "file_create", s_lpFileName);
 
         const auto truncate = (dwCreationDisposition == CREATE_ALWAYS) ||
                               (dwCreationDisposition == TRUNCATE_EXISTING);
@@ -619,6 +625,9 @@ void register_fileapi_family() {
         Handle new_handle;
         new_handle.obj = f.get();
         new_handle.owned = f;
+        // the guest path is the handle's name, so a later read/write can name
+        // the file it touched (the indicator target)
+        new_handle.name = s_lpFileName;
         w(ql).handle_manager().append(new_handle);
 
         return new_handle.id;
