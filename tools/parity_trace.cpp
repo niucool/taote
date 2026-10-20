@@ -16,12 +16,14 @@
 //
 // usage: parity_trace <sample> [--argv A B] [--count N] [--timeout S]
 //                     [--max-api-count N] [--dump-imports FILE] [--out FILE]
+//                     [--code-trace FILE] [--code-trace-range BEGIN END]
 #include <LIEF/PE.hpp>
 
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <memory>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -60,6 +62,10 @@ std::uint64_t parse_u64(const char* text) {
 
 }  // namespace
 
+// the code-trace hook outlives the configure callback (HookRet unregisters on
+// destruction)
+std::shared_ptr<qiling::HookRet> code_hook;
+
 int main(int argc, char** argv) {
     if (argc < 2) {
         std::cerr << "usage: parity_trace <sample> [--argv A B] [--count N] [--timeout S] [--max-api-count N]\n"
@@ -70,6 +76,9 @@ int main(int argc, char** argv) {
     const std::string sample = argv[1];
     std::string out_path;
     std::string dump_imports;
+    std::string code_trace;
+    std::uint64_t code_begin = 0;
+    std::uint64_t code_end = 0;
     qiling::testing::SampleOptions opts;
     opts.count = 0;
     opts.timeout = 0;
@@ -89,6 +98,11 @@ int main(int argc, char** argv) {
             opts.max_api_count = parse_u64(argv[++i]);
         } else if (arg == "--dump-imports" && i + 1 < argc) {
             dump_imports = argv[++i];
+        } else if (arg == "--code-trace" && i + 1 < argc) {
+            code_trace = argv[++i];
+        } else if (arg == "--code-trace-range" && i + 2 < argc) {
+            code_begin = parse_u64(argv[++i]);
+            code_end = parse_u64(argv[++i]);
         } else if (arg == "--out" && i + 1 < argc) {
             out_path = argv[++i];
         } else {
@@ -139,6 +153,27 @@ int main(int argc, char** argv) {
                     }
                 }
             }
+        };
+    }
+
+    // an instruction-level trace over a pc window: the differ compares API
+    // calls, so a control-flow divergence between two dispatches (where the two
+    // guests execute *different code* with no differing API value in between)
+    // is invisible to it - this is the probe for exactly that
+    if (!code_trace.empty()) {
+        opts.configure = [&code_trace, &code_begin, &code_end, previous = opts.configure](qiling::Qiling& ql) {
+            if (previous) {
+                previous(ql);
+            }
+            auto out = std::make_shared<std::ofstream>(code_trace);
+            // HookRet is RAII: dropping it unregisters the hook, so the handle
+            // outlives the configure callback
+            code_hook = std::make_shared<qiling::HookRet>(ql.hook_code([out, code_begin, code_end](std::uint64_t address, std::uint32_t size) {
+                if (address >= code_begin && (code_end == 0 || address < code_end)) {
+                    *out << std::hex << address << " " << std::dec << size << "\n";
+                }
+                return 0;
+            }));
         };
     }
 

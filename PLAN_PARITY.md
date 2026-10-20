@@ -254,6 +254,24 @@ symptom*, and the remaining diagnostic direction is the first differing return
 value before #5 (`HeapCreate` answers `83888280` on taote vs `83888680` on the
 reference), not the import table.
 
+**Fixed: the PE header page was never mapped (found by the code trace).** A new
+instruction-level probe (`parity_trace --code-trace FILE [--code-trace-range A B]`,
+and the same flags on `tools/qiling_reference_runner.py`) logs `(pc, size)` per
+executed instruction so the differential can see a control-flow divergence
+*between* two dispatches. On `11-01.exe_` it put the two runs next to each other
+and the difference is one instruction: right after `call [0x407020]`
+(`GetModuleHandleA`) both sides execute `0x403246 cmp word ptr [eax], 0x5a4d`,
+and then the reference falls through (`0x40324d`, it reads the PE header) while
+taote jumps (`0x403261`, "this is not an MZ image"). The cause is the loader:
+upstream `loader/pe.py` writes the whole memory-mapped image
+(`ql.mem.write(image_base, bytes(pe.get_memory_mapped_image()))`), which includes
+the header page, while `QlLoaderPE::load_parsed` staged only the *sections* - so
+`word ptr [imagebase]` read zero. The loader now writes `SizeOfHeaders` bytes of
+the file at the image base before staging the sections, and `11-01.exe_` goes
+from 45 calls ending on `UnhandledExceptionFilter` to the reference's 46 calls
+with the allocator cluster gone (its `HeapAlloc`-vs-`VirtualAlloc` divergence was
+this branch, not a heap-handle problem).
+
 **`none vs invalid_insn` dissected (`03-04`, `11-01`, `16-01`).** On
 `11-01.exe_` both runs are identical through call #4 (`GetVersion`, `HeapCreate`,
 `GetVersionExA`, `GetEnvironmentVariableA`, `GetModuleHandleA` at the *same* call

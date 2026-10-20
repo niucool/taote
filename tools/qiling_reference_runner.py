@@ -100,6 +100,9 @@ def main(argv=None) -> int:
     ap.add_argument("--count", type=int, default=0, help="instruction budget (0 = none)")
     ap.add_argument("--timeout", type=int, default=0, help="seconds (0 = none)")
     ap.add_argument("--out", default=None, help="write the JSON here instead of stdout")
+    ap.add_argument("--code-trace", default=None, help="log (pc, size) per executed instruction here")
+    ap.add_argument("--code-trace-range", nargs=2, type=lambda v: int(v, 0), default=None,
+                    metavar=("BEGIN", "END"), help="only log pcs inside [BEGIN, END)")
     args = ap.parse_args(argv)
 
     sys.path.insert(0, os.path.abspath(args.qiling))
@@ -140,6 +143,17 @@ def main(argv=None) -> int:
         # sees them; the differential needs exactly those
         ql.log.setLevel(logging.DEBUG)
         ql.log.addHandler(log_capture)
+        if args.code_trace:
+            begin, end = (args.code_trace_range or (0, 0))
+            sink = open(args.code_trace, "w")
+
+            def _log(ql_, address, size):  # the reference passes (ql, address, size)
+                if address >= begin and (not end or address < end):
+                    sink.write("%x %d\n" % (address, size))
+                    sink.flush()
+
+            ql.hook_code(_log)
+
         ql.timeout = args.timeout or 0
         ql.count = args.count or 0
 

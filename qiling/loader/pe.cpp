@@ -10,6 +10,7 @@
 #include "qiling/os/windows/api.hpp"
 
 #include <filesystem>
+#include <fstream>
 #include "qiling/os/os.hpp"
 
 namespace qiling {
@@ -55,6 +56,23 @@ std::uint64_t QlLoaderPE::load_parsed(std::unique_ptr<LIEF::PE::Binary> parsed, 
 
     mem.map(base, mem.align_up(size_of_image), UC_PROT_ALL, label);
     images.push_back(Image{base, base + size_of_image, host_path});
+
+    // the header page: upstream writes the *whole* memory-mapped image
+    // (loader/pe.py: `ql.mem.write(image_base, bytes(pe.get_memory_mapped_image()))`),
+    // so a guest that reads its own MZ/PE header at the module base sees the
+    // real bytes. Staging only the sections (as this port did) left the header
+    // page zero, and a packed sample that sanity-checks `word [imagebase] ==
+    // 'MZ'` then took its "not a PE image" branch
+    const auto headers_size = static_cast<std::size_t>(parsed->optional_header().sizeof_headers());
+    if (headers_size > 0) {
+        std::ifstream header_file(host_path, std::ios::binary);
+        std::vector<std::uint8_t> headers(headers_size);
+        header_file.read(reinterpret_cast<char*>(headers.data()), static_cast<std::streamsize>(headers_size));
+        headers.resize(static_cast<std::size_t>(header_file.gcount()));
+        if (!headers.empty()) {
+            mem.write(base, headers);
+        }
+    }
 
     // stage the sections: each section's raw bytes land at base + RVA
     struct SectionWriter {
