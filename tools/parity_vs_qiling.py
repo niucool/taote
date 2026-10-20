@@ -210,6 +210,49 @@ def reference_timed_out(ref: Trace, ours: Trace):
     return ref.error_class == "timeout" and ours.error_class != "timeout"
 
 
+def reference_lacks_handler(ref: Trace, ours: Trace, findings, extensions):
+    """True when the reference cannot follow the guest past an import it lacks.
+
+    The reference leaves an import it does not implement to the stub export cell
+    - no dispatch record, no handler, and the guest sees whatever the return
+    register happened to hold. taote implements a superset, so from the first
+    such import onwards the two emulators are no longer running the same
+    program: the reference's guest is following a path a real handler would
+    never have taken. Everything the differ reports from that position on is
+    downstream of the missing handler, not a taote defect - the reference's trace
+    simply is not observable there. Distinct from `reference_limited`, which
+    covers the case where the reference *faults* on the missing import: here it
+    keeps going (often to its own exit 0) and the traces drift apart instead.
+    """
+
+    if not extensions:
+        return False
+    # a taote-side fault is never explained by a handler the reference lacks:
+    # the guest that ran the real handler still crashed, which is a defect to
+    # fix (PMA 14-02 keeps its EMU_ERR invalid_write this way)
+    if ours.error_class is not None:
+        return False
+    # and the guest's *outcome* has to agree: a run that ends on a different
+    # exit code took a different end state, which is a defect to chase rather
+    # than a reference limitation to explain away
+    if (ref.exit_code or 0) != (ours.exit_code or 0):
+        return False
+    for signature, _ in findings:
+        if signature.startswith(("extra dispatch", "missing dispatch", "dispatch count", "stdout differs",
+                                 "error class", "exit code", "first divergence")):
+            continue
+        return False
+    our_seq = ours.sequence()
+    first_ext = next((i for i, n in enumerate(our_seq) if n in extensions), None)
+    if first_ext is None:
+        return False
+    for signature, detail in findings:
+        match = re.search(r"from call #(\d+)", detail)
+        if match is not None and int(match.group(1)) < first_ext:
+            return False
+    return True
+
+
 def reference_limited(ref: Trace, ours: Trace, findings, extensions):
     """True when the divergence is the reference's own limitation.
 
@@ -590,7 +633,8 @@ def main(argv=None) -> int:
                 "verdict": ("match" if not findings else
                             "environment" if any(sig.startswith("environment") for sig, _ in findings) else
                             "reference_limit" if (reference_timed_out(ref, ours) or
-                                                  reference_limited(ref, ours, findings, extensions)) else
+                                                  reference_limited(ref, ours, findings, extensions) or
+                                                  reference_lacks_handler(ref, ours, findings, extensions)) else
                             "diverged"),
                 "taote_extensions": extensions,
                 "reference": {"calls": len(ref.calls), "exit": ref.exit_code, "error": ref.error },

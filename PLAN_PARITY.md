@@ -176,8 +176,8 @@ PMA differential baseline (32 PE samples, measured this pass):
 | --- | --- |
 | match | **9** (`03-03.exe_`, `03-04.exe_`, `10-03.exe_`, `12-02.exe_`, `16-01.exe_`, `16-02.exe_`, `19-02.exe_`, `20-02.exe_`, `21-01.exe_`) |
 | environment | 1 (`12-01.exe_`) |
-| reference_limit | 6 (`01-01.exe_`, `01-04.exe_`, `12-03.exe_`, `12-04.exe_`, `14-01.exe_`, `18-01.exe_`) |
-| diverged | 16 |
+| reference_limit | 7 (`01-01.exe_`, `01-04.exe_`, `06-03.exe_`, `12-03.exe_`, `12-04.exe_`, `14-01.exe_`, `18-01.exe_`) |
+| diverged | 15 |
 
 Measured after the unsupported-import frame fix below (raw taote exit-0 **19/32**,
 was 13/32). Measured after the two differ fixes below (the signed/unsigned return-value fold
@@ -329,6 +329,22 @@ diverges at call #45 and now ends on `invalid_read`, so the change moved the gue
 further along without reaching the reference's trace. Recorded as the next unit
 with the corpus measurement it needs (the field is loader-level, so it must be
 scored over all 32 samples, not one).
+
+### The reference's missing handler as a verdict (`reference_lacks_handler`)
+
+`06-03.exe_` was the last sample whose divergence taote's *superset* handler surface
+caused: the guest asks `InternetGetConnectedState`, taote answers it, the reference
+has no handler and leaves the guest to the stub cell with whatever the return
+register held — so from that dispatch on, the two emulators are running different
+programs (its guest prints "Error 2.1: Fail to OpenUrl", the reference's "Error 2.3:
+Fail to get command"). The existing `reference_limited` verdict only covered the
+case where the reference *faults* on a missing import; this one keeps going to its
+own exit 0 and the traces drift instead. The new `reference_lacks_handler` predicate
+covers it, guarded so that it cannot excuse a real defect: it needs a non-empty
+extension list, every finding at or after the first extension dispatch, **no taote
+emulation fault**, and — the guard that keeps `14-02.exe_` diverged — the same exit
+code on both sides, because a run that ends elsewhere took a different end state.
+With it the corpus is **9 match / 1 environment / 7 reference_limit / 15 diverged**.
 
 ### The unsupported-import frame (the `ExitProcess` cluster)
 
