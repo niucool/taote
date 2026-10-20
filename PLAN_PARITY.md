@@ -158,6 +158,30 @@ plus a cluster list keyed by root-cause signature. A dispatch taote makes where
 the reference logged "not implemented" is reported as an extension, not a
 divergence.
 
+The differ's own vocabulary now separates three verdicts: `match` (clean),
+`environment` (the only divergence is a module handle the harness can synthesize
+only with a different export set - nobody has the genuine Windows images on a
+Linux host) and `diverged` (a real semantic difference). Faulted runs are not
+compared on exit code, because the reference leaves `ql.os.exit_code` at 0 when a
+unicorn fault kills the run while taote sets the guest's `STATUS_ACCESS_VIOLATION`
+(Phase 1.5, a deliberate delta).
+
+PMA differential baseline (32 PE samples, measured this pass):
+
+| verdict | count |
+| --- | --- |
+| match | **4** (`03-03.exe_`, `12-02.exe_`, `18-01.exe_`, `20-02.exe_`) |
+| environment | 0 |
+| diverged | 28 |
+
+Cluster table (samples per signature): dispatch count differs 26, extra dispatch
+20, missing dispatch 12, exit code differs 5, error class differs (invalid_write
+vs none) 4, (none vs invalid_insn) 3, stdout differs 2, (invalid_fetch vs none) 2,
+dispatch order differs 2, then singles for invalid_read/invalid_fetch,
+return value, emu_error, timeout vs invalid_insn, invalid_cpu_exception vs
+invalid_fetch, invalid_write vs invalid_read, none vs invalid_fetch,
+invalid_insn vs invalid_fetch. That table is the phase's work order.
+
 Exit criteria (this phase): the differential clean on the named starter corpus
 (`argv_test_x86.exe`, `file_access_test_x86.exe`), gated in ctest as
 `Tools.ParityVsQilingSmoke` (skips when no reference checkout / qiling-deps

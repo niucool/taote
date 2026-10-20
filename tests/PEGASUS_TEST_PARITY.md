@@ -107,6 +107,8 @@ dialog content reaches the string log.
 | reference trace (`tools/qiling_reference_runner.py`) | ported: `stats.syscalls`/`strings`, guest stdout, exit code, unicorn error text, plus the reference's own "not implemented" warnings |
 | taote trace (`tools/parity_trace.cpp`) | ported: the same fields from `QlOsStats` + `entry_point_errors()` |
 | normalization + diff (`tools/parity_vs_qiling.py`) | ported: addresses -> `sample+0xNN`, guest paths -> `<sample>`, pointer retvals -> `ptr`, one error vocabulary for both sides |
+| PMA differential baseline | **4/32 match** (`03-03.exe_`, `12-02.exe_`, `18-01.exe_`, `20-02.exe_`), 0 environment, 28 diverged, clustered: dispatch-count 26, extra-dispatch 20, missing-dispatch 12, exit-code 5, error-class 16 across 12 signature pairs, stdout 2, dispatch-order 2 |
+| verdicts | `match` / `environment` (module handle only the harness can synthesize) / `diverged`; faulted runs skip the exit-code compare (the reference reports 0 where taote reports `STATUS_ACCESS_VIOLATION`) |
 | starter corpus | `argv_test_x86.exe`, `file_access_test_x86.exe` — both clean (taote's extra `_initterm`/`_initterm_e`/`__acrt_iob_func` dispatches are imports the reference does not implement) |
 | ctest smoke gate | `Tools.ParityVsQilingSmoke` (`--require-match 1`; skips with 77 when the reference checkout or a qiling-deps python is absent) |
 | reference rootfs seeding | `tools/mkreg_hive.py` (minimal valid hives) + `tools/stub_dlls.py` (import-stub DLLs) — the reference cannot resolve PE imports on a Linux host without them |

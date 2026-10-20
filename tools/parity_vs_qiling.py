@@ -165,10 +165,47 @@ def retval_key(value):
 # ---------------------------------------------------------------------------
 
 
+def module_load_divergence(ref: Trace, ours: Trace):
+    """The first LoadLibrary* whose answer differs (a module the harness can only
+    synthesize, so the guest's downstream calls diverge for environment reasons).
+
+    Returns the index in the reference's call list, or None.
+    """
+
+    positional = 0
+    for i, (rcall, ocall) in enumerate(zip(ref.calls, ours.calls)):
+        if rcall["name"] != ocall["name"]:
+            break
+        if rcall["name"].lower().startswith("loadlibrary") or rcall["name"].lower() in ("getmodulehandlea", "getmodulehandlew"):
+            if retval_key(rcall["retval"]) != retval_key(ocall["retval"]):
+                return i
+            if is_pointerish(rcall["retval"]) and not is_pointerish(ocall["retval"]):
+                return i
+        positional += 1
+    return None
+
+
 def diff_traces(ref: Trace, ours: Trace):
     """Return (findings, clusters) where each finding names one divergence."""
 
     findings = []
+
+    # a module the harness could only synthesize answers a different base (or no
+    # base at all) on one side; everything the guest does with that handle
+    # differs for reasons that are not handler semantics, so it is classified
+    # as an environment divergence instead of chased
+    env_index = module_load_divergence(ref, ours)
+    if env_index is not None:
+        r = ref.calls[env_index]
+        o = ours.calls[env_index]
+        findings.append(
+            (
+                "environment: module load differs",
+                f"call #{env_index}: reference {r['name']} -> {r['retval']!r}, taote -> {o['retval']!r} "
+                f"(the harness can only synthesize an image with a different export set)",
+            )
+        )
+        return findings, {"environment": [findings[0][1]]}
 
     ref_seq, our_seq = ref.sequence(), ours.sequence()
     if ref_seq != our_seq:
@@ -232,8 +269,12 @@ def diff_traces(ref: Trace, ours: Trace):
 
     ref_exit = ref.exit_code if ref.exit_code is not None else 0
     our_exit = ours.exit_code if ours.exit_code is not None else 0
-    # a faulted run reports STATUS_* on both sides; compare as unsigned 32-bit
-    if (ref_exit & 0xFFFFFFFF) != (our_exit & 0xFFFFFFFF):
+    # The reference leaves `ql.os.exit_code` at 0 when a run dies on a unicorn
+    # fault (it only records the error), while taote sets the guest's
+    # STATUS_ACCESS_VIOLATION (PLAN_PARITY Phase 1.5, a deliberate delta), so the
+    # exit code is only comparable when neither side faulted.
+    faulted = ref.error_class is not None and ours.error_class is not None
+    if not faulted and (ref_exit & 0xFFFFFFFF) != (our_exit & 0xFFFFFFFF):
         findings.append(("exit code differs", f"reference {ref_exit}, taote {our_exit}"))
 
     clusters = {}
@@ -446,7 +487,9 @@ def main(argv=None) -> int:
         results.append(
             {
                 "sample": sample.name,
-                "verdict": "match" if not findings else "diverged",
+                "verdict": ("match" if not findings else
+                            "environment" if any(sig.startswith("environment") for sig, _ in findings) else
+                            "diverged"),
                 "taote_extensions": extensions,
                 "reference": {"calls": len(ref.calls), "exit": ref.exit_code, "error": ref.error },
                 "taote": {"calls": len(ours.calls), "exit": ours.exit_code, "error": ours.error, "error_types": our_raw.get("error_types")},
@@ -462,6 +505,7 @@ def main(argv=None) -> int:
             "total": len(results),
             "match": sum(1 for r in results if r["verdict"] == "match"),
             "diverged": sum(1 for r in results if r["verdict"] == "diverged"),
+            "environment": sum(1 for r in results if r["verdict"] == "environment"),
             "cluster_counts": _cluster_counts(results),
         },
     }
@@ -515,13 +559,16 @@ def render(report) -> str:
     lines.append(f"reference: {report['reference']['repo']} ({report['reference']['python']})")
     lines.append("")
     summary = report["summary"]
-    lines.append(f"samples: {summary['total']}  match: {summary['match']}  diverged: {summary['diverged']}")
+    lines.append(
+        f"samples: {summary['total']}  match: {summary['match']}  "
+        f"environment: {summary.get('environment', 0)}  diverged: {summary['diverged']}"
+    )
     lines.append("")
     for result in report["samples"]:
         if result["verdict"] == "skipped":
             lines.append(f"[skip] {result['sample']}: {result.get('reason')}")
             continue
-        mark = "ok  " if result["verdict"] == "match" else "DIFF"
+        mark = {"match": "ok  ", "environment": "env ", "diverged": "DIFF"}.get(result["verdict"], "DIFF")
         ref, ours = result["reference"], result["taote"]
         lines.append(
             f"[{mark}] {result['sample']}: reference {ref['calls']} calls exit {ref['exit']} "
