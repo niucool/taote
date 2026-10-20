@@ -174,10 +174,10 @@ PMA differential baseline (32 PE samples, measured this pass):
 
 | verdict | count |
 | --- | --- |
-| match | **7** (`03-03.exe_`, `03-04.exe_`, `10-03.exe_`, `12-02.exe_`, `16-01.exe_`, `16-02.exe_`, `20-02.exe_`) |
+| match | **9** (`03-03.exe_`, `03-04.exe_`, `10-03.exe_`, `12-02.exe_`, `16-01.exe_`, `16-02.exe_`, `19-02.exe_`, `20-02.exe_`, `21-01.exe_`) |
 | environment | 1 (`12-01.exe_`) |
-| reference_limit | 5 (`01-01.exe_`, `01-04.exe_`, `12-04.exe_`, `14-01.exe_`, `18-01.exe_`) |
-| diverged | 19 |
+| reference_limit | 6 (`01-01.exe_`, `01-04.exe_`, `12-03.exe_`, `12-04.exe_`, `14-01.exe_`, `18-01.exe_`) |
+| diverged | 16 |
 
 Measured after the unsupported-import frame fix below (raw taote exit-0 **19/32**,
 was 13/32). Measured after the two differ fixes below (the signed/unsigned return-value fold
@@ -355,8 +355,15 @@ Effect: `16-01.exe_` and `03-04.exe_` become **matches** (16-01's only remaining
 finding is a taote extension — it implements `ShellExecuteA`, the reference does
 not), `16-01`'s code trace agrees with the reference for **all 19,489
 instructions**, and the raw taote exit-0 count over the 32-sample corpus goes
-**13/32 → 19/32**. The differential is now **7 match / 1 environment /
-5 reference_limit / 19 diverged**. The differ also decodes subprocess output with
+**13/32 → 19/32**. The differential went to **7 match / 1 environment / 5 reference_limit /
+19 diverged**, and then one more step finished it: zeroing the return register
+still diverged from the reference, because the reference leaves the register
+alone (PMA 19-02 reads an unimplemented `LookupPrivilegeValue`'s stale `eax` and
+branches on it), so the unsupported path now does *nothing* but log - no frame
+change and no register change. That takes the corpus to **9 match / 1
+environment / 6 reference_limit / 16 diverged** (`19-02.exe_` and `21-01.exe_`
+join the match list, `12-03.exe_` is the reference's own invalid-write
+limitation). The differ also decodes subprocess output with
 `errors="replace"`: a packed sample prints non-utf-8 decoy bytes, which used to
 abort the whole sweep.
 

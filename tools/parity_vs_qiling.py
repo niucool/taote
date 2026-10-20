@@ -480,7 +480,9 @@ def run_one(sample: Path, machine: str, rootfs: Path, argv, qiling_python, qilin
         if ref_raw is None:
             ref_err = seen
     if ref_raw is None and ref_json.exists():
-        ref_raw, ref_err = json.loads(ref_json.read_text()), None
+        # a guest's stdout rides in the trace and can be non-utf-8 (see
+        # run_json), so the fallback read decodes permissively too
+        ref_raw, ref_err = json.loads(ref_json.read_text(encoding="utf-8", errors="replace")), None
     if ref_raw is None:
         ref_raw = {"emulator": "qiling", "sample": sample.name, "apis": [], "stdout": "", "error": ref_err, "exit_code": None}
 
@@ -491,7 +493,7 @@ def run_one(sample: Path, machine: str, rootfs: Path, argv, qiling_python, qilin
         our_cmd += ["--count", str(count)]
     our_raw, our_err = run_json(our_cmd, timeout)
     if our_raw is None and our_json.exists():
-        our_raw, our_err = json.loads(our_json.read_text()), None
+        our_raw, our_err = json.loads(our_json.read_text(encoding="utf-8", errors="replace")), None
     if our_raw is None:
         our_raw = {"emulator": "taote", "sample": sample.name, "apis": [], "stdout": "", "error": our_err, "exit_code": None}
 
