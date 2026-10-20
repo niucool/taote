@@ -173,10 +173,17 @@ First clusters the differ found, and what they turned out to be:
   Error`. That is what made GetProcAddress.exe and most PMA samples look like
   reference handler faults. The differ now stages each sample inside the seeded
   rootfs; GetProcAddress.exe went from 162 aborted calls to 216 calls to exit 0.
-* **open**: with the abort gone, GetProcAddress.exe has exactly one divergence
-  left - the reference dispatches `FreeLibrary` once and taote does not (taote
-  does register a `FreeLibrary` handler, so the guest's call is being resolved
-  or reached differently; the next unit of work).
+* **diagnosed, open**: GetProcAddress.exe's remaining divergence is *not* in
+  `FreeLibrary` at all - it is `LoadLibraryExW`. At dispatch #26 the reference
+  answers a module handle (`0x18000f000`) for a request where taote answers 0;
+  the guest therefore takes its success path (-> `GetProcAddress` at #27, and
+  `FreeLibrary` at #214), while taote's guest takes the error path (-> an extra
+  `GetLastError` at #27) and never reaches either call. taote *does* answer a
+  handle for the same API at #138 (`0x14003f000`), so the difference is which
+  requests it is willing to satisfy - the reference synthesizes a module for a
+  request taote declines. Next unit: make `LoadLibraryExW`/`LoadLibraryA`
+  answer a stable synthetic module handle for an unknown module (the reference's
+  behaviour) instead of 0, then re-run the differential over the PMA set.
 * **not a divergence**: taote's CRT startup dispatches `_initterm`,
   `_initterm_e` and `__acrt_iob_func`, which the reference leaves unimplemented -
   the harness reports those as extensions.
