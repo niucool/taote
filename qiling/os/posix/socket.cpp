@@ -15,7 +15,11 @@
 #include <afunix.h>
 #include <mswsock.h>
 #else
+#include <cerrno>
 #include <sys/socket.h>
+#ifndef _WIN32
+#include <poll.h>
+#endif
 #include <sys/un.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -721,6 +725,27 @@ bool QlSocket::listen(int backlog) {
     return ::listen(static_cast<SOCKET>(host_handle_), backlog) == 0;
 #else
     return ::listen(static_cast<int>(host_handle_), backlog) == 0;
+#endif
+}
+
+bool QlSocket::wait_readable(int timeout_ms) {
+    if (timeout_ms < 0) {
+        timeout_ms = 0;
+    }
+#ifdef _WIN32
+    WSAPOLLFD pfd{};
+    pfd.fd = static_cast<SOCKET>(host_handle_);
+    pfd.events = POLLRDNORM;
+    return ::WSAPoll(&pfd, 1, timeout_ms) > 0;
+#else
+    pollfd pfd{};
+    pfd.fd = static_cast<int>(host_handle_);
+    pfd.events = POLLIN;
+    int rc = 0;
+    do {
+        rc = ::poll(&pfd, 1, timeout_ms);
+    } while (rc < 0 && errno == EINTR);
+    return rc > 0;
 #endif
 }
 

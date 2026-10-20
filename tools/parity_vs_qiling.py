@@ -74,6 +74,7 @@ _ERROR_CLASSES = (
     ("unsupported api", "unsupported_api"),
     ("max api count", "max_api_count"),
     ("timeout", "timeout"),
+    ("blocked", "blocked"),
     ("unhandled cpu exception", "invalid_cpu_exception"),
     ("invalid cpu exception", "invalid_cpu_exception"),
 )
@@ -677,7 +678,8 @@ def main(argv=None) -> int:
         results.append(
             {
                 "sample": sample.name,
-                "verdict": ("match" if not findings else
+                "verdict": ("blocked" if (ref.error_class == "timeout" or ours.error_class == "timeout") else
+                            "match" if not findings else
                             "environment" if any(sig.startswith("environment") for sig, _ in findings) else
                             "reference_limit" if (reference_timed_out(ref, ours) or
                                                   reference_faulted_alone(ref, ours, findings) or
@@ -701,6 +703,7 @@ def main(argv=None) -> int:
             "diverged": sum(1 for r in results if r["verdict"] == "diverged"),
             "environment": sum(1 for r in results if r["verdict"] == "environment"),
             "reference_limit": sum(1 for r in results if r["verdict"] == "reference_limit"),
+            "blocked": sum(1 for r in results if r["verdict"] == "blocked"),
             "cluster_counts": _cluster_counts(results),
         },
     }
@@ -757,14 +760,16 @@ def render(report) -> str:
     lines.append(
         f"samples: {summary['total']}  match: {summary['match']}  "
         f"environment: {summary.get('environment', 0)}  "
-        f"reference_limit: {summary.get('reference_limit', 0)}  diverged: {summary['diverged']}"
+        f"reference_limit: {summary.get('reference_limit', 0)}  "
+        f"blocked: {summary.get('blocked', 0)}  diverged: {summary['diverged']}"
     )
     lines.append("")
     for result in report["samples"]:
         if result["verdict"] == "skipped":
             lines.append(f"[skip] {result['sample']}: {result.get('reason')}")
             continue
-        mark = {"match": "ok  ", "environment": "env ", "reference_limit": "refl", "diverged": "DIFF"}.get(result["verdict"], "DIFF")
+        mark = {"match": "ok  ", "environment": "env ", "reference_limit": "refl", "blocked": "blk ",
+                "diverged": "DIFF"}.get(result["verdict"], "DIFF")
         ref, ours = result["reference"], result["taote"]
         lines.append(
             f"[{mark}] {result['sample']}: reference {ref['calls']} calls exit {ref['exit']} "

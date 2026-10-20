@@ -427,6 +427,14 @@ void QlOsWindows::load() {
     // registration — the load() body here stays for the direct callers only)
 }
 
+int QlOsWindows::socket_wait_budget_ms() const noexcept {
+    const auto seconds = static_cast<long long>(ql_->timeout());
+    if (seconds > 0) {
+        return static_cast<int>(std::min<long long>(seconds, 60) * 1000);
+    }
+    return 1000;
+}
+
 void QlOsWindows::hook_winapi(std::uint64_t address, std::uint32_t size) {
     (void)size;
 

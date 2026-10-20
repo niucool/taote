@@ -139,6 +139,9 @@ void register_ws2_32_family() {
         return 0;
     };
 
+    // the WSAETIMEDOUT the non-blocking accept/recv path answers
+    static constexpr int kWsaeTimedOut = 10060;
+
     // SOCKET accept(SOCKET s, sockaddr* addr, int* addrlen);
     WinsdkApi("accept", WinCc::Stdcall, {
         {"s", SOCKET_},
@@ -150,10 +153,20 @@ void register_ws2_32_family() {
             return static_cast<std::uint64_t>(-1);
         }
 
+        // the host accept blocks, so a guest that waits for a peer must not
+        // hold the emulator: wait within the budget and answer WSAETIMEDOUT
+        // when nothing arrives (no fake connection is ever handed back)
+        const int budget_ms = w(ql).socket_wait_budget_ms();
+        if (!listener->wait_readable(budget_ms)) {
+            w(ql).set_last_error(kWsaeTimedOut);
+            return static_cast<std::uint64_t>(-1);
+        }
+
         std::string peer_path, peer_host;
         std::uint16_t peer_port = 0;
         auto conn = listener->accept(peer_path, peer_host, peer_port);
         if (conn == nullptr) {
+            w(ql).set_last_error(kWsaeTimedOut);
             return static_cast<std::uint64_t>(-1);
         }
 

@@ -103,6 +103,12 @@ public:
     const std::string& windir() const noexcept { return windir_; }
     const std::string& winsys() const noexcept { return winsys_; }
     const std::string& userprofile() const noexcept { return userprofile_; }
+
+    // the wall-clock budget the socket family spends waiting on a host call
+    // before answering WSAETIMEDOUT (windows.py has no analogue: its accept
+    // blocks forever and stalls a corpus sweep). The os `timeout` profile knob
+    // is the budget when it is set, else one second.
+    int socket_wait_budget_ms() const noexcept;
     const std::string& username() const noexcept { return username_; }
     // os.py last_error: ONE surface — the QlOs base field (the fiber.py
     // manager and the api handlers share it; the port previously shadowed

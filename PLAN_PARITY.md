@@ -9,7 +9,7 @@ phase closes without its tests.
 
 | metric | pegasus | taote today | target |
 |---|---|---|---|
-| API sample sweep (`../pegasus/tests/bins`, 101 bins) | n/a (their suite asserts dispatch only) | **97 exit 0**, 2 block in `accept`, 2 kernel `.sys` | 99+ (drivers land) |
+| API sample sweep (`../pegasus/tests/bins`, 101 bins) | n/a (their suite asserts dispatch only) | **98 exit 0**, 0 blocked, 3 failed (`kernel32_file_find_test_api_x86.exe`, the two `wdm_test_*.sys` drivers) | 99+ (drivers land) |
 | PMA corpus (`~/source/capa-testfiles`, 32 PE samples) | 12 curated cases green (their CI), 38 with `PEGASUS_PMA_FULL=1` | **14 exit 0** (32-sample sweep), **1/12 green** (curated ctest cases, now with the reference guards) | ≥ 30 exit 0, all curated cases green |
 | reference-suite parity (`../pegasus/tests`, 357 cases) | 357 | **12 ported + 4 ported clusters**, rest mapped in `tests/PEGASUS_TEST_PARITY.md` | every *portable* row ported, none "deferred" |
 | taote suite | — | **540 passed / 0 failed / 3 skipped** | grows with every phase, stays 0-failed |
@@ -329,6 +329,44 @@ diverges at call #45 and now ends on `invalid_read`, so the change moved the gue
 further along without reaching the reference's trace. Recorded as the next unit
 with the corpus measurement it needs (the field is loader-level, so it must be
 scored over all 32 samples, not one).
+
+### Phase 5.4 (early): the socket wall-clock budget, and `blocked` as a status
+
+A corpus sweep stalled for **91 minutes** on
+`ws2_32_tcp_server_test_api_x64.exe` with no CPU time and `wchan=inet_csk_accept`:
+the guest's `accept()` passed straight through to a real host socket, so the
+emulator sat in a host syscall with **no guest instruction retiring** — and a
+guest-instruction budget cannot bound that, which is why `--count 40000000` was
+no protection.
+
+Two harness defects let a single sample hold the sweep: nothing wrapped the run
+in a wall-clock timeout, and the sweep loop reused one `--out` path for every
+sample, so a killed run silently re-read the *previous* sample's JSON and
+misattributed its result.
+
+- **`tools/sweep_samples.py`** is now the sweep driver: a per-sample
+  wall-clock timeout (`--timeout`, default 30 s), a unique trace file per sample,
+  and four statuses — `exit0`, `failed`, `blocked` (the wall-clock timeout: the
+  guest is stuck in a host call, which is neither a failure nor a divergence) and
+  `no-trace`. `parity_vs_qiling.py` classifies a timeout as `blocked` too, on
+  either side, and reports it in the summary line and the per-sample mark (`blk`).
+- **`QlSocket::wait_readable(timeout_ms)`** (a `poll`/`WSAPoll` on the host
+  handle) plus `QlOsWindows::socket_wait_budget_ms()` give the socket family a
+  wall-clock budget: `accept` waits for a pending connection and answers
+  **`WSAETIMEDOUT`** when none arrives, instead of blocking forever and instead
+  of faking a connection. The budget is the os `timeout` knob when set, else one
+  second. Both `ws2_32_tcp_server_test_api_{x86,x64}.exe` and both
+  `ws2_32_tcp_client_test_api_*` samples now terminate honestly (13 dispatches,
+  exit 0). This is PLAN_PARITY Phase 5.4's non-blocking path arriving early,
+  because it blocked the measurement rather than the feature.
+
+Re-measured sweep (101 bins, 20 s per sample, count 40M): **98 exit 0, 0 blocked,
+3 failed** — `kernel32_file_find_test_api_x86.exe` and the two `wdm_test_*.sys`
+kernel drivers (Phase 5). That is one better than pegasus's own 97/101 and two
+better than the previous 96-with-2-blocked reading. The host was under a load
+average of ~15 on 24 cores (a parallel blade sweep), so wall-clock numbers are
+not meaningful here; the sweep records instruction counts and verdicts, not
+seconds.
 
 ### 14-02.exe_: the reference never initialises its CRT
 

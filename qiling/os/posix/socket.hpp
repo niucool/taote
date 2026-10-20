@@ -48,6 +48,14 @@ public:
     int fileno() override;
     void close() override;
 
+    // wait_readable(timeout_ms): true when a pending connection/datagram is
+    // there within the budget. The host calls behind accept/recv are blocking,
+    // and a guest sitting in accept() must never hold the emulator: this is the
+    // wall-clock budget the Windows family checks before entering one (Phase
+    // 5.4's non-blocking path; a timeout answers WSAETIMEDOUT, not a fake
+    // connection)
+    bool wait_readable(int timeout_ms);
+
     // shutdown(how): the ConnectionError shapes onto -1 at the caller
     // (returns false when the host socket errors)
     bool shutdown(int how);
