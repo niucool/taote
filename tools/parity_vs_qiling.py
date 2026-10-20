@@ -253,6 +253,26 @@ def reference_lacks_handler(ref: Trace, ours: Trace, findings, extensions):
     return True
 
 
+def reference_faulted_alone(ref: Trace, ours: Trace, findings):
+    """True when the only finding is the reference's own fault.
+
+    taote reproduced the reference's dispatch sequence exactly - same calls, same
+    order, same count, same return values, same stdout - and simply did not fault
+    where the reference did. Nothing in the traces disagrees except the error
+    class, so the fault is the reference's own limitation (PMA 12-01.dll_ and
+    11-03.dll_: 68 identical dispatches, the reference dies on an unmapped fetch,
+    taote exits 0).
+    """
+
+    if ref.error_class is None or ours.error_class is not None:
+        return False
+    if len(ref.calls) != len(ours.calls):
+        return False
+    if ref.sequence() != ours.sequence():
+        return False
+    return all(signature.startswith("error class") for signature, _ in findings)
+
+
 def reference_limited(ref: Trace, ours: Trace, findings, extensions):
     """True when the divergence is the reference's own limitation.
 
@@ -638,6 +658,7 @@ def main(argv=None) -> int:
                 "verdict": ("match" if not findings else
                             "environment" if any(sig.startswith("environment") for sig, _ in findings) else
                             "reference_limit" if (reference_timed_out(ref, ours) or
+                                                  reference_faulted_alone(ref, ours, findings) or
                                                   reference_limited(ref, ours, findings, extensions) or
                                                   reference_lacks_handler(ref, ours, findings, extensions)) else
                             "diverged"),

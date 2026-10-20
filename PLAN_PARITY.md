@@ -176,8 +176,8 @@ PMA differential baseline (32 PE samples, measured this pass):
 | --- | --- |
 | match | **12** (`01-02.exe_`, `03-03.exe_`, `03-04.exe_`, `10-03.exe_`, `12-01.exe_`, `12-02.exe_`, `16-01.exe_`, `16-02.exe_`, `18-03.exe_`, `19-02.exe_`, `20-02.exe_`, `21-01.exe_`) |
 | environment | 0 |
-| reference_limit | 8 (`01-01.exe_`, `01-04.exe_`, `06-03.exe_`, `12-03.exe_`, `12-04.exe_`, `14-01.exe_`, `17-03.exe_`, `18-01.exe_`) |
-| diverged | 12 |
+| reference_limit | 9 (`01-01.exe_`, `01-04.exe_`, `06-03.exe_`, `12-01.dll_`, `12-03.exe_`, `12-04.exe_`, `14-01.exe_`, `17-03.exe_`, `18-01.exe_`) |
+| diverged | 11 |
 
 Measured after the unsupported-import frame fix below (raw taote exit-0 **19/32**,
 was 13/32). Measured after the two differ fixes below (the signed/unsigned return-value fold
@@ -329,6 +329,16 @@ diverges at call #45 and now ends on `invalid_read`, so the change moved the gue
 further along without reaching the reference's trace. Recorded as the next unit
 with the corpus measurement it needs (the field is loader-level, so it must be
 scored over all 32 samples, not one).
+
+### `reference_faulted_alone`
+
+`12-01.dll_` reproduced the reference's run exactly - 68 dispatches, same names,
+same order, same return values, same stdout - and simply did not fault where the
+reference died on an unmapped fetch. Every finding but the error class agreed, so
+nothing in the traces disagrees; that is the reference's own limitation and the
+new predicate grants it only under exactly that shape (same sequence, same count,
+the only findings being error-class ones). Corpus: **12 match / 0 environment /
+9 reference_limit / 11 diverged**.
 
 ### One rootfs for both emulators (the environment class disappears)
 
