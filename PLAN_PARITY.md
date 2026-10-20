@@ -202,6 +202,29 @@ never reaches. The two repeats that are worth attacking first are therefore
 `ExitProcess` (taote not reaching process exit where the reference does), not the
 long tail of single-sample APIs.
 
+First dissection of the heap cluster (16-03.exe_, which carries both signatures):
+
+```
+#  reference                 taote
+0  GetVersion     262148     GetVersion     262148
+1  HeapCreate     83888680   HeapCreate     83888280
+2  GetVersionExA  1          GetVersionExA  1
+3  GetEnvironmentVariableA 0 GetEnvironmentVariableA 0
+4  GetModuleHandleA 0x400000 GetModuleHandleA 0x400000
+5  HeapAlloc      83892776   VirtualAlloc   83892376
+6  HeapAlloc      83893096   VirtualAlloc   88086680
+```
+
+The two traces are identical up to and including #4, then **at the same call site**
+the reference dispatches `HeapAlloc` and taote dispatches `VirtualAlloc`. taote
+registers `HeapAlloc` (`qiling/os/windows/dlls/kernel32/heapapi.cpp:84`), so this
+is not a missing handler - the guest's allocation import is resolving to a
+different stub cell on taote's side. The next unit is therefore to dump, for one
+run, guest IAT slot -> stub address -> export name (`QlLoaderPE::import_symbols`
+plus `import_address_table_at`), and compare it against the same map the
+reference built: a stub export table whose cell order disagrees with the names
+list would produce exactly this (each import answered by its neighbour).
+
 Exit criteria (this phase): the differential clean on the named starter corpus
 (`argv_test_x86.exe`, `file_access_test_x86.exe`), gated in ctest as
 `Tools.ParityVsQilingSmoke` (skips when no reference checkout / qiling-deps
