@@ -152,8 +152,13 @@ public:
     void call_native(std::uint64_t addr, const std::vector<std::pair<int, std::uint64_t>>& args,
                      std::optional<std::uint64_t> ret);
 
+    // Set the return register only (no frame change): the unsupported-import
+    // path answers a zero in the return register and leaves the guest's own
+    // stub-cell `ret` to unwind, which is what the reference does
+    void set_return_value(std::uint64_t value) { cc_->setReturnValue(value); }
+
     // Answer a call without a handler body: set the return value and unwind the
-    // frame as a real handler would (the unsupported-import path)
+    // frame as a real handler would (the supported-import path)
     void return_value(std::uint64_t value, int nslots) {
         cc_->setReturnValue(value);
         static_cast<void>(cc_->unwind(nslots));

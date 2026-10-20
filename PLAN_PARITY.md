@@ -174,12 +174,13 @@ PMA differential baseline (32 PE samples, measured this pass):
 
 | verdict | count |
 | --- | --- |
-| match | **5** (`03-03.exe_`, `10-03.exe_`, `12-02.exe_`, `16-02.exe_`, `20-02.exe_`) |
+| match | **7** (`03-03.exe_`, `03-04.exe_`, `10-03.exe_`, `12-02.exe_`, `16-01.exe_`, `16-02.exe_`, `20-02.exe_`) |
 | environment | 1 (`12-01.exe_`) |
 | reference_limit | 5 (`01-01.exe_`, `01-04.exe_`, `12-04.exe_`, `14-01.exe_`, `18-01.exe_`) |
-| diverged | 21 |
+| diverged | 19 |
 
-Measured after the two differ fixes below (the signed/unsigned return-value fold
+Measured after the unsupported-import frame fix below (raw taote exit-0 **19/32**,
+was 13/32). Measured after the two differ fixes below (the signed/unsigned return-value fold
 and the reference-timeout verdict); was 5 / 1 / 3 / 23 before them. The match
 list traded `18-01.exe_` for `10-03.exe_`: `10-03.exe_` is a real gain (its only
 finding was `CreateFileA` answering `-1` on the reference and
@@ -328,6 +329,36 @@ diverges at call #45 and now ends on `invalid_read`, so the change moved the gue
 further along without reaching the reference's trace. Recorded as the next unit
 with the corpus measurement it needs (the field is loader-level, so it must be
 scored over all 32 samples, not one).
+
+### The unsupported-import frame (the `ExitProcess` cluster)
+
+This closes the cluster the differential kept reporting as *missing dispatch:
+ExitProcess* on `03-04.exe_`, `11-01.exe_`, `16-01.exe_` — all three had the same
+tail: 43 matching dispatches, then taote dispatched `UnhandledExceptionFilter`
+where the reference reached `ExitProcess`, then taote faulted.
+
+The previous unit's `--dump-mem` probe had falsified the IAT hypothesis (taote's
+slot held the stub cell, and that cell executed), and the stack write watch over
+the frame settled it: both runs push the same return address (`0x401039` at
+`0xffffb54c`) and both execute the stub cell's `C3`, yet taote came back to a
+runtime thunk instead of its own next instruction. The cause is taote's
+unsupported-import path: where the reference logs `api X (dll) is not
+implemented` and dispatches **nothing** (leaving the guest's stub-export cell to
+`ret` and do the stdcall cleanup itself), taote emulated the return through the
+calling convention - `fcall_->return_value(0, 0)`, i.e. set the return register
+and unwind **zero** slots. That leaves a stdcall frame unbalanced by its
+arguments, so after the `ret` the guest is one frame off and follows a thunk into
+its own exception path. It now zeroes only the return register
+(`QlFunctionCall::set_return_value`) and lets the guest's `ret` unwind.
+
+Effect: `16-01.exe_` and `03-04.exe_` become **matches** (16-01's only remaining
+finding is a taote extension — it implements `ShellExecuteA`, the reference does
+not), `16-01`'s code trace agrees with the reference for **all 19,489
+instructions**, and the raw taote exit-0 count over the 32-sample corpus goes
+**13/32 → 19/32**. The differential is now **7 match / 1 environment /
+5 reference_limit / 19 diverged**. The differ also decodes subprocess output with
+`errors="replace"`: a packed sample prints non-utf-8 decoy bytes, which used to
+abort the whole sweep.
 
 ### The x86 loader layouts (heap-shift unit)
 

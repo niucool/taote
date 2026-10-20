@@ -385,12 +385,17 @@ def find_python(explicit=None):
 
 def run_json(cmd, timeout):
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        # the traces are JSON, but a guest's stdout rides inside them and a
+        # sample can print bytes that are not valid utf-8 (a packed sample's
+        # decoy strings), so decode permissively rather than crashing the sweep
+        proc = subprocess.run(cmd, capture_output=True, timeout=timeout)
     except subprocess.TimeoutExpired:
         return None, "timeout"
-    text = proc.stdout.strip()
+    out = proc.stdout.decode("utf-8", errors="replace")
+    err = proc.stderr.decode("utf-8", errors="replace")
+    text = out.strip()
     if not text:
-        return None, (proc.stderr.strip().splitlines() or ["no output"])[-1]
+        return None, (err.strip().splitlines() or ["no output"])[-1]
     try:
         return json.loads(text), None
     except json.JSONDecodeError as ex:

@@ -472,8 +472,15 @@ void QlOsWindows::hook_winapi(std::uint64_t address, std::uint32_t size) {
             record_entry_point_error("unsupported_api", "unsupported api: " + imported->name);
             throw QlErrorBase("unsupported api: " + imported->name);
         }
+        // the reference logs the import and dispatches *nothing*: the guest's
+        // own stub-export cell answers with a `ret` and does the stdcall
+        // cleanup. Zero the return register (so the caller does not inherit a
+        // stale rax) and leave the frame alone - emulating the return here
+        // unwinds a different number of slots than the guest's own ret and
+        // lands the guest in the wrong place (PMA 16-01: its stub ret handed
+        // back a thunk address instead of the return address)
         set_fcall_ptr(fcall_select(default_cc_for(imported->name, bits_)));
-        fcall_->return_value(0, 0);
+        fcall_->set_return_value(0);
         return;
     }
 
