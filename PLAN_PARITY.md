@@ -254,6 +254,27 @@ symptom*, and the remaining diagnostic direction is the first differing return
 value before #5 (`HeapCreate` answers `83888280` on taote vs `83888680` on the
 reference), not the import table.
 
+**`none vs invalid_insn` dissected (`03-04`, `11-01`, `16-01`).** On
+`11-01.exe_` both runs are identical through call #4 (`GetVersion`, `HeapCreate`,
+`GetVersionExA`, `GetEnvironmentVariableA`, `GetModuleHandleA` at the *same* call
+sites, `0x4014b3`/`0x4033c2`/`0x403288`/`0x4032bd`/`0x403246`), and then the two
+guests are in different code: the reference goes on to initialise stdio
+(`0x403b1e push 0x140` then `call [0x407090]`, i.e. `HeapAlloc`), while taote
+lands in the sample's unpacker and reserves its image
+(`0x4043b4 VirtualAlloc(0, 0x400000, 0x2000, 4)`), then ends on
+`UnhandledExceptionFilter` (the guest's own "no handler" branch at `0x402c07`)
+and dies on `UC_ERR_INSN_INVALID`. Since no API return value differs in that
+window, the branch is on *guest memory*, not on a handler answer - so the IAT was
+ruled out mechanically first: `parity_trace --dump-imports` now also prints the
+guest's own IAT (`iat <slot> -> <stub> <name> (<imported name>)`), and for this
+sample the three slots in play are all correct and distinct
+(`0x407018 -> VirtualAlloc`, `0x407038 -> ExitProcess`,
+`0x407090 -> HeapAlloc`). The next probe is therefore the guest's *data*, not its
+code: the PEB/TEB and the CRT's own globals are the only things that differ
+between the two runs at that point (`BeingDebugged` is 0 on both sides - the
+loader writes the same PEB fields - so it is something else in the process
+structures or in the environment block).
+
 **The `reference_limit` verdict (this pass).** Three of the four `invalid_write
 vs none` samples are the reference's own limitation, not taote defects. On
 `01-01.exe_` the reference runs 5 calls and dies writing unmapped memory, while

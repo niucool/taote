@@ -14,7 +14,10 @@
 //
 // tools/parity_vs_qiling.py runs both sides and diffs the normalized traces.
 //
-// usage: parity_trace <sample> [--argv A B] [--count N] [--timeout S] [--out FILE]
+// usage: parity_trace <sample> [--argv A B] [--count N] [--timeout S]
+//                     [--max-api-count N] [--dump-imports FILE] [--out FILE]
+#include <LIEF/PE.hpp>
+
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -59,7 +62,8 @@ std::uint64_t parse_u64(const char* text) {
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::cerr << "usage: parity_trace <sample> [--argv A B] [--count N] [--timeout S] [--out FILE]\n";
+        std::cerr << "usage: parity_trace <sample> [--argv A B] [--count N] [--timeout S] [--max-api-count N]\n"
+                 "                   [--dump-imports FILE] [--out FILE]\n";
         return 2;
     }
 
@@ -100,11 +104,40 @@ int main(int argc, char** argv) {
     // the resolved import stubs, for diagnosing "the guest called the wrong API"
     // (stub address -> export name, as the loader built them)
     if (!dump_imports.empty()) {
-        opts.configure = [&dump_imports](qiling::Qiling& ql) {
+        opts.configure = [&dump_imports, &sample](qiling::Qiling& ql) {
             std::ofstream out(dump_imports);
             const auto& loader = static_cast<const qiling::loader::QlLoaderPE&>(ql.loader());
             for (const auto& [addr, entry] : loader.import_symbols()) {
                 out << std::hex << addr << " " << entry.name << "\n";
+            }
+
+            // and the guest's own IAT: for every import entry, the slot in the
+            // image and the stub address the loader wrote there. `import_symbols`
+            // says what the loader *can* dispatch; this says what the guest will
+            // actually call, which is what a "why did the guest call X" question
+            // needs (the two disagree whenever a slot is left unwritten).
+            const auto parsed = LIEF::PE::Parser::parse(sample);
+            if (parsed != nullptr) {  // NOLINT(bugprone-unused-return-value)
+                const auto image_base = static_cast<std::uint64_t>(parsed->imagebase());
+                const auto pointer_size = ql.arch().pointersize();
+                for (const auto& imported : parsed->imports()) {
+                    for (const auto& entry : imported.entries()) {
+                        const auto slot = image_base + entry.iat_address();
+                        std::uint64_t target = 0;
+                        try {
+                            const auto raw = ql.mem().read(slot, pointer_size);
+                            for (std::size_t i = raw.size(); i-- > 0;) {
+                                target = (target << 8) | raw[i];
+                            }
+                        } catch (const std::exception&) {
+                            target = 0;
+                        }
+                        const auto it = loader.import_symbols().find(target);
+                        out << "iat " << std::hex << slot << " -> " << target << " "
+                            << (it != loader.import_symbols().end() ? it->second.name : std::string("?"))
+                            << " (" << entry.name() << ")\n";
+                    }
+                }
             }
         };
     }

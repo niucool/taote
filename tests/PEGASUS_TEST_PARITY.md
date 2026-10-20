@@ -105,7 +105,7 @@ dialog content reaches the string log.
 | surface | status |
 | --- | --- |
 | reference trace (`tools/qiling_reference_runner.py`) | ported: `stats.syscalls`/`strings`, guest stdout, exit code, unicorn error text, plus the reference's own "not implemented" warnings |
-| taote trace (`tools/parity_trace.cpp`) | ported: the same fields from `QlOsStats` + `entry_point_errors()` |
+| taote trace (`tools/parity_trace.cpp`) | ported: the same fields from `QlOsStats` + `entry_point_errors()`, plus `--dump-imports` (the loader's `import_symbols` map *and* the guest's own IAT slots) for "why did the guest call that" questions |
 | normalization + diff (`tools/parity_vs_qiling.py`) | ported: addresses -> `sample+0xNN`, guest paths -> `<sample>`, pointer retvals -> `ptr`, one error vocabulary for both sides |
 | PMA differential baseline | **4/32 match** (`03-03.exe_`, `12-02.exe_`, `18-01.exe_`, `20-02.exe_`), 0 environment, 3 `reference_limit` (`01-01.exe_`, `01-04.exe_`, `12-04.exe_`), 25 diverged, clustered: dispatch-count 26, extra-dispatch 20, missing-dispatch 12, exit-code 5, error-class 16 across 12 signature pairs, stdout 2, dispatch-order 2 |
 | verdicts | `match` / `environment` (module handle only the harness can synthesize) / `reference_limit` (the reference faulted on an import it leaves unimplemented while taote ran on; taote's extras all start at or after the first such import) / `diverged`; faulted runs skip the exit-code compare (the reference reports 0 where taote reports `STATUS_ACCESS_VIOLATION`) |
