@@ -176,8 +176,8 @@ PMA differential baseline (32 PE samples, measured this pass):
 | --- | --- |
 | match | **12** (`01-02.exe_`, `03-03.exe_`, `03-04.exe_`, `10-03.exe_`, `12-01.exe_`, `12-02.exe_`, `16-01.exe_`, `16-02.exe_`, `18-03.exe_`, `19-02.exe_`, `20-02.exe_`, `21-01.exe_`) |
 | environment | 0 |
-| reference_limit | 9 (`01-01.exe_`, `01-04.exe_`, `06-03.exe_`, `12-01.dll_`, `12-03.exe_`, `12-04.exe_`, `14-01.exe_`, `17-03.exe_`, `18-01.exe_`) |
-| diverged | 11 |
+| reference_limit | 12 (`01-01.exe_`, `01-04.exe_`, `06-03.exe_`, `11-02.dll_`, `11-03.dll_`, `11-03.exe_`, `12-01.dll_`, `12-03.exe_`, `12-04.exe_`, `14-01.exe_`, `17-03.exe_`, `18-01.exe_`) |
+| diverged | 8 |
 
 Measured after the unsupported-import frame fix below (raw taote exit-0 **19/32**,
 was 13/32). Measured after the two differ fixes below (the signed/unsigned return-value fold
@@ -329,6 +329,20 @@ diverges at call #45 and now ends on `invalid_read`, so the change moved the gue
 further along without reaching the reference's trace. Recorded as the next unit
 with the corpus measurement it needs (the field is loader-level, so it must be
 scored over all 32 samples, not one).
+
+### The reference stopped before taote did
+
+The last three non-trace-identical cases had the same reading: the reference
+faulted mid-run while taote ran on *cleanly* and every extra dispatch came at or
+after the reference's final one (`11-02.dll_`: reference one call then an unmapped
+read, taote 9 calls to exit 0; `11-03.dll_` and `11-03.exe_` are the same shape,
+the latter aborting with the reference's own "Windows API Implementation Error").
+`reference_limited` now also grants that verdict when there are no unimplemented
+-import extensions to point at, under the guard that taote exited 0 and every
+extra dispatch is at or after `len(reference calls)` — a taote that faulted is
+never excused this way (`03-02.dll_`, `05-01.dll_`, `17-02.dll_` and `01-01.dll_`
+keep their diverged verdicts for exactly that reason). Corpus: **12 match /
+0 environment / 12 reference_limit / 8 diverged**.
 
 ### `reference_faulted_alone`
 

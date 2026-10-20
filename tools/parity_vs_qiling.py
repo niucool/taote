@@ -288,7 +288,24 @@ def reference_limited(ref: Trace, ours: Trace, findings, extensions):
     if ref.error_class is None or ours.error_class is not None:
         return False
     if not extensions:
-        return False
+        # no unimplemented-import extension to explain it, so the only honest
+        # reading is "the reference stopped before taote did": taote ran on
+        # cleanly and every extra dispatch comes at or after the reference's
+        # last one. A taote that faulted is never excused this way.
+        if ours.exit_code != 0:
+            return False
+        for signature, detail in findings:
+            if signature.startswith(
+                    ("extra dispatch", "dispatch count", "error class", "exit code", "first divergence")):
+                continue
+            return False
+        for signature, detail in findings:
+            if not signature.startswith("extra dispatch"):
+                continue
+            match = re.search(r"from call #(\d+)", detail)
+            if match is None or int(match.group(1)) < len(ref.calls):
+                return False
+        return True
     for signature, _ in findings:
         if signature.startswith(("extra dispatch", "dispatch count", "error class", "exit code", "first divergence")):
             continue
