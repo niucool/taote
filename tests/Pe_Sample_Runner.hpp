@@ -208,6 +208,11 @@ struct SampleOptions {
     std::uint64_t timeout = 0;                                           // seconds (0 = none)
     std::uint64_t count = 0;                                             // instruction budget (0 = none)
     std::optional<std::filesystem::path> sample_path;                                // run an out-of-tree sample (the PMA corpus)
+    // run against a caller-seeded rootfs instead of synthesizing one (the
+    // differential hands both emulators the same tree, so the stub dll export
+    // sets cannot differ between them); the sample must already sit at
+    // <rootfs>/Windows/<name>
+    std::optional<std::filesystem::path> rootfs;
 };
 
 inline SampleOutcome run_pe_sample(const std::string& bin_name, const SampleOptions& opts = {}) {
@@ -269,11 +274,15 @@ inline SampleOutcome run_pe_sample(const std::string& bin_name, const SampleOpti
     Qiling* ql_after = nullptr;  // the post-run probe's handle (set once the run owns it)
     try {
         const auto plan = plan_for(sample);
-        const auto rootfs = make_rootfs(fs::path(bin_name).stem().string());
+        const auto rootfs = opts.rootfs.has_value() ? *opts.rootfs
+                                                    : make_rootfs(fs::path(bin_name).stem().string());
 
         // the synthesized system dlls (plus the caller-provided extra exports —
         // the real modules export far more than the import table names)
         for (const auto& [dll, exports] : plan.imports) {
+            if (opts.rootfs.has_value()) {
+                break;
+            }
             auto names = exports;
             const auto extra = opts.stub_extras.find(dll);
             if (extra != opts.stub_extras.end()) {
@@ -292,6 +301,9 @@ inline SampleOutcome run_pe_sample(const std::string& bin_name, const SampleOpti
         // guest allocation - an environment difference, not a guest one
         for (const char* key_dll : {"ntdll.dll", "kernelbase.dll", "kernel32.dll",
                                     "ucrtbase.dll", "mscoree.dll"}) {
+            if (opts.rootfs.has_value()) {
+                break;
+            }
             if (!fs::exists(rootfs / "Windows" / "System32" / key_dll)) {
                 auto names = std::vector<std::string>{};
                 for (const auto& [dll, exports] : plan.imports) {
@@ -312,7 +324,9 @@ inline SampleOutcome run_pe_sample(const std::string& bin_name, const SampleOpti
         }
 
         const auto exe_in_rootfs = rootfs / "Windows" / sample.filename().string();
-        fs::copy_file(sample, exe_in_rootfs, fs::copy_options::overwrite_existing);
+        if (!opts.rootfs.has_value()) {
+            fs::copy_file(sample, exe_in_rootfs, fs::copy_options::overwrite_existing);
+        }
 
         QilingOptions options;
         options.rootfs = rootfs.string();

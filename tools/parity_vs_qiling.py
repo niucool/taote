@@ -529,7 +529,12 @@ def run_one(sample: Path, machine: str, rootfs: Path, argv, qiling_python, qilin
     if ref_raw is None:
         ref_raw = {"emulator": "qiling", "sample": sample.name, "apis": [], "stdout": "", "error": ref_err, "exit_code": None}
 
-    our_cmd = [str(taote_trace), str(sample), "--out", str(our_json)]
+    # both emulators run the *same* staged tree: the stub dll export sets and the
+    # paths the guest resolves have to be identical or a GetProcAddress answer
+    # differs for harness reasons (PMA 01-02 asked for an export only the
+    # corpus-union rootfs carried)
+    our_cmd = [str(taote_trace), str(ref_sample or sample), "--rootfs", str(rootfs),
+               "--out", str(our_json)]
     if argv:
         our_cmd += ["--argv", *argv]
     if count:

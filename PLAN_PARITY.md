@@ -174,10 +174,10 @@ PMA differential baseline (32 PE samples, measured this pass):
 
 | verdict | count |
 | --- | --- |
-| match | **9** (`03-03.exe_`, `03-04.exe_`, `10-03.exe_`, `12-02.exe_`, `16-01.exe_`, `16-02.exe_`, `19-02.exe_`, `20-02.exe_`, `21-01.exe_`) |
-| environment | 1 (`12-01.exe_`) |
-| reference_limit | 7 (`01-01.exe_`, `01-04.exe_`, `06-03.exe_`, `12-03.exe_`, `12-04.exe_`, `14-01.exe_`, `18-01.exe_`) |
-| diverged | 15 |
+| match | **12** (`01-02.exe_`, `03-03.exe_`, `03-04.exe_`, `10-03.exe_`, `12-01.exe_`, `12-02.exe_`, `16-01.exe_`, `16-02.exe_`, `18-03.exe_`, `19-02.exe_`, `20-02.exe_`, `21-01.exe_`) |
+| environment | 0 |
+| reference_limit | 8 (`01-01.exe_`, `01-04.exe_`, `06-03.exe_`, `12-03.exe_`, `12-04.exe_`, `14-01.exe_`, `17-03.exe_`, `18-01.exe_`) |
+| diverged | 12 |
 
 Measured after the unsupported-import frame fix below (raw taote exit-0 **19/32**,
 was 13/32). Measured after the two differ fixes below (the signed/unsigned return-value fold
@@ -329,6 +329,23 @@ diverges at call #45 and now ends on `invalid_read`, so the change moved the gue
 further along without reaching the reference's trace. Recorded as the next unit
 with the corpus measurement it needs (the field is loader-level, so it must be
 scored over all 32 samples, not one).
+
+### One rootfs for both emulators (the environment class disappears)
+
+The differ seeded a rootfs for the reference and let taote synthesize its own
+per-sample one, so the two stub-dll export sets were not the same: the reference
+got the *corpus union* of every imported name, taote only the sample's own. PMA
+01-02 asks `GetProcAddress` for a name that only the union carried - the reference
+answered a stub-cell address, taote answered 0, and the guest branched. That is a
+harness difference, not an emulator one, and it was also what the `environment`
+verdict existed to excuse (`12-01.exe_`).
+
+`SampleOptions::rootfs` (and `parity_trace --rootfs DIR`) now runs taote against a
+caller-seeded tree instead of synthesizing one, and the differ hands *both* sides
+the same staged rootfs and the same staged sample path. The `environment` class is
+gone: **12 match / 0 environment / 8 reference_limit / 12 diverged**, with
+`01-02.exe_`, `12-01.exe_` and `18-03.exe_` newly matching and raw taote exit-0
+**20/32**.
 
 ### The reference's missing handler as a verdict (`reference_lacks_handler`)
 

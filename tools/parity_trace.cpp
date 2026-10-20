@@ -82,6 +82,7 @@ int main(int argc, char** argv) {
     std::string out_path;
     std::string dump_imports;
     std::string code_trace;
+    std::string rootfs;
     std::string dump_mem;
     std::string dump_images;
     std::string dump_heap;
@@ -111,6 +112,8 @@ int main(int argc, char** argv) {
             opts.max_api_count = parse_u64(argv[++i]);
         } else if (arg == "--dump-imports" && i + 1 < argc) {
             dump_imports = argv[++i];
+        } else if (arg == "--rootfs" && i + 1 < argc) {
+            rootfs = argv[++i];
         } else if (arg == "--dump-mem" && i + 3 < argc) {
             dump_mem = argv[++i];
             dump_mem_begin = parse_u64(argv[++i]);
@@ -295,6 +298,12 @@ int main(int argc, char** argv) {
                 out << "\n";
             }
         };
+    }
+
+    // the shared rootfs: the differential seeds one tree for both emulators so
+    // their stub dll export sets (and the paths the guest sees) cannot differ
+    if (!rootfs.empty()) {
+        opts.rootfs = std::filesystem::path(rootfs);
     }
 
     opts.sample_path = std::filesystem::path(sample);
