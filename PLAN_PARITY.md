@@ -10,7 +10,7 @@ phase closes without its tests.
 | metric | pegasus | taote today | target |
 |---|---|---|---|
 | API sample sweep (`../pegasus/tests/bins`, 101 bins) | n/a (their suite asserts dispatch only) | **97 exit 0**, 2 block in `accept`, 2 kernel `.sys` | 99+ (drivers land) |
-| PMA corpus (`~/source/capa-testfiles`, 32 PE samples) | 12 curated cases green (their CI), 38 with `PEGASUS_PMA_FULL=1` | **13 exit 0** (32-sample sweep), **0/12 green** (curated ctest cases, now with the reference guards) | ≥ 30 exit 0, all curated cases green |
+| PMA corpus (`~/source/capa-testfiles`, 32 PE samples) | 12 curated cases green (their CI), 38 with `PEGASUS_PMA_FULL=1` | **14 exit 0** (32-sample sweep), **1/12 green** (curated ctest cases, now with the reference guards) | ≥ 30 exit 0, all curated cases green |
 | reference-suite parity (`../pegasus/tests`, 357 cases) | 357 | **12 ported + 4 ported clusters**, rest mapped in `tests/PEGASUS_TEST_PARITY.md` | every *portable* row ported, none "deferred" |
 | taote suite | — | **537 passed / 0 failed / 3 skipped** | grows with every phase, stays 0-failed |
 | host support | MSVC/Windows + Linux | MSVC/Windows + Linux | unchanged (regression gate) |
@@ -102,6 +102,34 @@ export-less images added one), curated 0/12 — every case now reports *why*
 (missing API surface, not a harness bug).
 
 Exit: PMA ≥ 26 exit 0, curated cases green, sweep unchanged at 97.
+
+## Phase 1.9 — qiling-parity differential (acceptance criterion, highest priority)
+
+The reference implementation is now available locally (`~/source/qiling`, the
+Python reference). Every earlier judgement about a sample's behaviour is
+subordinate to it: **taote must reproduce what qiling does**, and only then what
+pegasus does.
+
+1. **Read the reference contract**: `docs/USAGE.md`, `docs/API.md`,
+   `docs/SETUP.md`, the PE examples (`examples/crackme_x86_windows.py`,
+   `cachedlls_x8664_windows.py`, `adcache_x86_windows_debug.py`,
+   `hello_x8664_windows_customapi.py`) and the PE cases under `tests/`, to pin
+   the standard invocation (rootfs, argv/env, profile, verbosity) and the
+   observable output (API dispatch sequence, string log, guest stdout, exit
+   code, error classification).
+2. **The differential harness** (`tools/parity_vs_qiling`): run the same PE, with
+   the same rootfs/profile/argv/env/hook set, under both emulators; normalize
+   (addresses -> symbols, timings, host paths) and diff the dispatch sequence,
+   guest stdout, exit code and entry-point error class. The report clusters
+   differences by root cause, and those clusters — not per-sample patches —
+   become the work order. 1.2's per-sample disassembly work is superseded
+   wherever it conflicts with the reference semantics.
+3. **Then** the pegasus bar: `tests/bins` 97/101 and the PMA corpus >= 30 exit 0.
+
+Status: **in progress** — the wininet family landed as the first reference-aligned
+surface (qiling passes `InternetOpen*`/`InternetConnect*`/`HttpOpenRequest*`
+through with a `None -> 0` answer and answers 1 for the BOOLAPI family; taote
+now matches that verbatim, and only adds the URL string log on top).
 
 ## Phase 2 — the qiling-surface completions the corpora need
 

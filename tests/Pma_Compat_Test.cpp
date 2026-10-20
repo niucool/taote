@@ -76,7 +76,7 @@ const std::vector<PmaCase>& curated_cases() {
 
 // The measured green count. Raise it whenever a case starts passing; never
 // lower it (that is the ratchet).
-constexpr std::size_t kGreenBaseline = 0;
+constexpr std::size_t kGreenBaseline = 1;
 
 fs::path pma_dir() {
     if (const char* env = std::getenv("TAOTE_PMA_DIR"); env != nullptr && *env != '\0') {
