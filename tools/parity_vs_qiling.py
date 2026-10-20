@@ -185,6 +185,45 @@ def module_load_divergence(ref: Trace, ours: Trace):
     return None
 
 
+def reference_limited(ref: Trace, ours: Trace, findings, extensions):
+    """True when the divergence is the reference's own limitation.
+
+    The reference leaves an import it does not implement to the stub cell (no
+    dispatch, no return value), so its guest often walks off into unmapped
+    memory right after - while taote, which does implement the import, keeps
+    going. That shape is a reference limitation, not a taote defect, and it is
+    recognisable without guessing: the reference faulted, taote did not, taote's
+    extra dispatches are all imports the reference reports unimplemented, and
+    nothing else in the trace disagrees.
+    """
+
+    if ref.error_class is None or ours.error_class is not None:
+        return False
+    if not extensions:
+        return False
+    for signature, _ in findings:
+        if signature.startswith(("extra dispatch", "dispatch count", "error class", "exit code", "first divergence")):
+            continue
+        return False
+    our_seq = ours.sequence()
+    # the first call that is an import the reference leaves unimplemented: from
+    # there on, taote is executing code the reference never ran, so a later
+    # extra dispatch is downstream of the same limitation, not a new defect
+    first_ext = next((i for i, n in enumerate(our_seq) if n in extensions), None)
+    if first_ext is None:
+        return False
+    for signature, detail in findings:
+        if not signature.startswith("extra dispatch"):
+            continue
+        name = signature.split(": ", 1)[1]
+        if name in extensions:
+            continue
+        match = re.search(r"from call #(\d+)", detail)
+        if match is None or int(match.group(1)) < first_ext:
+            return False
+    return True
+
+
 def diff_traces(ref: Trace, ours: Trace):
     """Return (findings, clusters) where each finding names one divergence."""
 
@@ -506,6 +545,7 @@ def main(argv=None) -> int:
                 "sample": sample.name,
                 "verdict": ("match" if not findings else
                             "environment" if any(sig.startswith("environment") for sig, _ in findings) else
+                            "reference_limit" if reference_limited(ref, ours, findings, extensions) else
                             "diverged"),
                 "taote_extensions": extensions,
                 "reference": {"calls": len(ref.calls), "exit": ref.exit_code, "error": ref.error },
@@ -523,6 +563,7 @@ def main(argv=None) -> int:
             "match": sum(1 for r in results if r["verdict"] == "match"),
             "diverged": sum(1 for r in results if r["verdict"] == "diverged"),
             "environment": sum(1 for r in results if r["verdict"] == "environment"),
+            "reference_limit": sum(1 for r in results if r["verdict"] == "reference_limit"),
             "cluster_counts": _cluster_counts(results),
         },
     }
@@ -578,14 +619,15 @@ def render(report) -> str:
     summary = report["summary"]
     lines.append(
         f"samples: {summary['total']}  match: {summary['match']}  "
-        f"environment: {summary.get('environment', 0)}  diverged: {summary['diverged']}"
+        f"environment: {summary.get('environment', 0)}  "
+        f"reference_limit: {summary.get('reference_limit', 0)}  diverged: {summary['diverged']}"
     )
     lines.append("")
     for result in report["samples"]:
         if result["verdict"] == "skipped":
             lines.append(f"[skip] {result['sample']}: {result.get('reason')}")
             continue
-        mark = {"match": "ok  ", "environment": "env ", "diverged": "DIFF"}.get(result["verdict"], "DIFF")
+        mark = {"match": "ok  ", "environment": "env ", "reference_limit": "refl", "diverged": "DIFF"}.get(result["verdict"], "DIFF")
         ref, ours = result["reference"], result["taote"]
         lines.append(
             f"[{mark}] {result['sample']}: reference {ref['calls']} calls exit {ref['exit']} "

@@ -2,6 +2,8 @@
 // decorator engine over the static ApiRegistry; the fncc calling conventions).
 #include <gtest/gtest.h>
 
+#include <unistd.h>
+
 #include <atomic>
 #include <fstream>
 #include <string>
@@ -149,9 +151,13 @@ std::filesystem::path win_ensure_rootfs() {
     // across process runs, and leftover dll files from earlier runs leak
     // into the shellcode fixtures' init_dlls walks (the exists-gated loads
     // then add LDR entries and the empty-table asserts flake)
+    // the pid is part of the name because `ctest -j` runs every gtest case in
+    // its own process, so a per-process counter alone makes two concurrent
+    // cases share (and wipe) one rootfs
     static std::atomic<unsigned> counter{0};
     const auto base = std::filesystem::temp_directory_path() /
-                      ("ql_windows_rootfs_" + std::to_string(counter.fetch_add(1)));
+                      ("ql_windows_rootfs_" + std::to_string(::getpid()) + "_" +
+                       std::to_string(counter.fetch_add(1)));
     std::error_code wipe_ec;
     std::filesystem::remove_all(base, wipe_ec);
     std::filesystem::create_directories(base);

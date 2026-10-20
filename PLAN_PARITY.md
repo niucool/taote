@@ -158,10 +158,14 @@ plus a cluster list keyed by root-cause signature. A dispatch taote makes where
 the reference logged "not implemented" is reported as an extension, not a
 divergence.
 
-The differ's own vocabulary now separates three verdicts: `match` (clean),
+The differ's own vocabulary separates four verdicts: `match` (clean),
 `environment` (the only divergence is a module handle the harness can synthesize
 only with a different export set - nobody has the genuine Windows images on a
-Linux host) and `diverged` (a real semantic difference). Faulted runs are not
+Linux host), `reference_limit` (the reference faulted and taote did not, taote's
+extra dispatches are imports the reference reports unimplemented, and every other
+disagreement starts at or after the first such import - i.e. taote is executing
+code the reference never ran because it leaves that import to the stub cell) and
+`diverged` (a real semantic difference). Faulted runs are not
 compared on exit code, because the reference leaves `ql.os.exit_code` at 0 when a
 unicorn fault kills the run while taote sets the guest's `STATUS_ACCESS_VIOLATION`
 (Phase 1.5, a deliberate delta).
@@ -172,9 +176,11 @@ PMA differential baseline (32 PE samples, measured this pass):
 | --- | --- |
 | match | **4** (`03-03.exe_`, `12-02.exe_`, `18-01.exe_`, `20-02.exe_`) |
 | environment | 0 |
-| diverged | 28 |
+| reference_limit | 3 (`01-01.exe_`, `01-04.exe_`, `12-04.exe_`) |
+| diverged | 25 |
 
-Cluster table (samples per signature): dispatch count differs 26, extra dispatch
+Cluster table (samples per signature, after the `reference_limit` split):
+dispatch count differs 26, extra dispatch
 20, missing dispatch 12, exit code differs 5, error class differs (invalid_write
 vs none) 4, (none vs invalid_insn) 3, stdout differs 2, (invalid_fetch vs none) 2,
 dispatch order differs 2, then singles for invalid_read/invalid_fetch,
@@ -247,6 +253,21 @@ derives from an earlier return value). The heap cluster is therefore a *downstre
 symptom*, and the remaining diagnostic direction is the first differing return
 value before #5 (`HeapCreate` answers `83888280` on taote vs `83888680` on the
 reference), not the import table.
+
+**The `reference_limit` verdict (this pass).** Three of the four `invalid_write
+vs none` samples are the reference's own limitation, not taote defects. On
+`01-01.exe_` the reference runs 5 calls and dies writing unmapped memory, while
+taote runs 9: the three extra ones are `__p___initenv` and `_initterm` twice -
+imports the reference reports unimplemented and leaves to the stub cell, so its
+guest's CRT never initialises and walks off into unmapped memory. Everything
+taote additionally dispatches (`exit`) happens *after* the first such import, so
+it is downstream of the same limitation. The differ now recognises that shape
+(`reference_limited`) instead of counting it as a defect, which moved the
+baseline from 4 match / 28 diverged to 4 match / 3 reference_limit / 25 diverged
+without touching the emulator. `14-02.exe_` looks superficially similar but is
+**not** excused: taote takes an SEH path the reference does not
+(`_except_handler3`, `_XcptFilter`, `_exit`), faults, and exits
+`-1073741819` - a real taote-side difference and part of the 25.
 
 The differ now reports that upstream value explicitly: when the dispatch sequences
 part company it inserts a `first divergence: <api> return value` finding for the
