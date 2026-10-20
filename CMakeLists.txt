@@ -33,6 +33,7 @@ endif()
 
 add_subdirectory(qiling)
 add_subdirectory(qltool)
+add_subdirectory(tools)
 
 enable_testing()
 add_subdirectory(tests)

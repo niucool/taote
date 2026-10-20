@@ -183,6 +183,26 @@ void register_msvcrt_family() {
     using namespace qiling::os::api;
 
     // void __set_app_type(int at);
+    // the api-ms-win-crt-* spelling of the same export (the UCRT redirects
+    // import `_set_app_type` with one underscore; the census in
+    // tools/gap_census found the pair unresolved)
+    WinsdkApi("_set_app_type", WinCc::Cdecl, {
+        {"at", INT_},
+    }) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
+        return 0;
+    };
+
+    // int _seh_filter_exe/_seh_filter_dll(...) — the CRT's exception filter
+    // entry (the ucrt spelling; the body defers to the SEH dispatch)
+    for (const char* name : {"_seh_filter_exe", "_seh_filter_dll"}) {
+        WinsdkApi(name, WinCc::Cdecl, {
+            {"exception_record", PVOID_},
+            {"context_record", PVOID_},
+        }) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
+            return qiling::os::windows::kExceptionContinueSearch;
+        };
+    }
+
     WinsdkApi("__set_app_type", WinCc::Cdecl, {
         {"at", INT_},
     }) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
