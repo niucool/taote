@@ -9,6 +9,8 @@
 #include "qiling/core.hpp"
 #include "qiling/os/memory.hpp"
 #include "qiling/os/windows/seh.hpp"
+
+#include "qiling/os/windows/ntdefs.hpp"
 #include "qiling/os/windows/windows.hpp"
 
 namespace qiling {
@@ -220,13 +222,14 @@ bool QlOsWindows::seh_dispatch(std::uint64_t fault_addr, std::uint32_t access_ty
     // EXCEPTION_RECORD: the ACCESS_VIOLATION code, the faulting pc, the
     // read/write type + the faulting address in the info params
     std::vector<std::uint8_t> rec(SEH_RECORD_SIZE, 0);
-    put_u32(rec, 0, exception_code);  // ExceptionCode (AV by default)
-    put_u32(rec, 4, 0);           // ExceptionFlags
+    using namespace ntdefs;
+    put_u32(rec, EXCEPTION_RECORD_OFF_CODE, exception_code);
+    put_u32(rec, EXCEPTION_RECORD_OFF_FLAGS, 0);
     put_u32(rec, 8, 0);           // ExceptionRecord (nested chains: none)
-    put_u32(rec, 12, static_cast<std::uint32_t>(pc));
-    put_u32(rec, 16, 2);          // NumberParameters
-    put_u32(rec, 20, access_type);
-    put_u32(rec, 24, static_cast<std::uint32_t>(fault_addr));
+    put_u32(rec, EXCEPTION_RECORD_OFF_ADDRESS_X86, static_cast<std::uint32_t>(pc));
+    put_u32(rec, EXCEPTION_RECORD_OFF_NUMBER_PARAMS_X86, 2);
+    put_u32(rec, EXCEPTION_RECORD_OFF_NUMBER_PARAMS_X86 + 4, access_type);
+    put_u32(rec, EXCEPTION_RECORD_OFF_INFORMATION_X86, static_cast<std::uint32_t>(fault_addr));
     mem.write(p_record, rec);
 
     // the x86 CONTEXT image

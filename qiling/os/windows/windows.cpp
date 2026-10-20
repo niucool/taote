@@ -528,6 +528,12 @@ void QlOsWindows::run() {
             continue;
         } catch (const QlErrorBase& e) {
             if (seh_retarget_ == 0) {
+                // an unhandled access violation ends the guest the way Windows
+                // does: the process exit code is STATUS_ACCESS_VIOLATION, and
+                // the entry-point error record carries the class
+                if (classify_emulation_error(e.what()).rfind("invalid_", 0) == 0) {
+                    set_exit_code(static_cast<int>(0xC0000005u));
+                }
                 emu_error();
                 throw;
             }

@@ -12,7 +12,7 @@ phase closes without its tests.
 | API sample sweep (`../pegasus/tests/bins`, 101 bins) | n/a (their suite asserts dispatch only) | **97 exit 0**, 2 block in `accept`, 2 kernel `.sys` | 99+ (drivers land) |
 | PMA corpus (`~/source/capa-testfiles`, 32 PE samples) | 12 curated cases green (their CI), 38 with `PEGASUS_PMA_FULL=1` | **13 exit 0** (32-sample sweep), **0/12 green** (curated ctest cases, now with the reference guards) | ≥ 30 exit 0, all curated cases green |
 | reference-suite parity (`../pegasus/tests`, 357 cases) | 357 | **12 ported + 4 ported clusters**, rest mapped in `tests/PEGASUS_TEST_PARITY.md` | every *portable* row ported, none "deferred" |
-| taote suite | — | **535 passed / 0 failed / 3 skipped** | grows with every phase, stays 0-failed |
+| taote suite | — | **536 passed / 0 failed / 3 skipped** | grows with every phase, stays 0-failed |
 | host support | MSVC/Windows + Linux | MSVC/Windows + Linux | unchanged (regression gate) |
 
 Two supporting tools the plan needs (Phase 0):
@@ -78,6 +78,10 @@ cause class, not a per-sample bug.
 5. **The AV-exit tail (14-02.exe).** An unhandled exception should end the run
    with `STATUS_ACCESS_VIOLATION` *and* a recorded entry-point error, not a bare
    fault text.
+   Status: **landed.** An unhandled `invalid_*` fault sets the guest exit code
+   to `STATUS_ACCESS_VIOLATION` (0xC0000005) next to the error record, and the
+   sample runner reads the code on the faulted path too (it used to report -1).
+   Asserted by the `SehDispatchDisabled` twin.
 
 Status: **1.1 landed** — `QlOsStats::log_unsupported_api` + the unsupported
 count, `QilingOptions::max_api_count` / `unsupported_api_policy` (Continue
@@ -106,11 +110,15 @@ Driven by `tools/gap_census` over both corpora:
   minimal NT registry hive parser (`nk`/`vk`/`sk` cells, value marshalling)
   behind `RegHive`, with corpus fixtures chosen from the PMA set that query
   installed-software keys.
-* **`os/windows/ntdefs.hpp`** — the ~70 `test_win_size_validation_all` rows
-  (`UNICODE_STRING`, `OBJECT_ATTRIBUTES`, `PEB`/`TEB`/`RTL_USER_PROCESS_PARAMETERS`,
-  …) as a size/offset table with a test, replacing the ad-hoc offsets the
-  handlers carry. Unblocks the biggest `[portable, deferred]` block in
-  `tests/PEGASUS_TEST_PARITY.md` and hardens every struct-writing handler.
+* **`os/windows/ntdefs.hpp`** — the `test_win_size_validation_all` rows as a
+  size/offset table with a test, replacing the ad-hoc offsets the handlers
+  carry. **Landed** for the layouts the handlers actually write
+  (`UNICODE_STRING`, `OBJECT_ATTRIBUTES`, `IO_STATUS_BLOCK`, `EXCEPTION_RECORD`,
+  `EXCEPTION_POINTERS`, `CONTEXT`, `MSG`, `KEY_VALUE_FULL_INFORMATION`), with
+  the x86/x64 columns, a `kLayouts` table and a `ptr_field` helper; `seh.cpp`'s
+  record writer now reads its offsets from it. The `PegasusParity.NtDefsLayout`
+  test pins every value. The `PEB`/`TEB`/`RTL_USER_PROCESS_PARAMETERS` rows are
+  still pending (they live in `structs.hpp` already and need the same table).
 
 Exit: the parity map has no `[portable, deferred]` rows left.
 

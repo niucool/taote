@@ -21,6 +21,7 @@
 #include "qiling/os/windows/windows.hpp"
 
 #include "Pe_Sample_Runner.hpp"
+#include "qiling/os/windows/ntdefs.hpp"
 
 using qiling::testing::SampleOptions;
 using qiling::testing::SampleOutcome;
@@ -255,6 +256,8 @@ TEST(PegasusParity, SehDispatchDisabled) {
     // ... and the entry-point error taxonomy names it the pegasus way
     ASSERT_EQ(out.error_types.size(), 1u) << "one fault, one error record";
     EXPECT_EQ(out.error_types[0], "invalid_write");
+    // an unhandled access violation ends the guest with the Windows exit code
+    EXPECT_EQ(out.exit_code, static_cast<int>(0xC0000005u));
 }
 
 // ---- the hang guard (PLAN_PARITY.md Phase 1.4) --------------------------
@@ -347,4 +350,41 @@ TEST(PegasusParity, ShellcodeLoadAndRun) {
 
     ql.run();
     EXPECT_EQ(ql.arch().regs().read("eax"), 0x1234u);
+}
+
+// ---- ntdefs (PLAN_PARITY.md Phase 2: the layout table) ------------------
+// The handlers write these images into guest memory; the layouts are the
+// contract, so the table is asserted instead of being trusted.
+namespace ntdefs = qiling::os::windows::ntdefs;
+
+TEST(PegasusParity, NtDefsLayoutTableMatchesTheGuestAbi) {
+    // the x86 / x64 pairs the reference suite's size validation walks
+    EXPECT_EQ(ntdefs::UNICODE_STRING_SIZE_X86, 8u);
+    EXPECT_EQ(ntdefs::UNICODE_STRING_SIZE_X64, 16u);
+    EXPECT_EQ(ntdefs::UNICODE_STRING_OFF_BUFFER_X86, 4u);
+    EXPECT_EQ(ntdefs::UNICODE_STRING_OFF_BUFFER_X64, 8u);
+
+    EXPECT_EQ(ntdefs::OBJECT_ATTRIBUTES_SIZE_X86, 24u);
+    EXPECT_EQ(ntdefs::OBJECT_ATTRIBUTES_SIZE_X64, 48u);
+    // the ObjectName slot sits at 2 pointers (what the NtCreateFile walk reads)
+    EXPECT_EQ(ntdefs::OBJECT_ATTRIBUTES_OFF_NAME_X86, 8u);
+    EXPECT_EQ(ntdefs::OBJECT_ATTRIBUTES_OFF_NAME_X64, 16u);
+
+    EXPECT_EQ(ntdefs::IO_STATUS_BLOCK_SIZE_X86, 8u);
+    EXPECT_EQ(ntdefs::IO_STATUS_BLOCK_SIZE_X64, 16u);
+    EXPECT_EQ(ntdefs::EXCEPTION_RECORD_OFF_ADDRESS_X86, 12u);
+    EXPECT_EQ(ntdefs::EXCEPTION_RECORD_OFF_NUMBER_PARAMS_X64, 24u);
+    // the user32 message pump width (the 28-byte x86 MSG the GetMessage fix pins)
+    EXPECT_EQ(ntdefs::MSG_SIZE_X86, 28u);
+    EXPECT_EQ(ntdefs::MSG_SIZE_X64_W, 64u);
+
+    // every table row is consistent and the pointer helper picks the column
+    for (const auto& row : ntdefs::kLayouts) {
+        EXPECT_GT(row.x86.size, 0u) << row.name;
+        EXPECT_GT(row.x64.size, 0u) << row.name;
+        EXPECT_GE(row.x64.size, row.x86.size) << row.name;
+        EXPECT_GT(row.x86.fields_count, 0u) << row.name;
+    }
+    EXPECT_EQ(ntdefs::ptr_field(8, 16, 32), 8u);
+    EXPECT_EQ(ntdefs::ptr_field(8, 16, 64), 16u);
 }

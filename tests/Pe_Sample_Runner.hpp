@@ -239,6 +239,10 @@ inline SampleOutcome run_pe_sample(const std::string& bin_name, const SampleOpti
         for (const auto& err : qlr.os<qiling::os::windows::QlOsWindows>().entry_point_errors()) {
             out.error_types.push_back(err.type);
         }
+        if (!out.ran) {
+            // a faulted run still has a meaningful exit code (STATUS_*)
+            out.exit_code = qlr.os().exit_code();
+        }
         const auto& stats = qlr.os().stats();
         out.unsupported = stats.unsupported_api_count();
         for (const auto& [name, records] : stats.syscalls()) {
