@@ -225,6 +225,17 @@ plus `import_address_table_at`), and compare it against the same map the
 reference built: a stub export table whose cell order disagrees with the names
 list would produce exactly this (each import answered by its neighbour).
 
+**Checked and ruled out**: sorting the stub's export list before building it
+(`tests/Pe_Sample_Runner.hpp::write_stub_dll`, so the name table and the function
+table agree by construction) changed nothing - taote still dispatches
+`VirtualAlloc` at the `HeapAlloc` call site - so the cell order is not the cause
+and the change was reverted. The next probe therefore has to be the guest's own
+IAT: dump the slot the guest calls through and what both sides wrote there,
+rather than inferring from the dispatch name. Two candidate explanations remain:
+the CRT's allocation wrapper genuinely calls a different API on each side (so
+the divergence is upstream, in an earlier return value), or taote's IAT write for
+this import lands on a different slot.
+
 Exit criteria (this phase): the differential clean on the named starter corpus
 (`argv_test_x86.exe`, `file_access_test_x86.exe`), gated in ctest as
 `Tools.ParityVsQilingSmoke` (skips when no reference checkout / qiling-deps
