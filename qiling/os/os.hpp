@@ -24,6 +24,7 @@
 #include "qiling/os/fcall.hpp"
 #include "qiling/os/mapper.hpp"
 #include "qiling/os/stats.hpp"
+#include "qiling/os/artifacts.hpp"
 
 namespace qiling {
 
@@ -204,6 +205,11 @@ public:
     void set_api_dll(std::string dll) { api_dll_ = std::move(dll); }
     const std::string& api_dll() const noexcept { return api_dll_; }
 
+    // PLAN_PARITY Phase 3 item 5: the content-addressed artifact store (the
+    // directory rides QilingOptions::artifact_dir)
+    os::QlArtifactStore& artifacts() noexcept { return artifacts_; }
+    const os::QlArtifactStore& artifacts() const noexcept { return artifacts_; }
+
     // process_fcall_params — the display strings for the typed args
     std::vector<std::string> process_fcall_params(const std::vector<FcallArg>& targs) const;
 
@@ -231,6 +237,7 @@ protected:
     std::shared_ptr<QlFsMappedObject> console_out_;
 
     std::unique_ptr<QlOsStats> stats_;
+    os::QlArtifactStore artifacts_;
     std::unique_ptr<QlFunctionCall> fcall_;
     QlFunctionCall* fcall_nonowning_ = nullptr;
 

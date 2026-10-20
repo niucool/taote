@@ -1025,6 +1025,31 @@ left the hooks registered but never dispatched; the handles are now kept on the
 os for the run's lifetime. Corpus unchanged (24/32 exit 0, differential
 10/0/16/2/4); API sweep 101/101; ctest 546.
 
+### Phase 3 item 5: the artifact store
+
+`qiling/os/artifacts.hpp` adds `QlArtifactStore`: dumps are named by the
+**sha256** of their content and stored once under `<dir>/<sha256>`, so a report
+can point at a dump by hash rather than by path, and the manifest
+`{kind, label, hash, size}` rides the existing `Snapshot` envelope's
+`artifacts` section - a snapshot and the dumps it refers to travel together.
+`save_memory` labels a guest range with its containing region's name,
+`save_file` stores a host file (a dropped file, a captured sample). The digest
+is a plain SHA-256 (the tree carries no crypto library; a stable name is all the
+store needs - it is not a signature).
+
+Wiring: `QilingOptions::artifact_dir`, `QlOs::artifacts()`, and
+`tools/parity_trace --artifact-dir DIR --artifact-mem BEGIN:SIZE` (the JSON
+carries the manifest). Measured on `argv_test_x86.exe`: the 0x100-byte range at
+`0x401000` stores as
+`b0298d54...0775f4`, labelled `argv_test_x86.exe`, and `sha256sum` of the stored
+blob equals its own file name.
+
+`PegasusParity.ArtifactStoreIsContentAddressedAndManifested` pins the NIST
+digest vectors, the dedup of identical bytes under different labels, the
+`get`/`contains` round trip, the manifest's snapshot round trip and a real run's
+memory artifact. Corpus unchanged (24/32 exit 0, differential 10/0/16/2/4); API
+sweep 101/101; ctest 547.
+
 ## Phase 4 — deliberately not ported (documented non-goals)
 
 * **JS engine** (`test_js_*`, 54 cases) — excluded by instruction; qiling hooks

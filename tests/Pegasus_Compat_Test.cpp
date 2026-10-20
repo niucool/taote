@@ -142,6 +142,64 @@ TEST(PegasusParity, AnalysisOptionRecordsRegionCountersAndCoverage) {
     EXPECT_TRUE(plain.memory_access.empty());
 }
 
+TEST(PegasusParity, ArtifactStoreIsContentAddressedAndManifested) {
+    // PLAN_PARITY Phase 3 item 5: pegasus's test_artifact_store shape - dumps
+    // are named by their content's sha256, stored once, and the manifest rides
+    // the Snapshot envelope so a snapshot and its dumps travel together.
+    namespace os = qiling::os;
+
+    // the digest is the real SHA-256 (the NIST vectors)
+    EXPECT_EQ(os::sha256_hex(""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+    EXPECT_EQ(os::sha256_hex("abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+
+    const auto dir = std::filesystem::temp_directory_path() / "ql_artifacts_test";
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+
+    os::QlArtifactStore store(dir);
+    const auto h1 = store.put("file", "a.bin", "hello");
+    // the same bytes under a different label cost one blob, not two
+    const auto h2 = store.put("file", "copy.bin", "hello");
+    EXPECT_EQ(h1, h2);
+    EXPECT_EQ(h1, os::sha256_hex("hello"));
+    ASSERT_EQ(store.records().size(), 1u);
+    EXPECT_TRUE(store.contains(h1));
+    EXPECT_TRUE(std::filesystem::exists(dir / h1));
+
+    const auto back = store.get(h1);
+    EXPECT_EQ(std::string(back.begin(), back.end()), "hello");
+
+    // the manifest round-trips through the snapshot envelope
+    qiling::SnapshotWriter writer;
+    store.write_manifest(writer);
+    const auto blob = std::move(writer).finish();
+
+    os::QlArtifactStore restored(dir);
+    const std::string raw(blob.begin(), blob.end());  // the reader views the buffer
+    qiling::SnapshotReader reader(raw);
+    restored.read_manifest(reader);
+    ASSERT_EQ(restored.records().size(), 1u);
+    EXPECT_EQ(restored.records()[0].kind, "file");
+    EXPECT_EQ(restored.records()[0].label, "a.bin");
+    EXPECT_EQ(restored.records()[0].hash, h1);
+    EXPECT_EQ(restored.records()[0].size, 5u);
+
+    // and a real run stores a guest range, labelled with its region
+    qiling::os::register_dlls();
+    SampleOptions opts;
+    opts.artifact_dir = dir.string();
+    opts.artifacts = {"0x401000:0x100"};
+    const auto out = run_pe_sample("argv_test_x86.exe", opts);
+    ASSERT_EQ(out.exit_code, 0);
+    ASSERT_FALSE(out.artifacts.empty());
+    EXPECT_EQ(out.artifacts.back().kind, "memory");
+    EXPECT_EQ(out.artifacts.back().label, "argv_test_x86.exe");
+    EXPECT_EQ(out.artifacts.back().size, 0x100u);
+    EXPECT_TRUE(std::filesystem::exists(dir / out.artifacts.back().hash));
+
+    std::filesystem::remove_all(dir, ec);
+}
+
 TEST(PegasusParity, GetProcAddressMissingFunctionReturnsZero) {
     qiling::os::register_dlls();
 

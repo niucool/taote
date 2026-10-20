@@ -100,6 +100,10 @@ struct QilingOptions {
     // parallel profiler
     bool analysis = false;
 
+    // PLAN_PARITY Phase 3 item 5: where the content-addressed artifact store
+    // keeps its blobs (empty = off; the store still hashes and accounts)
+    std::string artifact_dir;
+
     // an import whose name has no registered handler (and no rootfs module
     // implementing it): Continue answers a zero return value through the
     // calling convention so the guest's stack stays balanced, and records the
@@ -159,6 +163,7 @@ public:
     const std::string& api_replay_path() const noexcept { return api_replay_path_; }
     bool api_replay_serve() const noexcept { return api_replay_serve_; }
     bool analysis() const noexcept { return analysis_; }
+    const std::string& artifact_dir() const noexcept { return artifact_dir_; }
     QL_VERBOSE verbose() const noexcept { return verbose_; }
     void set_verbose(QL_VERBOSE v);
 
@@ -243,6 +248,7 @@ private:
     std::string api_replay_path_;
     bool api_replay_serve_ = false;
     bool analysis_ = false;
+    std::string artifact_dir_;
     QL_VERBOSE verbose_ = QL_VERBOSE::DEFAULT;
     // the macho driver loadbase override (0 = the verbatim default)
     std::uint64_t driver_loadbase_ = 0;

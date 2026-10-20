@@ -187,6 +187,7 @@ struct SampleOutcome {
     std::map<std::string, std::vector<IndicatorEvent>> indicators;  // the behavioural indicators
     std::map<std::string, RegionAccessStats> memory_access;      // per-region counters (analysis)
     std::set<std::uint64_t> coverage;                            // the retired pcs (analysis)
+    std::vector<qiling::os::ArtifactRecord> artifacts;           // the artifact manifest
     std::size_t unsupported = 0;                                 // imports with no handler
 
     // the call records for one api name (empty when never dispatched)
@@ -220,6 +221,10 @@ struct SampleOptions {
     std::string api_record;   // the deterministic-replay store (Phase 5.5)
     std::string api_replay;
     bool analysis = false;  // memory-tracing + coverage (PLAN_PARITY Phase 3 item 4)
+    // PLAN_PARITY Phase 3 item 5: a non-empty dir turns on the content-addressed
+    // artifact store; `artifacts` selects guest ranges to save as `BEGIN:SIZE`
+    std::string artifact_dir;
+    std::vector<std::string> artifacts;
     bool api_replay_serve = false;
 };
 
@@ -277,6 +282,7 @@ inline SampleOutcome run_pe_sample(const std::string& bin_name, const SampleOpti
         out.indicators = stats.indicators();
         out.memory_access = stats.memory_access();
         out.coverage = stats.coverage();
+        out.artifacts = qlr.os().artifacts().records();
         for (const auto& [s, addrs] : stats.strings()) {
             (void)addrs;
             out.strings.insert(s);
@@ -350,6 +356,7 @@ inline SampleOutcome run_pe_sample(const std::string& bin_name, const SampleOpti
         options.api_record_path = opts.api_record;
         options.api_replay_path = opts.api_replay;
         options.analysis = opts.analysis;
+        options.artifact_dir = opts.artifact_dir;
         options.api_replay_serve = opts.api_replay_serve;
         options.argv.push_back(exe_in_rootfs.string());
         for (const auto& a : opts.argv) {
@@ -440,6 +447,15 @@ inline SampleOutcome run_pe_sample(const std::string& bin_name, const SampleOpti
             ql.run();
             out.ran = true;
             out.exit_code = ql.os().exit_code();
+        }
+
+        // the artifact store: save the requested guest ranges while the memory
+        // is still there (the manifest is captured below)
+        for (const auto& spec : opts.artifacts) {
+            const auto colon = spec.find(':');
+            const auto begin = static_cast<std::uint64_t>(std::stoull(spec.substr(0, colon), nullptr, 0));
+            const auto size = static_cast<std::uint64_t>(std::stoull(spec.substr(colon + 1), nullptr, 0));
+            ql.os().artifacts().save_memory(ql, begin, size);
         }
 
         if (opts.after_run) {

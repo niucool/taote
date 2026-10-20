@@ -35,7 +35,7 @@ std::FILE* stderr_file() { return stderr; }
 
 }  // namespace
 
-QlOs::QlOs(Qiling* ql) : ql_(ql) {
+QlOs::QlOs(Qiling* ql) : ql_(ql), artifacts_(ql->artifact_dir()) {
     stats_ = std::make_unique<QlOsStats>();
     // standard streams: the console trio wraps the host C streams (see the
     // header's deviation note); PersistentQlFile keeps the host from closing

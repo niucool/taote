@@ -120,6 +120,10 @@ int main(int argc, char** argv) {
             api_record = argv[++i];
         } else if (arg == "--replay-api" && i + 1 < argc) {
             api_replay = argv[++i];
+        } else if (arg == "--artifact-dir" && i + 1 < argc) {
+            opts.artifact_dir = argv[++i];
+        } else if (arg == "--artifact-mem" && i + 1 < argc) {
+            opts.artifacts.emplace_back(argv[++i]);
         } else if (arg == "--analysis") {
             opts.analysis = true;
         } else if (arg == "--replay-serve") {
@@ -391,6 +395,14 @@ int main(int argc, char** argv) {
     }
     js << "}";
     js << ",\"coverage\":" << outcome.coverage.size();
+    js << ",\"artifacts\":[";
+    for (std::size_t i = 0; i < outcome.artifacts.size(); ++i) {
+        const auto& a = outcome.artifacts[i];
+        js << (i ? "," : "") << "{\"kind\":\"" << json_escape(a.kind) << "\",\"label\":\""
+           << json_escape(a.label) << "\",\"hash\":\"" << json_escape(a.hash) << "\",\"size\":" << a.size
+           << "}";
+    }
+    js << "]";
     js << ",\"stdout\":\"" << json_escape(outcome.output) << "\"";
     js << ",\"strings\":[";
     std::size_t i = 0;

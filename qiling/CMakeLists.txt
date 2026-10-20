@@ -23,6 +23,7 @@ add_library(qiling STATIC
     os/utils.cpp
     os/os.cpp
     os/stats.cpp
+    os/artifacts.cpp
     os/path.cpp
     os/filestruct.cpp
     os/disk.cpp
