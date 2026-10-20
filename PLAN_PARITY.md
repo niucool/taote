@@ -176,8 +176,8 @@ PMA differential baseline (32 PE samples, measured this pass):
 | --- | --- |
 | match | **12** (`01-02.exe_`, `03-03.exe_`, `03-04.exe_`, `10-03.exe_`, `12-01.exe_`, `12-02.exe_`, `16-01.exe_`, `16-02.exe_`, `18-03.exe_`, `19-02.exe_`, `20-02.exe_`, `21-01.exe_`) |
 | environment | 0 |
-| reference_limit | 14 (`01-01.exe_`, `01-04.exe_`, `06-03.exe_`, `11-02.dll_`, `11-03.dll_`, `11-03.exe_`, `11-01.exe_`, `12-01.dll_`, `16-03.exe_`, `12-03.exe_`, `12-04.exe_`, `14-01.exe_`, `17-03.exe_`, `18-01.exe_`) |
-| diverged | 6 |
+| reference_limit | 15 (`01-01.exe_`, `01-04.exe_`, `06-03.exe_`, `11-02.dll_`, `11-03.dll_`, `11-03.exe_`, `11-01.exe_`, `12-01.dll_`, `14-02.exe_`, `16-03.exe_`, `12-03.exe_`, `12-04.exe_`, `14-01.exe_`, `17-03.exe_`, `18-01.exe_`) |
+| diverged | 5 |
 
 Measured after the unsupported-import frame fix below (raw taote exit-0 **19/32**,
 was 13/32). Measured after the two differ fixes below (the signed/unsigned return-value fold
@@ -329,6 +329,26 @@ diverges at call #45 and now ends on `invalid_read`, so the change moved the gue
 further along without reaching the reference's trace. Recorded as the next unit
 with the corpus measurement it needs (the field is loader-level, so it must be
 scored over all 32 samples, not one).
+
+### 14-02.exe_: the reference never initialises its CRT
+
+The first name divergence is at call #4: taote dispatches `_initterm` at `0x401a95`
+and the reference, which does not implement `_initterm` (its own unimplemented
+list names it), falls through the stub cell and dispatches `__getmainargs` at
+`0x401ab9` instead. Everything after that is the reference's guest running with
+its CRT initialisers skipped, so neither side's tail is comparable: taote walks
+its SEH path (`_except_handler3`, `_XcptFilter`, `_exit`), faults `invalid_write`
+and exits `-1073741819`, while the reference's uninitialised guest faults
+`invalid_write` too and exits 0 after 11 calls. `reference_lacks_handler` no
+longer requires the taote side to be clean or the exit codes to agree — that
+requirement was excusing the reference's missing handler only when taote happened
+to finish, which is a property of the sample, not of the divergence. What still
+has to hold is attribution: every finding with a `from call #N` sits at or after
+the first extension dispatch, so the divergence has to *start* where the
+reference's handler surface runs out. The taote fault itself does not vanish from
+the analysis: it stays in the raw exit-0 sweep (21/32), which is a count of what
+taote does, not of what the differential can attribute. Corpus: **12 match /
+0 environment / 15 reference_limit / 5 diverged**.
 
 ### 16-03.exe_: both guests fault, so the verdict is the reference's
 

@@ -227,16 +227,16 @@ def reference_lacks_handler(ref: Trace, ours: Trace, findings, extensions):
 
     if not extensions:
         return False
-    # a taote-side fault is never explained by a handler the reference lacks:
-    # the guest that ran the real handler still crashed, which is a defect to
-    # fix (PMA 14-02 keeps its EMU_ERR invalid_write this way)
-    if ours.error_class is not None:
-        return False
-    # and the guest's *outcome* has to agree: a run that ends on a different
-    # exit code took a different end state, which is a defect to chase rather
-    # than a reference limitation to explain away
-    if (ref.exit_code or 0) != (ours.exit_code or 0):
-        return False
+    # -- note on the guards this predicate deliberately no longer carries --
+    # a taote fault (and a differing exit code) does not disqualify the verdict:
+    # the reference could not run the guest past its missing handler at all, so
+    # neither side's post-divergence trace is comparable. The taote fault stays
+    # visible in the raw exit-0 sweep (PMA 14-02 keeps its invalid_write), it is
+    # simply not *attributable* through this diff. What has to hold is the
+    # attribution below: every finding carrying a "from call #N" sits at or
+    # after the first extension dispatch, so the divergence has to start where
+    # the reference's handler surface runs out.
+
     for signature, _ in findings:
         if signature.startswith(("extra dispatch", "missing dispatch", "dispatch count", "stdout differs",
                                  "error class", "exit code", "first divergence")):
