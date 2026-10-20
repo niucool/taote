@@ -155,6 +155,9 @@ public:
 
     // the dispatch switch (pegasus cfg.exceptions.dispatch_handlers): off
     // leaves every guest fault on the ordinary failure path
+    // the guest software-interrupt delivery (public so a test can drive it)
+    bool seh_on_interrupt(std::uint32_t intno);
+
     void set_seh_dispatch(bool enabled) noexcept { seh_dispatch_enabled_ = enabled; }
     bool seh_dispatch() const noexcept { return seh_dispatch_enabled_; }
 
@@ -192,6 +195,11 @@ private:
     // faults use (unicorn surfaces it as UC_ERR_EXCEPTION, which no memory hook
     // can catch, so the trace hook pre-checks the instruction)
     bool seh_check_cpu_exception(std::uint64_t pc);
+
+    // the guest `int n` delivery (the UC_HOOK_INTR trampoline): int3 becomes
+    // STATUS_BREAKPOINT, everything else STATUS_ILLEGAL_INSTRUCTION, both
+    // staged into the fs:[0] chain like the memory faults
+    static void seh_intr_trampoline(uc_engine* uc, std::uint32_t intno, void* user_data);
     bool seh_continue();
     void seh_build_context(std::uint64_t dest) const;
     void seh_load_context();
@@ -228,6 +236,7 @@ private:
     std::uint64_t seh_fault_addr_ = 0;      // the repeat-guard key (fault address)
     int seh_repeat_count_ = 0;
     bool seh_dispatch_enabled_ = true;   // the set_seh_dispatch switch
+    uc_hook seh_intr_hook_ = 0;
     std::uint64_t env_cell_ = 0;
     std::vector<EntryPointError> entry_point_errors_;
     std::uint64_t instructions_ = 0;

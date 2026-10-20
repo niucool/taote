@@ -12,7 +12,7 @@ phase closes without its tests.
 | API sample sweep (`../pegasus/tests/bins`, 101 bins) | n/a (their suite asserts dispatch only) | **97 exit 0**, 2 block in `accept`, 2 kernel `.sys` | 99+ (drivers land) |
 | PMA corpus (`~/source/capa-testfiles`, 32 PE samples) | 12 curated cases green (their CI), 38 with `PEGASUS_PMA_FULL=1` | **13 exit 0** (32-sample sweep), **0/12 green** (curated ctest cases, now with the reference guards) | ≥ 30 exit 0, all curated cases green |
 | reference-suite parity (`../pegasus/tests`, 357 cases) | 357 | **12 ported + 4 ported clusters**, rest mapped in `tests/PEGASUS_TEST_PARITY.md` | every *portable* row ported, none "deferred" |
-| taote suite | — | **536 passed / 0 failed / 3 skipped** | grows with every phase, stays 0-failed |
+| taote suite | — | **537 passed / 0 failed / 3 skipped** | grows with every phase, stays 0-failed |
 | host support | MSVC/Windows + Linux | MSVC/Windows + Linux | unchanged (regression gate) |
 
 Two supporting tools the plan needs (Phase 0):
@@ -73,6 +73,10 @@ cause class, not a per-sample bug.
    `emu_start` returns *without* an error. 16-03.exe no longer reports
    `UC_ERR_EXCEPTION`; it now faults fetching from a non-executable page, i.e.
    the dispatch itself works and the remaining problem is the target.
+   The software-interrupt half is now wired too: a `UC_HOOK_INTR` callback
+   stages `int3` as `STATUS_BREAKPOINT` and any other `int n` as
+   `STATUS_ILLEGAL_INSTRUCTION` through the same walk, and declines (leaving the
+   fault on the ordinary path) when no frame is registered.
 4. **Hangs (14-01.exe).** The guards from 1. are the mechanism; add the
    virtual-clock slice so `Sleep`/timeouts do not stall the run.
 5. **The AV-exit tail (14-02.exe).** An unhandled exception should end the run

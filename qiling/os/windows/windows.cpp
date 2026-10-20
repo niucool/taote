@@ -287,6 +287,10 @@ void QlOsWindows::ensure_profile_state() {
         if (seh_map_sentinel()) {
             uc_hook_add(&ql_->arch().uc(), &seh_hook_, UC_HOOK_MEM_INVALID,
                         reinterpret_cast<void*>(&seh_fault_trampoline), this, 1, 0);
+            // the guest software interrupts ride the same dispatch (a `call`
+            // into a debugger probe, an int 0x2d kernel door)
+            uc_hook_add(&ql_->arch().uc(), &seh_intr_hook_, UC_HOOK_INTR,
+                        reinterpret_cast<void*>(&seh_intr_trampoline), this, 1, 0);
         }
     }
 }

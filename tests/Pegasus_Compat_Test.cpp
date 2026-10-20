@@ -388,3 +388,21 @@ TEST(PegasusParity, NtDefsLayoutTableMatchesTheGuestAbi) {
     EXPECT_EQ(ntdefs::ptr_field(8, 16, 32), 8u);
     EXPECT_EQ(ntdefs::ptr_field(8, 16, 64), 16u);
 }
+
+// ---- Phase 1.3 tail: guest software interrupts --------------------------
+// The UC_HOOK_INTR trampoline routes int3/int n into the same fs:[0] walk;
+// with no registered frame the dispatch declines and the fault stays on the
+// ordinary failure path (it must not swallow the exception).
+TEST(PegasusParity, SoftwareInterruptDeclinesWithoutAHandlerChain) {
+    qiling::os::register_dlls();
+
+    qiling::QilingOptions options;
+    options.ostype = qiling::QL_OS::WINDOWS;
+    options.archtype = qiling::QL_ARCH::X86;
+    options.code = {0xCD, 0x03};  // int 3
+    qiling::Qiling ql(options);
+
+    auto& win = ql.os<qiling::os::windows::QlOsWindows>();
+    EXPECT_FALSE(win.seh_on_interrupt(3)) << "no frame in the chain: not handled";
+    EXPECT_TRUE(win.entry_point_errors().empty());
+}

@@ -164,6 +164,25 @@ bool QlOsWindows::seh_check_cpu_exception(std::uint64_t pc) {
     return true;
 }
 
+void QlOsWindows::seh_intr_trampoline(uc_engine* /*uc*/, std::uint32_t intno, void* user_data) {
+    static_cast<QlOsWindows*>(user_data)->seh_on_interrupt(intno);
+}
+
+bool QlOsWindows::seh_on_interrupt(std::uint32_t intno) {
+    if (bits_ != 32 || !seh_dispatch_enabled_ || seh_sentinel_ == 0 || seh_retarget_ != 0) {
+        return false;
+    }
+    // int3 is a breakpoint, any other software interrupt is the illegal
+    // instruction class (an `int 0x2d`/`int 0x29` kernel-door probe lands here)
+    const auto code = intno == 3 ? 0x80000003u : 0xC000001Du;
+    const auto pc = ql_->arch().regs().arch_pc();
+    if (!seh_dispatch(pc, 0u, code)) {
+        return false;
+    }
+    ql_->emu_stop();
+    return true;
+}
+
 // pegasus _dispatch_seh_x86: stage the fs:[0] frame handler call and arm the
 // retarget. Returns true when the dispatch took the fault.
 bool QlOsWindows::seh_dispatch(std::uint64_t fault_addr, std::uint32_t access_type,
