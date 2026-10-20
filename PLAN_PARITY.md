@@ -374,8 +374,17 @@ from **3,954 to 15,412** instructions. The corpus verdicts do not move yet
 13/32), because `16-01` now splits later on a different cause: after
 `GetShortPathNameA` (unimplemented on both sides, so the guest's `call` lands in
 a stub cell) the reference returns to `0x401039` while taote jumps to
-`0x406f6c`, i.e. the guest's IAT slot 0x40b064 holds a different value at runtime
-than at load. That is the next unit.
+`0x406f6c`. The next probe narrows it: `--mem-watch` over that slot
+(`0x40b064`, 4 bytes) shows **neither** emulator's guest writing it, and
+`--dump-imports` shows taote's slot correctly bound to the stub cell
+`0x100210d0` right after load - so either the guest patches the slot through a
+path unicorn does not report to a write hook (the handlers ride `uc_mem_write`),
+or the slot is re-written by taote's own `init_imports` after the configure
+callback. The recorded next probe is therefore a run-end memory dump of the slot
+plus both emulators' `init_imports` write paths, not another code trace: the
+instruction streams agree up to and including the `call dword ptr [0x40b064]`
+at `0x401033` (both at `sp` 0xffffb550), and the two runs disagree only about
+*what that slot held*.
 
 Scored, and it lands: over the 32-sample corpus the differential is
 **5 match / 1 environment / 3 reference_limit / 23 diverged** before and after,
