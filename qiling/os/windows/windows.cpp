@@ -434,6 +434,19 @@ namespace {
 constexpr std::uint64_t kDriverReturnSentinel = 0xdeadc0deULL;
 }  // namespace
 
+// PLAN_PARITY Phase 5.5: start the replay store from the run options
+void QlOsWindows::init_api_replay() {
+    if (!ql_->api_record_path().empty()) {
+        if (!replay_.open(QlApiReplay::Mode::Record, ql_->api_record_path())) {
+            ql_->log().warn("cannot open the API recording at " + ql_->api_record_path());
+        }
+    } else if (!ql_->api_replay_path().empty()) {
+        if (!replay_.open(QlApiReplay::Mode::Replay, ql_->api_replay_path())) {
+            ql_->log().warn("cannot open the API recording at " + ql_->api_replay_path());
+        }
+    }
+}
+
 int QlOsWindows::socket_wait_budget_ms() const noexcept {
     const auto seconds = static_cast<long long>(ql_->timeout());
     if (seconds > 0) {
@@ -475,6 +488,23 @@ void QlOsWindows::hook_winapi(std::uint64_t address, std::uint32_t size) {
                                  "max api count reached (" + std::to_string(budget) + ")");
         throw QlErrorBase("max api count reached (" + std::to_string(budget) + ")");
     }
+
+    // the replay store records (or re-checks) every dispatch's answer: the
+    // environment's answers are what make a malware run reproducible
+    const auto replay_answer = [this, &imported](std::optional<std::uint64_t>& retval) {
+        if (!replay_.active()) {
+            return;
+        }
+        const auto value = retval.has_value() ? *retval : 0;
+        const auto error = last_error();
+        if (replay_.replaying()) {
+            if (!replay_.verify(imported->name, value, error)) {
+                record_entry_point_error("replay_mismatch", replay_.mismatch_log().back());
+            }
+        } else {
+            replay_.record(imported->name, value, error);
+        }
+    };
 
     if (api == nullptr) {
         // the unsupported-import discipline: answer a zero return value through
@@ -522,9 +552,22 @@ void QlOsWindows::hook_winapi(std::uint64_t address, std::uint32_t size) {
              return handler(*self->ql_, pc, self->resolve_named_params(proto, rawvals));
          },
          api->params, nullptr, nullptr, api->passthru);
+
+    // the answer the environment gave is what a replay re-produces (the
+    // dispatch returns nothing, so the recorded value is the guest's return
+    // register - what the guest actually sees)
+    std::optional<std::uint64_t> answer;
+    if (replay_.active()) {
+        answer = ql_->arch().regs().read(ql_->arch().bits() == 64 ? "rax" : "eax");
+    }
+    replay_answer(answer);
 }
 
 void QlOsWindows::run() {
+    // the replay store is opened once the run is about to start (the paths ride
+    // the options; the engine and the log exist by here)
+    init_api_replay();
+
     // windows.py run: the explicit entry/exit overrides, then the emulation
     ensure_profile_state();
     init_sp_ = ql_->arch().regs().arch_sp();

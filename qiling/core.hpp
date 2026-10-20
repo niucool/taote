@@ -84,6 +84,12 @@ struct QilingOptions {
     std::uint64_t count = 0;
     std::uint64_t max_api_count = 0;
 
+    // PLAN_PARITY Phase 5.5 (deterministic replay): record every API dispatch's
+    // answer to the first path, or re-check a run against that recording with
+    // the second (both empty = off)
+    std::string api_record_path;
+    std::string api_replay_path;
+
     // an import whose name has no registered handler (and no rootfs module
     // implementing it): Continue answers a zero return value through the
     // calling convention so the guest's stack stays balanced, and records the
@@ -137,6 +143,10 @@ public:
     const std::vector<std::uint8_t>& code() const noexcept { return code_; }
     bool multithread() const noexcept { return multithread_; }
     QL_STOP stop_options() const noexcept { return stop_options_; }
+
+    // the deterministic-replay store paths (empty = off)
+    const std::string& api_record_path() const noexcept { return api_record_path_; }
+    const std::string& api_replay_path() const noexcept { return api_replay_path_; }
     QL_VERBOSE verbose() const noexcept { return verbose_; }
     void set_verbose(QL_VERBOSE v);
 
@@ -217,6 +227,8 @@ private:
 
     bool multithread_ = false;
     QL_STOP stop_options_ = QL_STOP::NONE;
+    std::string api_record_path_;
+    std::string api_replay_path_;
     QL_VERBOSE verbose_ = QL_VERBOSE::DEFAULT;
     // the macho driver loadbase override (0 = the verbatim default)
     std::uint64_t driver_loadbase_ = 0;

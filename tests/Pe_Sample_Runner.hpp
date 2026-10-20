@@ -213,6 +213,8 @@ struct SampleOptions {
     // sets cannot differ between them); the sample must already sit at
     // <rootfs>/Windows/<name>
     std::optional<std::filesystem::path> rootfs;
+    std::string api_record;   // the deterministic-replay store (Phase 5.5)
+    std::string api_replay;
 };
 
 inline SampleOutcome run_pe_sample(const std::string& bin_name, const SampleOptions& opts = {}) {
@@ -335,6 +337,8 @@ inline SampleOutcome run_pe_sample(const std::string& bin_name, const SampleOpti
         options.max_api_count = opts.max_api_count;
         options.timeout = opts.timeout;
         options.count = opts.count;
+        options.api_record_path = opts.api_record;
+        options.api_replay_path = opts.api_replay;
         options.argv.push_back(exe_in_rootfs.string());
         for (const auto& a : opts.argv) {
             options.argv.push_back(a);

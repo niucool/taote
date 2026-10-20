@@ -19,6 +19,7 @@
 //                     [--code-trace FILE] [--code-trace-range BEGIN END]
 //                     [--mem-watch FILE BEGIN SIZE] [--dump-heap FILE]
 //                     [--dump-images FILE] [--dump-mem FILE BEGIN SIZE]
+//                     [--record-api FILE] [--replay-api FILE]
 #include <LIEF/PE.hpp>
 
 #include <algorithm>
@@ -82,6 +83,8 @@ int main(int argc, char** argv) {
     std::string out_path;
     std::string dump_imports;
     std::string code_trace;
+    std::string api_record;
+    std::string api_replay;
     std::string rootfs;
     std::string dump_mem;
     std::string dump_images;
@@ -112,6 +115,10 @@ int main(int argc, char** argv) {
             opts.max_api_count = parse_u64(argv[++i]);
         } else if (arg == "--dump-imports" && i + 1 < argc) {
             dump_imports = argv[++i];
+        } else if (arg == "--record-api" && i + 1 < argc) {
+            api_record = argv[++i];
+        } else if (arg == "--replay-api" && i + 1 < argc) {
+            api_replay = argv[++i];
         } else if (arg == "--rootfs" && i + 1 < argc) {
             rootfs = argv[++i];
         } else if (arg == "--dump-mem" && i + 3 < argc) {
@@ -299,6 +306,11 @@ int main(int argc, char** argv) {
             }
         };
     }
+
+    // the deterministic-replay store: record every dispatch's answer, or
+    // re-check a later run against the recording (PLAN_PARITY Phase 5.5)
+    opts.api_record = api_record;
+    opts.api_replay = api_replay;
 
     // the shared rootfs: the differential seeds one tree for both emulators so
     // their stub dll export sets (and the paths the guest sees) cannot differ

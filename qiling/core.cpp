@@ -34,6 +34,9 @@ Qiling::Qiling(const QilingOptions& options) {
     count_ = options.count;
     max_api_count_ = options.max_api_count;
     unsupported_api_policy_ = options.unsupported_api_policy;
+    // the replay store's paths ride the options (PLAN_PARITY Phase 5.5)
+    api_record_path_ = options.api_record_path;
+    api_replay_path_ = options.api_replay_path;
 
     // ---- argv setup (core.py) ----
     if (!options.argv.empty()) {

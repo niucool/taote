@@ -331,6 +331,27 @@ further along without reaching the reference's trace. Recorded as the next unit
 with the corpus measurement it needs (the field is loader-level, so it must be
 scored over all 32 samples, not one).
 
+### Phase 5.5: the deterministic API replay store
+
+A malware run is only reproducible if the *answers* its environment gives it are:
+registry, file and network answers are what drift between hosts, and a drift used
+to surface as a mysterious control-flow divergence three calls later. The store
+(`qiling/os/replay.hpp`, `QlOsWindows::api_replay()`) records every dispatch as
+`name \t retval \t lasterror` - one line per call, readable with `diff(1)` on
+purpose - and a later run re-checks against it, naming the first divergence as a
+`replay_mismatch` entry-point error with the position and both values.
+
+Wiring: `QilingOptions::api_record_path` / `api_replay_path`, opened by
+`QlOsWindows::run()`; `tools/parity_trace --record-api FILE` / `--replay-api
+FILE`. Measured on `argv_test_x64.exe`: 15 dispatches recorded, the replay run
+reproduces all 15 with **zero mismatches** and the same exit code.
+
+`WinApiReplay.StoreRecordsAndVerifiesADispatchSequence` covers the store itself:
+a recorded pair verifies clean, a differing answer is a named mismatch, and a
+dispatch the recording does not carry is one too. ctest 542 cases. The corpus is
+unchanged (**24/32 exit 0**, differential **10 / 0 / 16 / 2 / 4**) - the store is
+opt-in, so a default run behaves exactly as before.
+
 ### Phase 5.3: the x64 virtual unwinder
 
 `RtlVirtualUnwind` was a pure passthru (`std::nullopt`), which is what the guest's

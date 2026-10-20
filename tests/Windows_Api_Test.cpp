@@ -5331,6 +5331,42 @@ TEST(WinApiLoader, PebAndLdrCellsRideTheImageAndTheListHeads) {
     EXPECT_EQ(ql.mem().read_ptr(teb_addr + qiling::os::win::TEB_OFF_PEB_ADDRESS, 8), peb_addr);
 }
 
+TEST(WinApiReplay, StoreRecordsAndVerifiesADispatchSequence) {
+    // PLAN_PARITY Phase 5.5: the store records every dispatch's answer and a
+    // later run re-checks against it, so an environment difference is named
+    // instead of showing up as a mysterious control-flow divergence
+    namespace fs = std::filesystem;
+    const auto path = fs::temp_directory_path() / "ql_api_replay_store.txt";
+    fs::remove(path);
+
+    qiling::os::QlApiReplay recorder;
+    ASSERT_TRUE(recorder.open(qiling::os::QlApiReplay::Mode::Record, path.string()));
+    recorder.record("CreateFileA", 0x2c, 0);
+    recorder.record("ReadFile", 1, 0);
+
+    qiling::os::QlApiReplay replayer;
+    ASSERT_TRUE(replayer.open(qiling::os::QlApiReplay::Mode::Replay, path.string()));
+    EXPECT_EQ(replayer.recorded(), 2u);
+    EXPECT_TRUE(replayer.verify("CreateFileA", 0x2c, 0));
+    EXPECT_EQ(replayer.mismatches(), 0u);
+
+    // a differing answer is a named mismatch, not a silent pass
+    EXPECT_FALSE(replayer.verify("ReadFile", 0, 87));
+    ASSERT_EQ(replayer.mismatches(), 1u);
+    EXPECT_NE(replayer.mismatch_log().back().find("ReadFile"), std::string::npos);
+    EXPECT_EQ(replayer.remaining(), 0u);
+
+    // a dispatch the recording does not carry at all is one too
+    qiling::os::QlApiReplay short_replay;
+    ASSERT_TRUE(short_replay.open(qiling::os::QlApiReplay::Mode::Replay, path.string()));
+    EXPECT_TRUE(short_replay.verify("CreateFileA", 0x2c, 0));
+    EXPECT_TRUE(short_replay.verify("ReadFile", 1, 0));
+    EXPECT_FALSE(short_replay.verify("WriteFile", 1, 0));
+    EXPECT_EQ(short_replay.mismatches(), 1u);
+
+    fs::remove(path);
+}
+
 TEST(WinApiNtdll, RtlVirtualUnwindReplaysThePrologueCodes) {
     register_dlls();
 

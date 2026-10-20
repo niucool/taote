@@ -9,6 +9,7 @@
 #include "qiling/os/os.hpp"
 #include "qiling/os/memory.hpp"
 #include "qiling/os/fcall.hpp"
+#include "qiling/os/replay.hpp"
 #include "qiling/os/windows/fncc.hpp"
 #include "qiling/os/windows/handle.hpp"
 #include "qiling/os/windows/registry.hpp"
@@ -103,6 +104,13 @@ public:
     const std::string& windir() const noexcept { return windir_; }
     const std::string& winsys() const noexcept { return winsys_; }
     const std::string& userprofile() const noexcept { return userprofile_; }
+
+    // start the API replay store from the run options (called from the os setup)
+    void init_api_replay();
+
+    // the API replay store (PLAN_PARITY Phase 5.5): on in record or replay mode
+    QlApiReplay& api_replay() noexcept { return replay_; }
+    const QlApiReplay& api_replay() const noexcept { return replay_; }
 
     // the wall-clock budget the socket family spends waiting on a host call
     // before answering WSAETIMEDOUT (windows.py has no analogue: its accept
@@ -223,6 +231,7 @@ private:
     std::string windir_;
     std::string winsys_;
     std::string userprofile_;
+    QlApiReplay replay_;
     std::string username_;
     // windows.py thread_management (the typed surface; __setup_components
     // builds it over the main thread)
