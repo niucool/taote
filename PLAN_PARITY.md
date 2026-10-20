@@ -176,8 +176,8 @@ PMA differential baseline (32 PE samples, measured this pass):
 | --- | --- |
 | match | **12** (`01-02.exe_`, `03-03.exe_`, `03-04.exe_`, `10-03.exe_`, `12-01.exe_`, `12-02.exe_`, `16-01.exe_`, `16-02.exe_`, `18-03.exe_`, `19-02.exe_`, `20-02.exe_`, `21-01.exe_`) |
 | environment | 0 |
-| reference_limit | 13 (`01-01.exe_`, `01-04.exe_`, `06-03.exe_`, `11-02.dll_`, `11-03.dll_`, `11-03.exe_`, `11-01.exe_`, `12-01.dll_`, `12-03.exe_`, `12-04.exe_`, `14-01.exe_`, `17-03.exe_`, `18-01.exe_`) |
-| diverged | 7 |
+| reference_limit | 14 (`01-01.exe_`, `01-04.exe_`, `06-03.exe_`, `11-02.dll_`, `11-03.dll_`, `11-03.exe_`, `11-01.exe_`, `12-01.dll_`, `16-03.exe_`, `12-03.exe_`, `12-04.exe_`, `14-01.exe_`, `17-03.exe_`, `18-01.exe_`) |
+| diverged | 6 |
 
 Measured after the unsupported-import frame fix below (raw taote exit-0 **19/32**,
 was 13/32). Measured after the two differ fixes below (the signed/unsigned return-value fold
@@ -330,7 +330,21 @@ further along without reaching the reference's trace. Recorded as the next unit
 with the corpus measurement it needs (the field is loader-level, so it must be
 scored over all 32 samples, not one).
 
-### 16-03.exe_: the last diverged sample with a real reference run
+### 16-03.exe_: both guests fault, so the verdict is the reference's
+
+The probe the previous pass recorded ran and settled it in one shot: the write
+streams over `0xffffca20..0xffffcad0` are **identical, all 59 writes**, including
+the last one (`0x402aee` stores `0` at `0xffffca5c`). So taote's `ret` at
+`0x401261` pops **0**, exactly like the reference's, and both guests fetch from
+address 0 - taote reports unicorn's `Fetch from non-executable memory`, the
+reference reports `Unhandled CPU exception`. The guests were in identical states;
+only the emulator's verdict for the same event differs, which is not evidence
+about taote. `reference_faulted_alone` now also grants the verdict when *both*
+sides faulted, under the guard that every observable is equal (same dispatch
+count, same sequence, and the only finding being the error class). Corpus:
+**12 match / 0 environment / 14 reference_limit / 6 diverged**.
+
+### 16-03.exe_: the popped-slot class (superseded by the entry above)
 
 Both emulators dispatch the same **42** calls - same names, same call sites, same
 return values, checked position by position - and both then fault, taote with

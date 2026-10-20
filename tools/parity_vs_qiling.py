@@ -264,8 +264,13 @@ def reference_faulted_alone(ref: Trace, ours: Trace, findings):
     taote exits 0).
     """
 
-    if ref.error_class is None or ours.error_class is not None:
+    if ref.error_class is None:
         return False
+    # both faulting is allowed *only* when everything observable agrees: the
+    # same 42 dispatches in the same order with the same values means the two
+    # guests were in identical states, so a differing unicorn verdict for the
+    # same event (taote FETCH_PROT vs the reference UC_ERR_EXCEPTION for a fetch
+    # at address 0) is not evidence about taote (PMA 16-03)
     if len(ref.calls) != len(ours.calls):
         return False
     if ref.sequence() != ours.sequence():
