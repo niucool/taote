@@ -477,6 +477,11 @@ void register_ntoskrnl_family() {
                     // port parks it on the eprocess address tail since the
                     // stub images ride the loader maps)
                     const auto new_function_address = pe_mut.eprocess_address() + index + 1;
+                    // the upstream writes ql.loader.import_symbols[addr] so the
+                    // dispatch hook recognises the fake address; that
+                    // registration is what makes the guest's call reach the
+                    // handler instead of executing unmapped memory
+                    pe_mut.register_import_symbol(new_function_address, "ntoskrnl.exe", routine_name);
                     // the import_symbols registration rides the ApiRegistry
                     // loader map — the port notes the deviation: the
                     // upstream writes ql.loader.import_symbols; the port's

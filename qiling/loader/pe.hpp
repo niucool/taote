@@ -80,6 +80,14 @@ public:
     const std::map<std::uint64_t, ImportSymbol>& import_symbols() const noexcept { return import_symbols_; }
 
     // the import stub at an address (nullptr when the pc is not a stub)
+    // register a runtime-resolved routine address as a dispatchable import
+    // (the ntoskrnl MmGetSystemRoutineAddress path parks a fake address per
+    // hook-only routine; without the registration the guest calls it and the
+    // dispatcher does not recognise the address)
+    void register_import_symbol(std::uint64_t address, std::string dll, std::string name) {
+        import_symbols_[address] = ImportSymbol{address, std::move(dll), std::move(name), 0};
+    }
+
     const ImportSymbol* import_symbols_at(std::uint64_t address) const {
         const auto it = import_symbols_.find(address);
         return it == import_symbols_.end() ? nullptr : &it->second;

@@ -537,9 +537,13 @@ void QlOsWindows::run() {
     }
 
     const auto entry_point = ql_->loader().entry_point;
-    const auto exit_point = ql_->code().empty()
-        ? exit_point_
-        : (entry_point + ql_->code().size());
+    // a driver returns to the sentinel the entry frame carries, so emulation
+    // stops *at* it (unicorn stops on the until address before fetching it) -
+    // otherwise the guest ret's into 0xdeadc0de and faults there
+    const auto is_driver = static_cast<const loader::QlLoaderPE&>(ql_->loader()).is_driver();
+    const auto exit_point = !ql_->code().empty()
+        ? (entry_point + ql_->code().size())
+        : (is_driver ? kDriverReturnSentinel : exit_point_);
 
     // the emulation with the SEH retarget loop: a dispatched guest fault
     // (seh.hpp) arms seh_retarget_ and lets emu_start surface the error; the
@@ -551,8 +555,7 @@ void QlOsWindows::run() {
     // loader built and a sentinel return address - without it `esi` is
     // whatever the entry's caller left there and the first
     // `lea edi,[esi+0x38]` writes through garbage
-    if (const auto& pe_loader = static_cast<const loader::QlLoaderPE&>(ql_->loader());
-        pe_loader.is_driver()) {
+    if (const auto& pe_loader = static_cast<const loader::QlLoaderPE&>(ql_->loader()); is_driver) {
         const std::vector<std::pair<int, std::uint64_t>> args = {
             {qiling::os::api::LPVOID_, pe_loader.driver_object_address()},
             {qiling::os::api::LPVOID_, pe_loader.registry_path_address()},

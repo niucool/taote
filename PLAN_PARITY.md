@@ -9,7 +9,7 @@ phase closes without its tests.
 
 | metric | pegasus | taote today | target |
 |---|---|---|---|
-| API sample sweep (`../pegasus/tests/bins`, 101 bins) | n/a (their suite asserts dispatch only) | **99 exit 0**, 0 blocked, 2 failed (the two `wdm_test_*.sys` drivers) | 99+ (drivers land) |
+| API sample sweep (`../pegasus/tests/bins`, 101 bins) | n/a (their suite asserts dispatch only) | **100 exit 0**, 0 blocked, 1 failed (`wdm_test_x64.sys`) | 99+ (met) |
 | PMA corpus (`~/source/capa-testfiles`, 32 PE samples) | 12 curated cases green (their CI), 38 with `PEGASUS_PMA_FULL=1` | **14 exit 0** (32-sample sweep), **1/12 green** (curated ctest cases, now with the reference guards) | ≥ 30 exit 0, all curated cases green |
 | reference-suite parity (`../pegasus/tests`, 357 cases) | 357 | **12 ported + 4 ported clusters**, rest mapped in `tests/PEGASUS_TEST_PARITY.md` | every *portable* row ported, none "deferred" |
 | taote suite | — | **540 passed / 0 failed / 3 skipped** | grows with every phase, stays 0-failed |
@@ -349,13 +349,18 @@ both `wdm_test_*.sys` swept as failures with zero dispatches. Now:
 - CR8 is written only for 64-bit guests (the register does not exist on the
   32-bit file, and writing it aborted the run with `unknown register: CR8`).
 
-`wdm_test_x86.sys` now dispatches `RtlInitUnicodeString` ×4 and
-`MmGetSystemRoutineAddress` ×2 before faulting on an unmapped read at the third
-routine address it resolves; `wdm_test_x64.sys` reaches its two
-`RtlInitUnicodeString` calls. Both still fail, so the sweep stands at 99/101 — this
-is the first half of Phase 5.1/5.2, recorded with the next probe: the
-`MmGetSystemRoutineAddress` answers (the driver resolves its imports at runtime,
-so the kernel export table is what it needs next).
+Then two more pieces finished the 32-bit driver: `MmGetSystemRoutineAddress`
+parks a fake address per hook-only routine but never registered it, so the guest
+called an address the dispatcher did not know (upstream writes
+`ql.loader.import_symbols[addr]`; `QlLoaderPE::register_import_symbol` is that
+write), and a driver's `ret` went to the `0xdeadc0de` sentinel and faulted
+fetching it - the run's `until` address is now that sentinel, so unicorn stops
+*at* it before fetching. `wdm_test_x86.sys` runs 8 dispatches
+(`RtlInitUnicodeString` ×4, `MmGetSystemRoutineAddress` ×2, `IoCreateDeviceSecure`,
+`IoCreateSymbolicLink`) to **exit 0**, taking the sweep to **100/101**.
+`wdm_test_x64.sys` still fails (two `RtlInitUnicodeString` calls, then an
+unmapped write right after its entry's `sub rsp,0x20`), which is the remaining
+item of Phase 5.1/5.2.
 
 ### A return to the null page is the entry point returning
 
