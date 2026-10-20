@@ -94,6 +94,12 @@ struct QilingOptions {
     // the default is verify-only for exactly that reason)
     bool api_replay_serve = false;
 
+    // PLAN_PARITY Phase 3 item 4 (the analysis surface): one option enables
+    // both memory-access tracing (per-region read/write counters) and code
+    // coverage (the pcs that retired), folded into QlOsStats rather than a
+    // parallel profiler
+    bool analysis = false;
+
     // an import whose name has no registered handler (and no rootfs module
     // implementing it): Continue answers a zero return value through the
     // calling convention so the guest's stack stays balanced, and records the
@@ -152,6 +158,7 @@ public:
     const std::string& api_record_path() const noexcept { return api_record_path_; }
     const std::string& api_replay_path() const noexcept { return api_replay_path_; }
     bool api_replay_serve() const noexcept { return api_replay_serve_; }
+    bool analysis() const noexcept { return analysis_; }
     QL_VERBOSE verbose() const noexcept { return verbose_; }
     void set_verbose(QL_VERBOSE v);
 
@@ -235,6 +242,7 @@ private:
     std::string api_record_path_;
     std::string api_replay_path_;
     bool api_replay_serve_ = false;
+    bool analysis_ = false;
     QL_VERBOSE verbose_ = QL_VERBOSE::DEFAULT;
     // the macho driver loadbase override (0 = the verbatim default)
     std::uint64_t driver_loadbase_ = 0;

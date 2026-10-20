@@ -185,6 +185,8 @@ struct SampleOutcome {
     std::vector<qiling::os::windows::EntryPointError> errors;    // type + message + pc
     std::vector<ApiCallRecord> calls;                            // every dispatch, in call order
     std::map<std::string, std::vector<IndicatorEvent>> indicators;  // the behavioural indicators
+    std::map<std::string, RegionAccessStats> memory_access;      // per-region counters (analysis)
+    std::set<std::uint64_t> coverage;                            // the retired pcs (analysis)
     std::size_t unsupported = 0;                                 // imports with no handler
 
     // the call records for one api name (empty when never dispatched)
@@ -217,6 +219,7 @@ struct SampleOptions {
     std::optional<std::filesystem::path> rootfs;
     std::string api_record;   // the deterministic-replay store (Phase 5.5)
     std::string api_replay;
+    bool analysis = false;  // memory-tracing + coverage (PLAN_PARITY Phase 3 item 4)
     bool api_replay_serve = false;
 };
 
@@ -272,6 +275,8 @@ inline SampleOutcome run_pe_sample(const std::string& bin_name, const SampleOpti
         std::sort(out.calls.begin(), out.calls.end(),
                   [](const ApiCallRecord& a, const ApiCallRecord& b) { return a.position < b.position; });
         out.indicators = stats.indicators();
+        out.memory_access = stats.memory_access();
+        out.coverage = stats.coverage();
         for (const auto& [s, addrs] : stats.strings()) {
             (void)addrs;
             out.strings.insert(s);
@@ -344,6 +349,7 @@ inline SampleOutcome run_pe_sample(const std::string& bin_name, const SampleOpti
         options.count = opts.count;
         options.api_record_path = opts.api_record;
         options.api_replay_path = opts.api_replay;
+        options.analysis = opts.analysis;
         options.api_replay_serve = opts.api_replay_serve;
         options.argv.push_back(exe_in_rootfs.string());
         for (const auto& a : opts.argv) {

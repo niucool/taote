@@ -1003,6 +1003,28 @@ instruction's address and a guard (`max_api_count`, `timeout`,
 `invalid_write`, a non-zero address and a non-empty message. Corpus unchanged
 (24/32 exit 0, differential 10/0/16/2/4); ctest 545.
 
+### Phase 3 item 4: memory tracing and coverage
+
+`QilingOptions::analysis` (one option, default off) folds pegasus's
+`cfg.analysis.memory_tracing` and `coverage` into the existing stats rather than
+a parallel profiler: `QlOsStats::memory_access()` keeps
+`reads/writes/bytes_read/bytes_written` **per mapped region**, keyed by the
+region's label (`[stack]`, `[heap]`, `[FS]`, the image name) or its hex begin
+address when unlabeled, and `coverage()` is the set of pcs that retired (the
+code hook reports the block start, the same granularity pegasus records).
+
+Measured on `argv_test_x86.exe`: 378 distinct pcs, `[stack]` 80 reads / 131
+writes, the image 40 / 13, `[FS]` 3 / 1 - and the trace carries both as
+`coverage` (a count) and `memory` (per region).
+
+`PegasusParity.AnalysisOptionRecordsRegionCountersAndCoverage` asserts the
+counters and the coverage for a real sample *and* that a run without the option
+records nothing. One bug pinned on the way: `HookRet` is RAII - destroying the
+handle unregisters the hook - so a discarded `ql.hook_code(...)` return value
+left the hooks registered but never dispatched; the handles are now kept on the
+os for the run's lifetime. Corpus unchanged (24/32 exit 0, differential
+10/0/16/2/4); API sweep 101/101; ctest 546.
+
 ## Phase 4 — deliberately not ported (documented non-goals)
 
 * **JS engine** (`test_js_*`, 54 cases) — excluded by instruction; qiling hooks

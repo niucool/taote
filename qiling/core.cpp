@@ -38,6 +38,7 @@ Qiling::Qiling(const QilingOptions& options) {
     api_record_path_ = options.api_record_path;
     api_replay_path_ = options.api_replay_path;
     api_replay_serve_ = options.api_replay_serve;
+    analysis_ = options.analysis;
 
     // ---- argv setup (core.py) ----
     if (!options.argv.empty()) {

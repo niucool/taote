@@ -120,6 +120,8 @@ int main(int argc, char** argv) {
             api_record = argv[++i];
         } else if (arg == "--replay-api" && i + 1 < argc) {
             api_replay = argv[++i];
+        } else if (arg == "--analysis") {
+            opts.analysis = true;
         } else if (arg == "--replay-serve") {
             replay_serve = true;
         } else if (arg == "--rootfs" && i + 1 < argc) {
@@ -377,6 +379,18 @@ int main(int argc, char** argv) {
         }
     }
     js << "]";
+    js << ",\"memory\":{";
+    {
+        bool first_region = true;
+        for (const auto& [region, rec] : outcome.memory_access) {
+            js << (first_region ? "" : ",") << "\"" << json_escape(region) << "\":{\"reads\":" << rec.reads
+               << ",\"writes\":" << rec.writes << ",\"bytes_read\":" << rec.bytes_read
+               << ",\"bytes_written\":" << rec.bytes_written << "}";
+            first_region = false;
+        }
+    }
+    js << "}";
+    js << ",\"coverage\":" << outcome.coverage.size();
     js << ",\"stdout\":\"" << json_escape(outcome.output) << "\"";
     js << ",\"strings\":[";
     std::size_t i = 0;

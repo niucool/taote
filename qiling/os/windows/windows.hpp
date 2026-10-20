@@ -73,6 +73,11 @@ public:
     }
     void record_entry_point_error(std::string type, std::string message);
 
+    // PLAN_PARITY Phase 3 item 4: the memory/coverage hooks (QilingOptions::analysis).
+    // HookRet is RAII - destroying it unregisters the hook - so the handles are
+    // kept for the run's lifetime.
+    void init_analysis_hooks();
+
     // the emulation-error taxonomy hook (QlOs::on_emulation_error): classify
     // the unicorn failure text into the pegasus entry-point error vocabulary
     void on_emulation_error(std::string_view message) override;
@@ -230,6 +235,7 @@ private:
     std::unique_ptr<Clipboard> clipboard_;
     std::map<std::string, std::string> services_;
     std::optional<HookRet> hook_handle_;
+    std::vector<HookRet> analysis_hooks_;
     std::string windir_;
     std::string winsys_;
     std::string userprofile_;

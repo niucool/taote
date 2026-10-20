@@ -44,6 +44,16 @@ struct IndicatorEvent {
     std::uint64_t position = 0;
 };
 
+// the analysis surface's memory accounting (PLAN_PARITY Phase 3 item 4,
+// pegasus's cfg.analysis.memory_tracing): per mapped region, how often the
+// guest read/wrote it and how many bytes moved
+struct RegionAccessStats {
+    std::uint64_t reads = 0;
+    std::uint64_t writes = 0;
+    std::uint64_t bytes_read = 0;
+    std::uint64_t bytes_written = 0;
+};
+
 class QlOsStats {
 public:
     QlOsStats() = default;
@@ -72,6 +82,16 @@ public:
     // the api dispatch count (the max_api_count guard reads it)
     std::size_t api_count() const noexcept { return api_count_; }
 
+    // the memory-tracing surface: per-region read/write counters, keyed by the
+    // region's label (or its hex begin address when unlabeled)
+    void log_mem_access(bool write, std::string_view region, std::uint32_t size);
+
+    const std::map<std::string, RegionAccessStats>& memory_access() const noexcept { return memory_access_; }
+
+    // the coverage surface: the guest pcs that actually retired
+    void log_code(std::uint64_t pc);
+    const std::set<std::uint64_t>& coverage() const noexcept { return coverage_; }
+
     // log_indicator — record a behavioural indicator (file/registry/network)
     void log_indicator(std::string_view kind, std::string_view target);
 
@@ -90,6 +110,8 @@ private:
     std::map<std::string, std::vector<ApiCallRecord>> syscalls_;
     std::map<std::string, std::set<std::uint64_t>> strings_;
     std::map<std::string, std::vector<IndicatorEvent>> indicators_;
+    std::map<std::string, RegionAccessStats> memory_access_;
+    std::set<std::uint64_t> coverage_;
     std::set<std::string> unsupported_apis_;
     std::size_t api_count_ = 0;
     std::uint64_t position_ = 0;

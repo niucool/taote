@@ -405,6 +405,15 @@ void QlMemoryManager::protect(std::uint64_t addr, std::uint64_t size, int perms)
     change_mapinfo(aligned_address, aligned_address + aligned_size, perms);
 }
 
+const MapInfoEntry* QlMemoryManager::region_at(std::uint64_t addr) const {
+    for (const auto& entry : map_info_) {
+        if (addr >= entry.begin && addr < entry.end) {
+            return &entry;
+        }
+    }
+    return nullptr;
+}
+
 std::vector<std::pair<std::uint64_t, std::uint64_t>> QlMemoryManager::mapped_regions() const {
     // consolidate adjacent regions; protections and labels are ignored
     std::vector<std::pair<std::uint64_t, std::uint64_t>> out;

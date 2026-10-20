@@ -330,6 +330,42 @@ std::string_view QlOsWindows::bits_section() const noexcept {
     return bits_ == 64 ? "OS64" : "OS32";
 }
 
+void QlOsWindows::init_analysis_hooks() {
+
+    const auto* self = this;
+    const auto record = [self](bool write, std::uint64_t address, std::uint32_t size) {
+        const auto* region = self->ql_->mem().region_at(address);
+        std::string label;
+        if (region != nullptr) {
+            label = region->label.empty() ? std::string() : region->label;
+        }
+        if (label.empty()) {
+            char buf[32];
+            const auto begin = region != nullptr ? region->begin : (address & ~0xfffull);
+            std::snprintf(buf, sizeof(buf), "%#llx", static_cast<unsigned long long>(begin));
+            label = buf;
+        }
+        self->ql_->os().stats().log_mem_access(write, label, size);
+    };
+
+    analysis_hooks_.push_back(ql_->hook_mem_read([record](int, std::uint64_t address, std::uint32_t size, std::int64_t) {
+        record(false, address, size);
+        return 0;
+    }));
+    analysis_hooks_.push_back(ql_->hook_mem_write([record](int, std::uint64_t address, std::uint32_t size, std::int64_t) {
+        record(true, address, size);
+        return 0;
+    }));
+
+    // coverage: one entry per distinct pc that retired (the code hook reports
+    // the block start, so the granularity is the basic block - the same
+    // decision pegasus's coverage makes)
+    analysis_hooks_.push_back(ql_->hook_code([self](std::uint64_t address, std::uint32_t) -> int {
+        self->ql_->os().stats().log_code(address);
+        return 0;
+    }));
+}
+
 void QlOsWindows::record_entry_point_error(std::string type, std::string message) {
     // the pc the record was raised at (pegasus's error_info(addr)): the faulting
     // instruction for an emulation error, the dispatch site for a guard
@@ -599,6 +635,12 @@ void QlOsWindows::run() {
     // the replay store is opened once the run is about to start (the paths ride
     // the options; the engine and the log exist by here)
     init_api_replay();
+
+    // the analysis surface (PLAN_PARITY Phase 3 item 4): one option turns on
+    // per-region memory counters and the retired-pc coverage set
+    if (ql_->analysis()) {
+        init_analysis_hooks();
+    }
 
     // windows.py run: the explicit entry/exit overrides, then the emulation
     ensure_profile_state();

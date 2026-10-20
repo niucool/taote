@@ -163,6 +163,10 @@ public:
     SavedMemory save() const;
     void restore(const SavedMemory& saved_state);
 
+    // the mapped region containing addr (the analysis surface labels its
+    // per-region counters with it); nullopt when addr is unmapped
+    const MapInfoEntry* region_at(std::uint64_t addr) const;
+
     std::uint64_t pagesize() const noexcept { return pagesize_; }
 
     // memory.py max_mem_addr — the arch-bounded upper address

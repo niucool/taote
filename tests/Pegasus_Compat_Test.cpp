@@ -111,6 +111,37 @@ TEST(PegasusParity, ApiRecordsCarryTheDllAndRenderedArguments) {
     EXPECT_EQ(feature->params[0], "ProcessorFeature=0xa");
 }
 
+TEST(PegasusParity, AnalysisOptionRecordsRegionCountersAndCoverage) {
+    // PLAN_PARITY Phase 3 item 4: one option folds pegasus's
+    // cfg.analysis.memory_tracing + coverage into the existing stats - the
+    // per-region read/write counters and the set of pcs that retired - instead
+    // of a parallel profiler.
+    qiling::os::register_dlls();
+
+    SampleOptions opts;
+    opts.analysis = true;
+    const auto out = run_pe_sample("argv_test_x86.exe", opts);
+
+    ASSERT_EQ(out.exit_code, 0);
+    EXPECT_FALSE(out.coverage.empty()) << "the guest executed code, so coverage cannot be empty";
+    // the counters are keyed by the mapped region's label, so the image, the
+    // stack and the TEB's FS segment each carry their own numbers
+    ASSERT_FALSE(out.memory_access.empty());
+    const auto image = out.memory_access.find("argv_test_x86.exe");
+    ASSERT_NE(image, out.memory_access.end());
+    EXPECT_GT(image->second.reads, 0u);
+    EXPECT_GT(image->second.writes, 0u);
+    EXPECT_GT(image->second.bytes_read, 0u);
+    const auto stack = out.memory_access.find("[stack]");
+    ASSERT_NE(stack, out.memory_access.end());
+    EXPECT_GT(stack->second.writes, 0u);
+
+    // and the surface is opt-in: without the option nothing is recorded
+    const auto plain = run_pe_sample("argv_test_x86.exe");
+    EXPECT_TRUE(plain.coverage.empty());
+    EXPECT_TRUE(plain.memory_access.empty());
+}
+
 TEST(PegasusParity, GetProcAddressMissingFunctionReturnsZero) {
     qiling::os::register_dlls();
 
