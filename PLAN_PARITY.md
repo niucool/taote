@@ -180,7 +180,27 @@ vs none) 4, (none vs invalid_insn) 3, stdout differs 2, (invalid_fetch vs none) 
 dispatch order differs 2, then singles for invalid_read/invalid_fetch,
 return value, emu_error, timeout vs invalid_insn, invalid_cpu_exception vs
 invalid_fetch, invalid_write vs invalid_read, none vs invalid_fetch,
-invalid_insn vs invalid_fetch. That table is the phase's work order.
+invalid_insn vs invalid_fetch. That table is the phase's work order, and the per-name aggregation of the two
+biggest signatures (from `/tmp/pma_parity.json`) shows it is not one systemic
+bug but a long tail plus a few repeats:
+
+| direction | API | samples |
+| --- | --- | --- |
+| taote extra | `_initterm`, `HeapFree` | 5 each |
+| taote extra | `UnhandledExceptionFilter` | 4 |
+| taote extra | `exit`, `LoadLibraryA`, `GetProcAddress`, `GetModuleFileNameA` | 3 each |
+| taote extra | `memset`, `strlen`, `GetSystemDirectoryA`, `_except_handler3` | 2 each |
+| taote missing | `ExitProcess` | 4 |
+| taote missing | `GetModuleHandleA` | 3 |
+| taote missing | `HeapAlloc` | 2 |
+
+The shape of that table is the finding: the reference **stops earlier** than
+taote on most samples (a fault ends its run), so taote's "extra" dispatches are
+the calls it survives and the reference's "missing" ones are the calls taote
+never reaches. The two repeats that are worth attacking first are therefore
+`HeapFree`/`HeapAlloc` (a heap-handle divergence on both directions) and
+`ExitProcess` (taote not reaching process exit where the reference does), not the
+long tail of single-sample APIs.
 
 Exit criteria (this phase): the differential clean on the named starter corpus
 (`argv_test_x86.exe`, `file_access_test_x86.exe`), gated in ctest as
