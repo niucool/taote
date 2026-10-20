@@ -562,6 +562,7 @@ void QlOsWindows::hook_winapi(std::uint64_t address, std::uint32_t size) {
     const auto proto = api->params;
     const auto handler = api->handler;
     auto* self = this;
+    set_api_dll(imported->dll);
     call(address, imported->name,
          [self, proto, handler](std::uint64_t pc, const QlFunctionCall::Params& raw) -> std::optional<std::uint64_t> {
              std::vector<std::uint64_t> rawvals;

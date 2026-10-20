@@ -20,6 +20,13 @@ namespace qiling {
 struct ApiCallRecord {
     std::uint64_t address;
     std::string name;         // api function name
+    // the owning module, so an expectation can be dll-qualified
+    // (`KERNEL32.GetProcAddress`) the way pegasus's cases are
+    std::string dll;
+    // the rendered arguments (`name=0x...`, or `name='text'` for the string
+    // families): the analysis surface an argument-sensitive expectation needs
+    // (PMA 06-03 asserts InternetOpenUrlA's URL)
+    std::vector<std::string> params;
     std::uint64_t retval;
     bool retval_present;
     std::uint64_t retaddr;
@@ -38,6 +45,10 @@ public:
     // log_api_call — record an emulated API invocation
     void log_api_call(std::uint64_t address, std::string_view name,
                       std::uint64_t retval, bool retval_present,
+                      std::uint64_t retaddr);
+    // the dll-qualified, argument-carrying form (the record fields above)
+    void log_api_call(std::uint64_t address, std::string_view name, std::string_view dll,
+                      std::vector<std::string> params, std::uint64_t retval, bool retval_present,
                       std::uint64_t retaddr);
 
     // log_unsupported_api — record an import that no handler serves (pegasus

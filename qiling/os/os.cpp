@@ -3,6 +3,7 @@
 #include <cstdint>
 
 #include "qiling/os/os.hpp"
+#include "qiling/os/utils.hpp"
 
 #include "qiling/os/linux/thread.hpp"
 
@@ -189,6 +190,28 @@ std::vector<std::string> QlOs::process_fcall_params(const std::vector<FcallArg>&
     out.reserve(targs.size());
 
     for (const auto& targ : targs) {
+        // the string families render as their text (an argument-sensitive
+        // expectation needs the URL/file name, not a pointer); everything else
+        // stays a hex scalar
+        const auto type = targ.type.value_or(0);
+        const auto string_kind = type >= os::PARAM_PTRX ? type - os::PARAM_PTRX : 0;
+        if (targ.value != 0 && (string_kind == 1 || string_kind == 2)) {
+            const bool wide = string_kind == 2;
+            std::string text;
+            try {
+                if (wide) {
+                    text = os::QlOsUtils::read_wstring(ql(), targ.value);
+                } else {
+                    text = os::QlOsUtils::read_cstring(ql(), targ.value);
+                }
+            } catch (const std::exception&) {
+                text.clear();
+            }
+            if (!text.empty()) {
+                out.push_back(targ.name + "='" + text + "'");
+                continue;
+            }
+        }
         char buf[32];
         std::snprintf(buf, sizeof(buf), "%#llx", static_cast<unsigned long long>(targ.value));
         out.push_back(targ.name + "=" + buf);
@@ -222,9 +245,9 @@ std::optional<std::uint64_t> QlOs::call(std::uint64_t pc, const std::string& nam
         targs.push_back(FcallArg{t.name, t.type, t.value});
     }
     const auto pargs = process_fcall_params(targs);
-    (void)pargs;  // the verbose print_function surface lands with its slice
 
-    stats_->log_api_call(pc, name, result.retval.value_or(0), result.retval.has_value(), result.retaddr);
+    stats_->log_api_call(pc, name, api_dll_, pargs, result.retval.value_or(0), result.retval.has_value(),
+                         result.retaddr);
 
     // os.py: avoid modifying the pc when the emulation has stopped (unicorn
     // issue #1579)

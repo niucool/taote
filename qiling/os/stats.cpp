@@ -57,7 +57,21 @@ void QlOsStats::log_api_call(std::uint64_t address, std::string_view name,
         key.erase(0, 5);
     }
 
-    syscalls_[key].push_back(ApiCallRecord{address, key, retval, retval_present, retaddr, position_});
+    syscalls_[key].push_back(ApiCallRecord{address, key, {}, {}, retval, retval_present, retaddr, position_});
+    ++position_;
+}
+
+void QlOsStats::log_api_call(std::uint64_t address, std::string_view name, std::string_view dll,
+                             std::vector<std::string> params, std::uint64_t retval, bool retval_present,
+                             std::uint64_t retaddr) {
+    ++api_count_;
+    std::string key{name};
+    if (key.rfind("hook_", 0) == 0) {
+        key.erase(0, 5);
+    }
+
+    syscalls_[key].push_back(ApiCallRecord{address, key, std::string(dll), std::move(params), retval,
+                                           retval_present, retaddr, position_});
     ++position_;
 }
 

@@ -951,6 +951,24 @@ assertions possible:
 Exit: parity map shows every analysis-surface row ported; PMA harness asserts
 dll-qualified APIs and indicators (not bare names).
 
+### Phase 3 item 1: typed API records with arguments
+
+`ApiCallRecord` now carries the owning **module** and the **rendered
+arguments**, so an expectation can be dll-qualified (`KERNEL32.GetProcAddress`)
+and argument-sensitive the way pegasus's cases are. `QlOs::process_fcall_params`
+renders the string families as their text (`lpLibFileName='ntdll.dll'`,
+`_Format='Error: could not find the function NtOpenFile in library ntdll.dll.'`)
+and everything else as a hex scalar (`ProcessorFeature=0xa`); the Windows
+`hook_winapi` sets the current module before dispatching, and the tool's trace
+carries `dll` + `params` per call.
+
+`PegasusParity.ApiRecordsCarryTheDllAndRenderedArguments` pins both halves on
+`file_access_test_x86.exe`: a `LoadLibraryW` record is `kernel32.dll` with
+`lpLibFileName='ntdll.dll'`, and an `IsProcessorFeaturePresent` record keeps its
+scalar as `ProcessorFeature=0xa`. ctest 544 cases. The corpus does not move
+(24/32 exit 0, differential 10 / 0 / 16 / 2 / 4) - this is analysis surface, not
+emulation.
+
 ## Phase 4 — deliberately not ported (documented non-goals)
 
 * **JS engine** (`test_js_*`, 54 cases) — excluded by instruction; qiling hooks

@@ -198,6 +198,12 @@ public:
         const std::vector<std::pair<std::string, int>>& proto,
         const std::vector<std::uint64_t>& raw) const;
 
+    // the owning module of the api being dispatched (set by the Windows
+    // hook_winapi before it calls through, so the recorded call is
+    // dll-qualified like pegasus's events)
+    void set_api_dll(std::string dll) { api_dll_ = std::move(dll); }
+    const std::string& api_dll() const noexcept { return api_dll_; }
+
     // process_fcall_params — the display strings for the typed args
     std::vector<std::string> process_fcall_params(const std::vector<FcallArg>& targs) const;
 
@@ -235,6 +241,7 @@ protected:
     int exit_code_ = 0;
     std::uint32_t last_error_ = 0;
 
+    std::string api_dll_;
     std::uint64_t exit_point_ = 0;
     std::uint64_t load_address_ = 0;
     std::uint64_t entry_point_ = 0;

@@ -346,6 +346,12 @@ int main(int argc, char** argv) {
             js << ",";
         }
         js << "{\"position\":" << c.position << ",\"name\":\"" << json_escape(c.name) << "\"";
+        js << ",\"dll\":\"" << json_escape(c.dll) << "\"";
+        js << ",\"params\":[";
+        for (std::size_t k = 0; k < c.params.size(); ++k) {
+            js << (k ? "," : "") << "\"" << json_escape(c.params[k]) << "\"";
+        }
+        js << "]";
         js << ",\"retval\":" << (c.retval_present ? std::to_string(c.retval) : std::string("null"));
         js << ",\"retaddr\":" << c.retaddr;
         js << ",\"address\":" << c.address << "}";

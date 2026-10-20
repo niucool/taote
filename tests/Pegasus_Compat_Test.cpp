@@ -80,6 +80,37 @@ TEST(PegasusParity, ArgvPassedToExe) {
 // The sample looks four exports up through GetProcAddress: the third one
 // (AreFileApisANSI) is exported and must resolve, the fourth
 // (ThisFunctionIsNotExportedByKernel32) must answer NULL.
+TEST(PegasusParity, ApiRecordsCarryTheDllAndRenderedArguments) {
+    // PLAN_PARITY Phase 3: the analysis surface. A record names its module, so
+    // an expectation can be dll-qualified (KERNEL32.GetProcAddress) the way
+    // pegasus's cases are, and the arguments are rendered - strings as their
+    // text, everything else as a hex scalar - which is what an
+    // argument-sensitive expectation needs.
+    const auto out = run_pe_sample("file_access_test_x86.exe");
+
+    const auto find = [&out](const std::string& name) -> const qiling::ApiCallRecord* {
+        for (const auto& call : out.calls) {
+            if (call.name == name) {
+                return &call;
+            }
+        }
+        return nullptr;
+    };
+
+    const auto* load = find("LoadLibraryW");
+    ASSERT_NE(load, nullptr);
+    EXPECT_EQ(load->dll, "kernel32.dll");
+    ASSERT_EQ(load->params.size(), 1u);
+    // the wide string argument is rendered as its text, not its pointer
+    EXPECT_EQ(load->params[0], "lpLibFileName='ntdll.dll'");
+
+    // a scalar argument stays a hex scalar
+    const auto* feature = find("IsProcessorFeaturePresent");
+    ASSERT_NE(feature, nullptr);
+    ASSERT_EQ(feature->params.size(), 1u);
+    EXPECT_EQ(feature->params[0], "ProcessorFeature=0xa");
+}
+
 TEST(PegasusParity, GetProcAddressMissingFunctionReturnsZero) {
     qiling::os::register_dlls();
 
