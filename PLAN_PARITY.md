@@ -248,6 +248,14 @@ symptom*, and the remaining diagnostic direction is the first differing return
 value before #5 (`HeapCreate` answers `83888280` on taote vs `83888680` on the
 reference), not the import table.
 
+The differ now reports that upstream value explicitly: when the dispatch sequences
+part company it inserts a `first divergence: <api> return value` finding for the
+earliest call whose *name* matches but whose scalar return differs, so the next
+pass gets the root cause instead of the fan-out. (Pointer-sized return values are
+compared as `ptr` by normalization, which is deliberate - a heap handle is not a
+value either emulator can agree on - so the `HeapCreate` difference above is
+invisible to it by design and has to be chased from the raw traces.)
+
 Exit criteria (this phase): the differential clean on the named starter corpus
 (`argv_test_x86.exe`, `file_access_test_x86.exe`), gated in ctest as
 `Tools.ParityVsQilingSmoke` (skips when no reference checkout / qiling-deps

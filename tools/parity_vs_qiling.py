@@ -233,6 +233,23 @@ def diff_traces(ref: Trace, ours: Trace):
                     f"same APIs, different order from #{first}: reference {ref_seq[first:first + 5]}, taote {our_seq[first:first + 5]}",
                 )
             )
+        # the call where the two runs parted company: the earliest point where
+        # either the name or the return value differs. That value difference is
+        # usually the root cause of everything downstream (a guest branching on
+        # it takes a different path, so the rest of the trace mismatches).
+        for i in range(min(len(ref_seq), len(our_seq))):
+            if ref.calls[i]["name"] == ours.calls[i]["name"] and \
+               retval_key(ref.calls[i]["retval"]) != retval_key(ours.calls[i]["retval"]):
+                findings.insert(
+                    0,
+                    (
+                        f"first divergence: {ref.calls[i]['name']} return value",
+                        f"call #{i}: reference {ref.calls[i]['retval']!r}, taote {ours.calls[i]['retval']!r} "
+                        f"(everything after this point differs because the guest branched on it)",
+                    ),
+                )
+                break
+
         extensions = sum(1 for n in our_seq if n in ref.unimplemented)
         if len(ref_seq) + extensions < len(our_seq) or len(ref_seq) > len(our_seq):
             findings.append(
