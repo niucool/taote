@@ -302,6 +302,22 @@ so the write comes from a *value* the guest loaded, not from a different code
 path. Next probe: watch writes into the frame holding that slot (a mem-write hook
 over the 64 bytes around it, both sides) and compare the writer.
 
+That probe exists now (`parity_trace --mem-watch FILE BEGIN SIZE`, and the same
+flag on the reference runner, both logging `pc addr size value`), and it answers
+it in four instructions: at `0x401496 mov eax, dword ptr fs:[0]` /
+`0x40149c push eax` the reference pushes **0** and taote pushes **0xffffffff** -
+i.e. the two loaders disagree about the x86 TEB's initial `ExceptionList`.
+taote writes the real-Windows sentinel `0xffffffff`, upstream leaves the field at
+its zero default, and the guest stores that value as the `Next` of its first SEH
+registration, so on taote the chain head reads as a *live frame* and the guest
+walks into the sentinel. Making that field 0 (matching the reference) was tried
+and **reverted as not-yet-a-win**: `11-01.exe_` then runs 62 calls instead of 46
+(it gets past the `UnhandledExceptionFilter` and keeps dispatching) but still
+diverges at call #45 and now ends on `invalid_read`, so the change moved the guest
+further along without reaching the reference's trace. Recorded as the next unit
+with the corpus measurement it needs (the field is loader-level, so it must be
+scored over all 32 samples, not one).
+
 **`none vs invalid_insn` dissected (`03-04`, `11-01`, `16-01`).** On
 `11-01.exe_` both runs are identical through call #4 (`GetVersion`, `HeapCreate`,
 `GetVersionExA`, `GetEnvironmentVariableA`, `GetModuleHandleA` at the *same* call

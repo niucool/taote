@@ -17,6 +17,7 @@
 // usage: parity_trace <sample> [--argv A B] [--count N] [--timeout S]
 //                     [--max-api-count N] [--dump-imports FILE] [--out FILE]
 //                     [--code-trace FILE] [--code-trace-range BEGIN END]
+//                     [--mem-watch FILE BEGIN SIZE]
 #include <LIEF/PE.hpp>
 
 #include <cstdint>
@@ -65,6 +66,7 @@ std::uint64_t parse_u64(const char* text) {
 // the code-trace hook outlives the configure callback (HookRet unregisters on
 // destruction)
 std::shared_ptr<qiling::HookRet> code_hook;
+std::shared_ptr<qiling::HookRet> mem_watch_hook;
 
 int main(int argc, char** argv) {
     if (argc < 2) {
@@ -77,6 +79,9 @@ int main(int argc, char** argv) {
     std::string out_path;
     std::string dump_imports;
     std::string code_trace;
+    std::string mem_watch;
+    std::uint64_t mem_watch_begin = 0;
+    std::uint64_t mem_watch_size = 0;
     std::uint64_t code_begin = 0;
     std::uint64_t code_end = 0;
     qiling::testing::SampleOptions opts;
@@ -98,6 +103,10 @@ int main(int argc, char** argv) {
             opts.max_api_count = parse_u64(argv[++i]);
         } else if (arg == "--dump-imports" && i + 1 < argc) {
             dump_imports = argv[++i];
+        } else if (arg == "--mem-watch" && i + 3 < argc) {
+            mem_watch = argv[++i];
+            mem_watch_begin = parse_u64(argv[++i]);
+            mem_watch_size = parse_u64(argv[++i]);
         } else if (arg == "--code-trace" && i + 1 < argc) {
             code_trace = argv[++i];
         } else if (arg == "--code-trace-range" && i + 2 < argc) {
@@ -179,6 +188,26 @@ int main(int argc, char** argv) {
                 }
                 return 0;
             }));
+        };
+    }
+
+    // watch guest writes into one memory window, with the pc that wrote: the
+    // probe for "two runs executed the same instructions but a stack slot ends
+    // up holding a different value"
+    if (!mem_watch.empty()) {
+        opts.configure = [&mem_watch, &mem_watch_begin, &mem_watch_size, previous = opts.configure](qiling::Qiling& ql) {
+            if (previous) {
+                previous(ql);
+            }
+            auto out = std::make_shared<std::ofstream>(mem_watch);
+            mem_watch_hook = std::make_shared<qiling::HookRet>(ql.hook_mem_write(
+                [out, &ql, mem_watch_begin, mem_watch_size](int, std::uint64_t address, std::uint32_t size, std::int64_t value) {
+                    if (address + size > mem_watch_begin && address < mem_watch_begin + mem_watch_size) {
+                        *out << std::hex << ql.arch().regs().arch_pc() << " " << address << " " << std::dec << size
+                             << " " << std::hex << static_cast<std::uint64_t>(value) << "\n";
+                    }
+                    return 0;
+                }));
         };
     }
 

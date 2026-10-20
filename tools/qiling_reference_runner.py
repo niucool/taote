@@ -100,6 +100,9 @@ def main(argv=None) -> int:
     ap.add_argument("--count", type=int, default=0, help="instruction budget (0 = none)")
     ap.add_argument("--timeout", type=int, default=0, help="seconds (0 = none)")
     ap.add_argument("--out", default=None, help="write the JSON here instead of stdout")
+    ap.add_argument("--mem-watch", nargs=3, default=None,
+                    metavar=("FILE", "BEGIN", "SIZE"),
+                    help="log guest writes into [BEGIN, BEGIN+SIZE) as pc addr size value")
     ap.add_argument("--code-trace", default=None, help="log (pc, size) per executed instruction here")
     ap.add_argument("--code-trace-range", nargs=2, type=lambda v: int(v, 0), default=None,
                     metavar=("BEGIN", "END"), help="only log pcs inside [BEGIN, END)")
@@ -143,6 +146,18 @@ def main(argv=None) -> int:
         # sees them; the differential needs exactly those
         ql.log.setLevel(logging.DEBUG)
         ql.log.addHandler(log_capture)
+        if args.mem_watch:
+            path, begin, size = args.mem_watch
+            begin, size = int(begin, 0), int(size, 0)
+            sink2 = open(path, "w")
+
+            def _watch(ql_, access, address, size_, value):
+                if address + size_ > begin and address < begin + size:
+                    sink2.write("%x %x %d %x\n" % (ql_.arch.regs.read("eip"), address, size_, value))
+                    sink2.flush()
+
+            ql.hook_mem_write(_watch)
+
         if args.code_trace:
             begin, end = (args.code_trace_range or (0, 0))
             sink = open(args.code_trace, "w")
