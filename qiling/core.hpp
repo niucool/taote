@@ -77,6 +77,21 @@ struct QilingOptions {
     std::optional<QL_ENDIAN> endian;
     bool thumb = false;
 
+    // the emulation guards (pegasus cfg.timeout / cfg.max_api_count): the
+    // timeout is in seconds (0 = no limit), count caps executed instructions,
+    // max_api_count caps dispatched API calls
+    std::uint64_t timeout = 0;
+    std::uint64_t count = 0;
+    std::uint64_t max_api_count = 0;
+
+    // an import whose name has no registered handler (and no rootfs module
+    // implementing it): Continue answers a zero return value through the
+    // calling convention so the guest's stack stays balanced, and records the
+    // name as unsupported; Abort ends the entry point with an `unsupported_api`
+    // error (pegasus's modules.functions_always_exist=False + debug_stop)
+    enum class UnsupportedApiPolicy { Continue, Abort };
+    UnsupportedApiPolicy unsupported_api_policy = UnsupportedApiPolicy::Continue;
+
     // the kext driver loadbase override (the macho loadDriver's loadbase
     // parameter; 0 means the verbatim default 0xffffff7000000000 — the stock
     // unicorn 2.1.4 cannot fetch there, so the fixture-driven paths pass a
@@ -139,6 +154,12 @@ public:
     std::uint64_t exit_point() const noexcept { return exit_point_; }
     std::uint64_t timeout() const noexcept { return timeout_; }
     std::uint64_t count() const noexcept { return count_; }
+
+    // the emulation guards (options.max_api_count / unsupported_api_policy)
+    std::uint64_t max_api_count() const noexcept { return max_api_count_; }
+    QilingOptions::UnsupportedApiPolicy unsupported_api_policy() const noexcept {
+        return unsupported_api_policy_;
+    }
     void set_entry_point(std::uint64_t addr) { entry_point_ = addr; entry_point_set_ = true; }
     void set_exit_point(std::uint64_t addr) { exit_point_ = addr; exit_point_set_ = true; }
 
@@ -224,6 +245,8 @@ public:
     bool debugger_ = false;
     std::uint64_t timeout_ = 0;
     std::uint64_t count_ = 0;
+    std::uint64_t max_api_count_ = 0;
+    QilingOptions::UnsupportedApiPolicy unsupported_api_policy_ = QilingOptions::UnsupportedApiPolicy::Continue;
     std::uint64_t entry_point_ = 0;
     bool entry_point_set_ = false;
     std::uint64_t exit_point_ = 0;

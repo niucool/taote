@@ -152,6 +152,13 @@ public:
     void call_native(std::uint64_t addr, const std::vector<std::pair<int, std::uint64_t>>& args,
                      std::optional<std::uint64_t> ret);
 
+    // Answer a call without a handler body: set the return value and unwind the
+    // frame as a real handler would (the unsupported-import path)
+    void return_value(std::uint64_t value, int nslots) {
+        cc_->setReturnValue(value);
+        static_cast<void>(cc_->unwind(nslots));
+    }
+
     // the post-emu_start frame unwind (fcall.py's cc.unwind(len(args)) ride
     // at the call_dll_entrypoint tail; the nslots form mirrors count_slots)
     void unwind_native(int nslots);

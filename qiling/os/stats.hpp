@@ -40,6 +40,16 @@ public:
                       std::uint64_t retval, bool retval_present,
                       std::uint64_t retaddr);
 
+    // log_unsupported_api — record an import that no handler serves (pegasus
+    // counts these and the reference PMA cases assert the count is zero)
+    void log_unsupported_api(std::string_view name);
+
+    std::size_t unsupported_api_count() const noexcept { return unsupported_apis_.size(); }
+    const std::set<std::string>& unsupported_apis() const noexcept { return unsupported_apis_; }
+
+    // the api dispatch count (the max_api_count guard reads it)
+    std::size_t api_count() const noexcept { return api_count_; }
+
     // log_string — record string appearance (tokenized by spaces)
     void log_string(std::string_view s);
 
@@ -52,6 +62,8 @@ public:
 private:
     std::map<std::string, std::vector<ApiCallRecord>> syscalls_;
     std::map<std::string, std::set<std::uint64_t>> strings_;
+    std::set<std::string> unsupported_apis_;
+    std::size_t api_count_ = 0;
     std::uint64_t position_ = 0;
 };
 

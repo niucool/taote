@@ -72,6 +72,12 @@ public:
     // os main method; derivatives must implement one of their own
     virtual void run() = 0;
 
+    // the emulation-error hook: core.py's emu_start raises the unicorn error
+    // text; an OS may translate it into its own error taxonomy (the windows
+    // entry-point error records ride this, so the dll-drive path that calls
+    // emu_start directly records them too)
+    virtual void on_emulation_error(std::string_view message) { (void)message; }
+
     // releases the os-owned hooks while the uc engine is still open (the
     // C++ destruction order closes the arch's uc handle before the base
     // dtors run; the Python original leans on GC ordering)
@@ -101,9 +107,9 @@ public:
     QlFile& stdin_stream() const { return *stdin_; }
     QlFile& stdout_stream() const { return *stdout_; }
     QlFile& stderr_stream() const { return *stderr_; }
-    void set_stdin(std::shared_ptr<QlFile> stream);
-    void set_stdout(std::shared_ptr<QlFile> stream);
-    void set_stderr(std::shared_ptr<QlFile> stream);
+    virtual void set_stdin(std::shared_ptr<QlFile> stream);
+    virtual void set_stdout(std::shared_ptr<QlFile> stream);
+    virtual void set_stderr(std::shared_ptr<QlFile> stream);
 
     // os.py root — derivatives override with the OS logic; the base is false
     virtual bool root() const noexcept { return false; }

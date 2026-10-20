@@ -32,6 +32,15 @@ windows::QlOsWindows& w(Qiling& ql) { return ql.os<os::windows::QlOsWindows>(); 
 // The call sites compare the raw u64 param against the all-ones pattern.
 constexpr std::uint64_t kInvalidHandleValue = 0xffffffffffffffffull;
 
+// the handle's mapped-file body. The pre-bound stdio/registry handles are
+// registered with no obj (handle.py: the STDIN/STDOUT/STDERR and HKEY_*
+// entries are plain ids), so a handler that dereferences obj unguarded faults
+// the *host* process instead of answering an error — the WriteFile-on-stdout
+// crash the PMA corpus turned up (06-03.exe).
+QlFsMappedObject* fs_object_of(const Handle* handle) {
+    return handle == nullptr || handle->obj == nullptr ? nullptr : static_cast<QlFsMappedObject*>(handle->obj);
+}
+
 // windows.py hook_FindFirstFileA: the guest-relative time origin (Jan 1 1601)
 // in 100ns ticks — where: (10 ** 9) / 100 -> (10 ** 7)
 std::uint64_t filetime_now() {
@@ -450,7 +459,18 @@ void register_fileapi_family() {
             return 0;
         }
 
-        const auto data = static_cast<QlFsMappedObject*>(handle->obj)->read(static_cast<std::size_t>(nNumberOfBytesToRead));
+        if (hFile == STD_INPUT_HANDLE) {
+            ql.mem().write_ptr(lpNumberOfBytesRead, 0, 4);  // the console read answers EOF
+            return 1;
+        }
+
+        auto* obj = fs_object_of(handle);
+        if (obj == nullptr) {
+            win.set_last_error(ERROR_INVALID_HANDLE);
+            return 0;
+        }
+
+        const auto data = obj->read(static_cast<std::size_t>(nNumberOfBytesToRead));
 
         ql.mem().write(lpBuffer, data);
         ql.mem().write_ptr(lpNumberOfBytesRead, static_cast<std::int64_t>(data.size()), 4);
@@ -483,11 +503,23 @@ void register_fileapi_family() {
 
         const auto data = ql.mem().read(lpBuffer, static_cast<std::size_t>(nNumberOfBytesToWrite));
 
+        // the console handles answer through the os streams (the handle object
+        // is only a cache of the stream, never the authority)
         if (hFile == STD_OUTPUT_HANDLE || hFile == STD_ERROR_HANDLE) {
+            auto& stream = hFile == STD_ERROR_HANDLE ? win.stderr_stream() : win.stdout_stream();
+            stream.write(data);
             win.stats().log_string(std::string(data.begin(), data.end()));
+            ql.mem().write_ptr(lpNumberOfBytesWritten, static_cast<std::int64_t>(data.size()), 4);
+            return 1;
         }
 
-        const auto written = static_cast<QlFsMappedObject*>(handle->obj)->write(data);
+        auto* obj = fs_object_of(handle);
+        if (obj == nullptr) {
+            win.set_last_error(ERROR_INVALID_HANDLE);
+            return 0;
+        }
+
+        const auto written = obj->write(data);
         ql.mem().write_ptr(lpNumberOfBytesWritten, static_cast<std::int64_t>(written), 4);
 
         return 1;
@@ -825,8 +857,14 @@ void register_fileapi_family() {
             return static_cast<std::uint64_t>(-1);  // INVALID_FILE_SIZE
         }
 
+        auto* obj = fs_object_of(handle);
+        if (obj == nullptr) {
+            w(ql).set_last_error(ERROR_INVALID_HANDLE);
+            return static_cast<std::uint64_t>(-1);  // INVALID_FILE_SIZE
+        }
+
         try {
-            return std::filesystem::file_size(static_cast<QlFsMappedObject*>(handle->obj)->name());
+            return std::filesystem::file_size(obj->name());
         } catch (...) {
             w(ql).set_last_error(ERROR_INVALID_HANDLE);
             return static_cast<std::uint64_t>(-1);  // INVALID_FILE_SIZE

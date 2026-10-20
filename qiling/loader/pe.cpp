@@ -35,6 +35,7 @@ std::uint64_t QlLoaderPE::load_parsed(std::unique_ptr<LIEF::PE::Binary> parsed, 
     auto& mem = ql_->mem();
     const std::uint64_t image_base = parsed->imagebase();
     const std::uint64_t size_of_image = parsed->virtual_size();
+    last_image_size_ = size_of_image;
     const std::uint64_t entry_rva = parsed->entrypoint() - image_base;
 
     // loader/pe.py load: if the default base address is taken, use the one
@@ -597,6 +598,7 @@ void QlLoaderPE::run() {
     } else {
         // the PE image path
         pe_image_address_ = load_image(ql_->path(), ql_->targetname());
+        pe_image_size_ = last_image_size_;
 
         if (is_driver_) {
             init_driver_object();

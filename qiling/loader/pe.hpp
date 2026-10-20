@@ -92,6 +92,11 @@ public:
     // loader/pe.py: the main image base (pe_image_address)
     std::uint64_t pe_image_address() const noexcept { return pe_image_address_; }
 
+    // the main image's mapped extent (the address-space range the dispatcher
+    // must not treat as an import slot: a dll target's own exports are keyed
+    // into import_symbols_ by load_dll just like a real import)
+    std::uint64_t pe_image_size() const noexcept { return pe_image_size_; }
+
     // loader/pe.py: the accumulated mapped dll size (the dll_size walk in
     // load_dll; the GetSystemInfo upper-bound rider)
     std::uint64_t dll_size() const noexcept { return dll_size_; }
@@ -232,6 +237,8 @@ private:
     std::map<std::uint64_t, std::vector<RuntimeFunction>> function_tables_;
     std::map<std::uint64_t, std::uint64_t> function_table_lookup_;
     std::uint64_t pe_image_address_ = 0;
+    std::uint64_t pe_image_size_ = 0;
+    std::uint64_t last_image_size_ = 0;
     std::map<std::uint64_t, ImportSymbol> import_symbols_;
     std::map<std::uint64_t, ExportSymbol> export_symbols_;
     std::map<std::string, ImportTable> import_address_table_;

@@ -36,7 +36,9 @@ namespace {
 struct PmaCase {
     const char* name;
     const char* sample;
-    std::vector<const char*> expected_apis;  // the reference list (dll-qualified)
+    std::vector<const char*> expected_apis;       // the reference list (dll-qualified)
+    std::vector<const char*> allowed_errors;      // the reference tolerated entry-point errors
+    std::vector<const char*> argv;                // the reference command line (empty = default)
 };
 
 // The curated 12 reference cases, in ../pegasus/tests/test_pma_samples.cpp
@@ -44,29 +46,30 @@ struct PmaCase {
 const std::vector<PmaCase>& curated_cases() {
     static const std::vector<PmaCase> kCases = {
         {"pma-01-02-exe", "Practical Malware Analysis Lab 01-02.exe_",
-         {"KERNEL32.GetProcAddress", "WININET.InternetOpenUrlA"}},
+         {"KERNEL32.GetProcAddress", "WININET.InternetOpenUrlA"}, {"max_api_count"}, {}},
         {"pma-03-02-dll", "Practical Malware Analysis Lab 03-02.dll_",
-         {"ADVAPI32.OpenSCManagerA", "KERNEL32.GetModuleFileNameA"}},
+         {"ADVAPI32.OpenSCManagerA", "KERNEL32.GetModuleFileNameA"}, {"max_api_count"}, {}},
         {"pma-03-04-in", "Practical Malware Analysis Lab 03-04.exe_",
-         {"ADVAPI32.ChangeServiceConfigA", "KERNEL32.CopyFileA", "ADVAPI32.RegSetValueExA"}},
+         {"ADVAPI32.ChangeServiceConfigA", "KERNEL32.CopyFileA", "ADVAPI32.RegSetValueExA"}, {}, {}},
         {"pma-05-01-dll", "Practical Malware Analysis Lab 05-01.dll_",
-         {"KERNEL32.CreateThread", "ADVAPI32.RegSetValueExA"}},
+         {"KERNEL32.CreateThread", "ADVAPI32.RegSetValueExA"}, {"max_api_count", "invalid_read"}, {}},
         {"pma-06-03-exe", "Practical Malware Analysis Lab 06-03.exe_",
          {"WININET.InternetGetConnectedState", "WININET.InternetOpenUrlA", "KERNEL32.WriteFile",
-          "KERNEL32.ExitProcess"}},
-        {"pma-10-03-sys", "Practical Malware Analysis Lab 10-03.sys_", {"ntoskrnl.IoCreateDevice"}},
+          "KERNEL32.ExitProcess"}, {}, {}},
+        {"pma-10-03-sys", "Practical Malware Analysis Lab 10-03.sys_",
+         {"ntoskrnl.IoCreateDevice", "ntoskrnl.IoDeleteDevice"}, {}, {}},
         {"pma-11-02-dll", "Practical Malware Analysis Lab 11-02.dll_",
-         {"KERNEL32.CreateToolhelp32Snapshot", "KERNEL32.VirtualProtect", "ADVAPI32.RegSetValueExA"}},
+         {"KERNEL32.CreateToolhelp32Snapshot", "KERNEL32.VirtualProtect", "ADVAPI32.RegSetValueExA"}, {}, {}},
         {"pma-12-02-exe", "Practical Malware Analysis Lab 12-02.exe_",
-         {"KERNEL32.CreateProcessA", "KERNEL32.ResumeThread", "ntdll.NtUnmapViewOfSection"}},
+         {"KERNEL32.CreateProcessA", "KERNEL32.ResumeThread", "ntdll.NtUnmapViewOfSection"}, {"invalid_fetch"}, {}},
         {"pma-12-04-exe", "Practical Malware Analysis Lab 12-04.exe_",
-         {"KERNEL32.CreateRemoteThread", "KERNEL32.WinExec", "sfc_os.SfcTerminateWatcherThread"}},
+         {"KERNEL32.CreateRemoteThread", "KERNEL32.WinExec", "sfc_os.SfcTerminateWatcherThread"}, {}, {}},
         {"pma-14-01-exe", "Practical Malware Analysis Lab 14-01.exe_",
-         {"ADVAPI32.GetCurrentHwProfileA", "urlmon.URLDownloadToCacheFileA"}},
+         {"ADVAPI32.GetCurrentHwProfileA", "urlmon.URLDownloadToCacheFileA"}, {}, {}},
         {"pma-16-03-exe", "Practical Malware Analysis Lab 16-03.exe_",
-         {"KERNEL32.GetVersionExA", "KERNEL32.ExitProcess"}},
+         {"KERNEL32.GetVersionExA", "KERNEL32.ExitProcess"}, {}, {}},
         {"pma-21-01-exe", "Practical Malware Analysis Lab 21-01.exe_",
-         {"KERNEL32.GetTickCount", "KERNEL32.EncodePointer"}},
+         {"KERNEL32.GetTickCount", "KERNEL32.EncodePointer"}, {}, {}},
     };
     return kCases;
 }
@@ -104,6 +107,15 @@ std::string evaluate(const PmaCase& tc) {
     }
     SampleOptions opts;
     opts.sample_path = sample;
+    // the reference harness defaults (pma_harness.h build_case_config)
+    opts.timeout = 6;
+    opts.max_api_count = 600;
+    // the hang guard: a deterministic instruction budget rather than the wall
+    // clock (the reference's 6 s timeout is host-speed dependent)
+    opts.count = 40000000;
+    for (const auto* a : tc.argv) {
+        opts.argv.push_back(a);
+    }
     const auto out = run_pe_sample(sample.filename().string(), opts);
 
     std::set<std::string> observed;
@@ -117,8 +129,24 @@ std::string evaluate(const PmaCase& tc) {
             missing += std::string(" ") + api;
         }
     }
-    if (!out.error.empty()) {
-        return "error '" + out.error + "'" + (missing.empty() ? "" : "; missing apis" + missing);
+    std::string unexpected;
+    for (const auto& type : out.error_types) {
+        bool allowed = false;
+        for (const auto* a : tc.allowed_errors) {
+            if (type == a) {
+                allowed = true;
+            }
+        }
+        if (!allowed) {
+            unexpected += " " + type;
+        }
+    }
+    if (!unexpected.empty()) {
+        return "unexpected entry-point errors" + unexpected + (out.error.empty() ? "" : " (" + out.error + ")") +
+               (missing.empty() ? "" : "; missing apis" + missing);
+    }
+    if (out.unsupported != 0) {
+        return std::to_string(out.unsupported) + " unsupported apis" + (missing.empty() ? "" : "; missing apis" + missing);
     }
     if (!missing.empty()) {
         return "missing apis" + missing;
@@ -144,6 +172,35 @@ TEST(PmaCompat, OneCase) {
     }
     ASSERT_NE(tc, nullptr) << "unknown case " << name;
     EXPECT_EQ(evaluate(*tc), "") << "case " << name;
+}
+
+// The sweep driver: run any corpus sample by path, print the outcome as one
+// line. Used by the corpus sweeps (TAOTE_PMA_SAMPLE=<path>), and by hand.
+TEST(PmaCompat, ArbitrarySample) {
+    const char* path = std::getenv("TAOTE_PMA_SAMPLE");
+    if (path == nullptr || *path == '\0') {
+        GTEST_SKIP() << "sweep driver: set TAOTE_PMA_SAMPLE to a sample path";
+    }
+    const fs::path sample = path;
+    ASSERT_TRUE(fs::exists(sample)) << sample.string();
+
+    // the sweep metric is the raw one (no api/instruction budget, like the
+    // pre-reference-defaults measurement): a sample is "ok" when it runs to
+    // its own exit without an emulation error
+    SampleOptions opts;
+    opts.sample_path = sample;
+    // a deterministic guard instead of the wall clock: the sweep metric is the
+    // raw one, but a sample may not run forever
+    opts.count = 50000000;
+    const auto out = run_pe_sample(sample.filename().string(), opts);
+
+    std::string types;
+    for (const auto& t : out.error_types) {
+        types += types.empty() ? t : ("," + t);
+    }
+    std::fprintf(stderr, "SWEEP %s ok=%d exit=%d apis=%zu unsup=%zu errors=[%s] %s\n", sample.filename().c_str(),
+                 static_cast<int>(out.error.empty()), out.exit_code, out.api.size(), out.unsupported, types.c_str(),
+                 out.error.c_str());
 }
 
 TEST(PmaCompat, CuratedCorpusApiExpectations) {

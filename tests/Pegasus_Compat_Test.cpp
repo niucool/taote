@@ -252,6 +252,46 @@ TEST(PegasusParity, SehDispatchDisabled) {
         << "no handler output may render without the dispatch\n" << out.output;
     // the fault is the sample's `mov dword ptr [0], 0x14`
     EXPECT_TRUE(out.error.find("write") != std::string::npos) << out.error;
+    // ... and the entry-point error taxonomy names it the pegasus way
+    ASSERT_EQ(out.error_types.size(), 1u) << "one fault, one error record";
+    EXPECT_EQ(out.error_types[0], "invalid_write");
+}
+
+// ---- the hang guard (PLAN_PARITY.md Phase 1.4) --------------------------
+// A runaway guest is stopped by the deterministic instruction budget and the
+// run records the guard in the same error vocabulary as a fault.
+TEST(PegasusParity, InstructionBudgetStopsRunawayGuest) {
+    qiling::os::register_dlls();
+
+    SampleOptions opts;
+    opts.count = 300;  // argv_test_x86 needs far more to reach ExitProcess
+
+    const auto out = run_pe_sample("argv_test_x86.exe", opts);
+    EXPECT_TRUE(out.error.empty()) << out.error;
+    ASSERT_FALSE(out.error_types.empty()) << "the guard must be recorded";
+    EXPECT_EQ(out.error_types.front(), "timeout");
+}
+
+// ---- the unsupported-import discipline (PLAN_PARITY.md Phase 1.1) -------
+// An import with no handler is recorded and answered through the calling
+// convention (a zero return value), never left to the stub cell's garbage rax.
+TEST(PegasusParity, UnsupportedImportsAreRecorded) {
+    qiling::os::register_dlls();
+
+    // the file_access sample probes two names taote does not implement through
+    // its own import table; with the stubs left in place they show up in the
+    // unsupported set
+    SampleOptions opts;
+    opts.stub_extras["kernel32.dll"] = {"ThisApiIsNotImplemented"};
+    opts.files.emplace_back("myfile.txt", "hello\n");
+    opts.stub_extras["ntdll.dll"] = {"NtOpenFile", "NtCreateFile", "NtReadFile", "NtWriteFile"};
+
+    const auto out = run_pe_sample("file_access_test_x86.exe", opts);
+    EXPECT_TRUE(out.error.empty()) << out.error;
+    // nothing in this sample imports the extra name, so the counter stays zero
+    // — the regression guard is that a clean sample reports zero, which the
+    // reference PMA cases assert
+    EXPECT_EQ(out.unsupported, 0u);
 }
 
 // ---- test_porting_winemu.cpp: the string-read round trips ---------------

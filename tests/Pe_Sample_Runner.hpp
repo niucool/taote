@@ -21,6 +21,8 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -39,6 +41,7 @@
 #include "qiling/os/memory.hpp"
 #include "qiling/os/os.hpp"
 #include "qiling/os/windows/dlls/dlls.hpp"
+#include "qiling/os/windows/windows.hpp"
 
 namespace qiling {
 namespace testing {
@@ -87,9 +90,12 @@ inline SamplePlan plan_for(const fs::path& sample) {
     }
 
     // LIEF reports the entrypoint as a VA and the export addresses as RVAs in
-    // this build (see the loader's own note) — normalize the entry to an RVA
+    // this build (see the loader's own note) — normalize the entry to an RVA.
+    // A DLL image carries the 0x80000000 flag bit in that VA, so the difference
+    // has to be masked back to 31 bits (the 01-01.dll entry reads 0x800012fa
+    // with imagebase 0x10000000: the rva is 0x12fa, not 0x700012fa)
     plan.imagebase = static_cast<std::uint64_t>(bin->imagebase());
-    plan.entry_rva = static_cast<std::uint32_t>(bin->entrypoint() - plan.imagebase);
+    plan.entry_rva = static_cast<std::uint32_t>(bin->entrypoint() - plan.imagebase) & 0x7fffffffu;
     if (bin->get_export() != nullptr) {
         for (const auto& e : bin->get_export()->entries()) {
             plan.exports_own.emplace_back(e.name(), static_cast<std::uint32_t>(e.address()));
@@ -173,6 +179,8 @@ struct SampleOutcome {
     std::vector<std::pair<std::string, std::uint64_t>> entries;  // dll entry -> return
     std::uint64_t imagebase = 0;                                 // the main image base
     std::vector<std::string> modules;                            // the loaded dll names
+    std::vector<std::string> error_types;                        // the entry-point error taxonomy
+    std::size_t unsupported = 0;                                 // imports with no handler
 
     // the call records for one api name (empty when never dispatched)
     const std::vector<std::uint64_t>& retvals(const std::string& name) const {
@@ -192,6 +200,9 @@ struct SampleOptions {
     std::vector<std::pair<std::string, std::string>> files;              // rootfs path -> content
     std::map<std::string, std::vector<std::string>> stub_extras;         // dll -> extra exports
     std::function<void(Qiling&)> configure;                             // per-run tweaks
+    std::uint64_t max_api_count = 0;                                     // the api budget guard
+    std::uint64_t timeout = 0;                                           // seconds (0 = none)
+    std::uint64_t count = 0;                                             // instruction budget (0 = none)
     std::optional<std::filesystem::path> sample_path;                                // run an out-of-tree sample (the PMA corpus)
 };
 
@@ -205,6 +216,42 @@ inline SampleOutcome run_pe_sample(const std::string& bin_name, const SampleOpti
         out.error = "missing fixture: " + sample.string();
         return out;
     }
+
+    std::unique_ptr<Qiling> ql_storage;
+    fs::path capture_path;
+    std::shared_ptr<QlFile> capture_file;
+
+    // the captured guest output + the stats record — read from whatever state
+    // the run reached, so a faulted sample still reports its API calls and its
+    // entry-point error class
+    const auto capture_stats = [&]() {
+        if (capture_file) {
+            capture_file->close();
+        }
+        if (!capture_path.empty()) {
+            std::ifstream in(capture_path, std::ios::binary);
+            out.output.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+        }
+        if (ql_storage == nullptr) {
+            return;
+        }
+        auto& qlr = *ql_storage;
+        for (const auto& err : qlr.os<qiling::os::windows::QlOsWindows>().entry_point_errors()) {
+            out.error_types.push_back(err.type);
+        }
+        const auto& stats = qlr.os().stats();
+        out.unsupported = stats.unsupported_api_count();
+        for (const auto& [name, records] : stats.syscalls()) {
+            auto& dst = out.api[name];
+            for (const auto& r : records) {
+                dst.push_back(r.retval);
+            }
+        }
+        for (const auto& [s, addrs] : stats.strings()) {
+            (void)addrs;
+            out.strings.insert(s);
+        }
+    };
 
     try {
         const auto plan = plan_for(sample);
@@ -240,16 +287,21 @@ inline SampleOutcome run_pe_sample(const std::string& bin_name, const SampleOpti
         options.rootfs = rootfs.string();
         options.ostype = QL_OS::WINDOWS;
         options.archtype = plan.is64 ? QL_ARCH::X8664 : QL_ARCH::X86;
+        options.max_api_count = opts.max_api_count;
+        options.timeout = opts.timeout;
+        options.count = opts.count;
         options.argv.push_back(exe_in_rootfs.string());
         for (const auto& a : opts.argv) {
             options.argv.push_back(a);
         }
 
-        Qiling ql(std::move(options));
+        ql_storage = std::make_unique<Qiling>(std::move(options));
+        Qiling& ql = *ql_storage;
+        capture_path = rootfs / "guest_stdout.txt";
 
         // the guest stdout capture (the printf/puts renders land here)
-        const auto capture_path = rootfs / "guest_stdout.txt";
         auto captured = QlFile::open_mode(capture_path.string(), "w+b");
+        capture_file = captured;
         ql.os().set_stdout(captured);
 
         // the loader state the module-system checks assert on
@@ -272,7 +324,11 @@ inline SampleOutcome run_pe_sample(const std::string& bin_name, const SampleOpti
         const bool is_dll = file_name.size() > 4 &&
                             (file_name.compare(file_name.size() - 4, 4, ".dll") == 0 ||
                              file_name.compare(file_name.size() - 5, 5, ".dll_") == 0);
-        if (is_dll && !plan.exports_own.empty()) {
+        // a dll target always runs through the drive (DllMain, then every named
+        // export): the corpus dlls often carry an export table LIEF cannot
+        // enumerate in this build, and running one as a program executes the
+        // entry point with an argument set it never expects
+        if (is_dll) {
             // drive the DllMain and every export: stage a return address into
             // a mapped ret cell so each entry returns cleanly to the driver
             const auto& loader = static_cast<const loader::QlLoaderPE&>(ql.loader());
@@ -324,27 +380,13 @@ inline SampleOutcome run_pe_sample(const std::string& bin_name, const SampleOpti
             out.exit_code = ql.os().exit_code();
         }
 
-        // the captured guest output + the stats record
-        captured->close();
-        {
-            std::ifstream in(capture_path, std::ios::binary);
-            out.output.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
-        }
-        const auto& stats = ql.os().stats();
-        for (const auto& [name, records] : stats.syscalls()) {
-            auto& dst = out.api[name];
-            for (const auto& r : records) {
-                dst.push_back(r.retval);
-            }
-        }
-        for (const auto& [s, addrs] : stats.strings()) {
-            (void)addrs;
-            out.strings.insert(s);
-        }
+        capture_stats();
     } catch (const std::exception& e) {
         out.error = e.what();
+        capture_stats();
     } catch (...) {
         out.error = "unknown exception";
+        capture_stats();
     }
     return out;
 }

@@ -29,6 +29,11 @@ Qiling::Qiling(const QilingOptions& options) {
     stop_options_ = options.stop;
     verbose_ = options.verbose;
     driver_loadbase_ = options.driver_loadbase;
+    // pegasus cfg.timeout is in seconds; unicorn takes microseconds
+    timeout_ = options.timeout == 0 ? 0 : options.timeout * 1000000ull;
+    count_ = options.count;
+    max_api_count_ = options.max_api_count;
+    unsupported_api_policy_ = options.unsupported_api_policy;
 
     // ---- argv setup (core.py) ----
     if (!options.argv.empty()) {
@@ -206,8 +211,15 @@ void Qiling::run(std::optional<std::uint64_t> begin, std::optional<std::uint64_t
     entry_point_set_ = begin.has_value();
     exit_point_ = end.value_or(0);
     exit_point_set_ = end.has_value();
-    timeout_ = timeout;
-    count_ = count;
+    // the emulation guards are only overridden when the caller passes one: a
+    // bare run() keeps the QilingOptions budget (timeout_/count_ seeded by the
+    // constructor), otherwise every run would reset the hang guard to none
+    if (timeout != 0) {
+        timeout_ = timeout;
+    }
+    if (count != 0) {
+        count_ = count;
+    }
 
     // debugger selection degrades until the debugging slice (core.py selects
     // and runs a debugger when one is configured)
@@ -237,7 +249,11 @@ void Qiling::emu_start(std::uint64_t begin, std::uint64_t end, std::uint64_t tim
     uc_engine& u = arch().uc();
     const uc_err err = uc_emu_start(&u, begin, end, timeout, count);
     if (err != UC_ERR_OK) {
-        throw QlErrorBase(std::string("emulation error: ") + uc_strerror(err));
+        const std::string message = std::string("emulation error: ") + uc_strerror(err);
+        if (os_) {
+            os_->on_emulation_error(message);
+        }
+        throw QlErrorBase(message);
     }
 
     state_ = QL_STATE::STOPPED;

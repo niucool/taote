@@ -17,6 +17,7 @@
 #include "qiling/os/windows/thread.hpp"
 #include "qiling/os/windows/seh.hpp"
 
+#include <string>
 #include <vector>
 
 namespace qiling {
@@ -31,6 +32,13 @@ inline constexpr std::uint64_t FS_SEGMENT_ADDR = 0x6000;
 inline constexpr std::uint64_t FS_SEGMENT_SIZE = 0x6000;
 inline constexpr std::uint64_t GS_SEGMENT_ADDR = 0x6000000;
 inline constexpr std::uint64_t GS_SEGMENT_SIZE = (20 << 20);  // 20 MB
+
+// the entry-point error taxonomy (pegasus winemu.cpp error["error"]): the
+// types the reference PMA cases assert against
+struct EntryPointError {
+    std::string type;     // invalid_fetch / invalid_write / max_api_count / ...
+    std::string message;  // the human text (the emulation error line)
+};
 
 class QlOsWindows final : public QlOs {
 public:
@@ -54,8 +62,35 @@ public:
     // import address
     void hook_winapi(std::uint64_t address, std::uint32_t size);
 
+    // the entry-point error records: what ended the run, in pegasus's
+    // vocabulary, so a harness can assert the tolerated classes
+    const std::vector<EntryPointError>& entry_point_errors() const noexcept {
+        return entry_point_errors_;
+    }
+    void record_entry_point_error(std::string type, std::string message);
+
+    // the emulation-error taxonomy hook (QlOs::on_emulation_error): classify
+    // the unicorn failure text into the pegasus entry-point error vocabulary
+    void on_emulation_error(std::string_view message) override;
+    // a dispatched fault (the SEH retarget) consumes its error record: the
+    // dispatched faults are not what ended the run
+    void drop_last_entry_point_error() {
+        if (!entry_point_errors_.empty()) {
+            entry_point_errors_.pop_back();
+        }
+    }
+    std::size_t instruction_count() const noexcept { return instructions_; }
+    bool instruction_budget_hit() const noexcept { return instruction_budget_hit_; }
+
     // windows.py fcall_select - the per-cc fcall (32-bit may mix STDCALL and
     // CDECL; 64-bit is always MS64)
+    // the stdio setters rebind the handle objects too (the pre-bound STD*
+    // handles carry the QlFile pointer; a bare reassignment would leave them
+    // dangling and the next WriteFile would call through freed memory)
+    void set_stdin(std::shared_ptr<QlFile> stream) override;
+    void set_stdout(std::shared_ptr<QlFile> stream) override;
+    void set_stderr(std::shared_ptr<QlFile> stream) override;
+
     QlFunctionCall& fcall_select(WinCc cc);
 
     // windows.py `ql.os.fcall = ql.os.fcall_select(cc)`: the per-call-site
@@ -184,7 +219,10 @@ private:
     std::uint64_t seh_fault_addr_ = 0;      // the repeat-guard key (fault address)
     int seh_repeat_count_ = 0;
     bool seh_dispatch_enabled_ = true;   // the set_seh_dispatch switch
-    std::uint64_t env_cell_ = 0;         // the __p___initenv cell
+    std::uint64_t env_cell_ = 0;
+    std::vector<EntryPointError> entry_point_errors_;
+    std::uint64_t instructions_ = 0;
+    bool instruction_budget_hit_ = false;         // the __p___initenv cell
     std::vector<SehFrame> seh_frames_;
 };
 

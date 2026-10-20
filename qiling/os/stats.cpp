@@ -50,6 +50,7 @@ std::vector<std::string> QlOsStats::summary() const {
 void QlOsStats::log_api_call(std::uint64_t address, std::string_view name,
                              std::uint64_t retval, bool retval_present,
                              std::uint64_t retaddr) {
+    ++api_count_;
     // stats.py: the 'hook_' prefix marks hook-installed APIs and is stripped
     std::string key{name};
     if (key.rfind("hook_", 0) == 0) {
@@ -58,6 +59,11 @@ void QlOsStats::log_api_call(std::uint64_t address, std::string_view name,
 
     syscalls_[key].push_back(ApiCallRecord{address, key, retval, retval_present, retaddr, position_});
     ++position_;
+}
+
+void QlOsStats::log_unsupported_api(std::string_view name) {
+    unsupported_apis_.insert(std::string(name));
+    ++api_count_;
 }
 
 void QlOsStats::log_string(std::string_view s) {

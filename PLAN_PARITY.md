@@ -10,9 +10,9 @@ phase closes without its tests.
 | metric | pegasus | taote today | target |
 |---|---|---|---|
 | API sample sweep (`../pegasus/tests/bins`, 101 bins) | n/a (their suite asserts dispatch only) | **97 exit 0**, 2 block in `accept`, 2 kernel `.sys` | 99+ (drivers land) |
-| PMA corpus (`~/source/capa-testfiles`, 33 samples) | 12 curated cases green (their CI), 38 with `PEGASUS_PMA_FULL=1` | **17 exit 0** (33-sample sweep), **0/12 green** (curated ctest cases) | ≥ 30 exit 0, all curated cases green |
+| PMA corpus (`~/source/capa-testfiles`, 32 PE samples) | 12 curated cases green (their CI), 38 with `PEGASUS_PMA_FULL=1` | **13 exit 0** (32-sample sweep), **0/12 green** (curated ctest cases, now with the reference guards) | ≥ 30 exit 0, all curated cases green |
 | reference-suite parity (`../pegasus/tests`, 357 cases) | 357 | **12 ported + 4 ported clusters**, rest mapped in `tests/PEGASUS_TEST_PARITY.md` | every *portable* row ported, none "deferred" |
-| taote suite | — | **530 passed / 0 failed / 3 skipped** | grows with every phase, stays 0-failed |
+| taote suite | — | **535 passed / 0 failed / 3 skipped** | grows with every phase, stays 0-failed |
 | host support | MSVC/Windows + Linux | MSVC/Windows + Linux | unchanged (regression gate) |
 
 Two supporting tools the plan needs (Phase 0):
@@ -58,6 +58,20 @@ cause class, not a per-sample bug.
 5. **The AV-exit tail (14-02.exe).** An unhandled exception should end the run
    with `STATUS_ACCESS_VIOLATION` *and* a recorded entry-point error, not a bare
    fault text.
+
+Status: **1.1 landed** — `QlOsStats::log_unsupported_api` + the unsupported
+count, `QilingOptions::max_api_count` / `unsupported_api_policy` (Continue
+answers a zero return value through the calling convention, Abort ends the
+entry point), the `EntryPointError` taxonomy (`invalid_fetch`, `invalid_read`,
+`invalid_write`, `invalid_cpu_exception`, `invalid_insn`, `unsupported_api`,
+`max_api_count`, `timeout`) recorded through `QlOs::on_emulation_error` so the
+dll-drive path records it too, and the deterministic instruction budget (a
+`count` guard that unicorn stops at exactly). It also fixed a host crash the
+corpus surfaced: `WriteFile` on a console handle dereferenced the handle's
+cached stream pointer, which `set_stdout` left dangling. Measured after: PMA
+raw sweep 13/32 (was 12; the entry/export normalization and the dll drive for
+export-less images added one), curated 0/12 — every case now reports *why*
+(missing API surface, not a harness bug).
 
 Exit: PMA ≥ 26 exit 0, curated cases green, sweep unchanged at 97.
 

@@ -257,6 +257,19 @@ void QlOsWindows::ensure_profile_state() {
     // pinned registration shape (the default begin=1/end=0 never fires)
     auto* self = this;
     hook_handle_ = ql_->hook_code([self](std::uint64_t address, std::uint32_t size) -> int {
+        // the hang guard: the trace hook already runs per instruction, so the
+        // instruction budget is free (pegasus's runaway-loop protection is the
+        // config timeout; a counted budget is deterministic instead of wall
+        // clock)
+        // unicorn's own count limit stops at exactly `count` instructions
+        // without reporting an error, so the guard trips on the boundary
+        ++self->instructions_;
+        const auto budget = self->ql_->count();
+        if (budget != 0 && self->instructions_ >= budget) {
+            self->instruction_budget_hit_ = true;
+            self->ql_->emu_stop();
+            return 1;
+        }
         self->hook_winapi(address, size);
         return 0;
     }, 0, 0xffffffffffffffffull);
@@ -302,6 +315,68 @@ std::string_view QlOsWindows::bits_section() const noexcept {
     return bits_ == 64 ? "OS64" : "OS32";
 }
 
+void QlOsWindows::record_entry_point_error(std::string type, std::string message) {
+    entry_point_errors_.push_back(EntryPointError{std::move(type), std::move(message)});
+}
+
+namespace {
+
+// the emulation-error text -> the pegasus error["error"] vocabulary the
+// reference PMA cases assert against
+std::string classify_emulation_error(const std::string& text) {
+    auto has = [&text](const char* needle) { return text.find(needle) != std::string::npos; };
+    if (has("Invalid memory fetch") || has("failed to fetch")) return "invalid_fetch";
+    if (has("Invalid memory write") || has("failed to write memory")) return "invalid_write";
+    if (has("Invalid memory read") || has("failed to read memory")) return "invalid_read";
+    if (has("Invalid memory access")) return "invalid_access";
+    if (has("Unhandled CPU exception")) return "invalid_cpu_exception";
+    if (has("Invalid instruction")) return "invalid_insn";
+    if (has("max api count")) return "max_api_count";
+    if (has("unsupported api")) return "unsupported_api";
+    return "emu_error";
+}
+
+std::string lower_ascii(std::string s) {
+    for (auto& c : s) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    return s;
+}
+
+// the calling convention an unresolved import is answered through: the CRT
+// family cleans its own frame on x86 (cdecl), everything else is stdcall, and
+// a 64-bit guest is Ms64
+WinCc default_cc_for(const std::string& name, std::size_t bits) {
+    if (bits == 64) return WinCc::Ms64;
+    const auto n = lower_ascii(name);
+    if (n.rfind("msvcrt.", 0) == 0 || n.rfind("ucrtbase", 0) == 0 || n.rfind("api-ms-win-crt", 0) == 0 ||
+        n.rfind("vcruntime", 0) == 0) {
+        return WinCc::Cdecl;
+    }
+    return WinCc::Stdcall;
+}
+
+}  // namespace
+
+void QlOsWindows::on_emulation_error(std::string_view message) {
+    record_entry_point_error(classify_emulation_error(std::string(message)), std::string(message));
+}
+
+void QlOsWindows::set_stdin(std::shared_ptr<QlFile> stream) {
+    QlOs::set_stdin(std::move(stream));
+    if (auto* h = handle_manager_->get(QL_STD_INPUT_HANDLE)) h->obj = &stdin_stream();
+}
+
+void QlOsWindows::set_stdout(std::shared_ptr<QlFile> stream) {
+    QlOs::set_stdout(std::move(stream));
+    if (auto* h = handle_manager_->get(QL_STD_OUTPUT_HANDLE)) h->obj = &stdout_stream();
+}
+
+void QlOsWindows::set_stderr(std::shared_ptr<QlFile> stream) {
+    QlOs::set_stderr(std::move(stream));
+    if (auto* h = handle_manager_->get(QL_STD_ERROR_HANDLE)) h->obj = &stderr_stream();
+}
+
 QlFunctionCall& QlOsWindows::fcall_select(WinCc cc) {
     return *fcall_table_.at(cc);
 }
@@ -345,14 +420,46 @@ void QlOsWindows::hook_winapi(std::uint64_t address, std::uint32_t size) {
     // export address to the api identity; the resolved handler comes from
     // the ApiRegistry (the C++ static registration replacing the getattr
     // dispatch)
-    const auto* imported = static_cast<const loader::QlLoaderPE&>(ql_->loader()).import_symbols_at(address);
+    const auto& pe_loader = static_cast<const loader::QlLoaderPE&>(ql_->loader());
+
+    const auto* imported = pe_loader.import_symbols_at(address);
     if (imported == nullptr) {
         return;
     }
+    // the loader keys import_symbols_ by every loaded image's exports, so the
+    // main image's own exports land in it too: a dll calling its own export is
+    // not an import (answering it as one hijacks the call). Match the owning
+    // module name instead of an address range — the x64 profiles map the
+    // synthesized stub dlls at the image base itself
+    if (lower_ascii(imported->dll) == lower_ascii(ql_->targetname())) {
+        return;
+    }
+
     const auto* api = ApiRegistry::instance().find(imported->name);
+
+    // the max_api_count guard (pegasus cfg.max_api_count): a dispatch beyond
+    // the budget ends the entry point instead of letting a runaway sample eat
+    // the whole analysis
+    const auto budget = ql_->max_api_count();
+    if (budget != 0 && stats().api_count() >= budget) {
+        record_entry_point_error("max_api_count",
+                                 "max api count reached (" + std::to_string(budget) + ")");
+        throw QlErrorBase("max api count reached (" + std::to_string(budget) + ")");
+    }
+
     if (api == nullptr) {
-        // windows.py: not implemented (a warning; debug_stop raises with the
-        // QlErrorSyscallNotFound slice)
+        // the unsupported-import discipline: answer a zero return value through
+        // the calling convention so the caller's frame stays balanced (the stub
+        // export cell would answer whatever rax held, which is how an
+        // unimplemented import turns into a stale-pointer store), and record
+        // the name so the analysis surface can rank the gap
+        stats().log_unsupported_api(imported->name);
+        if (ql_->unsupported_api_policy() == QilingOptions::UnsupportedApiPolicy::Abort) {
+            record_entry_point_error("unsupported_api", "unsupported api: " + imported->name);
+            throw QlErrorBase("unsupported api: " + imported->name);
+        }
+        set_fcall_ptr(fcall_select(default_cc_for(imported->name, bits_)));
+        fcall_->return_value(0, 0);
         return;
     }
 
@@ -409,14 +516,22 @@ void QlOsWindows::run() {
         try {
             ql_->emu_start(begin, exit_point, ql_->timeout(), ql_->count());
             break;
-        } catch (const QlErrorBase&) {
+        } catch (const QlErrorBase& e) {
             if (seh_retarget_ == 0) {
                 emu_error();
                 throw;
             }
+            drop_last_entry_point_error();
             begin = seh_retarget_;
             seh_retarget_ = 0;
         }
+    }
+
+    // the instruction budget ended the run without an emulation error: record
+    // the guard in the same vocabulary (the reference PMA cases tolerate it)
+    if (instruction_budget_hit_) {
+        record_entry_point_error("timeout", "instruction budget reached (" +
+                                                std::to_string(ql_->count()) + ")");
     }
 
     // windows.py run tail: persist the registry diff + the summary lines
