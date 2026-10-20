@@ -286,7 +286,17 @@ std::string QlOsPath::host_to_virtual_path(std::string_view hostpath) const {
     split_virtual(cwd_, anchor, body);
     (void)body;
 
-    return anchor + rel.generic_string();
+    // upstream rides ntpath (`self._cwd_anchor / relative_path`), so the
+    // virtual path uses backslashes; generic_string() would hand the guest a
+    // mixed C:\Windows/System32/x.dll that no Windows-shaped parse finds
+    // (PMA 11-01's strrchr('\\') then failed and it wrote through NULL)
+    std::string body_virtual = rel.generic_string();
+    for (auto& ch : body_virtual) {
+        if (ch == '/') {
+            ch = '\\';
+        }
+    }
+    return anchor + body_virtual;
 }
 
 bool QlOsPath::is_virtual_abspath(std::string_view virtpath) const {

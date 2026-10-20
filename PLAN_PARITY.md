@@ -176,8 +176,8 @@ PMA differential baseline (32 PE samples, measured this pass):
 | --- | --- |
 | match | **12** (`01-02.exe_`, `03-03.exe_`, `03-04.exe_`, `10-03.exe_`, `12-01.exe_`, `12-02.exe_`, `16-01.exe_`, `16-02.exe_`, `18-03.exe_`, `19-02.exe_`, `20-02.exe_`, `21-01.exe_`) |
 | environment | 0 |
-| reference_limit | 12 (`01-01.exe_`, `01-04.exe_`, `06-03.exe_`, `11-02.dll_`, `11-03.dll_`, `11-03.exe_`, `12-01.dll_`, `12-03.exe_`, `12-04.exe_`, `14-01.exe_`, `17-03.exe_`, `18-01.exe_`) |
-| diverged | 8 |
+| reference_limit | 13 (`01-01.exe_`, `01-04.exe_`, `06-03.exe_`, `11-02.dll_`, `11-03.dll_`, `11-03.exe_`, `11-01.exe_`, `12-01.dll_`, `12-03.exe_`, `12-04.exe_`, `14-01.exe_`, `17-03.exe_`, `18-01.exe_`) |
+| diverged | 7 |
 
 Measured after the unsupported-import frame fix below (raw taote exit-0 **19/32**,
 was 13/32). Measured after the two differ fixes below (the signed/unsigned return-value fold
@@ -329,6 +329,22 @@ diverges at call #45 and now ends on `invalid_read`, so the change moved the gue
 further along without reaching the reference's trace. Recorded as the next unit
 with the corpus measurement it needs (the field is loader-level, so it must be
 scored over all 32 samples, not one).
+
+### `host_to_virtual_path` emits Windows separators
+
+`11-01.exe_` was the last sample with a comparable reference run that still
+diverged, and the mem-watch over its frame showed a single upstream cause: 750
+writes into the `GetModuleFileNameA` buffer identical on both sides, then
+`0x401460` (a `strrchr`-shaped `repne scasb` for `'\\'`) answered `0xffffceae`
+(a pointer to the last separator) on the reference and **0** on taote, so taote
+wrote through NULL and faulted 46 dispatches later. The buffer was mixed:
+`QlOsPath::host_to_virtual_path` returned `anchor + rel.generic_string()`, i.e.
+`C:\Windows/System32/...` - the anchor's backslash plus forward slashes -
+because `generic_string()` is the host-flavoured form. Upstream rides
+`ntpath`/`Path`, so the virtual path is all backslashes. The separator fold now
+matches, `11-01.exe_` runs **51 calls to exit 0** (the reference reaches 46 and
+never calls the handler at all), and the corpus is **12 match / 0 environment /
+13 reference_limit / 7 diverged** with raw taote exit-0 **21/32**.
 
 ### The reference stopped before taote did
 
