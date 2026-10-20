@@ -65,6 +65,7 @@ int main(int argc, char** argv) {
 
     const std::string sample = argv[1];
     std::string out_path;
+    std::string dump_imports;
     qiling::testing::SampleOptions opts;
     opts.count = 0;
     opts.timeout = 0;
@@ -82,6 +83,8 @@ int main(int argc, char** argv) {
             opts.timeout = parse_u64(argv[++i]);
         } else if (arg == "--max-api-count" && i + 1 < argc) {
             opts.max_api_count = parse_u64(argv[++i]);
+        } else if (arg == "--dump-imports" && i + 1 < argc) {
+            dump_imports = argv[++i];
         } else if (arg == "--out" && i + 1 < argc) {
             out_path = argv[++i];
         } else {
@@ -93,6 +96,18 @@ int main(int argc, char** argv) {
     // the dll handler surface is registered once per process (the tests do this
     // in their fixture; a standalone tool has to do it itself)
     qiling::os::register_dlls();
+
+    // the resolved import stubs, for diagnosing "the guest called the wrong API"
+    // (stub address -> export name, as the loader built them)
+    if (!dump_imports.empty()) {
+        opts.configure = [&dump_imports](qiling::Qiling& ql) {
+            std::ofstream out(dump_imports);
+            const auto& loader = static_cast<const qiling::loader::QlLoaderPE&>(ql.loader());
+            for (const auto& [addr, entry] : loader.import_symbols()) {
+                out << std::hex << addr << " " << entry.name << "\n";
+            }
+        };
+    }
 
     opts.sample_path = std::filesystem::path(sample);
     const auto outcome = qiling::testing::run_pe_sample(std::filesystem::path(sample).filename().string(), opts);

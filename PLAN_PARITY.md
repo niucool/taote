@@ -236,6 +236,18 @@ the CRT's allocation wrapper genuinely calls a different API on each side (so
 the divergence is upstream, in an earlier return value), or taote's IAT write for
 this import lands on a different slot.
 
+**Dumped, and the answer is "upstream"**: `tools/parity_trace --dump-imports`
+(new) prints the loader's `import_symbols` map, and for 16-03.exe_ it is correct
+and distinct - `HeapCreate 0x10001210`, `HeapAlloc 0x10001260`,
+`VirtualAlloc 0x100012a0` - while the guest's two allocation calls dispatch at
+`0x100012a0` (VirtualAlloc's own cell). So taote's IAT is right and the guest
+*genuinely called a different API*: the two emulators run different allocation
+wrappers (CRT `malloc` picks heap vs virtual allocation from a size the guest
+derives from an earlier return value). The heap cluster is therefore a *downstream
+symptom*, and the remaining diagnostic direction is the first differing return
+value before #5 (`HeapCreate` answers `83888280` on taote vs `83888680` on the
+reference), not the import table.
+
 Exit criteria (this phase): the differential clean on the named starter corpus
 (`argv_test_x86.exe`, `file_access_test_x86.exe`), gated in ctest as
 `Tools.ParityVsQilingSmoke` (skips when no reference checkout / qiling-deps
