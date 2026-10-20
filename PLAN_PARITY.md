@@ -331,6 +331,32 @@ further along without reaching the reference's trace. Recorded as the next unit
 with the corpus measurement it needs (the field is loader-level, so it must be
 scored over all 32 samples, not one).
 
+### Phase 5.1/5.2: the kernel driver path is wired (in progress)
+
+`is_driver_` was declared but **never set**, so the driver branch
+(`init_driver_object`, `init_registry_path`, the CR8/CR4 writes) was dead code and
+both `wdm_test_*.sys` swept as failures with zero dispatches. Now:
+
+- `is_driver_` comes from the image's own subsystem (`NATIVE`), like
+  `loader/pe.py`'s `pe.is_driver()`;
+- the `/GS` cookie cell (`LOAD_CONFIG.SecurityCookie`) is seeded **after** the
+  image is in memory — a driver whose cookie reads zero takes its own
+  cookie-failure path (`int 0x29`) instead of `DriverEntry`;
+- `DriverEntry` is staged the way upstream does it:
+  `call_native(entry, {PDRIVER_OBJECT, PUNICODE_STRING}, 0xdeadc0de)` with the
+  loader's driver-object and registry-path pointers, so `mov esi,[ebp+8]` gets a
+  real driver object instead of garbage;
+- CR8 is written only for 64-bit guests (the register does not exist on the
+  32-bit file, and writing it aborted the run with `unknown register: CR8`).
+
+`wdm_test_x86.sys` now dispatches `RtlInitUnicodeString` ×4 and
+`MmGetSystemRoutineAddress` ×2 before faulting on an unmapped read at the third
+routine address it resolves; `wdm_test_x64.sys` reaches its two
+`RtlInitUnicodeString` calls. Both still fail, so the sweep stands at 99/101 — this
+is the first half of Phase 5.1/5.2, recorded with the next probe: the
+`MmGetSystemRoutineAddress` answers (the driver resolves its imports at runtime,
+so the kernel export table is what it needs next).
+
 ### A return to the null page is the entry point returning
 
 `kernel32_file_find_test_api_x86.exe` was the one non-driver failure left in the

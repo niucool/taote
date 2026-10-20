@@ -130,9 +130,12 @@ public:
     std::uint64_t kuser_shared_data_address() const noexcept { return kuser_shared_data_address_; }
     std::uint64_t eprocess_address() const noexcept { return eprocess_address_; }
     std::uint64_t driver_object_address() const noexcept { return driver_object_address_; }
+    // the UNICODE_STRING init_registry_path built (DriverEntry's 2nd argument)
+    std::uint64_t registry_path_address() const noexcept { return registry_path_address_; }
     std::uint64_t regitry_path_address() const noexcept { return regitry_path_address_; }
     void init_ki_user_shared_data();
     void init_eprocess();
+    void init_security_cookie();   // the /GS cookie cell (drivers)
     void init_driver_object();
     void init_registry_path();
 
@@ -249,6 +252,7 @@ private:
     std::uint64_t kuser_shared_data_address_ = 0;
     std::uint64_t eprocess_address_ = 0;
     std::uint64_t driver_object_address_ = 0;
+    std::uint64_t registry_path_address_ = 0;
     std::uint64_t regitry_path_address_ = 0;
 };
 

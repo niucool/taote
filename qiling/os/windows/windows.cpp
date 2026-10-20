@@ -6,6 +6,7 @@
 #include <unicorn/unicorn.h>
 #include <unicorn/x86.h>
 
+#include "qiling/os/windows/api.hpp"
 #include "qiling/loader/pe.hpp"
 
 #include "qiling/arch/x86.hpp"
@@ -427,6 +428,12 @@ void QlOsWindows::load() {
     // registration — the load() body here stays for the direct callers only)
 }
 
+namespace {
+// loader/pe.py: the sentinel DriverEntry returns to when the user configured no
+// stop options ("a driver will return, so write a sentinel return value")
+constexpr std::uint64_t kDriverReturnSentinel = 0xdeadc0deULL;
+}  // namespace
+
 int QlOsWindows::socket_wait_budget_ms() const noexcept {
     const auto seconds = static_cast<long long>(ql_->timeout());
     if (seconds > 0) {
@@ -539,6 +546,20 @@ void QlOsWindows::run() {
     // loop restarts at the staged target (the frame handler, the filter, the
     // __except block, or the CONTEXT resume pc). A fault with no retarget
     // is the ordinary failure path
+    // loader/pe.py run(): a driver's entry is DriverEntry(PDRIVER_OBJECT,
+    // PUNICODE_STRING), so the frame is staged with the two pointers the
+    // loader built and a sentinel return address - without it `esi` is
+    // whatever the entry's caller left there and the first
+    // `lea edi,[esi+0x38]` writes through garbage
+    if (const auto& pe_loader = static_cast<const loader::QlLoaderPE&>(ql_->loader());
+        pe_loader.is_driver()) {
+        const std::vector<std::pair<int, std::uint64_t>> args = {
+            {qiling::os::api::LPVOID_, pe_loader.driver_object_address()},
+            {qiling::os::api::LPVOID_, pe_loader.registry_path_address()},
+        };
+        fcall().call_native(entry_point, args, kDriverReturnSentinel);
+    }
+
     std::uint64_t begin = entry_point;
     while (true) {
         try {

@@ -632,6 +632,17 @@ void QlLoaderPE::run() {
         init_ldr_data();
     } else {
         // the PE image path
+        // loader/pe.py run(): self.is_driver = pe.is_driver() - the image
+        // subsystem (NATIVE) decides, so a .sys is never loaded as if it were
+        // a user process (its entry takes a DRIVER_OBJECT, and the TEB/PEB
+        // walk does not apply)
+        {
+            const auto parsed = LIEF::PE::Parser::parse(ql_->path());
+            is_driver_ = parsed != nullptr &&
+                         parsed->optional_header().subsystem() ==
+                             LIEF::PE::OptionalHeader::SUBSYSTEM::NATIVE;
+        }
+
         pe_image_address_ = load_image(ql_->path(), ql_->targetname());
         pe_image_size_ = last_image_size_;
 
@@ -640,13 +651,24 @@ void QlLoaderPE::run() {
             init_registry_path();
             init_eprocess();
 
-            // set IRQ Level in CR8 to PASSIVE_LEVEL  (verbatim)
-            ql_->arch().regs().write("CR8", 0);
+            // set IRQ Level in CR8 to PASSIVE_LEVEL (verbatim; CR8 only
+            // exists on the 64-bit register file, so a 32-bit driver run
+            // skips it rather than failing on an unknown register)
+            if (bits == 64) {
+                ql_->arch().regs().write("CR8", 0);
+            }
 
             // setup CR4, enabling: DE, PSE, PAE, MCE, PGE, OSFXSR and
             // OSXMMEXCPT. some drivers may check this at initialized
             // (verbatim)
             ql_->arch().regs().write("CR4", 0b0000011011111000);
+
+            // loader/pe.py init_security_cookie: the /GS cookie cell (the
+            // LOAD_CONFIG SecurityCookie) is written *after* the image is in
+            // memory, with a random value that keeps the top 16 bits clear; a
+            // driver whose cookie reads zero takes its own cookie-failure path
+            // (`int 0x29`) instead of DriverEntry (PMA/sweep wdm_test_*.sys)
+            init_security_cookie();
         } else {
             // loader/pe.py: initialize thread information block, then add
             // the image to the ldr table (verbatim)
@@ -747,6 +769,35 @@ void QlLoaderPE::init_eprocess() {
     eprocess_address_ = eproc_addr;
 }
 
+// loader/pe.py init_security_cookie: seed the direct-address cookie cell
+void QlLoaderPE::init_security_cookie() {
+    const auto parsed = LIEF::PE::Parser::parse(ql_->path());
+    if (parsed == nullptr) {
+        return;
+    }
+
+    const auto& config = parsed->load_configuration();
+    const std::uint64_t cookie_va = config->security_cookie();
+    if (cookie_va == 0) {
+        return;
+    }
+
+    // the image base comes from the parse, so a relocated image still lands
+    // the cookie at its own cell
+    const std::uint64_t cookie_rva = cookie_va - parsed->imagebase();
+
+    // a pseudo-random value with the two most significant bytes zero (the
+    // upstream comment: `rol rcx, 10h; test cx, 0ffffh`), stable per run
+    static std::uint64_t seed = 0x9e3779b97f4a7c15ULL;
+    seed ^= seed << 13;
+    seed ^= seed >> 7;
+    seed ^= seed << 17;
+    const auto bits = ql_->arch().bits();
+    const std::uint64_t cookie = seed & ((bits == 64) ? 0x0000ffffffffffffULL : 0x0000ffffULL);
+
+    ql_->mem().write_ptr(pe_image_address_ + cookie_rva, cookie, bits / 8);
+}
+
 // loader/pe.py init_driver_object: the DRIVER_OBJECT placeholder (the
 // volatile ref — the zero image)
 void QlLoaderPE::init_driver_object() {
@@ -792,6 +843,7 @@ void QlLoaderPE::init_registry_path() {
         }
     };
     put_ptr(buf_off, regpath_addr);   // FIXME: pointing to self? verbatim
+    registry_path_address_ = regpath_addr;
     ql_->mem().write(regpath_addr, std::vector<std::uint8_t>(image.begin(), image.end()));
 
     (void)put16;
