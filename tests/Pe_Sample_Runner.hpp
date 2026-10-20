@@ -180,6 +180,7 @@ struct SampleOutcome {
     std::uint64_t imagebase = 0;                                 // the main image base
     std::vector<std::string> modules;                            // the loaded dll names
     std::vector<std::string> error_types;                        // the entry-point error taxonomy
+    std::vector<ApiCallRecord> calls;                            // every dispatch, in call order
     std::size_t unsupported = 0;                                 // imports with no handler
 
     // the call records for one api name (empty when never dispatched)
@@ -249,8 +250,13 @@ inline SampleOutcome run_pe_sample(const std::string& bin_name, const SampleOpti
             auto& dst = out.api[name];
             for (const auto& r : records) {
                 dst.push_back(r.retval);
+                out.calls.push_back(r);
             }
         }
+        // the stats map is keyed by name, so restore the dispatch order the
+        // position counter recorded (the parity tool diffs sequences)
+        std::sort(out.calls.begin(), out.calls.end(),
+                  [](const ApiCallRecord& a, const ApiCallRecord& b) { return a.position < b.position; });
         for (const auto& [s, addrs] : stats.strings()) {
             (void)addrs;
             out.strings.insert(s);

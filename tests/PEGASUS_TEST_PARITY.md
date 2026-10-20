@@ -99,3 +99,14 @@ Also corrected while porting: the dll fixtures now hand the
 startup branches on the reason — without it `DllMain` was never called and the
 startup answered 0), and `MessageBoxA/W` decode their text/caption so the
 dialog content reaches the string log.
+
+## Phase 1.9 — the qiling-parity differential
+
+| surface | status |
+| --- | --- |
+| reference trace (`tools/qiling_reference_runner.py`) | ported: `stats.syscalls`/`strings`, guest stdout, exit code, unicorn error text, plus the reference's own "not implemented" warnings |
+| taote trace (`tools/parity_trace.cpp`) | ported: the same fields from `QlOsStats` + `entry_point_errors()` |
+| normalization + diff (`tools/parity_vs_qiling.py`) | ported: addresses -> `sample+0xNN`, guest paths -> `<sample>`, pointer retvals -> `ptr`, one error vocabulary for both sides |
+| starter corpus | `argv_test_x86.exe`, `file_access_test_x86.exe` — both clean (taote's extra `_initterm`/`_initterm_e`/`__acrt_iob_func` dispatches are imports the reference does not implement) |
+| ctest smoke gate | `Tools.ParityVsQilingSmoke` (`--require-match 1`; skips with 77 when the reference checkout or a qiling-deps python is absent) |
+| reference rootfs seeding | `tools/mkreg_hive.py` (minimal valid hives) + `tools/stub_dlls.py` (import-stub DLLs) — the reference cannot resolve PE imports on a Linux host without them |

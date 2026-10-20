@@ -12,7 +12,7 @@ phase closes without its tests.
 | API sample sweep (`../pegasus/tests/bins`, 101 bins) | n/a (their suite asserts dispatch only) | **97 exit 0**, 2 block in `accept`, 2 kernel `.sys` | 99+ (drivers land) |
 | PMA corpus (`~/source/capa-testfiles`, 32 PE samples) | 12 curated cases green (their CI), 38 with `PEGASUS_PMA_FULL=1` | **14 exit 0** (32-sample sweep), **1/12 green** (curated ctest cases, now with the reference guards) | ≥ 30 exit 0, all curated cases green |
 | reference-suite parity (`../pegasus/tests`, 357 cases) | 357 | **12 ported + 4 ported clusters**, rest mapped in `tests/PEGASUS_TEST_PARITY.md` | every *portable* row ported, none "deferred" |
-| taote suite | — | **537 passed / 0 failed / 3 skipped** | grows with every phase, stays 0-failed |
+| taote suite | — | **538 passed / 0 failed / 3 skipped** | grows with every phase, stays 0-failed |
 | host support | MSVC/Windows + Linux | MSVC/Windows + Linux | unchanged (regression gate) |
 
 Two supporting tools the plan needs (Phase 0):
@@ -126,10 +126,51 @@ pegasus does.
    wherever it conflicts with the reference semantics.
 3. **Then** the pegasus bar: `tests/bins` 97/101 and the PMA corpus >= 30 exit 0.
 
-Status: **in progress** — the wininet family landed as the first reference-aligned
-surface (qiling passes `InternetOpen*`/`InternetConnect*`/`HttpOpenRequest*`
-through with a `None -> 0` answer and answers 1 for the BOOLAPI family; taote
-now matches that verbatim, and only adds the URL string log on top).
+Status: **step 1 (read) + step 2 (the differ) landed.**
+
+What the reference contract turned out to be (`docs/USAGE.md`, `docs/API.md`,
+`docs/SETUP.md` are one-line pointers to docs.qiling.io, so the contract was read
+off the code and the examples):
+
+* invocation: `Qiling([path] + argv, rootfs, verbose=QL_VERBOSE.X)` then `ql.run()`
+  (`qltool run -f FILE --rootfs DIR` is the same thing from the CLI); the rootfs
+  is the only ambient input, and it must carry `Windows/registry/*` plus the
+  system DLL *images* under `Windows/System32`;
+* the observable surface: `ql.os.stats.syscalls` (name -> calls with `params`,
+  `retval`, `address`, `retaddr`, `position`, recorded by `QlOsStats.log_api_call`
+  from `QlOs.call`), `stats.strings`, the guest stdout (`ql.os.stdout`), the guest
+  exit code (`ql.os.exit_code`) and - the one place the reference has no
+  vocabulary of its own - the unicorn error text;
+* dispatch is `hook_winapi` on `pc in loader.import_symbols`: an import with no
+  handler only logs `api X (dll) is not implemented` and falls through the stub
+  cell, which is *not* a dispatch record. That single fact explains most of the
+  raw divergences, and the harness now uses it to separate "taote extends the
+  reference" from "taote disagrees with the reference".
+
+The differ: `tools/parity_vs_qiling.py` (+ `tools/qiling_reference_runner.py`,
+`tools/parity_trace.cpp`, `tools/stub_dlls.py`, `tools/mkreg_hive.py`). It seeds a
+private rootfs (hives + import-stub DLLs generated from the corpus's own import
+tables), runs both emulators with the same sample/argv/guards, normalizes
+(addresses -> `sample+0xNN`, guest paths -> `<sample>`, pointer return values ->
+`ptr`, both sides' error text -> one vocabulary), diffs dispatch sequence /
+per-call return values / stdout / exit code / error class, and prints a report
+plus a cluster list keyed by root-cause signature. A dispatch taote makes where
+the reference logged "not implemented" is reported as an extension, not a
+divergence.
+
+Exit criteria (this phase): the differential clean on the named starter corpus
+(`argv_test_x86.exe`, `file_access_test_x86.exe`), gated in ctest as
+`Tools.ParityVsQilingSmoke` (skips when no reference checkout / qiling-deps
+python is present). Both are clean today; taote's only extra dispatches are
+`_initterm`, `_initterm_e` and `__acrt_iob_func`, which the reference leaves
+unimplemented.
+
+First clusters the differ already found (the work order for the rest of the
+phase): the reference **aborts a run** with `Windows API Implementation Error`
+when one of its own handlers raises (GetProcAddress.exe, most PMA samples),
+`GetProcAddress` is dispatched by taote *outside* the guest's call in 18-01.exe
+(reference logs it from the guest's call), and taote's console/CRT startup
+dispatches more handlers than the reference for the same binary.
 
 ## Phase 2 — the qiling-surface completions the corpora need
 

@@ -31,9 +31,9 @@ if(MSVC)
     add_compile_definitions(_CRT_SECURE_NO_WARNINGS NOMINMAX)
 endif()
 
+enable_testing()
+
 add_subdirectory(qiling)
 add_subdirectory(qltool)
 add_subdirectory(tools)
-
-enable_testing()
 add_subdirectory(tests)

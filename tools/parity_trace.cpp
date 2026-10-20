@@ -1,0 +1,142 @@
+// tools/parity_trace.cpp — the taote side of the qiling-parity differential
+// (PLAN_PARITY.md Phase 1.9).
+//
+// It runs one PE through the same in-tree sample runner the tests use
+// (tests/Pe_Sample_Runner.hpp: synthesize stub dlls, real QlOsWindows path) and
+// dumps what taote observed as JSON, in the shape
+// tools/qiling_reference_runner.py emits for the reference:
+//
+//   { "emulator": "taote", "sample": ..., "image_base": ...,
+//     "apis": [ { "position": 0, "name": "GetStdHandle", "retval": ...,
+//                 "retaddr": ... } ],
+//     "stdout": "...", "strings": [...], "exit_code": ...,
+//     "error": "...", "error_types": [...] }
+//
+// tools/parity_vs_qiling.py runs both sides and diffs the normalized traces.
+//
+// usage: parity_trace <sample> [--argv A B] [--count N] [--timeout S] [--out FILE]
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <fstream>
+#include <iostream>
+#include <sstream>
+#include <string>
+#include <vector>
+
+#include "../tests/Pe_Sample_Runner.hpp"
+
+namespace {
+
+std::string json_escape(const std::string& in) {
+    std::string out;
+    out.reserve(in.size() + 8);
+    for (unsigned char c : in) {
+        switch (c) {
+            case '"': out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            default:
+                if (c < 0x20) {
+                    char buf[8];
+                    std::snprintf(buf, sizeof(buf), "\\u%04x", c);
+                    out += buf;
+                } else {
+                    out.push_back(static_cast<char>(c));
+                }
+        }
+    }
+    return out;
+}
+
+std::uint64_t parse_u64(const char* text) {
+    return static_cast<std::uint64_t>(std::strtoull(text, nullptr, 0));
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+    if (argc < 2) {
+        std::cerr << "usage: parity_trace <sample> [--argv A B] [--count N] [--timeout S] [--out FILE]\n";
+        return 2;
+    }
+
+    const std::string sample = argv[1];
+    std::string out_path;
+    qiling::testing::SampleOptions opts;
+    opts.count = 0;
+    opts.timeout = 0;
+    opts.max_api_count = 0;
+
+    for (int i = 2; i < argc; ++i) {
+        const std::string arg = argv[i];
+        if (arg == "--argv") {
+            while (i + 1 < argc && std::strncmp(argv[i + 1], "--", 2) != 0) {
+                opts.argv.emplace_back(argv[++i]);
+            }
+        } else if (arg == "--count" && i + 1 < argc) {
+            opts.count = parse_u64(argv[++i]);
+        } else if (arg == "--timeout" && i + 1 < argc) {
+            opts.timeout = parse_u64(argv[++i]);
+        } else if (arg == "--max-api-count" && i + 1 < argc) {
+            opts.max_api_count = parse_u64(argv[++i]);
+        } else if (arg == "--out" && i + 1 < argc) {
+            out_path = argv[++i];
+        } else {
+            std::cerr << "parity_trace: unknown argument " << arg << "\n";
+            return 2;
+        }
+    }
+
+    // the dll handler surface is registered once per process (the tests do this
+    // in their fixture; a standalone tool has to do it itself)
+    qiling::os::register_dlls();
+
+    opts.sample_path = std::filesystem::path(sample);
+    const auto outcome = qiling::testing::run_pe_sample(std::filesystem::path(sample).filename().string(), opts);
+
+    std::ostringstream js;
+    js << "{";
+    js << "\"emulator\":\"taote\"";
+    js << ",\"sample\":\"" << json_escape(std::filesystem::path(sample).filename().string()) << "\"";
+    js << ",\"ran\":" << (outcome.ran ? "true" : "false");
+    js << ",\"exit_code\":" << outcome.exit_code;
+    js << ",\"image_base\":" << outcome.imagebase;
+    js << ",\"unsupported\":" << outcome.unsupported;
+    js << ",\"error\":\"" << json_escape(outcome.error) << "\"";
+    js << ",\"error_types\":[";
+    for (std::size_t i = 0; i < outcome.error_types.size(); ++i) {
+        js << (i ? "," : "") << "\"" << json_escape(outcome.error_types[i]) << "\"";
+    }
+    js << "]";
+    js << ",\"apis\":[";
+    for (std::size_t i = 0; i < outcome.calls.size(); ++i) {
+        const auto& c = outcome.calls[i];
+        if (i) {
+            js << ",";
+        }
+        js << "{\"position\":" << c.position << ",\"name\":\"" << json_escape(c.name) << "\"";
+        js << ",\"retval\":" << (c.retval_present ? std::to_string(c.retval) : std::string("null"));
+        js << ",\"retaddr\":" << c.retaddr;
+        js << ",\"address\":" << c.address << "}";
+    }
+    js << "]";
+    js << ",\"stdout\":\"" << json_escape(outcome.output) << "\"";
+    js << ",\"strings\":[";
+    std::size_t i = 0;
+    for (const auto& s : outcome.strings) {
+        js << (i++ ? "," : "") << "\"" << json_escape(s) << "\"";
+    }
+    js << "]}";
+
+    const std::string text = js.str();
+    if (out_path.empty()) {
+        std::cout << text;
+    } else {
+        std::ofstream out(out_path, std::ios::binary);
+        out << text;
+    }
+    return 0;
+}
