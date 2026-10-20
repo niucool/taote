@@ -331,7 +331,15 @@ std::string_view QlOsWindows::bits_section() const noexcept {
 }
 
 void QlOsWindows::record_entry_point_error(std::string type, std::string message) {
-    entry_point_errors_.push_back(EntryPointError{std::move(type), std::move(message)});
+    // the pc the record was raised at (pegasus's error_info(addr)): the faulting
+    // instruction for an emulation error, the dispatch site for a guard
+    std::uint64_t address = 0;
+    try {
+        address = ql_->arch().regs().arch_pc();
+    } catch (const std::exception&) {
+        address = 0;
+    }
+    entry_point_errors_.push_back(EntryPointError{std::move(type), std::move(message), address});
 }
 
 namespace {

@@ -287,6 +287,12 @@ TEST(PegasusParity, SehDispatchDisabled) {
     // ... and the entry-point error taxonomy names it the pegasus way
     ASSERT_EQ(out.error_types.size(), 1u) << "one fault, one error record";
     EXPECT_EQ(out.error_types[0], "invalid_write");
+    // the record carries the guest pc it was raised at (pegasus's
+    // get_error_info(addr)), so a report can say where the sample died
+    ASSERT_EQ(out.errors.size(), 1u);
+    EXPECT_EQ(out.errors[0].type, "invalid_write");
+    EXPECT_NE(out.errors[0].address, 0u);
+    EXPECT_FALSE(out.errors[0].message.empty());
     // an unhandled access violation ends the guest with the Windows exit code
     EXPECT_EQ(out.exit_code, static_cast<int>(0xC0000005u));
 }

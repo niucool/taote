@@ -38,8 +38,10 @@ inline constexpr std::uint64_t GS_SEGMENT_SIZE = (20 << 20);  // 20 MB
 // the entry-point error taxonomy (pegasus winemu.cpp error["error"]): the
 // types the reference PMA cases assert against
 struct EntryPointError {
-    std::string type;     // invalid_fetch / invalid_write / max_api_count / ...
-    std::string message;  // the human text (the emulation error line)
+    std::string type;        // invalid_fetch / invalid_write / max_api_count / ...
+    std::string message;     // the human text (the emulation error line)
+    std::uint64_t address = 0;  // the guest pc the error was detected at (pegasus's
+                                // get_error_info(addr) field)
 };
 
 class QlOsWindows final : public QlOs {

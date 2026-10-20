@@ -989,6 +989,20 @@ the URL.
 a real run. Corpus unchanged (24/32 exit 0, differential 10/0/16/2/4); ctest 545
 cases.
 
+### Phase 3 item 3: the error taxonomy in the report
+
+An entry-point error record now carries the **guest pc** it was raised at
+(pegasus's `get_error_info(addr)` shape) alongside its type and message:
+`record_entry_point_error` reads the current pc, so a fault records the faulting
+instruction's address and a guard (`max_api_count`, `timeout`,
+`unsupported_api`, `replay_mismatch`) records its dispatch site. The trace's
+`errors` array carries `{type, message, address}` next to the existing
+`error_types`.
+
+`PegasusParity.SehDispatchDisabled` asserts the delivered record: one
+`invalid_write`, a non-zero address and a non-empty message. Corpus unchanged
+(24/32 exit 0, differential 10/0/16/2/4); ctest 545.
+
 ## Phase 4 — deliberately not ported (documented non-goals)
 
 * **JS engine** (`test_js_*`, 54 cases) — excluded by instruction; qiling hooks

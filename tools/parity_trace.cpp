@@ -339,6 +339,14 @@ int main(int argc, char** argv) {
         js << (i ? "," : "") << "\"" << json_escape(outcome.error_types[i]) << "\"";
     }
     js << "]";
+    // the taxonomy records themselves: the pegasus get_error_info(addr) shape
+    js << ",\"errors\":[";
+    for (std::size_t i = 0; i < outcome.errors.size(); ++i) {
+        const auto& e = outcome.errors[i];
+        js << (i ? "," : "") << "{\"type\":\"" << json_escape(e.type) << "\",\"message\":\""
+           << json_escape(e.message) << "\",\"address\":" << e.address << "}";
+    }
+    js << "]";
     js << ",\"apis\":[";
     for (std::size_t i = 0; i < outcome.calls.size(); ++i) {
         const auto& c = outcome.calls[i];

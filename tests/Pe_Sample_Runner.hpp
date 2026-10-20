@@ -182,6 +182,7 @@ struct SampleOutcome {
     std::uint64_t imagebase = 0;                                 // the main image base
     std::vector<std::string> modules;                            // the loaded dll names
     std::vector<std::string> error_types;                        // the entry-point error taxonomy
+    std::vector<qiling::os::windows::EntryPointError> errors;    // type + message + pc
     std::vector<ApiCallRecord> calls;                            // every dispatch, in call order
     std::map<std::string, std::vector<IndicatorEvent>> indicators;  // the behavioural indicators
     std::size_t unsupported = 0;                                 // imports with no handler
@@ -249,7 +250,8 @@ inline SampleOutcome run_pe_sample(const std::string& bin_name, const SampleOpti
             return;
         }
         auto& qlr = *ql_storage;
-        for (const auto& err : qlr.os<qiling::os::windows::QlOsWindows>().entry_point_errors()) {
+        out.errors = qlr.os<qiling::os::windows::QlOsWindows>().entry_point_errors();
+        for (const auto& err : out.errors) {
             out.error_types.push_back(err.type);
         }
         if (!out.ran) {
