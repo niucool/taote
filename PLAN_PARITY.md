@@ -44,6 +44,18 @@ cause class, not a per-sample bug.
    error taxonomy on the entry point (`unsupported_api`, `invalid_read`,
    `invalid_write`, `max_api_count`).
 2. **Dynamic-import resolution (`UC_ERR_FETCH_UNMAPPED`: 01-01.dll, 12-01 .exe/.dll, 18-03, 20-02).**
+   Status: **attempted, reverted.** A synthesised `ret` cell (the
+   `modules.functions_always_exist` sentinel) for a `GetProcAddress` miss made
+   the corpus *worse* (13 → 11 ok): the guests that check the result for NULL
+   take their error path, and the ones that call it land in the excel-page
+   `ret` whose arg-cleanup the adaptive stdcall peek then gets wrong. What the
+   diagnosis did establish: the faults split into (i) `push DWORD PTR [edi]`
+   with `edi == 1` — an internal helper called with a value where the reference
+   profile would have supplied a module base (03-02.dll, 05-01.dll, 11-02.dll,
+   17-02.dll: five samples, one shape), (ii) jumps to 0 from a NULL
+   `GetProcAddress` result (18-03, 19-02, 12-01), and (iii) `PC = 0x80000073`,
+   a key handle used as a call target (01-01.dll, 20-02.exe). Each needs its
+   own root-cause fix; none is the sentinel.
    Diagnose per sample; the likely causes are (a) `GetProcAddress` on a name the
    rootfs dll does not export — pegasus's `modules.functions_always_exist`
    answers a sentinel, (b) `LoadLibraryA` of a module absent from the rootfs,

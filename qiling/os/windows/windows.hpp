@@ -17,6 +17,7 @@
 #include "qiling/os/windows/thread.hpp"
 #include "qiling/os/windows/seh.hpp"
 
+#include <map>
 #include <string>
 #include <vector>
 
@@ -80,6 +81,7 @@ public:
         }
     }
     std::size_t instruction_count() const noexcept { return instructions_; }
+
     bool instruction_budget_hit() const noexcept { return instruction_budget_hit_; }
 
     // windows.py fcall_select - the per-cc fcall (32-bit may mix STDCALL and
