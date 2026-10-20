@@ -168,9 +168,14 @@ int main(int argc, char** argv) {
             auto out = std::make_shared<std::ofstream>(code_trace);
             // HookRet is RAII: dropping it unregisters the hook, so the handle
             // outlives the configure callback
-            code_hook = std::make_shared<qiling::HookRet>(ql.hook_code([out, code_begin, code_end](std::uint64_t address, std::uint32_t size) {
+            code_hook = std::make_shared<qiling::HookRet>(ql.hook_code([out, code_begin, code_end, &ql](
+                std::uint64_t address, std::uint32_t size) {
                 if (address >= code_begin && (code_end == 0 || address < code_end)) {
-                    *out << std::hex << address << " " << std::dec << size << "\n";
+                    // the stack pointer rides along: a stack-content divergence
+                    // between two identical instruction streams shows up here
+                    // first (the same `ret` popping different values)
+                    *out << std::hex << address << " " << std::dec << size << " "
+                         << std::hex << ql.arch().regs().arch_sp() << "\n";
                 }
                 return 0;
             }));

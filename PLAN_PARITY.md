@@ -288,9 +288,19 @@ taote pops `0x402acf` (the guest's SEH handler entry, i.e. the `Handler` field o
 its own registration record). So taote's guest stack is off by a slot by the time
 it reaches that `ret`, which means an earlier dispatch left `esp` unbalanced
 (`stdcall` cleanup vs the dispatcher's own) rather than the guest branching on a
-value. Next probe: `esp` before and after each of the last ten dispatches on both
-sides - that is a one-line comparison per call and it names the unbalancing
-handler directly.
+value.
+
+The `esp` probe ran and **corrected that hypothesis**: both `--code-trace` writers
+now print the stack pointer as a third column, and over 121 (reference) / 75
+(taote) instructions the two traces agree in *pc and sp* for all 53 shared steps,
+including the `ret` at `0x4029f9`. The two guests therefore pop from the *same*
+stack address and get different values - so it is the memory at that slot that
+differs (`0x4029fa` vs `0x402acf`), not the stack pointer. Something wrote the
+guest's SEH-handler entry (`0x402acf`) into a stack slot on taote's side that the
+reference left holding a return address, and every preceding instruction matched,
+so the write comes from a *value* the guest loaded, not from a different code
+path. Next probe: watch writes into the frame holding that slot (a mem-write hook
+over the 64 bytes around it, both sides) and compare the writer.
 
 **`none vs invalid_insn` dissected (`03-04`, `11-01`, `16-01`).** On
 `11-01.exe_` both runs are identical through call #4 (`GetVersion`, `HeapCreate`,

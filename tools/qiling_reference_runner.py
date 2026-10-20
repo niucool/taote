@@ -149,7 +149,11 @@ def main(argv=None) -> int:
 
             def _log(ql_, address, size):  # the reference passes (ql, address, size)
                 if address >= begin and (not end or address < end):
-                    sink.write("%x %d\n" % (address, size))
+                    try:
+                        sp = ql_.arch.regs.read("esp")
+                    except Exception:
+                        sp = 0
+                    sink.write("%x %d %x\n" % (address, size, sp))
                     sink.flush()
 
             ql.hook_code(_log)
