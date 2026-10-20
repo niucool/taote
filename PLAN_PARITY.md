@@ -12,7 +12,7 @@ phase closes without its tests.
 | API sample sweep (`../pegasus/tests/bins`, 101 bins) | n/a (their suite asserts dispatch only) | **97 exit 0**, 2 block in `accept`, 2 kernel `.sys` | 99+ (drivers land) |
 | PMA corpus (`~/source/capa-testfiles`, 32 PE samples) | 12 curated cases green (their CI), 38 with `PEGASUS_PMA_FULL=1` | **14 exit 0** (32-sample sweep), **1/12 green** (curated ctest cases, now with the reference guards) | ≥ 30 exit 0, all curated cases green |
 | reference-suite parity (`../pegasus/tests`, 357 cases) | 357 | **12 ported + 4 ported clusters**, rest mapped in `tests/PEGASUS_TEST_PARITY.md` | every *portable* row ported, none "deferred" |
-| taote suite | — | **539 passed / 0 failed / 3 skipped** | grows with every phase, stays 0-failed |
+| taote suite | — | **540 passed / 0 failed / 3 skipped** | grows with every phase, stays 0-failed |
 | host support | MSVC/Windows + Linux | MSVC/Windows + Linux | unchanged (regression gate) |
 
 Two supporting tools the plan needs (Phase 0):
@@ -328,6 +328,54 @@ diverges at call #45 and now ends on `invalid_read`, so the change moved the gue
 further along without reaching the reference's trace. Recorded as the next unit
 with the corpus measurement it needs (the field is loader-level, so it must be
 scored over all 32 samples, not one).
+
+### The x86 loader layouts (heap-shift unit)
+
+`PLAN_PARITY` Phase 1.9, after the TEB sentinel. `16-01.exe_` and its siblings
+(`03-04.exe_`, `11-01.exe_`) all shared one shape: 43 matching dispatches, then
+taote dispatches `UnhandledExceptionFilter` where the reference reaches
+`ExitProcess`, and taote's guest later faults on an unmapped read. The probes
+this pass added (`--mem-watch`, `--dump-heap`, `--dump-images`, all mirrored on
+the reference runner) turned that into four separate defects, each a place where
+the port used the 64-bit column of the loader's own structures on a 32-bit guest:
+
+1. **LDR entry and UNICODE_STRING sizes.** `LDR_ENTRY_SIZE` was 304 (the x64
+   value) and `UNICODE_STRING_SIZE` 16 for both word sizes. Upstream builds them
+   from `make_ldr_data_table_entry(bits)`/`make_unicode_string(bits)`, so an x86
+   guest gets 156 and 8 — and since both are *heap* allocations, taote's first
+   guest allocation landed 0x280 before the reference's. `qiling/os/windows/structs.hpp`
+   now carries a `LoaderLayout` with both columns and `loader_layout(bits)`.
+2. **The x86 TEB's PEB pointer.** It rode at 0x1c (which is EnvironmentPointer in
+   the 32-bit TEB) instead of 0x30, so a guest's `mov eax, fs:[0x30]` read
+   garbage and `mov bl, [eax+2]` (PEB.BeingDebugged) took the anti-debug branch.
+   The x86 TEB/PEB/LDR_DATA field offsets come from the layout too now.
+3. **The command line.** The port composed `targetname + args`; upstream composes
+   `ntpath.join(userprofile, 'Desktop', targetname) + ' ' + the quoted argv tail
+   + NUL`. A packed sample's argv parser splits on those spaces, so the shape
+   matters. Related: `userprofile_` was built as `systemdrive + "\Users\" + user`
+   and the profile's `systemdrive` already ends in a backslash (`C:\`), so the
+   path came out `C:\\Users\Qiling`; `ntpath.join` does not double it.
+4. **The harness's stub set.** The reference's `tools/stub_dlls.py` always seeds
+   `kernel32`/`ntdll`/`kernelbase`/`ucrtbase`/`mscoree`, and the loader asks for
+   all five on every PE run; `tests/Pe_Sample_Runner.hpp` seeded only the planned
+   imports, so `ntdll`/`kernelbase`/`ucrtbase`/`mscoree` were missing on the taote
+   side (no LDR entry, no heap allocation for it) and every later heap chunk was
+   shifted. It also skipped dlls whose imports are ordinal-only (`WS2_32` in
+   16-01), which the reference does load. Both now match the reference.
+5. **The thread return-address cell.** Upstream's thread manager allocates
+   `heap.alloc(8)` in its constructor, before the loader lays the PEB; the port
+   deferred it to `install_hook()`, which lands after, shifting the heap by 8.
+
+Measured: with the harness and loader aligned, `16-01.exe_`'s heap chunk table is
+**chunk-for-chunk identical to the reference's** (31 chunks, same sizes, same
+order) and its instruction prefix before the first control-flow divergence grows
+from **3,954 to 15,412** instructions. The corpus verdicts do not move yet
+(5 match / 1 environment / 5 reference_limit / 21 diverged, raw taote exit-0
+13/32), because `16-01` now splits later on a different cause: after
+`GetShortPathNameA` (unimplemented on both sides, so the guest's `call` lands in
+a stub cell) the reference returns to `0x401039` while taote jumps to
+`0x406f6c`, i.e. the guest's IAT slot 0x40b064 holds a different value at runtime
+than at load. That is the next unit.
 
 Scored, and it lands: over the 32-sample corpus the differential is
 **5 match / 1 environment / 3 reference_limit / 23 diverged** before and after,

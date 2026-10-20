@@ -336,6 +336,72 @@ inline constexpr std::size_t UNICODE_STRING_OFF_LENGTH = 0;
 inline constexpr std::size_t UNICODE_STRING_OFF_MAXIMUM_LENGTH = 2;
 inline constexpr std::size_t UNICODE_STRING_OFF_BUFFER = 8;
 
+// ---- the loader's own structures, both word sizes ----------------------
+//
+// Everything above is the 64-bit column. Upstream builds these from
+// make_teb/make_peb/make_ldr_data/make_ldr_data_table_entry/make_unicode_string
+// (bits), so a 32-bit guest gets smaller structures with 4-byte pointer
+// fields - and because the LDR entries and their name buffers are *heap*
+// allocations, using the 64-bit sizes on an x86 guest shifts every later heap
+// chunk (found on PMA 16-01, where taote's first guest allocation landed 0x280
+// before the reference's and a packed sample read a byte of a pointer).
+struct LoaderLayout {
+    std::size_t teb_size;
+    std::size_t peb_size;
+    std::size_t ldr_data_size;
+    std::size_t ldr_entry_size;
+    std::size_t unicode_string_size;
+    std::size_t unicode_string_off_buffer;
+    std::size_t entry_off_in_load_order_links;
+    std::size_t entry_off_in_memory_order_links;
+    std::size_t entry_off_in_initialization_order_links;
+    std::size_t entry_off_dll_base;
+    std::size_t entry_off_full_dll_name;
+    std::size_t entry_off_base_dll_name;
+    // the TEB fields the loader seeds (the x86 column puts the PEB pointer at
+    // 0x30 - fs:[0x30] is what a guest reads, and a wrong cell there makes
+    // every anti-debug PEB peek read garbage)
+    std::size_t teb_off_stack_base;
+    std::size_t teb_off_stack_limit;
+    std::size_t teb_off_teb_address;
+    std::size_t teb_off_peb_address;
+    std::size_t teb_off_last_error;
+    // the PEB fields it seeds
+    std::size_t peb_off_image_base_address;
+    std::size_t peb_off_ldr_address;
+    std::size_t peb_off_process_parameters;
+    std::size_t peb_off_process_heap;
+    std::size_t peb_off_number_of_processors;
+    // the PEB_LDR_DATA order-list heads
+    std::size_t ldr_data_off_in_load_order;
+    std::size_t ldr_data_off_in_memory_order;
+    std::size_t ldr_data_off_in_initialization_order;
+};
+
+constexpr LoaderLayout loader_layout(const int bits) {
+    if (bits == 32) {
+        return LoaderLayout{420, 1148, 48, 156, 8, 4, 0, 8, 16, 24, 36, 44,
+                            4, 8, 24, 48, 52,
+                            8, 12, 16, 24, 100,
+                            12, 20, 28};
+    }
+    return LoaderLayout{TEB_SIZE, PEB_SIZE, LDR_DATA_SIZE, LDR_ENTRY_SIZE, UNICODE_STRING_SIZE,
+                        UNICODE_STRING_OFF_BUFFER,
+                        LDR_ENTRY_OFF_IN_LOAD_ORDER_LINKS,
+                        LDR_ENTRY_OFF_IN_MEMORY_ORDER_LINKS,
+                        LDR_ENTRY_OFF_IN_INITIALIZATION_ORDER_LINKS,
+                        LDR_ENTRY_OFF_DLL_BASE,
+                        LDR_ENTRY_OFF_FULL_DLL_NAME,
+                        LDR_ENTRY_OFF_BASE_DLL_NAME,
+                        TEB_OFF_STACK_BASE, TEB_OFF_STACK_LIMIT, TEB_OFF_TEB_ADDRESS,
+                        TEB_OFF_PEB_ADDRESS, TEB_OFF_LAST_ERROR,
+                        PEB_OFF_IMAGE_BASE_ADDRESS, PEB_OFF_LDR_ADDRESS,
+                        PEB_OFF_PROCESS_PARAMETERS, PEB_OFF_PROCESS_HEAP,
+                        PEB_OFF_NUMBER_OF_PROCESSORS,
+                        LDR_DATA_OFF_IN_LOAD_ORDER, LDR_DATA_OFF_IN_MEMORY_ORDER,
+                        LDR_DATA_OFF_IN_INITIALIZATION_ORDER};
+}
+
 }  // namespace win
 }  // namespace os
 }  // namespace qiling

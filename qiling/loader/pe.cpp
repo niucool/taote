@@ -571,12 +571,29 @@ void QlLoaderPE::run() {
 
     dll_last_address_ = dll_address_;
 
-    // the command line (windows.py: cmdline + args)
+    // loader/pe.py run(): the command line is the sample's *desktop* path
+    // plus the quoted argv tail and a trailing space -
+    //   cmdline = ntpath.join(userprofile, 'Desktop', targetname)
+    //   cmdargs = ' '.join(f'"{a}"' if " " in a else a for a in argv[1:])
+    //   self.cmdline = bytes(f'{cmdline} {cmdargs}\0', "utf-8")
+    // which is what a guest parses (a packed sample's argv walk splits on the
+    // spaces, so a bare targetname takes a different branch)
     {
-        std::string cmdline = ql_->targetname();
+        std::string cmdline = ql_->os<os::windows::QlOsWindows>().userprofile() + "\\Desktop\\" +
+                              ql_->targetname();
+        cmdline += ' ';
         for (std::size_t i = 1; i < ql_->argv().size(); ++i) {
-            cmdline += ' ';
+            if (i > 1) {
+                cmdline += ' ';
+            }
+            const bool space = ql_->argv()[i].find(' ') != std::string::npos;
+            if (space) {
+                cmdline += '"';
+            }
             cmdline += ql_->argv()[i];
+            if (space) {
+                cmdline += '"';
+            }
         }
         cmdline += '\0';
         cmdline_.assign(cmdline.begin(), cmdline.end());
@@ -803,25 +820,28 @@ using namespace os::win;
 // profile stack, the self-referencing TebAddress and the PebAddress pointed
 // at the PEB that init_peb lays right after (16-aligned)
 void QlLoaderPE::init_teb() {
+    const auto layout = loader_layout(ql_->arch().bits() == 32 ? 32 : 64);
     const std::uint64_t teb_addr = structure_last_addr_;
-    const std::uint64_t peb_addr = ql_->mem().align_up(teb_addr + TEB_SIZE, 0x10);
+    const std::uint64_t peb_addr = ql_->mem().align_up(teb_addr + layout.teb_size, 0x10);
 
-    std::vector<std::uint8_t> image(TEB_SIZE, 0);
-    put_le(image, TEB_OFF_STACK_BASE, stack_address_ + stack_size_, 8);
-    put_le(image, TEB_OFF_STACK_LIMIT, stack_address_, 8);
-    put_le(image, TEB_OFF_TEB_ADDRESS, teb_addr, 8);
-    put_le(image, TEB_OFF_PEB_ADDRESS, peb_addr, 8);
+    std::vector<std::uint8_t> image(layout.teb_size, 0);
+    put_le(image, layout.teb_off_stack_base, stack_address_ + stack_size_, 8);
+    put_le(image, layout.teb_off_stack_limit, stack_address_, 8);
+    put_le(image, layout.teb_off_teb_address, teb_addr, 8);
+    put_le(image, layout.teb_off_peb_address, peb_addr, 8);
 
     // the x86 (32-bit) TEB layout: the pointer fields shrink to 4 bytes —
-    // the StackBase/StackLimit ride at 4/8 and the Self at 0x18 (the fs:0x18
-    // read the MSVC x86 CRT makes); the ExceptionList starts the end-of-chain
-    // sentinel (the SEH walkers stop on it)
+    // StackBase/StackLimit ride at 4/8, the Self at 0x18 (the fs:0x18 read the
+    // MSVC x86 CRT makes) and the PEB pointer at 0x30 (fs:[0x30], the cell
+    // every guest peeks for the anti-debug flags); the ExceptionList stays 0
+    // like the reference
     if (ql_->arch().bits() == 32) {
         put_le(image, 0, 0, 4);                                        // ExceptionList
         put_le(image, 4, stack_address_ + stack_size_, 4);             // StackBase
         put_le(image, 8, stack_address_, 4);                           // StackLimit
         put_le(image, 0x18, teb_addr, 4);                              // Self
-        put_le(image, 0x1c, peb_addr, 4);                              // ProcessEnvironmentBlock
+        put_le(image, layout.teb_off_peb_address, peb_addr, 4);        // ProcessEnvironmentBlock
+        put_le(image, layout.teb_off_last_error, 0, 4);                // LastError
     }
 
     ql_->mem().write(teb_addr, image);
@@ -837,15 +857,16 @@ void QlLoaderPE::init_teb() {
 void QlLoaderPE::init_peb() {
     auto& os_win = static_cast<os::windows::QlOsWindows&>(ql_->os());
 
+    const auto layout = loader_layout(ql_->arch().bits() == 32 ? 32 : 64);
     const std::uint64_t peb_addr = structure_last_addr_;
-    const std::uint64_t ldr_addr = ql_->mem().align_up(peb_addr + PEB_SIZE, 0x10);
+    const std::uint64_t ldr_addr = ql_->mem().align_up(peb_addr + layout.peb_size, 0x10);
 
-    std::vector<std::uint8_t> image(PEB_SIZE, 0);
-    put_le(image, PEB_OFF_IMAGE_BASE_ADDRESS, pe_image_address_, 8);
-    put_le(image, PEB_OFF_LDR_ADDRESS, ldr_addr, 8);
-    put_le(image, PEB_OFF_PROCESS_PARAMETERS, os_win.heap().alloc(0x100), 8);
-    put_le(image, PEB_OFF_PROCESS_HEAP, os_win.heap().alloc(0x100), 8);
-    put_le(image, PEB_OFF_NUMBER_OF_PROCESSORS,
+    std::vector<std::uint8_t> image(layout.peb_size, 0);
+    put_le(image, layout.peb_off_image_base_address, pe_image_address_, 8);
+    put_le(image, layout.peb_off_ldr_address, ldr_addr, 8);
+    put_le(image, layout.peb_off_process_parameters, os_win.heap().alloc(0x100), 8);
+    put_le(image, layout.peb_off_process_heap, os_win.heap().alloc(0x100), 8);
+    put_le(image, layout.peb_off_number_of_processors,
            static_cast<std::uint64_t>(ql_->profile().get_int("HARDWARE", "number_processors")), 4);
     ql_->mem().write(peb_addr, image);
 
@@ -857,12 +878,13 @@ void QlLoaderPE::init_peb() {
 // self-linked (the Flink/Blink pointing at their own list-head cells)
 void QlLoaderPE::init_ldr_data() {
     const std::uint64_t ldr_addr = structure_last_addr_;
-    const std::uint64_t nobj_addr = ql_->mem().align_up(ldr_addr + LDR_DATA_SIZE, 0x10);
+    const auto layout = loader_layout(ql_->arch().bits() == 32 ? 32 : 64);
+    const std::uint64_t nobj_addr = ql_->mem().align_up(ldr_addr + layout.ldr_data_size, 0x10);
 
-    std::vector<std::uint8_t> image(LDR_DATA_SIZE, 0);
-    for (const auto off : {LDR_DATA_OFF_IN_LOAD_ORDER,
-                           LDR_DATA_OFF_IN_MEMORY_ORDER,
-                           LDR_DATA_OFF_IN_INITIALIZATION_ORDER}) {
+    std::vector<std::uint8_t> image(layout.ldr_data_size, 0);
+    for (const auto off : {layout.ldr_data_off_in_load_order,
+                           layout.ldr_data_off_in_memory_order,
+                           layout.ldr_data_off_in_initialization_order}) {
         put_le(image, off, ldr_addr + off, 8);       // Flink
         put_le(image, off + 8, ldr_addr + off, 8);   // Blink
     }
@@ -886,7 +908,13 @@ void QlLoaderPE::add_ldr_data_table_entry(const std::string& dll_name) {
         throw QlErrorBase("image should have been added to loader.images first");
     }
 
-    const std::uint64_t entry_addr = os_win.heap().alloc(LDR_ENTRY_SIZE);
+    // the entry's size and pointer-field offsets follow the guest's word size:
+    // upstream builds it from make_ldr_data_table_entry(bits) and
+    // make_unicode_string(bits), and both structures are heap allocations, so
+    // using the 64-bit sizes on an x86 guest shifts every later heap chunk
+    const auto layout = loader_layout(ql_->arch().bits() == 32 ? 32 : 64);
+
+    const std::uint64_t entry_addr = os_win.heap().alloc(layout.ldr_entry_size);
 
     // populate_unistr: the utf-16le encode + the heap buffer with the NUL
     // tail and the Length/MaximumLength/Buffer cells
@@ -905,28 +933,28 @@ void QlLoaderPE::add_ldr_data_table_entry(const std::string& dll_name) {
         }
         ql_->mem().write(ucsbuf, bytes);
 
-        std::vector<std::uint8_t> ucs(UNICODE_STRING_SIZE, 0);
+        std::vector<std::uint8_t> ucs(layout.unicode_string_size, 0);
         put_le(ucs, UNICODE_STRING_OFF_LENGTH, ucslen, 2);
         put_le(ucs, UNICODE_STRING_OFF_MAXIMUM_LENGTH, ucslen + 2, 2);
-        put_le(ucs, UNICODE_STRING_OFF_BUFFER, ucsbuf, 8);
+        put_le(ucs, layout.unicode_string_off_buffer, ucsbuf, 8);
         ql_->mem().write(entry_base + ucs_off, ucs);
     };
 
-    std::vector<std::uint8_t> entry(LDR_ENTRY_SIZE, 0);
-    put_le(entry, LDR_ENTRY_OFF_DLL_BASE, image_rec->base, 8);
+    std::vector<std::uint8_t> entry(layout.ldr_entry_size, 0);
+    put_le(entry, layout.entry_off_dll_base, image_rec->base, 8);
     ql_->mem().write(entry_addr, entry);
 
     const std::string full_name = os_win.winsys() + "\\" + dll_name;
-    populate_unistr(entry_addr, LDR_ENTRY_OFF_FULL_DLL_NAME, full_name);
-    populate_unistr(entry_addr, LDR_ENTRY_OFF_BASE_DLL_NAME, dll_name);
+    populate_unistr(entry_addr, layout.entry_off_full_dll_name, full_name);
+    populate_unistr(entry_addr, layout.entry_off_base_dll_name, dll_name);
 
     // the three-order link offsets ride the LDR_DATA list offsets (the
     // InLoad/InMemory/InInitialization pairs map 1:1 over the entry)
     const auto entry_links = std::array{
-        std::pair{LDR_ENTRY_OFF_IN_LOAD_ORDER_LINKS, LDR_DATA_OFF_IN_LOAD_ORDER},
-        std::pair{LDR_ENTRY_OFF_IN_MEMORY_ORDER_LINKS, LDR_DATA_OFF_IN_MEMORY_ORDER},
-        std::pair{LDR_ENTRY_OFF_IN_INITIALIZATION_ORDER_LINKS,
-                  LDR_DATA_OFF_IN_INITIALIZATION_ORDER},
+        std::pair{layout.entry_off_in_load_order_links, layout.ldr_data_off_in_load_order},
+        std::pair{layout.entry_off_in_memory_order_links, layout.ldr_data_off_in_memory_order},
+        std::pair{layout.entry_off_in_initialization_order_links,
+                  layout.ldr_data_off_in_initialization_order},
     };
 
     for (const auto& [entry_off, ldr_off] : entry_links) {

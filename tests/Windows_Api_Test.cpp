@@ -2091,12 +2091,13 @@ TEST(WinApiProcessenv, GetCommandLineAWritesDoubleNulTail) {
     options.archtype = QL_ARCH::X8664;
     Qiling ql(options);
 
-    // the port's cmdline composition (the loader's concern): the basename +
-    // the trailing NUL — the handler's shape (the second NUL, the wide
+    // the port's cmdline composition (the loader's concern): upstream's
+    // ntpath.join(userprofile, 'Desktop', targetname) + ' ' + the quoted argv
+    // tail + the trailing NUL — the handler's shape (the second NUL, the wide
     // encode) is what rides under test here
     const auto& cmdline_vec = static_cast<loader::QlLoaderPE&>(ql.loader()).cmdline();
     const std::string target(cmdline_vec.begin(), cmdline_vec.end() - 1);
-    ASSERT_EQ(target, "minpe_test.exe");
+    ASSERT_EQ(target, "C:\\Users\\Qiling\\Desktop\\minpe_test.exe ");
 
     // the A form: the cmdline (already NUL-terminated) + the verbatim second NUL
     const auto* gca = ApiRegistry::instance().find("GetCommandLineA");
@@ -5330,6 +5331,41 @@ TEST(WinApiLoader, PebAndLdrCellsRideTheImageAndTheListHeads) {
     EXPECT_EQ(ql.mem().read_ptr(teb_addr + qiling::os::win::TEB_OFF_PEB_ADDRESS, 8), peb_addr);
 }
 
+TEST(WinApiLoader, X86LoaderLayoutsAreTheUpstreamWordSizeOnes) {
+    // upstream builds the loader's own structures from make_teb/make_peb/
+    // make_ldr_data/make_ldr_data_table_entry/make_unicode_string(bits): on an
+    // x86 guest the LDR entry is 156 bytes (not 304), the UNICODE_STRING 8
+    // (not 16), the PEB pointer rides fs:[0x30] (not 0x1c) and the PEB's own
+    // fields sit at their 4-byte-pointer offsets - both because a guest peeks
+    // them directly and because these structures are heap allocations whose
+    // size shifts every later guest allocation
+    using namespace qiling::os::win;
+
+    const auto x86 = loader_layout(32);
+    EXPECT_EQ(x86.teb_size, 420u);
+    EXPECT_EQ(x86.peb_size, 1148u);
+    EXPECT_EQ(x86.ldr_data_size, 48u);
+    EXPECT_EQ(x86.ldr_entry_size, 156u);
+    EXPECT_EQ(x86.unicode_string_size, 8u);
+    EXPECT_EQ(x86.unicode_string_off_buffer, 4u);
+    EXPECT_EQ(x86.entry_off_dll_base, 24u);
+    EXPECT_EQ(x86.entry_off_in_initialization_order_links, 16u);
+    EXPECT_EQ(x86.teb_off_peb_address, 0x30u);
+    EXPECT_EQ(x86.teb_off_teb_address, 0x18u);
+    EXPECT_EQ(x86.peb_off_image_base_address, 8u);
+    EXPECT_EQ(x86.peb_off_ldr_address, 12u);
+    EXPECT_EQ(x86.ldr_data_off_in_load_order, 12u);
+
+    const auto x64 = loader_layout(64);
+    EXPECT_EQ(x64.teb_size, TEB_SIZE);
+    EXPECT_EQ(x64.peb_size, PEB_SIZE);
+    EXPECT_EQ(x64.ldr_entry_size, LDR_ENTRY_SIZE);
+    EXPECT_EQ(x64.unicode_string_size, UNICODE_STRING_SIZE);
+    EXPECT_EQ(x64.teb_off_peb_address, TEB_OFF_PEB_ADDRESS);
+    EXPECT_EQ(x64.peb_off_image_base_address, PEB_OFF_IMAGE_BASE_ADDRESS);
+    EXPECT_EQ(x64.ldr_data_off_in_load_order, LDR_DATA_OFF_IN_LOAD_ORDER);
+}
+
 TEST(WinApiLoader, X86TebExceptionListStartsAtZeroLikeTheReference) {
     register_dlls();
 
@@ -5344,6 +5380,9 @@ TEST(WinApiLoader, X86TebExceptionListStartsAtZeroLikeTheReference) {
 
     const auto& loader = static_cast<const qiling::loader::QlLoaderPE&>(ql.loader());
     EXPECT_EQ(ql.mem().read_ptr(loader.teb_address(), 4), 0u);
+    // the PEB pointer a guest reads as fs:[0x30] points at the loader's PEB
+    // (0x1c is EnvironmentPointer in the 32-bit TEB, not this)
+    EXPECT_EQ(ql.mem().read_ptr(loader.teb_address() + 0x30, 4), loader.peb_address());
     // and the reference's own zero rides through the guest's fs segment
     EXPECT_EQ(ql.mem().read_ptr(qiling::os::windows::FS_SEGMENT_ADDR, 4), 0u);
 }

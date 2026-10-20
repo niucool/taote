@@ -95,6 +95,18 @@ QlWindowsThreadManagement::QlWindowsThreadManagement(Qiling* ql, QlWindowsThread
     threads_.push_back(cur_thread);
 }
 
+// thread.py __init__ allocates the thread return-address cell from the windows
+// heap, and the os builds this manager *before* the PE loader lays the PEB
+// (whose ProcessParameters/ProcessHeap chunks come from the same heap) - so
+// allocating it later shifts every subsequent chunk by 8 bytes. The os ctor
+// calls this once its heap is up; install_hook keeps its own guard for the
+// engine-less builds.
+void QlWindowsThreadManagement::alloc_ret_addr(qiling::QlMemoryHeap& heap) {
+    if (thread_ret_addr_ == 0) {
+        thread_ret_addr_ = heap.alloc(8);
+    }
+}
+
 void QlWindowsThreadManagement::install_hook() {
     // thread.py __init__: self.thread_ret_addr = os.heap.alloc(8) rides the
     // ctor; the port defers the alloc here so the pure-logic tests can build

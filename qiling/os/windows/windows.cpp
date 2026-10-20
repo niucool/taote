@@ -226,7 +226,13 @@ void QlOsWindows::ensure_profile_state() {
 
     windir_ = std::string(sysdrv) + std::string(windir);
     winsys_ = windir_ + "\\System32";
-    userprofile_ = std::string(sysdrv) + "\\Users\\" + std::string(username);
+    // the profile's systemdrive already carries its separator ("C:\\"), so a
+    // literal join would double it - upstream rides ntpath.join, which does not
+    std::string sysdrv_root = std::string(sysdrv);
+    while (!sysdrv_root.empty() && (sysdrv_root.back() == '\\' || sysdrv_root.back() == '/')) {
+        sysdrv_root.pop_back();
+    }
+    userprofile_ = sysdrv_root + "\\Users\\" + std::string(username);
     username_ = username;
 
     // windows.py __init__: self.pid = self.profile.getint('KERNEL', 'pid')
@@ -240,6 +246,7 @@ void QlOsWindows::ensure_profile_state() {
     auto mgr = std::make_unique<QlWindowsThreadManagement>(ql_, main_thread.get());
     mgr->append(std::move(main_thread));
     thread_manager_ = std::move(mgr);
+    thread_manager_->alloc_ret_addr(*heap_storage_);
 
     // more handle manager: the main-thread handle (windows.py verbatim:
     // Handle(obj=main_thread)). The ensure runs from the ctor head where the

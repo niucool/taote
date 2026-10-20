@@ -84,9 +84,11 @@ inline SamplePlan plan_for(const fs::path& sample) {
                 names.push_back(e.name());
             }
         }
-        if (!names.empty()) {
-            plan.imports.emplace_back(lower(imp.name()), std::move(names));
-        }
+        // every imported dll gets a stub image, even one whose imports are
+        // ordinal-only (WS2_32 in PMA 16-01): the loader's sys_dlls-independent
+        // import walk loads it on both emulators, and a dll that only one side
+        // can find shifts that side's heap for every later guest allocation
+        plan.imports.emplace_back(lower(imp.name()), std::move(names));
     }
 
     // LIEF reports the entrypoint as a VA and the export addresses as RVAs in
@@ -280,6 +282,23 @@ inline SampleOutcome run_pe_sample(const std::string& bin_name, const SampleOpti
                 }
             }
             write_stub_dll(rootfs, dll, names);
+        }
+        // the same key dlls the reference's harness always seeds
+        // (tools/stub_dlls.py): the loader's sys_dlls tuple asks for all of
+        // them on every PE run, and a missing image means no LDR entry, no
+        // heap allocation for it and therefore a shifted heap for every later
+        // guest allocation - an environment difference, not a guest one
+        for (const char* key_dll : {"ntdll.dll", "kernelbase.dll", "kernel32.dll",
+                                    "ucrtbase.dll", "mscoree.dll"}) {
+            if (!fs::exists(rootfs / "Windows" / "System32" / key_dll)) {
+                auto names = std::vector<std::string>{};
+                for (const auto& [dll, exports] : plan.imports) {
+                    if (dll == key_dll) {
+                        names = exports;
+                    }
+                }
+                write_stub_dll(rootfs, key_dll, names);
+            }
         }
         fs::create_directories(rootfs / "Windows" / "registry");
         fs::create_directories(rootfs / "qltest");

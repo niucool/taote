@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "qiling/arch/arch.hpp"
+#include "qiling/os/memory.hpp"
 #include "qiling/core_hooks_types.hpp"
 #include "qiling/os/thread.hpp"
 
@@ -100,6 +101,9 @@ public:
     bool do_schedule();
 
     void install_hook();
+    // the thread.py ctor's heap.alloc(8) for the return-address cell (the os
+    // ctor calls it right after building the manager)
+    void alloc_ret_addr(QlMemoryHeap& heap);
     void release_hooks();
     void set_thread_ret_addr(std::uint64_t addr) noexcept { thread_ret_addr_ = addr; }
 

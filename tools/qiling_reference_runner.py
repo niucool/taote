@@ -100,6 +100,10 @@ def main(argv=None) -> int:
     ap.add_argument("--count", type=int, default=0, help="instruction budget (0 = none)")
     ap.add_argument("--timeout", type=int, default=0, help="seconds (0 = none)")
     ap.add_argument("--out", default=None, help="write the JSON here instead of stdout")
+    ap.add_argument("--dump-images", default=None,
+                    help="write the loader's image table and command line before the run")
+    ap.add_argument("--dump-heap", default=None,
+                    help="write the heap chunk table (address size state) before the run")
     ap.add_argument("--mem-watch", nargs=3, default=None,
                     metavar=("FILE", "BEGIN", "SIZE"),
                     help="log guest writes into [BEGIN, BEGIN+SIZE) as pc addr size value")
@@ -146,6 +150,24 @@ def main(argv=None) -> int:
         # sees them; the differential needs exactly those
         ql.log.setLevel(logging.DEBUG)
         ql.log.addHandler(log_capture)
+        if args.dump_images:
+            with open(args.dump_images, "w") as di:
+                for img in ql.loader.images:
+                    di.write("%x %s\n" % (img.base, img.path))
+                di.write("cmdline '%s'\n" % ql.loader.cmdline.decode("latin-1").replace("'", ""))
+
+        if args.dump_heap:
+            heap = ql.os.heap
+            with open(args.dump_heap, "w") as dh:
+                dh.write("start %x\n" % heap.start_address)
+                for chunk in heap.chunks:
+                    try:
+                        raw = ql.mem.read(chunk.address, min(chunk.size, 64))
+                    except Exception:
+                        raw = b""
+                    text = "".join(chr(b) if 0x20 <= b < 0x7f else "." for b in raw)
+                    dh.write("%x %d %s %s\n" % (chunk.address, chunk.size, "inuse" if chunk.inuse else "free", text))
+
         if args.mem_watch:
             path, begin, size = args.mem_watch
             begin, size = int(begin, 0), int(size, 0)

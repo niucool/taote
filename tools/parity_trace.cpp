@@ -17,9 +17,11 @@
 // usage: parity_trace <sample> [--argv A B] [--count N] [--timeout S]
 //                     [--max-api-count N] [--dump-imports FILE] [--out FILE]
 //                     [--code-trace FILE] [--code-trace-range BEGIN END]
-//                     [--mem-watch FILE BEGIN SIZE]
+//                     [--mem-watch FILE BEGIN SIZE] [--dump-heap FILE]
+//                     [--dump-images FILE]
 #include <LIEF/PE.hpp>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -79,6 +81,8 @@ int main(int argc, char** argv) {
     std::string out_path;
     std::string dump_imports;
     std::string code_trace;
+    std::string dump_images;
+    std::string dump_heap;
     std::string mem_watch;
     std::uint64_t mem_watch_begin = 0;
     std::uint64_t mem_watch_size = 0;
@@ -103,6 +107,10 @@ int main(int argc, char** argv) {
             opts.max_api_count = parse_u64(argv[++i]);
         } else if (arg == "--dump-imports" && i + 1 < argc) {
             dump_imports = argv[++i];
+        } else if (arg == "--dump-images" && i + 1 < argc) {
+            dump_images = argv[++i];
+        } else if (arg == "--dump-heap" && i + 1 < argc) {
+            dump_heap = argv[++i];
         } else if (arg == "--mem-watch" && i + 3 < argc) {
             mem_watch = argv[++i];
             mem_watch_begin = parse_u64(argv[++i]);
@@ -208,6 +216,53 @@ int main(int argc, char** argv) {
                     }
                     return 0;
                 }));
+        };
+    }
+
+    // the loader's image table right after load: what a dll walk actually
+    // resolved (a stub the reference found and taote did not shifts the heap
+    // and changes which imports resolve)
+    if (!dump_images.empty()) {
+        auto previous = opts.configure;
+        opts.configure = [&dump_images, previous](qiling::Qiling& ql) {
+            if (previous) {
+                previous(ql);
+            }
+            std::ofstream out(dump_images);
+            const auto& pe_loader = static_cast<const qiling::loader::QlLoaderPE&>(ql.loader());
+            for (const auto& image : pe_loader.images) {
+                out << std::hex << image.base << " " << image.path << "\n";
+            }
+            const auto& cmdline = pe_loader.cmdline();
+            out << "cmdline '" << std::string(cmdline.begin(), cmdline.end()) << "'\n";
+        };
+    }
+
+    // the heap's chunk table right after load: the probe for "both runs
+    // dispatch the same allocator calls but the addresses come out shifted",
+    // which is the loader's own allocations, not the guest's
+    if (!dump_heap.empty()) {
+        auto previous = opts.configure;
+        opts.configure = [&dump_heap, previous](qiling::Qiling& ql) {
+            if (previous) {
+                previous(ql);
+            }
+            auto& heap = ql.os<qiling::os::windows::QlOsWindows>().heap();
+            std::ofstream out(dump_heap);
+            out << "start " << std::hex << heap.start_address() << "\n";
+            out << std::hex;
+            for (const auto& c : heap.chunks()) {
+                out << c.address << " " << std::dec << c.size << (c.inuse ? " inuse" : " free") << " ";
+                std::vector<std::uint8_t> raw;
+                try {
+                    raw = ql.mem().read(c.address, std::min<std::uint64_t>(c.size, 64));
+                } catch (...) {
+                }
+                for (const auto b : raw) {
+                    out << (b >= 0x20 && b < 0x7f ? static_cast<char>(b) : '.');
+                }
+                out << "\n";
+            }
         };
     }
 
