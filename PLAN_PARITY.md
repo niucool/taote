@@ -352,6 +352,11 @@ dispatch the recording does not carry is one too. ctest 542 cases. The corpus is
 unchanged (**24/32 exit 0**, differential **10 / 0 / 16 / 2 / 4**) - the store is
 opt-in, so a default run behaves exactly as before.
 
+**Still open in 5.5:** the store *verifies* a run; it does not yet *serve* the
+recorded values back (a replay that skips the handler and answers from the
+recording, which needs the frame unwind to be driven by the api's own slot count
+rather than the handler's). That is the remaining half of this phase.
+
 ### Phase 5.3: the x64 virtual unwinder
 
 `RtlVirtualUnwind` was a pure passthru (`std::nullopt`), which is what the guest's
