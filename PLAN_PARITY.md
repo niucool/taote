@@ -330,6 +330,22 @@ further along without reaching the reference's trace. Recorded as the next unit
 with the corpus measurement it needs (the field is loader-level, so it must be
 scored over all 32 samples, not one).
 
+### 16-03.exe_: the last diverged sample with a real reference run
+
+Both emulators dispatch the same **42** calls - same names, same call sites, same
+return values, checked position by position - and both then fault, taote with
+`Fetch from non-executable memory` and the reference with `Unhandled CPU
+exception`. All memory in taote is mapped `UC_PROT_ALL` (there is no
+`uc_mem_protect` anywhere in the tree), so the fetch-prot is a fetch *off* the
+mapped regions rather than a permission, and the instruction trace pins it: the
+last instruction executed on taote is `ret` at **0x401261** and the fault is the
+fetch of the address it popped from `0xffffca5c`. That is the third instance of
+the same class this phase has already met twice (`11-01.exe_`'s SEH tail,
+`16-01.exe_`'s stub-cell ret): same `sp`, same code, a different value in the
+popped stack slot. The recorded next probe is the one that settled `11-01`: a
+`--mem-watch` over `0xffffca20..0xffffcad0` on both sides, comparing the write
+streams to name the writer.
+
 ### `host_to_virtual_path` emits Windows separators
 
 `11-01.exe_` was the last sample with a comparable reference run that still
