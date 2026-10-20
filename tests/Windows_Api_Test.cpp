@@ -5331,6 +5331,95 @@ TEST(WinApiLoader, PebAndLdrCellsRideTheImageAndTheListHeads) {
     EXPECT_EQ(ql.mem().read_ptr(teb_addr + qiling::os::win::TEB_OFF_PEB_ADDRESS, 8), peb_addr);
 }
 
+TEST(WinApiRegistry, RegHiveReadsARealHiveFile) {
+    // PLAN_PARITY Phase 2: the regf read path. The hive here is the smallest one
+    // that exercises it - base block, one hbin, a root key with a subkey list, a
+    // subkey with a value list, and one REG_SZ value - which is exactly the
+    // shape python-registry serves upstream.
+    namespace fs = std::filesystem;
+    const auto dir = fs::temp_directory_path() / "ql_hive_fixture";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+
+    std::vector<std::uint8_t> hive(0x2000, 0);
+    const auto put32 = [&hive](std::size_t at, std::uint32_t v) {
+        hive[at] = static_cast<std::uint8_t>(v);
+        hive[at + 1] = static_cast<std::uint8_t>(v >> 8);
+        hive[at + 2] = static_cast<std::uint8_t>(v >> 16);
+        hive[at + 3] = static_cast<std::uint8_t>(v >> 24);
+    };
+    const auto cell = [&hive, &put32](std::size_t rel, std::uint32_t size, const char* sig) {
+        put32(0x1000 + rel, static_cast<std::uint32_t>(-static_cast<std::int32_t>(size)));
+        std::memcpy(hive.data() + 0x1000 + rel + 4, sig, 2);
+        return 0x1000 + rel + 4;  // the payload's absolute offset
+    };
+
+    std::memcpy(hive.data(), "regf", 4);
+    put32(0x24, 0x20);                   // root cell, relative to the hbins
+    std::memcpy(hive.data() + 0x1000, "hbin", 4);
+    put32(0x1000 + 8, 0x1000);           // the hbin's size
+
+    // the root key "SOFTWARE": one subkey (list at 0xc8), no values
+    const auto root = cell(0x20, 0x58, "nk");
+    const std::string root_name = "SOFTWARE";
+    put32(root + 0x14, 1);
+    put32(root + 0x1c, 0xd0);
+    put32(root + 0x24, 0);
+    put32(root + 0x28, 0xffffffffu);
+    put32(root + 0x48, static_cast<std::uint32_t>(root_name.size()));
+    std::memcpy(hive.data() + root + 0x4c, root_name.data(), root_name.size());
+
+    // the subkey "Test": one value (list at 0x100)
+    const auto sub = cell(0x78, 0x58, "nk");
+    const std::string sub_name = "Test";
+    put32(sub + 0x14, 0);
+    put32(sub + 0x1c, 0xffffffffu);
+    put32(sub + 0x24, 1);
+    put32(sub + 0x28, 0x108);
+    put32(sub + 0x48, static_cast<std::uint32_t>(sub_name.size()));
+    std::memcpy(hive.data() + sub + 0x4c, sub_name.data(), sub_name.size());
+
+    // the "lf" subkey list: count 1, then (offset, hash) for the 0x78 cell
+    const auto list = cell(0xd0, 0x10, "lf");
+    put32(list, 1);
+    put32(list + 4, 0x78);
+    put32(list + 8, 0);
+
+    // the value list: one vk offset
+    put32(0x1000 + 0x108, static_cast<std::uint32_t>(-8));  // the list cell's size
+    put32(0x1000 + 0x108 + 4, 0xe0);                        // its one vk offset
+
+    // the value "Greeting" = REG_SZ "hi", its data in the cell at 0x110
+    const auto vk = cell(0xe0, 0x28, "vk");
+    const std::string value_name = "Greeting";
+    hive[vk + 2] = static_cast<std::uint8_t>(value_name.size());  // NameLength (u16)
+    put32(vk + 0x04, 6);
+    put32(vk + 0x08, 0x110);
+    put32(vk + 0x0c, 1);  // REG_SZ
+    std::memcpy(hive.data() + vk + 0x14, value_name.data(), value_name.size());
+    const auto data_cell = cell(0x110, 0x08, "\x01\x00");
+    const std::array<std::uint8_t, 6> text{'h', 0, 'i', 0, 0, 0};
+    std::memcpy(hive.data() + data_cell, text.data(), text.size());
+
+    {
+        std::ofstream out(dir / "SOFTWARE", std::ios::binary);
+        out.write(reinterpret_cast<const char*>(hive.data()), static_cast<std::streamsize>(hive.size()));
+    }
+
+    qiling::os::registry::RegHive reg(dir.string());
+    EXPECT_TRUE(reg.exists("HKEY_LOCAL_MACHINE\\SOFTWARE"));
+    EXPECT_TRUE(reg.exists("HKEY_LOCAL_MACHINE\\SOFTWARE\\Test"));
+    EXPECT_FALSE(reg.exists("HKEY_LOCAL_MACHINE\\SOFTWARE\\Nope"));
+
+    // the value walk itself (the vk cell: name, type, data offsets) is the next
+    // item - the key walk above is what this test pins today
+    const auto missing = reg.read("HKEY_LOCAL_MACHINE\\SOFTWARE\\Test", "Absent", 1);
+    EXPECT_FALSE(missing.first.has_value());
+    EXPECT_FALSE(missing.second.has_value());
+
+    fs::remove_all(dir);
+}
+
 TEST(WinApiReplay, StoreRecordsAndVerifiesADispatchSequence) {
     // PLAN_PARITY Phase 5.5: the store records every dispatch's answer and a
     // later run re-checks against it, so an environment difference is named

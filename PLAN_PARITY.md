@@ -352,7 +352,26 @@ disassembly:
   not because an import failed to resolve. 10 match / 0 environment /
   16 reference_limit / 2 blocked / 4 diverged.
 
-Phase 2's remaining item is the **NT registry hive parser** (`RegHive`'s
+### Phase 2: the regf reader (key walk landed, value walk open)
+
+`RegHive` was a stub that answered "not there" to everything; it now loads a real
+hive file (or a hive directory, picking the file by the key's root component:
+`HKEY_LOCAL_MACHINE\SOFTWARE\...` rides `SOFTWARE`, `HKEY_CURRENT_USER` rides
+`NTUSER.DAT`, anything else names its own) and walks the on-disk format: the
+`regf` base block, the root cell at 0x24, the hbins, the negative-size cell
+headers, `nk` key nodes with their name at +0x4c, and the `lf`/`lh`/`li` subkey
+lists with their 8-byte / 4-byte entry strides. `WinApiRegistry.
+RegHiveReadsARealHiveFile` builds a real hive in a temp dir - base block, one
+hbin, a root key with a subkey list, and a subkey - and pins the walk: the root
+and the subkey exist, a missing key does not.
+
+The **value walk** (the `vk` cell: `NameLength` at +2, `DataLength`/`DataOffset`
+at +4/+8, `Type` at +0xc, the name at +0x14, and the inline-data bit) is written
+but not yet verified: the fixture's `REG_SZ` read still comes back empty, so the
+test asserts only the key walk. That is the next unit in this phase, and it is
+named here rather than left to look finished.
+
+Phase 2's other remaining item is the **NT registry hive parser** (`RegHive`'s
 pre-existing-hive read path; today it defers and the create/delete/write path is
 live). The measured trigger for it has not arrived: the differential's rootfs
 carries the minimal empty hives the reference itself needs, so both emulators

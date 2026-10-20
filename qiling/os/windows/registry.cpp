@@ -164,18 +164,289 @@ void RegConf::save(std::string_view fname) const {
 
 // ---- RegHive (the hive parsing defers; the no-op mutations are verbatim) ----
 
-RegHive::RegHive(std::string_view hname) : hname_(std::string(hname)) {}
+// ---- RegHive: the regf reader ----
+//
+// The on-disk registry hive (the python-registry surface upstream rides):
+//   * a 0x1000 base block, "regf" at 0, the root key cell offset at 0x24
+//     (relative to the hbins area that starts at 0x1000);
+//   * hbins of page-multiple size, "hbin" at 0, cells inside them;
+//   * a cell is a signed size followed by its payload - negative means
+//     allocated, and "nk"/"vk"/"lf"/"lh"/"li" name the payload kinds;
+//   * "nk" holds the key's name, its subkey count + list offset and its value
+//     count + list offset; a subkey/value offset is *cell-relative* to the
+//     hbins start;
+//   * "vk" holds a value's name, its data size (the high bit means the data
+//     rides inline in the offset field), its data offset and its type.
+// Everything here is read-only: a write goes to the RegConf diff first, so the
+// hive file is never mutated (registry.py's RegHive.create is a no-op too).
 
-bool RegHive::exists(std::string_view) const {
-    return false;  // the pre-existing hive reads land with the hive slice
+namespace {
+
+std::uint32_t rd32(const std::vector<std::uint8_t>& data, std::size_t off) {
+    if (off + 4 > data.size()) {
+        return 0;
+    }
+    return static_cast<std::uint32_t>(data[off]) | (static_cast<std::uint32_t>(data[off + 1]) << 8) |
+           (static_cast<std::uint32_t>(data[off + 2]) << 16) | (static_cast<std::uint32_t>(data[off + 3]) << 24);
+}
+
+}  // namespace
+
+bool RegHive::load_hive(std::string_view hive_name) const {
+    std::filesystem::path path = hname_;
+    std::error_code ec;
+    if (std::filesystem::is_directory(path, ec)) {
+        path /= std::filesystem::path(hive_name);
+    }
+    if (!std::filesystem::exists(path, ec) || ec) {
+        data_.clear();
+        loaded_hive_.assign(hive_name);
+        return false;
+    }
+
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        return false;
+    }
+    data_.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    loaded_hive_.assign(hive_name);
+
+    // the base block has to say "regf" and carry a root cell inside the hbins
+    if (data_.size() < 0x1000 || std::memcmp(data_.data(), "regf", 4) != 0) {
+        data_.clear();
+        return false;
+    }
+    root_off_ = rd32(data_, 0x24);
+    if (root_off_ == 0 || 0x1000 + root_off_ >= data_.size()) {
+        data_.clear();
+        return false;
+    }
+    return true;
+}
+
+RegHive::RegHive(std::string_view hname) : hname_(std::string(hname)) {
+    // a direct file loads now; the hive-directory shape loads lazily, per key
+    std::error_code ec;
+    if (std::filesystem::is_regular_file(hname_, ec) && !ec) {
+        (void)load_hive("");
+    }
+}
+
+std::size_t RegHive::cell_at(std::size_t rel_off) const {
+    // the cell's payload starts 4 bytes into the cell (past the signed size)
+    const auto abs = 0x1000 + rel_off;
+    if (abs + 4 > data_.size()) {
+        return std::string::npos;
+    }
+    return abs + 4;
+}
+
+std::string RegHive::key_name(std::size_t nk) const {
+    if (nk == std::string::npos || nk + 0x4c > data_.size() || std::memcmp(data_.data() + nk, "nk", 2) != 0) {
+        return {};
+    }
+    const auto name_len = static_cast<std::size_t>(rd32(data_, nk + 0x48));
+    if (nk + 0x4c + name_len > data_.size()) {
+        return {};
+    }
+    return std::string(reinterpret_cast<const char*>(data_.data() + nk + 0x4c), name_len);
+}
+
+std::vector<std::size_t> RegHive::subkeys(std::size_t nk) const {
+    std::vector<std::size_t> out;
+    if (nk == std::string::npos || nk + 0x2c > data_.size()) {
+        return out;
+    }
+    const auto count = static_cast<std::size_t>(rd32(data_, nk + 0x14));
+    const auto list_off = static_cast<std::size_t>(rd32(data_, nk + 0x1c));
+    const auto list = cell_at(list_off);
+    if (list == std::string::npos || list + 4 > data_.size()) {
+        return out;
+    }
+    const auto sig = std::memcmp(data_.data() + list, "li", 2) == 0 ? "li" : "lf";
+    const bool direct = std::memcmp(data_.data() + list, "li", 2) == 0;
+    (void)sig;
+    // lf/lh carry (offset, hash) pairs of 8 bytes; li carries bare offsets
+    const std::size_t stride = direct ? 4 : 8;
+    for (std::size_t i = 0; i < count; ++i) {
+        const auto at = list + 4 + i * stride;
+        if (at + 4 > data_.size()) {
+            break;
+        }
+        out.push_back(static_cast<std::size_t>(rd32(data_, at)));
+    }
+    return out;
+}
+
+std::size_t RegHive::find_key(std::string_view key) const {
+    // the guest key is the full path ("HKEY_LOCAL_MACHINE\SOFTWARE\...")
+    std::string path(key);
+    std::vector<std::string> parts;
+    std::size_t start_at = 0;
+    while (start_at <= path.size()) {
+        const auto end = path.find('\\', start_at);
+        parts.push_back(path.substr(start_at, end == std::string::npos ? std::string::npos : end - start_at));
+        if (end == std::string::npos) {
+            break;
+        }
+        start_at = end + 1;
+    }
+
+    // HKEY_LOCAL_MACHINE\SOFTWARE\... rides the SOFTWARE hive and
+    // HKEY_CURRENT_USER rides NTUSER.DAT; anything else names its own hive
+    std::string hive_name;
+    std::size_t first_key_part = 1;
+    const auto head = parts.empty() ? std::string() : parts[0];
+    if ((head == "HKEY_LOCAL_MACHINE" || head == "HKEY_USERS") && parts.size() > 1) {
+        hive_name = parts[1];
+        first_key_part = 2;
+    } else if (head == "HKEY_CURRENT_USER") {
+        hive_name = "NTUSER.DAT";
+        first_key_part = 1;
+    } else {
+        hive_name = head;
+        first_key_part = 1;
+    }
+
+    if (hive_name != loaded_hive_ || data_.empty()) {
+        if (!load_hive(hive_name) && data_.empty()) {
+            return std::string::npos;
+        }
+    }
+
+    std::string rest;
+    for (std::size_t i = first_key_part; i < parts.size(); ++i) {
+        if (!rest.empty()) {
+            rest.push_back('\\');
+        }
+        rest += parts[i];
+    }
+
+    auto current = cell_at(root_off_);
+    if (current == std::string::npos) {
+        return std::string::npos;
+    }
+
+    std::size_t start = 0;
+    while (start <= rest.size()) {
+        const auto end = rest.find('\\', start);
+        const auto component = rest.substr(start, end == std::string::npos ? std::string::npos : end - start);
+        if (!component.empty()) {
+            std::size_t found = std::string::npos;
+            for (const auto child : subkeys(current)) {
+                const auto child_cell = cell_at(child);
+                if (key_name(child_cell) == component) {
+                    found = child_cell;
+                    break;
+                }
+            }
+            if (found == std::string::npos) {
+                return std::string::npos;
+            }
+            current = found;
+        }
+        if (end == std::string::npos) {
+            break;
+        }
+        start = end + 1;
+    }
+    return current;
+}
+
+std::size_t RegHive::find_value(std::size_t nk, std::string_view name) const {
+    if (nk == std::string::npos || nk + 0x2c > data_.size()) {
+        return std::string::npos;
+    }
+    const auto count = static_cast<std::size_t>(rd32(data_, nk + 0x24));
+    const auto list_off = static_cast<std::size_t>(rd32(data_, nk + 0x28));
+    const auto list = cell_at(list_off);
+    if (list == std::string::npos) {
+        return std::string::npos;
+    }
+    for (std::size_t i = 0; i < count; ++i) {
+        const auto at = list + i * 4;
+        if (at + 4 > data_.size()) {
+            break;
+        }
+        const auto vk = cell_at(static_cast<std::size_t>(rd32(data_, at)));
+        if (vk == std::string::npos || vk + 0x14 > data_.size() || std::memcmp(data_.data() + vk, "vk", 2) != 0) {
+            continue;
+        }
+        const auto name_len = static_cast<std::size_t>(rd32(data_, vk + 0x0));
+        if (vk + 0x14 + name_len > data_.size()) {
+            continue;
+        }
+        const std::string value_name(reinterpret_cast<const char*>(data_.data() + vk + 0x14), name_len);
+        if (value_name == name) {
+            return vk;
+        }
+    }
+    return std::string::npos;
+}
+
+bool RegHive::exists(std::string_view key) const {
+    return find_key(key) != std::string::npos;
 }
 
 void RegHive::create(std::string_view) {}
 
 void RegHive::delete_entry(std::string_view, std::string_view) {}
 
-std::pair<std::optional<int>, std::optional<RegValue>> RegHive::read(std::string_view, std::string_view, int) const {
-    return {std::nullopt, std::nullopt};
+std::pair<std::optional<int>, std::optional<RegValue>> RegHive::read(std::string_view key, std::string_view subkey,
+                                                                    int reg_type) const {
+    (void)reg_type;
+    const auto nk = find_key(key);
+    const auto vk = find_value(nk, subkey);
+    if (vk == std::string::npos) {
+        return {std::nullopt, std::nullopt};
+    }
+
+    const auto type = static_cast<int>(rd32(data_, vk + 0x0c));
+    const auto raw_size = rd32(data_, vk + 0x04);
+    const bool inline_data = (raw_size & 0x80000000u) != 0;
+    const auto size = static_cast<std::size_t>(raw_size & 0x7fffffffu);
+    const auto data_field = vk + 0x08;
+
+    std::vector<std::uint8_t> bytes;
+    if (inline_data) {
+        const auto base = vk + 0x08;
+        for (std::size_t i = 0; i < size && base + i < data_.size(); ++i) {
+            bytes.push_back(data_[base + i]);
+        }
+    } else {
+        const auto payload = cell_at(static_cast<std::size_t>(rd32(data_, data_field)));
+        if (payload == std::string::npos) {
+            return {std::nullopt, std::nullopt};
+        }
+        for (std::size_t i = 0; i < size && payload + i < data_.size(); ++i) {
+            bytes.push_back(data_[payload + i]);
+        }
+    }
+
+    // the typed value domain: REG_SZ/EXPAND_SZ decode as microsoft utf-16le,
+    // REG_DWORD/QWORD as an integer, everything else as raw bytes
+    if (type == 1 || type == 2) {
+        std::string text;
+        for (std::size_t i = 0; i + 1 < bytes.size(); i += 2) {
+            const auto unit = static_cast<std::uint16_t>(bytes[i] | (bytes[i + 1] << 8));
+            if (unit == 0) {
+                break;
+            }
+            text.push_back(unit < 0x80 ? static_cast<char>(unit) : '?');
+        }
+        return {type, RegValue{text}};
+    }
+    if (type == 4 && bytes.size() >= 4) {
+        return {type, RegValue{static_cast<std::int64_t>(rd32(bytes, 0))}};
+    }
+    if (type == 11 && bytes.size() >= 8) {
+        std::uint64_t value = 0;
+        for (int i = 7; i >= 0; --i) {
+            value = (value << 8) | bytes[static_cast<std::size_t>(i)];
+        }
+        return {type, RegValue{static_cast<std::int64_t>(value)}};
+    }
+    return {type, RegValue{bytes}};
 }
 
 void RegHive::write(std::string_view, std::string_view, int, RegValue) {}

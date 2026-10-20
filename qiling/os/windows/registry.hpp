@@ -10,6 +10,7 @@
 
 #include <cstdint>
 #include <map>
+#include <vector>
 #include <memory>
 #include <optional>
 #include <string>
@@ -74,6 +75,11 @@ class RegHive {
 public:
     explicit RegHive(std::string_view hname);
 
+    // the regf read path: the base block, the hbins and the nk/vk cells (the
+    // python-registry analogue). A hive file that is absent or unparsable
+    // simply answers "not there", which is what the empty-hive fixtures need.
+    bool loaded() const noexcept { return !data_.empty(); }
+
     bool exists(std::string_view key) const;
     void create(std::string_view key);
     void delete_entry(std::string_view key, std::string_view subkey);
@@ -82,7 +88,23 @@ public:
     void write(std::string_view key, std::string_view subkey, int reg_type, RegValue data);
 
 private:
+    // the cell walk: a "offset from the hbins start" plus the cell payload
+    std::size_t cell_at(std::size_t rel_off) const;
+    std::string key_name(std::size_t nk) const;
+    std::vector<std::size_t> subkeys(std::size_t nk) const;
+    std::size_t find_key(std::string_view key) const;
+    // the value list of a key: name -> (type, payload cell, inline data size)
+    std::size_t find_value(std::size_t nk, std::string_view name) const;
+
+    // true when the hive was given as a file, false when it is the hive
+    // directory (the upstream shape: RegHive(hivedir) picks the file by the
+    // key's hive-root component)
+    bool load_hive(std::string_view hive_name) const;
+
     std::string hname_;
+    mutable std::vector<std::uint8_t> data_;
+    mutable std::size_t root_off_ = 0;
+    mutable std::string loaded_hive_;
 };
 
 // registry.py RegistryManager — the diff-first read precedence, the
