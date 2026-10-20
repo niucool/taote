@@ -5330,6 +5330,24 @@ TEST(WinApiLoader, PebAndLdrCellsRideTheImageAndTheListHeads) {
     EXPECT_EQ(ql.mem().read_ptr(teb_addr + qiling::os::win::TEB_OFF_PEB_ADDRESS, 8), peb_addr);
 }
 
+TEST(WinApiLoader, X86TebExceptionListStartsAtZeroLikeTheReference) {
+    register_dlls();
+
+    // the x86 (32-bit) TEB layout: upstream's TEB struct leaves ExceptionList
+    // at its zero default, and guests store fs:[0] as the Next of their first
+    // SEH registration, so a real-Windows 0xffffffff sentinel makes the chain
+    // head read as a live frame and the walk runs into the sentinel (found on
+    // PMA 11-01, where the guest pushes fs:[0] straight onto the stack)
+    auto options = win_test_options();
+    options.archtype = QL_ARCH::X86;
+    Qiling ql(options);
+
+    const auto& loader = static_cast<const qiling::loader::QlLoaderPE&>(ql.loader());
+    EXPECT_EQ(ql.mem().read_ptr(loader.teb_address(), 4), 0u);
+    // and the reference's own zero rides through the guest's fs segment
+    EXPECT_EQ(ql.mem().read_ptr(qiling::os::windows::FS_SEGMENT_ADDR, 4), 0u);
+}
+
 TEST(WinApiE2E, RealPeHelloRunsToExitProcess) {
     register_dlls();
 

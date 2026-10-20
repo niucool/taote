@@ -12,7 +12,7 @@ phase closes without its tests.
 | API sample sweep (`../pegasus/tests/bins`, 101 bins) | n/a (their suite asserts dispatch only) | **97 exit 0**, 2 block in `accept`, 2 kernel `.sys` | 99+ (drivers land) |
 | PMA corpus (`~/source/capa-testfiles`, 32 PE samples) | 12 curated cases green (their CI), 38 with `PEGASUS_PMA_FULL=1` | **14 exit 0** (32-sample sweep), **1/12 green** (curated ctest cases, now with the reference guards) | ≥ 30 exit 0, all curated cases green |
 | reference-suite parity (`../pegasus/tests`, 357 cases) | 357 | **12 ported + 4 ported clusters**, rest mapped in `tests/PEGASUS_TEST_PARITY.md` | every *portable* row ported, none "deferred" |
-| taote suite | — | **538 passed / 0 failed / 3 skipped** | grows with every phase, stays 0-failed |
+| taote suite | — | **539 passed / 0 failed / 3 skipped** | grows with every phase, stays 0-failed |
 | host support | MSVC/Windows + Linux | MSVC/Windows + Linux | unchanged (regression gate) |
 
 Two supporting tools the plan needs (Phase 0):
@@ -317,6 +317,17 @@ diverges at call #45 and now ends on `invalid_read`, so the change moved the gue
 further along without reaching the reference's trace. Recorded as the next unit
 with the corpus measurement it needs (the field is loader-level, so it must be
 scored over all 32 samples, not one).
+
+Scored, and it lands: over the 32-sample corpus the differential is
+**5 match / 1 environment / 3 reference_limit / 23 diverged** before and after,
+and the raw exit-0 count is 13/32 before and after. No sample changes verdict
+(`18-01.exe_` first read as lost, but its reference run had timed out under host
+load; re-run alone it is still a match, and the differ's `reference 0 calls exit
+None (error: timeout)` line is the tell). What moves is `11-01.exe_`: 46 calls
+ending `UnhandledExceptionFilter` + `invalid_read` become 62 calls, past the
+filter and still dispatching, ending one call later in the run. The field now
+matches the reference, it costs nothing anywhere else, and a loader test pins it
+(`WinApiLoader.X86TebExceptionListStartsAtZeroLikeTheReference`).
 
 **`none vs invalid_insn` dissected (`03-04`, `11-01`, `16-01`).** On
 `11-01.exe_` both runs are identical through call #4 (`GetVersion`, `HeapCreate`,

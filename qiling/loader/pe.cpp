@@ -817,7 +817,7 @@ void QlLoaderPE::init_teb() {
     // read the MSVC x86 CRT makes); the ExceptionList starts the end-of-chain
     // sentinel (the SEH walkers stop on it)
     if (ql_->arch().bits() == 32) {
-        put_le(image, 0, 0xffffffffu, 4);                              // ExceptionList = end
+        put_le(image, 0, 0, 4);                                        // ExceptionList
         put_le(image, 4, stack_address_ + stack_size_, 4);             // StackBase
         put_le(image, 8, stack_address_, 4);                           // StackLimit
         put_le(image, 0x18, teb_addr, 4);                              // Self
