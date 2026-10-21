@@ -615,8 +615,7 @@ TEST(PegasusParity, InstructionBudgetStopsRunawayGuest) {
 // ---- the unsupported-import discipline (PLAN_PARITY.md Phase 1.1) -------
 // An import with no handler is recorded and answered through the calling
 // convention (a zero return value), never left to the stub cell's garbage rax.
-TEST(PegasusParity, UnsupportedImportsAreRecorded) {
-    qiling::os::register_dlls();
+TEST(PegasusParity, UnsupportedImportsAreRecorded) {    qiling::os::register_dlls();
 
     // the file_access sample probes two names taote does not implement through
     // its own import table; with the stubs left in place they show up in the
@@ -628,10 +627,27 @@ TEST(PegasusParity, UnsupportedImportsAreRecorded) {
 
     const auto out = run_pe_sample("file_access_test_x86.exe", opts);
     EXPECT_TRUE(out.error.empty()) << out.error;
-    // nothing in this sample imports the extra name, so the counter stays zero
-    // — the regression guard is that a clean sample reports zero, which the
-    // reference PMA cases assert
-    EXPECT_EQ(out.unsupported, 0u);
+    // Nothing in this sample imports the extra stub names, so they stay out of
+    // the set. The names that DO show up are the CRT's own initializer walk:
+    // `_initterm` and `_initterm_e` deliberately have no handler here (the
+    // reference hooks neither — upstream msvcrt.py never registers them), so a
+    // CRT-linked guest walks its own initializer table and the recorder counts
+    // the two dispatches. That is the intended shape: intercepting them would
+    // stop the guest's initializers from ever running (which is what kept
+    // msvcp140's std::cout unconstructed on a real-dll rootfs). The guard is
+    // that nothing *else* leaks into the set — a regression that starts
+    // answering unimplemented imports through a synthetic frame shows up as a
+    // new name here.
+    static const std::set<std::string> kDeliberatelyUnhooked = {"_initterm", "_initterm_e"};
+    std::string names;
+    std::size_t unexpected = 0;
+    for (const auto& n : out.unsupported_apis) {
+        names += (names.empty() ? "" : ", ") + n;
+        if (kDeliberatelyUnhooked.count(n) == 0) {
+            ++unexpected;
+        }
+    }
+    EXPECT_EQ(unexpected, 0u) << "recorded: [" << names << "]";
 }
 
 // ---- test_porting_winemu.cpp: the string-read round trips ---------------
