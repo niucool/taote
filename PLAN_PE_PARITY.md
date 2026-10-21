@@ -74,6 +74,51 @@ Stub mode is unchanged by all of this: 26 passed / 10 skipped / 0 failed, the te
 skips being the same cases that need a real C++ runtime, a real `MSVCR110.dll`,
 or live thread switching.
 
+### 0.2 The Windows 11 rootfs (the UCRT harvest) and the clean differential
+
+A rootfs collected on Windows 11 now exists at
+`../qiling/examples/scripts/examples/rootfs` (35 x64 / 57 x86 images plus the six
+registry hives, ~110 MB `SOFTWARE`): **it has the Universal CRT** — `ucrtbase.dll`,
+`ucrtbased.dll`, the five `api-ms-win-crt-*` shims, `msvcp140[_1/_2]`,
+`vcruntime140[_1]` — for both arches, and `msvcr110.dll`. This is what
+`dllscollector.bat` produces on a modern Windows host, and it is the rootfs the
+upstream tests are written for.
+
+**Upstream on this rootfs** (its own `test_pe.py` + `test_windows_cpp_*.py`, run
+from a composed tree with the sample corpus staged inside):
+
+| suite | result |
+|---|---|
+| `test_pe.py` (25 cases) | **24 pass, 1 error** — only `test_pe_win_x86_gandcrab`, erroring inside upstream's *own* `lstrcmpiW` handler (UC_ERR_READ_UNMAPPED) |
+| `test_windows_cpp_x8664.py` + `..._x86.py` (8 cases) | **8 pass** |
+
+**taote on the same rootfs**: **26 pass / 9 fail / 1 skip** of 36. The
+differential is therefore sharp — for the first time the oracle can convict:
+
+| case | upstream | taote | verdict |
+|---|---|---|---|
+| 26 cases (all the hello/cmdln/upx/return_main/customapi/crackme/wannacry/al-khaser/… rows of §0.1) | pass | pass | parity |
+| **CppHelloWorldX8664, CppTypesX8664, SoftSehX8664, SoftCppExX8664, CppExUnhandledFiltered, CppExUnhandledUnfiltered, CppHelloWorldX86, CppTypesX86** | **pass** | fail | **port bug** — see below |
+| **PeWinX86Multithread** | **pass** | skip | **port bug** — upstream's threads are `gevent.Greenlet`s, i.e. Python-level cooperative switching; a pc/register scheduler is not equivalent. `if (address == thread_ret_addr) stop()` + `do_schedule()` in a code hook (what taote has) performs the register swap but unicorn keeps executing the retired instruction stream, so the child never starts at its own entry. Implementing this needs the run-loop restart that upstream gets from the greenlet model. |
+| PeWinX86GandcrabProfileChangesBehaviour | fail | fail | oracle cannot convict (upstream fails too, in its `lstrcmpiW`) |
+
+On the Win11 rootfs the C++ chain is now correct up to one instruction:
+msvcp140 loads, its DllMain completes, `?cout@std@@` holds a vtable
+(`0x180963c98`), the real `operator<<` runs and even computes the string length
+(`r8 = 0xd`) — then faults at `msvcp140+0x9916`, `mov (%rax),%r9` with
+`rax = [basic_ios + 0x40]`. That field is the stream's streambuf slot and reads
+`0x1` (a bogus pointer, not NULL), so the remaining defect is the same one Phase B
+described: the C++ initializer walk binds the stream's `filebuf` inconsistently.
+`_initterm` **is** called over msvcp140's 57-entry table
+(`msvcp140+0x516d8..+0x518a0`, 56 entries inside the image, one null), so the
+walk runs; what is left is to find which entry binds the streambuf and why its
+effect is missing.
+
+Fixed on this rootfs in this pass: `PeWinX86RegDemo` (it passed on rootfs-win7
+and regressed here) — taote substituted its synthetic `_except_handler4_common`
+walk for a real ucrtbase unwinder; the handler now yields when the image has real
+code at that export (detected by the synthesized-cell `ret` signature).
+
 ## 1. The harness (`tests/QilingPe_Compat_Test.cpp`)
 
 One `TEST()` per upstream case, named after it, so a red case names the upstream
