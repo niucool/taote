@@ -136,11 +136,18 @@ void register_ucrt_family() {
         return 0;
     };
 
-    // void terminate(void); — the abort shape (the verbatim devblog comment
-    // rides the abort handler; the exit code rides STATUS_FATAL_APP_EXIT)
+    // void terminate(void);
+    //
+    // The C++ runtime's terminate() ends in abort(), and abort is the
+    // reference's STATUS_STACK_BUFFER_OVERRUN mapping (upstream msvcrt.py
+    // hook_abort; the devblog note there explains that the code does not mean a
+    // stack overrun actually happened). Answering 3 here — the abort() exit
+    // convention — made TestCppExUnhandled2 end with 3 where the oracle asserts
+    // 0xC0000409, because in the reference terminate is *not* hooked at all and
+    // its real body reaches the hooked abort.
     WinsdkApi("terminate", WinCc::Cdecl, {}) =
         [](Qiling& ql, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
-        w(ql).set_exit_code(3);  // the abort() exit convention
+        w(ql).set_exit_code(static_cast<int>(STATUS_STACK_BUFFER_OVERRUN));
         ql.emu_stop();
         return std::nullopt;
     };

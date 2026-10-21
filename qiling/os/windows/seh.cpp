@@ -265,6 +265,52 @@ bool QlOsWindows::seh_on_fault(int access, std::uint64_t address) {
     return seh_dispatch(address, access == UC_MEM_WRITE_UNMAPPED ? 1u : 0u);
 }
 
+// iretq: unicorn raises UC_ERR_EXCEPTION for it (a privileged instruction in
+// ring 3), and nothing catches that — no memory hook, no UC_HOOK_INTR. But the
+// guest reaches it legitimately: ntdll's KiUserExceptionDispatcher ends by
+// restoring the CONTEXT and executing iretq to enter the guest's __except
+// block, which is how every x64 SEH fixture resumes. Measured on TestSoftSEH
+// against the Windows 11 x64 tree: the whole dispatch ran (real
+// __C_specific_handler, RtlVirtualUnwind, RtlLookupFunctionEntry) and died at
+// iretq, ntdll+0x1245b0. The instruction's effect is a five-qword pop
+// (rip, cs, rflags, rsp, ss) in long mode, so the trace hook performs it and
+// restarts the run at the restored rip.
+bool QlOsWindows::seh_check_iret(std::uint64_t pc) {
+    if (bits_ != 64) {
+        return false;  // the x86 path has its own dispatch
+    }
+    std::vector<std::uint8_t> code;
+    try {
+        code = ql_->mem().read(pc, 2);
+    } catch (...) {
+        return false;
+    }
+    if (code.empty()) {
+        return false;
+    }
+    const bool iretq = code[0] == 0xCF || (code[0] == 0x48 && code.size() > 1 && code[1] == 0xCF);
+    if (!iretq) {
+        return false;
+    }
+
+    auto& regs = ql_->arch().regs();
+    const auto sp = static_cast<std::uint64_t>(regs.arch_sp());
+    std::uint64_t rip = 0;
+    std::uint64_t flags = 0;
+    std::uint64_t new_sp = 0;
+    try {
+        rip = static_cast<std::uint64_t>(ql_->mem().read_ptr(sp, 8));
+        flags = static_cast<std::uint64_t>(ql_->mem().read_ptr(sp + 0x10, 8));
+        new_sp = static_cast<std::uint64_t>(ql_->mem().read_ptr(sp + 0x18, 8));
+    } catch (...) {
+        return false;
+    }
+    regs.write("rsp", new_sp);
+    regs.write("eflags", flags & 0x3f7fd7ull);  // the user-settable arithmetic bits
+    regs.set_arch_pc(rip);
+    return true;
+}
+
 // the div/idiv pre-check: the trace hook runs before every instruction, so a
 // zero divisor can be turned into the guest exception unicorn would otherwise
 // surface as an uncatchable UC_ERR_EXCEPTION

@@ -5486,8 +5486,16 @@ TEST(WinApiNtdll, RtlVirtualUnwindReplaysThePrologueCodes) {
     ql.mem().write_ptr(kTable + 8, kUnwind, 4);
 
     // Version 1, UNW_FLAG_EHANDLER (1 << 3), SizeOfProlog 4, 1 code, no frame
-    // register; the code is (offset 0, UWOP_PUSH_NONVOL, rbx)
-    ql.mem().write(kUnwind, std::vector<std::uint8_t>{0x09, 0x04, 0x01, 0x00, 0x00, 0x03, 0x00, 0x00, 0xef, 0xbe, 0xad, 0xde});
+    // register; the code is (offset 0, UWOP_PUSH_NONVOL, rbx).
+    //
+    // The UNWIND_CODE encoding (winnt.h) is byte0 = CodeOffset and byte1 =
+    // UnwindOp in its *low* nibble with OpInfo in its high nibble, so "push rbx"
+    // is (0x00, 0x00 | 3 << 4) = 0x00, 0x30. The fixture used to write 0x00,0x03
+    // — the op and info nibbles the other way round — which decoded as
+    // UWOP_SET_FPREG and only passed because the handler read the op out of
+    // byte0 and the whole of byte1 as its info. Real images never encode that
+    // (ntdll's own frame reads 0x27,0x74 = UWOP_SAVE_NONVOL rdi).
+    ql.mem().write(kUnwind, std::vector<std::uint8_t>{0x09, 0x04, 0x01, 0x00, 0x00, 0x30, 0x00, 0x00, 0xef, 0xbe, 0xad, 0xde});
 
     ql.mem().write_ptr(kStack + 0, kSavedRbx, 8);
     ql.mem().write_ptr(kStack + 8, kRetAddr, 8);

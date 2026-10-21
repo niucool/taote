@@ -283,6 +283,9 @@ void QlOsWindows::ensure_profile_state() {
         if (self->seh_check_cpu_exception(address)) {
             return 1;  // the exception was staged: the run loop restarts there
         }
+        if (self->seh_check_iret(address)) {
+            return 1;  // iretq emulated: the run loop restarts at the restored rip
+        }
         self->hook_winapi(address, size);
         return 0;
     }, 0, 0xffffffffffffffffull);

@@ -768,11 +768,21 @@ void register_ntdll_family() {
             return static_cast<std::uint64_t>(ql.mem().read_ptr(context_record + ctx_reg_off(reg), 8));
         };
 
-        // replay the prologue backwards (the codes are stored in prologue order)
+        // replay the prologue backwards: the codes are stored in *reverse*
+        // prologue order, so walking the array forward undoes the prologue
         for (std::size_t i = 0; i < count_of_codes; ++i) {
             const auto code = slot(i);
-            const auto op_info = byte(code + 1);
-            switch (byte(code) & 0xf) {
+            // the UNWIND_CODE encoding (winnt.h): byte 0 is the CodeOffset
+            // (the prologue offset the op runs at), and byte 1 carries the op
+            // in its *low* nibble and the op info in its high nibble. Reading
+            // the op out of byte 0 decoded the prologue offset as an op code
+            // and the whole op byte as its info, so the walk applied nonsense
+            // (measured on ntdll's own frame: op read as 7, info as 0x74, and
+            // an UWOP_ALLOC_LARGE that was really an UWOP_SAVE_NONVOL moved rsp
+            // by 0x32100 into unmapped memory).
+            const auto op_byte = byte(code + 1);
+            const auto op_info = (op_byte >> 4) & 0xf;
+            switch (op_byte & 0xf) {
                 case 0:  // UWOP_PUSH_NONVOL: the saved register sits at rsp
                     ql.mem().write_ptr(context_record + ctx_reg_off(static_cast<int>(op_info)),
                                        ql.mem().read_ptr(rsp, 8), 8);

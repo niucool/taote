@@ -527,13 +527,24 @@ void register_msvcrt_family() {
         return qiling::os::windows::kExceptionContinueSearch;
     };
 
-    // LONG __C_specific_handler(PEXCEPTION_RECORD, PEXCEPTION_FRAME, ...);
+    // LONG __C_specific_handler(PEXCEPTION_RECORD, PEXCEPTION_FRAME,
+    //                            CONTEXT, DISPATCHER_CONTEXT);
+    //
+    // The x64 counterpart of the EH4 question: this is the table-driven handler
+    // the compiler puts in every x64 frame that has a __try/__except or a C++
+    // destructor scope. Answering EXCEPTION_CONTINUE_SEARCH makes the guest's
+    // own filters and __except blocks dead code, so the exception walks past
+    // every frame. Upstream qiling hooks the name nowhere, which is why it
+    // passes the x64 SEH fixtures: the real handler reads the SCOPE_TABLE out
+    // of the DISPATCHER_CONTEXT that RtlVirtualUnwind filled and runs the
+    // guest's own filter. Guarded, so a stub rootfs keeps the old answer.
     WinsdkApi("__C_specific_handler", WinCc::Cdecl, {
         {"exception_record", PVOID_},
         {"establisher_frame", PVOID_},
         {"context_record", PVOID_},
         {"dispatcher_context", PVOID_},
-    }) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
+    }, false, [](Qiling& ql) { return !w(ql).has_real_crt(); }) =
+        [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
         return qiling::os::windows::kExceptionContinueSearch;
     };
 

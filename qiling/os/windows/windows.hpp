@@ -268,6 +268,12 @@ private:
     // faults use (unicorn surfaces it as UC_ERR_EXCEPTION, which no memory hook
     // can catch, so the trace hook pre-checks the instruction)
     bool seh_check_cpu_exception(std::uint64_t pc);
+    // The x64 iretq intercept: ntdll's KiUserExceptionDispatcher resumes the
+    // handler through iretq, which unicorn reports as UC_ERR_EXCEPTION (a
+    // privileged-instruction fault no memory hook can catch). The instruction's
+    // documented effect is a five-qword stack pop into rip/cs/rflags/rsp/ss, so
+    // the trace hook applies it directly and restarts the run at the handler.
+    bool seh_check_iret(std::uint64_t pc);
 
     // the guest `int n` delivery (the UC_HOOK_INTR trampoline): int3 becomes
     // STATUS_BREAKPOINT, everything else STATUS_ILLEGAL_INSTRUCTION, both
