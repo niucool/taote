@@ -18,6 +18,14 @@
 #include "qiling/os/os.hpp"
 #include "qiling/os/utils.hpp"
 #include "qiling/os/volumes.hpp"
+#include "qiling/gdbserver.hpp"
+
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
+#include <thread>
 #include "qiling/os/windows/dlls/dlls.hpp"
 #include "qiling/os/windows/windows.hpp"
 
@@ -141,6 +149,92 @@ TEST(PegasusParity, AnalysisOptionRecordsRegionCountersAndCoverage) {
     const auto plain = run_pe_sample("argv_test_x86.exe");
     EXPECT_TRUE(plain.coverage.empty());
     EXPECT_TRUE(plain.memory_access.empty());
+}
+
+TEST(PegasusParity, GdbServerServesRegistersMemoryAndSingleStep) {
+    // PLAN_PARITY Phase 3 item 7: the gdbserver slice covers the three intents
+    // the reference's test_gdb.cpp names (connect + read registers, read
+    // memory, single step) over the real GDB remote protocol.
+    namespace fs = std::filesystem;
+
+    qiling::os::register_dlls();
+    auto options = qiling::QilingOptions{};
+    options.ostype = qiling::QL_OS::WINDOWS;
+    options.archtype = qiling::QL_ARCH::X86;
+    options.rootfs = fs::temp_directory_path().string();
+    options.code = std::vector<std::uint8_t>{0x90, 0x90, 0x90, 0xC3};  // nop; nop; nop; ret
+    qiling::Qiling ql{options};
+
+    // shellcode staging: the loader records the entry (the pc is set by run),
+    // so the server's step starts from there
+    const auto pc = ql.loader().entry_point;
+    ASSERT_NE(pc, 0u);
+    ql.arch().regs().set_arch_pc(pc);
+
+    qiling::QlGdb gdb(ql, "127.0.0.1", 0);
+    gdb.start();
+    ASSERT_NE(gdb.port(), 0);
+
+    // the protocol surface, without a socket first
+    EXPECT_EQ(gdb.handle_packet("?"), "S05");
+    EXPECT_EQ(gdb.handle_packet("qSupported"), "PacketSize=1000;qXfer:features:read-");
+    EXPECT_EQ(gdb.handle_packet("qAttached"), "1");
+    const auto all = gdb.handle_packet("g");
+    EXPECT_EQ(all.size(), ql.arch().bits() == 64 ? 24u * 16u : 16u * 8u);
+    EXPECT_EQ(gdb.handle_packet("Z0,1000,1"), "OK");
+    EXPECT_EQ(gdb.handle_packet("z0,1000,1"), "OK");
+    // an unknown command answers an empty packet (the client's "unsupported")
+    // - 'g' itself is the register read, so the probe must not start with one
+    EXPECT_EQ(gdb.handle_packet("Xyz"), "");
+
+    // the execution packets: a step retires exactly one instruction
+    ql.arch().regs().set_arch_pc(pc);
+    EXPECT_EQ(gdb.handle_packet("s"), "S05");
+    EXPECT_EQ(ql.arch().regs().arch_pc(), pc + 1);
+    char mreq[64];
+    std::snprintf(mreq, sizeof(mreq), "m%lx,3", static_cast<unsigned long>(pc));
+    EXPECT_EQ(gdb.handle_packet(mreq), "909090");
+
+    // the transport, deterministically and bounded: a socketpair carries the
+    // same packets, so no accept() is involved (a listener wait is bounded by
+    // accept_client's poll budget, which the expiry arm below pins)
+    int sv[2] = {-1, -1};
+    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
+    std::thread server([&gdb, fd = sv[0]] { gdb.serve_fd(fd, 2000); });
+
+    const auto rsp = [fd = sv[1]](std::string_view payload) -> std::string {
+        char sum[8];
+        std::uint8_t s = 0;
+        for (const char c : payload) s = static_cast<std::uint8_t>(s + static_cast<std::uint8_t>(c));
+        std::snprintf(sum, sizeof(sum), "#%02x", s);
+        const std::string frame = "$" + std::string(payload) + sum;
+        (void)::send(fd, frame.data(), frame.size(), 0);
+        std::string reply;
+        char ch = 0;
+        while (::recv(fd, &ch, 1, 0) == 1) {
+            if (ch == '$') break;
+        }
+        while (::recv(fd, &ch, 1, 0) == 1 && ch != '#') reply.push_back(ch);
+        char ignored[2];
+        (void)::recv(fd, ignored, 2, 0);
+        return reply;
+    };
+
+    EXPECT_EQ(rsp("?"), "S05");
+    EXPECT_EQ(rsp("qAttached"), "1");
+    EXPECT_EQ(rsp("D"), "OK");
+    ::close(sv[1]);
+    if (server.joinable()) server.join();
+    EXPECT_EQ(gdb.last_status(), qiling::QlGdbStatus::Detached);
+
+    // the listener budget: with nobody connecting, accept_client expires rather
+    // than blocking (the same discipline as the socket samples' wall clock)
+    qiling::QlGdb idle(ql, "127.0.0.1", 0);
+    idle.start();
+    EXPECT_FALSE(idle.accept_client(50));
+    EXPECT_EQ(idle.last_status(), qiling::QlGdbStatus::ListenTimeout);
+    idle.stop();
+    (void)ql;
 }
 
 TEST(PegasusParity, ConfigParityMountsFilesAndPatchesTheRegistry) {

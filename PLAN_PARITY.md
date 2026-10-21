@@ -1080,6 +1080,38 @@ replay store and the analysis hooks already are), not in `load()`.
 Corpus unchanged (24/32 exit 0, differential 10/0/16/2/4); API sweep 101/101;
 ctest 548.
 
+### Phase 3 item 7: the gdbserver slice
+
+`qiling/gdbserver.hpp` adds `QlDebugger` (the base upstream's
+`debugger/debugger.py` declares) and `QlGdb`, the GDB remote serial protocol
+over TCP: `? g G p P m M c s Z0 z0 D k qSupported qAttached`, with registers read
+and written through `QlRegisterManager` (GDB's per-architecture order, not
+unicorn's enum order), memory through `QlMemoryManager`, breakpoints tracked by
+address and honoured by a code hook that stops the engine, and `s` stepping
+exactly one instruction through `uc_emu_start(count=1)`.
+
+The reference's own `test_gdb.cpp` cases are **skipped stubs** ("GDB RSP client
+not yet implemented in C++"), so the port's acceptance is the same three intents,
+pinned by `PegasusParity.GdbServerServesRegistersMemoryAndSingleStep`:
+connect-and-read-registers, read memory, single step - plus the transport over a
+socketpair and the listener's expiry arm.
+
+**Never block on the host.** The first cut hung a test process for 66 minutes:
+the listener thread sat in a real `accept()` with no client and the main thread
+waited on its `join`, and no guest instruction was retiring, so no guest-side
+budget could bound it. The same discipline as the socket samples' wall clock now
+applies: `accept_client(timeout)` polls the listener and returns a named
+`gdb_listen_timeout`, `serve_fd(fd, timeout)` bounds every read with
+`gdb_client_timeout`, and the test drives the server through a socketpair (no
+accept at all) with an explicit `ListenTimeout` expiry arm - it completes in
+~70 ms. The `-j` flake seen on the way (`PegasusParity.FileAccessEmulationX86`
+under `ctest -j4`) does not reproduce in the serial gate, and `antidbg.exe`'s
+`failed to write memory (uc_err 7)` under a loaded sweep is the pre-existing
+load artifact: run alone it makes 40 calls and exits 0.
+
+Corpus unchanged (24/32 exit 0, differential 10/0/16/2/4); API sweep 101/101;
+ctest 549.
+
 ## Phase 4 — deliberately not ported (documented non-goals)
 
 * **JS engine** (`test_js_*`, 54 cases) — excluded by instruction; qiling hooks

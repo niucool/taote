@@ -25,6 +25,7 @@ add_library(qiling STATIC
     os/stats.cpp
     os/artifacts.cpp
     os/volumes.cpp
+    gdbserver.cpp
     os/path.cpp
     os/filestruct.cpp
     os/disk.cpp
