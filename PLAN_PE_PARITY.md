@@ -16,8 +16,7 @@ below, and a phase does not close without its tests.
 | metric | upstream | taote today | target |
 |---|---|---|---|
 | qiling PE suite parity, **stub mode** (default) (`../qiling/tests/test_pe.py`, `test_peshellcode.py`, `test_windows_cpp_*.py`) | passes **on a Windows host only** (its CI runs `test_pe.bat`, which needs `dllscollector.bat` to copy the real System32 DLLs) | **26 passed / 10 skipped / 0 failed** of 36 ported cases (`tests/QilingPe_Compat_Test.cpp`) | all but the documented deferrals |
-| qiling PE suite parity, **real-dll mode** (`TAOTE_WINDOWS_ROOTFS=~/source/jim/rootfs-win7`) | the reference's own mode | **21 passed / 0 skipped / 15 failed** | all 36 |
-| qiling PE suite parity, real-dll mode (`rootfs-win7-crt`, Win7 + Wine UCRT) | — | **21 passed / 0 skipped / 15 failed** | — |
+| qiling PE suite parity, **real-dll mode** (`TAOTE_WINDOWS_ROOTFS=~/source/jim/rootfs-win7`) | the reference's own configuration; upstream itself fails every case on this rootfs (§2.3) | **26 passed / 1 skipped / 9 failed** | all 36 |
 | pegasus sample sweep (`../pegasus/tests/bins`, 101 bins) | asserts dispatch only | **101 exit 0** | maintained |
 | pegasus suite parity (`PegasusParity.*`, 18 cases) | 357 cases | **18 passed** | maintained |
 | PMA corpus (`~/source/jim/capa-testfiles`) | 12 curated | **1/12 curated** (raw sweep 24/32 exit 0) | 12/12 |
@@ -25,68 +24,55 @@ below, and a phase does not close without its tests.
 
 The two modes are reported separately because they measure different things: stub
 mode is deterministic and is what the default suite runs; real-dll mode is the
-reference's own configuration and is the only mode in which the C++/SEH cases can
-even attempt to run. **Neither mode is a superset of the other today** — five
-cases pass in stub mode and fail with real DLLs (`PeWinX8664Clipboard`,
-`PeWinX8664Tls`, `PeWinX8664Fls`, `PeWinX86Argv`, `PeWinX86RegDemo`), because the
-real DLLs execute vendor code the emulator has not finished covering.
+reference's own configuration. Stub mode used to be the only safe mode — five
+cases passed on stubs and failed with real DLLs. Those five are now green in both
+modes (they were one port bug, §2.2 #9), so real-dll mode is the *strictly
+stronger* mode: it runs every case that stub mode skips.
 
-### 0.1 Per-case state
+### 0.1 Per-case state, with the upstream-oracle differential
 
-`stub` = default mode; `win7` = `TAOTE_WINDOWS_ROOTFS=~/source/jim/rootfs-win7`
-(real Microsoft System32, no Universal CRT); `win7crt` = the same tree with
-Wine's `ucrtbase`/`msvcp140`/`vcruntime140` injected.
+`upstream` = `../qiling` run against the same `rootfs-win7` per §2.3;
+`taote` = `TAOTE_WINDOWS_ROOTFS=~/source/jim/rootfs-win7`. Every row was
+measured, not inferred.
 
-| case | stub | win7 | win7crt | note |
-|---|---|---|---|---|
-| PeWinX86Hello | pass | pass | pass | |
-| PeWinX8664Hello | pass | pass | pass | |
-| PeWinX86FileUpx | pass | pass | pass | |
-| PeWinX8664FileUpx | pass | pass | pass | |
-| PeWinX86Cmdln | pass | pass | pass | `_acmdln`/`__p__acmdln` data-export shim |
-| PeWinX8664Cmdln | pass | pass | pass | |
-| PeWinX86Crackme | pass | pass | pass | patches + stdin |
-| PeWinX8664CustomApi | pass | pass | pass | 12/17/17 `puts` intercept |
-| PeWinX8664ReturnFromMainStackPointer | pass | pass | pass | `QL_STOP.STACK_POINTER` |
-| PeWinX8664ReturnFromMainExitTrap | pass | pass | pass | `QL_STOP.EXIT_TRAP` |
-| PeWinX86ReturnFromMainStackPointer | pass | pass | pass | |
-| PeWinX86ReturnFromMainExitTrap | pass | pass | pass | |
-| PeWinX86GetLastError | pass | pass | pass | |
-| PeWinX86NtQueryInformationSystem | pass | pass | pass | |
-| PeWinX86UselessDisk | pass | pass | pass | `\\.\PHYSICALDRIVE0` mapper |
-| PeWinX86Wannacry | pass | pass | pass | |
-| PeWinAlKhaser | pass | pass | pass | |
-| PeWinX8664Libcache | pass | pass | pass | fresh parse (no `QlPeCache`) |
-| WindowsShellcodeX86 | pass | pass | pass | |
-| ReadPtr32 | pass | pass | pass | |
-| ReadPtr64 | pass | pass | pass | |
-| PeWinX8664Clipboard | pass | **fail** | **fail** | real DLLs: faults in the sample's own startup (`0x14001233a`) |
-| PeWinX8664Tls | pass | **fail** | **fail** | real DLLs: `UC_ERR_WRITE_UNMAPPED` at `0x140001172` after `EtwNotificationRegister` |
-| PeWinX8664Fls | pass | **fail** | **fail** | same shape as Tls (`0x140001182`) |
-| PeWinX86Argv | pass | **fail** | **fail** | real DLLs: jumps to `0x70000000` (non-executable) |
-| PeWinX86RegDemo | pass | **fail** | **fail** | real DLLs: jumps to `0x70000000` after `RegOpenKeyW` |
-| PeWinX86GandcrabProfileChangesBehaviour | skip | **fail** | **fail** | needs real DLLs (§Phase C) |
-| PeWinX86Multithread | skip | **fail** | **fail** | needs live thread switching (§Phase D) |
-| CppHelloWorldX86 | skip | **fail** | **fail** | needs the Universal CRT (§Phase B) |
-| CppTypesX86 | skip | **fail** | **fail** | needs the Universal CRT |
-| CppHelloWorldX8664 | skip | **fail** | **fail** | needs the Universal CRT |
-| CppTypesX8664 | skip | **fail** | **fail** | needs the Universal CRT |
-| SoftSehX8664 | skip | **fail** | **fail** | needs the Universal CRT |
-| SoftCppExX8664 | skip | **fail** | **fail** | needs the Universal CRT |
-| CppExUnhandledFilteredX8664 | skip | **fail** | **fail** | needs the Universal CRT |
-| CppExUnhandledUnfilteredX8664 | skip | **fail** | **fail** | needs the Universal CRT |
+| case | upstream on rootfs-win7 | taote (real DLLs) | conclusion |
+|---|---|---|---|
+| PeWinX86Hello | FAIL | pass | rootfs gap upstream cannot route around; taote serves the unbound imports |
+| PeWinX8664Hello | FAIL | pass | idem (control: upstream dies inside real ntdll) |
+| PeWinX86FileUpx | FAIL | pass | idem |
+| PeWinX8664FileUpx | FAIL | pass | idem |
+| PeWinX86Cmdln | FAIL | pass | idem |
+| PeWinX8664Cmdln | FAIL | pass | idem |
+| PeWinX86Crackme | FAIL | pass | idem |
+| PeWinX8664CustomApi | FAIL | pass | idem |
+| PeWinX86/64ReturnFromMain* (4) | FAIL | pass | idem |
+| PeWinX86GetLastError | FAIL | pass | idem |
+| PeWinX86NtQueryInformationSystem | FAIL | pass | idem |
+| PeWinX86UselessDisk | FAIL | pass | idem |
+| PeWinX86Wannacry | FAIL | pass | idem |
+| PeWinAlKhaser | FAIL | pass | idem |
+| PeWinX8664Libcache | FAIL | pass | idem |
+| WindowsShellcodeX86 | FAIL | pass | idem |
+| ReadPtr32 / ReadPtr64 | FAIL | pass | idem |
+| **PeWinX8664Clipboard** | **FAIL** (FETCH_UNMAPPED) | **pass** | *was* a taote port bug: `__p__commode`/`__acrt_iob_func` returned 0 to a guest that dereferences it, because a handler-less stub cell is not a dispatchable export. Fixed. |
+| **PeWinX8664Tls** | **FAIL** (pc `0x2ba6`) | **pass** | same port bug (fixed) |
+| **PeWinX8664Fls** | **FAIL** (FETCH_UNMAPPED) | **pass** | same port bug (fixed) |
+| **PeWinX86Argv** | **FAIL** (FETCH_UNMAPPED) | **pass** | same port bug (fixed) |
+| **PeWinX86RegDemo** | **FAIL** (`QlErrorSyscallError`) | **pass** | same port bug (fixed) |
+| **PeWinX86Multithread** | **FAIL** (pc `0x2476`) | **skipped** | **rootfs gap, proven**: the sample imports `MSVCR110.dll` and `rootfs-win7` contains no `MSVCR110.dll` (0 matches in either arch tree); with its CRT stubbed the sample never reaches its `CreateThread` call (verified with `TAOTE_VERBOSE=debug`: `CreateThread` is never dispatched). Upstream fails the same case for the same reason. Needs a real `MSVCR110.dll`. |
+| **PeWinX8664CppHelloWorld** | FAIL | fail | **port gap (not rootfs)** — see §3 Phase B |
+| **PeWinX8664CppTypes** | FAIL | fail | idem |
+| **PeWinX8664SoftSeh** | FAIL | fail | idem |
+| **PeWinX8664SoftCppEx** | FAIL | fail | idem |
+| **PeWinX8664CppExUnhandledFiltered** | FAIL | fail | idem |
+| **PeWinX8664CppExUnhandledUnfiltered** | FAIL | fail | idem |
+| **PeWinX86CppHelloWorld** | FAIL | fail | idem |
+| **PeWinX86CppTypes** | FAIL | fail | idem |
+| **PeWinX86GandcrabProfile** | FAIL | fail | **port gap** — see §3 Phase C |
 
-The ten stub-mode skips are exactly the ten cases that need something the stub
-rootfs cannot provide: eight need the real C++ runtime, one needs live thread
-switching, one needs the real system DLLs for the malware's environment probing.
-They are `GTEST_SKIP`ped with a reason rather than silently passing, and each one
-runs (and fails loudly) in real-dll mode.
-
-Run the PE parity suite alone:
-
-```bash
-./build/tests/qiling_tests --gtest_filter='QilingPeCompat.*'
-```
+Stub mode is unchanged by all of this: 26 passed / 10 skipped / 0 failed, the ten
+skips being the same cases that need a real C++ runtime, a real `MSVCR110.dll`,
+or live thread switching.
 
 ## 1. The harness (`tests/QilingPe_Compat_Test.cpp`)
 
@@ -138,14 +124,60 @@ box means either
   that lives *inside* those DLLs cannot run, see §3), or
 * (b) a real Windows DLL set supplied by the user.
 
-Wine's builtin PE DLLs are an appealing (b) substitute and were tried:
-`apt-get download libwine` gives `x86_64-windows/` and `i386-windows/` trees
-with `kernel32.dll`, `kernelbase.dll`, `ntdll.dll`, `ucrtbase.dll`,
-`msvcrt.dll`, `vcruntime140.dll`, `msvcp140.dll`, … A rootfs built from them
-**segfaults the loader** (crash inside the load walk; no fixture reaches its
-entry point). Recorded as an open item: either the loader has an out-of-bounds
-on those images or the images use a PE feature LIEF/the loader mishandles. Until
-that is fixed, mode (b) needs real Windows DLLs collected on a Windows host.
+Mode (b) is **runnable**: `TAOTE_WINDOWS_ROOTFS=~/source/jim/rootfs-win7`
+(real Microsoft Windows 7 System32, 35 x64 + 73 x86 images) drives the whole
+suite and is the mode the numbers in §0 are quoted for. The earlier "the loader
+segfaults on real DLLs / real-dll mode is not runnable" finding is **retired** —
+it was three loader defects, all fixed: a heap-use-after-free in the relocation
+walk (the fixups are copied out of the LIEF `Binary` before `load_parsed` takes
+ownership), guest-pointer-width violations in the PEB/TEB/LDR writes (8-byte
+stores on a 32-bit guest, off the end of the heap allocations), and import
+groups dropped whole so their IAT slots kept raw hint/name RVAs.
+
+Wine's builtin PE DLLs were also tried as a (b) substitute and are **no longer
+used**: they are self-consistent only as a complete set, Wine's `ucrtbase`
+imports wine-only `ntdll` exports (`__wine_dbg_*`), and the tree's `System32` is
+a symlink into `/tmp`. The measurements in this document use real Windows DLLs
+only.
+
+### 2.3 The upstream oracle
+
+`../qiling` itself can be run against the same rootfs, which separates "our port
+is wrong" from "this rootfs cannot support the case". Setup (Linux, no Windows
+host): a venv at `../qiling/.venv-oracle` with unicorn/capstone/pefile/
+python-registry/pyelftools/keystone-engine/gevent/multiprocess/pyyaml/
+questionary/termcolor installed, the sample corpus **staged inside** the rootfs
+copy (upstream rejects a target binary outside the rootfs with a `ValueError`
+in its path mapper), and its own `tests/profiles/*.ql` for the GandCrab case.
+
+Measured upstream verdicts on `rootfs-win7` — upstream fails **every** case,
+including the control (`x8664_hello.exe`, which taote passes):
+
+| case | upstream on rootfs-win7 | failing pc / error |
+|---|---|---|
+| x8664_hello (control) | FAIL | pc `0x78e99aa0` *inside real ntdll* (READ_UNMAPPED) |
+| x8664_tls | FAIL | pc `0x2ba6`, not in any image — an `.idata` RVA |
+| Fls | FAIL | UC_ERR_FETCH_UNMAPPED |
+| x8664_clipboard_test | FAIL | UC_ERR_FETCH_UNMAPPED |
+| RegDemo | FAIL | `QlErrorSyscallError` raised inside its `hook_winapi` |
+| argv | FAIL | UC_ERR_FETCH_UNMAPPED |
+| MultiThread | FAIL | pc `0x2476`, an `.idata` RVA |
+| GandCrab502 (both profiles) | FAIL | UC_ERR_FETCH_UNMAPPED |
+| the 8 C++/SEH fixtures | FAIL | UC_ERR_FETCH_UNMAPPED |
+
+The `0x2ba6` / `0x2476` jumps are the signature of an unbound import whose IAT
+slot still holds its hint/name RVA: rootfs-win7 exports **none** of the Universal
+CRT's `api-ms-win-crt-*` surface, and upstream's redirect ladder only maps those
+to `ucrtbase.dll` (absent here), so every CRT import in every MSVC-2015 sample is
+unbound. taote does not have that defect (unresolved slots are answer-0 stub
+cells, and names taote implements are dispatched through its own handlers), which
+is why taote passes cases upstream cannot.
+
+Consequence for the differential rule: on this rootfs the oracle **cannot**
+convict taote of a port bug for any case — it fails everything, including the
+control. Where the oracle is useful is the reverse direction: a case taote fails
+while upstream's *failure mode* differs from ours localizes the defect, which is
+how the C++ rows below were narrowed.
 
 ### 2.2 Defects fixed on the way
 
@@ -214,6 +246,31 @@ that is fixed, mode (b) needs real Windows DLLs collected on a Windows host.
    `__pctype_func` return **data pointers** and the guest dereferences the
    result immediately (`mov 0x8(%rax),%rcx` → fault at `0x8`), so a stub cannot
    stand in for them — see Phase B.
+9. **A handler is reached by *export address*, so taote skipped its own
+   implementations for imports the rootfs could not export.** The five cases
+   that passed on stubs and failed on real DLLs (`PeWinX8664Tls`/`Fls`/
+   `Clipboard`, `PeWinX86Argv`/`RegDemo`) were one cause: `api-ms-win-crt-*`
+   imports missing from Win7's msvcrt bound to answer-0 stub cells, and taote's
+   `__p__commode` / `__acrt_iob_func` / `__stdio_common_vfprintf` handlers never
+   fired because the loader keys `import_symbols_` by *export* addresses and a
+   stub cell is not an export. `x8664_tls.exe` then stored through the null that
+   `__p__commode()` returned (`mov %eax,(%rbx)`). The loader now records
+   address→symbol for every stub cell (`stub_symbol_at`) and `hook_winapi`
+   synthesizes the `ImportSymbol` from it and dispatches normally when the
+   registry has a handler.
+10. **The SEH sentinel return was never observed.** The sentinel page is mapped
+   rw-without-execute on purpose so a guest returning into it traps, but unicorn
+   reports that as `UC_MEM_FETCH_PROT` (its own hook type), not as
+   `UC_HOOK_MEM_INVALID` — so the dispatcher missed exactly the sentinel-return
+   case and an x86 fixture died jumping into `0x70000000`.
+11. **The UCRT locale-state accessors were missing.** `___lc_codepage_func`,
+   `___lc_collate_cp_func`, `___mb_cur_max_func`, `___lc_locale_name_func` and
+   `__pctype_func` return *pointers* into CRT state; a Win7 rootfs has none of
+   them, and an answer-0 stub faults at `mov 0x8(%rax),%rcx` with `rax == 0`
+   (measured at `msvcp140+0x1c44`). Now implemented as real guest cells holding
+   the C locale. Effect: msvcp140's DllMain completes, `.data +0x94250` reaches
+   its initialized state, and `?cout@std@@` holds a vtable
+   (`0x180057300`) instead of zeros.
 
 ## 3. The failure clusters left (and their phases)
 
@@ -231,47 +288,37 @@ library code. No stub can provide it. Two ways forward:
 2. **Collect real DLLs on a Windows host** (`dllscollector.bat`) and run with
    `TAOTE_WINDOWS_ROOTFS`. The suite already supports it.
 
-### Phase B — the Universal CRT (the eight C++/SEH cases)
+### Phase B — the eight C++/SEH cases (port gap, narrowed to one thing)
 
-Superseded the old `_initterm`/`_initterm_e` framing. Those two names now have
-**no handler on purpose** (the reference registers neither), so a guest with a
-real CRT executes its own initializer table; on the stub rootfs the call lands on
-the synthesized `ret` cell. What actually blocks the C++ cases is upstream of
-that, and it is now measured end to end:
+This is **not** a rootfs gap. Both arches' fixtures import the same set
+(`MSVCP140`, `VCRUNTIME140[_1]`, the five `api-ms-win-crt-*` groups, `KERNEL32`)
+and `rootfs-win7` has `msvcp140.dll` and `vcruntime140.dll` for x86 and x64. The
+whole chain now works up to one point:
 
-* The `DllMain` drive used to take the *detach* branch (defect 6). Fixed — the
-  attach path runs, its gates pass (`.data +0x94250`/`+0x94290` set, the
-  `_initterm_e` table at `+0x517c8..+0x517d8` walking its single entry), and
-  msvcp140 proceeds to the winapi-thunk/bootstrap stage.
-* That stage imports the **Universal CRT** surface: `___lc_locale_name_func`,
-  `___mb_cur_max_func`, `___lc_codepage_func`, `__pctype_func`,
-  `_initialize_onexit_table`, `_crt_atexit`, `_execute_onexit_table`. The first
-  four return *data pointers* that the guest dereferences immediately, so the
-  answer-0 stub page cannot substitute for them: with Win7's msvcrt (which
-  exports none of them) msvcp140's startup dies at `mov 0x8(%rax),%rcx` with
-  `rax == 0` — measured at `msvcp140+0x1c44`.
-* **Windows 7 predates the Universal CRT entirely** (`ucrtbase.dll` ships only
-  from KB2999226 on), and `rootfs-win7`'s VC++ 2015 binaries were collected
-  *without* `ucrtbase.dll`. So the pure Win7 tree cannot ever run these.
-* `rootfs-win7-crt` injects Wine's `ucrtbase.dll` into that tree, but Wine's
-  UCRT imports wine-only `ntdll` exports (`__wine_dbg_get_channel_flags`,
-  `__wine_dbg_header`, `__wine_dbg_output`, `__wine_dbg_strdup`) that real Win7
-  `ntdll` does not export; the stubbed zero answers leave its `DllMain` bailing
-  in its own code (`ucrtbase+0x3ddd9`), after which msvcp140's printf path
-  recurses until the guest stack is exhausted.
-* A **coherent Wine set** (`~/source/jim/qiling-rootfs`, 750 DLLs incl. Wine's
-  own `ntdll`) gets further — ucrtbase's `DllMain` runs `_set_app_type` /
-  `_set_fmode` and the sample's own CRT startup completes — but `std::cout` is
-  still unconstructed, and the same tree makes `PeWinX86GetLastError` throw an
-  uncaught `QlErrorBase` that terminates the test binary (a defect to fix before
-  that mode can be used: the Wine `System32` is also a symlink into `/tmp`).
+* the `DllMain` drive rides CDECL and takes the **attach** path (§2.2 #6), so
+  msvcp140's own CRT startup runs;
+* the UCRT locale-state accessors are implemented (§2.2 #11), so that startup no
+  longer faults, `.data +0x94250` reaches its initialized state and
+  `?cout@std@@` (msvcp140+0x947d0) holds a **vtable** (`0x180057300`);
+* the fixture therefore faults *inside genuine msvcp140 code*, not on a null
+  stream: `msvcp140+0xf62c`, `mov 0x40(%r15),%rax; mov (%rax),%r9` with
+  `rax == 0`.
 
-**Phase B action:** collect `ucrtbase.dll` (x64 + x86) and the
-`api-ms-win-crt-*.dll` set from the machine that produced `rootfs-win7.zip` —
-it runs the VC++ 2015 redistributable, so the Universal CRT is present there,
-it simply was not copied. That single harvest is what the eight cases need; no
-emulator change is implied by the measurements above.
+**The remaining defect is precise:** the stream object is constructed (vtable
+present) but the pointer at `basic_ios<char> + 0x40` — the `_Mystrbuf`/rdbuf slot
+— is still NULL, so `operator<<` dereferences it. `std::cout`'s binding to its
+`filebuf` comes from `_Init_ostream` via the CRT's **C++ initializer table**
+(`__xc_a..__xc_z`, walked by `_initterm`), while what has demonstrably run is the
+`__xi` table (`_initterm_e` over `msvcp140+0x517c8..+0x517d8`, one entry — the
+winapi-thunk resolver). So the next step is to confirm and fix why the `__xc`
+walk does not take effect on this path: check whether `_initterm` is reached at
+all on msvcp140's attach path once `_initterm_e` returns, and whether the
+`coutbuf`/`filebuf` BSS statics are constructed before `_Init_ostream` binds
+them. This is a small, mechanical target — not a "needs a Windows host" wall.
 
+Upstream cannot be used as an oracle here (it fails these cases on this rootfs,
+and on a Windows host this configuration is its supported one), so the verdict
+rests on the above: the DLLs are present, therefore **port gap**.
 ### Phase C — `GandCrab502.bin` (`PeWinX86GandcrabProfileChangesBehaviour`)
 
 The case is now the upstream shape (§1): the admin run hooks the stage-2 gate
