@@ -551,9 +551,24 @@ void QlOsWindows::hook_winapi(std::uint64_t address, std::uint32_t size) {
     // dispatch)
     const auto& pe_loader = static_cast<const loader::QlLoaderPE&>(ql_->loader());
 
+    // an import the rootfs cannot serve is bound to an unbound-import stub cell
+    // (the Win7 rootfs exports none of the Universal CRT's api-ms-win-crt-*
+    // surface, for instance). Those cells are `xor eax,eax; ret`, and a zero is
+    // only correct for a function whose answer nobody reads: several of these
+    // return *data pointers* the guest dereferences immediately (__p__commode,
+    // __acrt_iob_func, __stdio_common_vfprintf's stream argument). When taote
+    // implements the name, dispatch it exactly like a real export.
+    loader::ImportSymbol stub_symbol;
     const auto* imported = pe_loader.import_symbols_at(address);
     if (imported == nullptr) {
-        return;
+        const auto* stub_name = pe_loader.stub_symbol_at(address);
+        if (stub_name == nullptr || ApiRegistry::instance().find(*stub_name) == nullptr) {
+            return;
+        }
+        stub_symbol.address = address;
+        stub_symbol.name = *stub_name;
+        stub_symbol.dll = "<unbound import stub>";
+        imported = &stub_symbol;
     }
     // the loader keys import_symbols_ by every loaded image's exports, so the
     // main image's own exports land in it too: a dll calling its own export is

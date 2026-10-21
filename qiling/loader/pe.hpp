@@ -217,6 +217,16 @@ public:
     // philosophy for APIs the environment genuinely cannot provide
     std::uint64_t unbound_import_stub(const std::string& name, std::uint64_t ordinal = 0);
 
+    // the symbol an unbound-import stub cell stands in for (nullptr when the
+    // address is not one of the stub page's cells). hook_winapi consults this
+    // so an import the rootfs's DLL does not export — the Win7 rootfs exports
+    // none of the Universal CRT's api-ms-win-crt-* surface — is still served by
+    // taote's own handler instead of by a bare answer-0 cell
+    const std::string* stub_symbol_at(std::uint64_t address) const noexcept {
+        const auto it = stub_addr_names_.find(address);
+        return it == stub_addr_names_.end() ? nullptr : &it->second;
+    }
+
     // loader/pe.py cmdline: `cmdline args...`
     const std::vector<std::uint8_t>& cmdline() const noexcept { return cmdline_; }
 
@@ -268,6 +278,7 @@ private:
     std::vector<ForwardedExport> forwarded_exports_;
     std::optional<std::uint64_t> stub_page_;
     std::map<std::string, std::uint64_t> stub_cells_;
+    std::map<std::uint64_t, std::string> stub_addr_names_;
 
     // the ntoskrnl-family rider addresses (the init_* walks seed them)
     std::uint64_t kuser_shared_data_address_ = 0;

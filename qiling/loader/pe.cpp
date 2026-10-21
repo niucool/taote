@@ -277,6 +277,7 @@ std::uint64_t QlLoaderPE::unbound_import_stub(const std::string& name, std::uint
         throw QlErrorBase("too many unresolved imports for the stub page");
     }
     const auto cell_addr = *stub_page_ + stub_cells_.size() * 16;
+    stub_addr_names_.emplace(cell_addr, name.empty() ? key : name);
     stub_cells_.emplace(std::move(key), cell_addr);
     return cell_addr;
 }
