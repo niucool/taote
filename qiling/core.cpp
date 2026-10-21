@@ -118,6 +118,11 @@ Qiling::Qiling(const QilingOptions& options) {
     // adjust the sink format
     log_ = log::setup_logger({log::LogDevice{log::LogDevice::Kind::Stderr}}, options.log_plain);
     (void)options.console;
+    // core.py applies the verbose level when the logger comes up (the
+    // Qiling ctor's after-init), not only through the setter
+    if (verbose_ != QL_VERBOSE::DEFAULT) {
+        set_verbose(verbose_);
+    }
 
     // ---- profile ----
     profile_default_ = profile_setup(*ostype, options.profile);
