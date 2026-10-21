@@ -224,6 +224,10 @@ struct SampleOptions {
     // PLAN_PARITY Phase 3 item 5: a non-empty dir turns on the content-addressed
     // artifact store; `artifacts` selects guest ranges to save as `BEGIN:SIZE`
     std::string artifact_dir;
+    // PLAN_PARITY Phase 3 item 6: the config-parity surface
+    std::vector<std::pair<std::string, std::string>> fs_mappings;  // guest, host
+    std::vector<std::string> volumes;                              // "host:guest"
+    std::vector<qiling::QilingOptions::RegistryPatch> registry_patches;
     std::vector<std::string> artifacts;
     bool api_replay_serve = false;
 };
@@ -357,6 +361,9 @@ inline SampleOutcome run_pe_sample(const std::string& bin_name, const SampleOpti
         options.api_replay_path = opts.api_replay;
         options.analysis = opts.analysis;
         options.artifact_dir = opts.artifact_dir;
+        options.fs_mappings = opts.fs_mappings;
+        options.volumes = opts.volumes;
+        options.registry_patches = opts.registry_patches;
         options.api_replay_serve = opts.api_replay_serve;
         options.argv.push_back(exe_in_rootfs.string());
         for (const auto& a : opts.argv) {

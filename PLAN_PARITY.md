@@ -1050,6 +1050,36 @@ digest vectors, the dedup of identical bytes under different labels, the
 memory artifact. Corpus unchanged (24/32 exit 0, differential 10/0/16/2/4); API
 sweep 101/101; ctest 547.
 
+### Phase 3 item 6: config parity
+
+`QilingOptions` gains the three config surfaces pegasus's `test_volumes` /
+`test_config*` rows use, and both are applied before the guest runs:
+
+- **`fs_mappings`** - an explicit `guest -> host` file list, mounted through
+  the existing `QlFsMapper` (no config intermediate);
+- **`volumes`** - Docker-style `"host:guest"` specs via the new
+  `qiling/os/volumes.hpp` (a port of pegasus `src/volumes.cpp`): the separator is
+  the first `:` that is not a drive-letter prefix (so `C:\samples:C:\guest`
+  parses), a host file maps to the guest path itself, a host directory expands
+  recursively to `guest\<relative>` entries (sorted), and a volume overrides an
+  earlier mapping;
+- **`registry_patches`** - `{key, name, type, data}` written to the in-memory
+  diff store through the new `RegistryManager::write_value` (the hive files stay
+  read-only), with `REG_SZ`/`EXPAND_SZ` as text, `REG_DWORD`/`QWORD` as integers
+  and everything else as bytes.
+
+`PegasusParity.ConfigParityMountsFilesAndPatchesTheRegistry` pins the spec
+parser (drive-letter colon, the malformed arms), the directory expansion order,
+and a real run whose guest file APIs see a mapped file and a volume file while a
+patched `REG_SZ` reads back as typed text.
+
+One finding worth recording: `QlOsWindows::load()` is not reached by the port's
+construction path at all - the config therefore lands in `run()` (where the
+replay store and the analysis hooks already are), not in `load()`.
+
+Corpus unchanged (24/32 exit 0, differential 10/0/16/2/4); API sweep 101/101;
+ctest 548.
+
 ## Phase 4 — deliberately not ported (documented non-goals)
 
 * **JS engine** (`test_js_*`, 54 cases) — excluded by instruction; qiling hooks

@@ -120,6 +120,17 @@ int main(int argc, char** argv) {
             api_record = argv[++i];
         } else if (arg == "--replay-api" && i + 1 < argc) {
             api_replay = argv[++i];
+        } else if (arg == "--volume" && i + 1 < argc) {
+            opts.volumes.emplace_back(argv[++i]);
+        } else if (arg == "--fs-map" && i + 2 < argc) {
+            opts.fs_mappings.emplace_back(argv[++i], argv[++i]);
+        } else if (arg == "--reg-patch" && i + 4 < argc) {
+            qiling::QilingOptions::RegistryPatch patch;
+            patch.key = argv[++i];
+            patch.name = argv[++i];
+            patch.type = static_cast<int>(parse_u64(argv[++i]));
+            patch.data = argv[++i];
+            opts.registry_patches.push_back(std::move(patch));
         } else if (arg == "--artifact-dir" && i + 1 < argc) {
             opts.artifact_dir = argv[++i];
         } else if (arg == "--artifact-mem" && i + 1 < argc) {

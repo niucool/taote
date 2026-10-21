@@ -100,6 +100,23 @@ struct QilingOptions {
     // parallel profiler
     bool analysis = false;
 
+    // PLAN_PARITY Phase 3 item 6 (config parity, pegasus cfg.filesystem):
+    // explicit guest->host file mappings and Docker-style "host:guest" volumes
+    // mounted through the mapper at load time
+    std::vector<std::pair<std::string, std::string>> fs_mappings;
+    std::vector<std::string> volumes;
+
+    // a registry patch applied to the in-memory diff store at load time (never
+    // written to a hive file): the key, the value name, the REG_* type and the
+    // text/binary payload
+    struct RegistryPatch {
+        std::string key;
+        std::string name;
+        int type = 1;  // REG_SZ
+        std::string data;
+    };
+    std::vector<RegistryPatch> registry_patches;
+
     // PLAN_PARITY Phase 3 item 5: where the content-addressed artifact store
     // keeps its blobs (empty = off; the store still hashes and accounts)
     std::string artifact_dir;
@@ -164,6 +181,9 @@ public:
     bool api_replay_serve() const noexcept { return api_replay_serve_; }
     bool analysis() const noexcept { return analysis_; }
     const std::string& artifact_dir() const noexcept { return artifact_dir_; }
+    const std::vector<std::pair<std::string, std::string>>& fs_mappings() const noexcept { return fs_mappings_; }
+    const std::vector<std::string>& volumes() const noexcept { return volumes_; }
+    const std::vector<QilingOptions::RegistryPatch>& registry_patches() const noexcept { return registry_patches_; }
     QL_VERBOSE verbose() const noexcept { return verbose_; }
     void set_verbose(QL_VERBOSE v);
 
@@ -249,6 +269,9 @@ private:
     bool api_replay_serve_ = false;
     bool analysis_ = false;
     std::string artifact_dir_;
+    std::vector<std::pair<std::string, std::string>> fs_mappings_;
+    std::vector<std::string> volumes_;
+    std::vector<QilingOptions::RegistryPatch> registry_patches_;
     QL_VERBOSE verbose_ = QL_VERBOSE::DEFAULT;
     // the macho driver loadbase override (0 = the verbatim default)
     std::uint64_t driver_loadbase_ = 0;

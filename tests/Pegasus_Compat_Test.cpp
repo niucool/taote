@@ -17,6 +17,7 @@
 #include "qiling/loader/pe.hpp"
 #include "qiling/os/os.hpp"
 #include "qiling/os/utils.hpp"
+#include "qiling/os/volumes.hpp"
 #include "qiling/os/windows/dlls/dlls.hpp"
 #include "qiling/os/windows/windows.hpp"
 
@@ -140,6 +141,72 @@ TEST(PegasusParity, AnalysisOptionRecordsRegionCountersAndCoverage) {
     const auto plain = run_pe_sample("argv_test_x86.exe");
     EXPECT_TRUE(plain.coverage.empty());
     EXPECT_TRUE(plain.memory_access.empty());
+}
+
+TEST(PegasusParity, ConfigParityMountsFilesAndPatchesTheRegistry) {
+    // PLAN_PARITY Phase 3 item 6: the config surface pegasus's test_volumes /
+    // test_config rows set up per case - explicit guest->host mappings, the
+    // "host:guest" volume specs (with their drive-letter colon quirk) and a
+    // registry patch that lands in the diff store, not in a hive file.
+    namespace fs = std::filesystem;
+    namespace os = qiling::os;
+
+    // the spec parser: the separator is the first ':' that is not a drive letter
+    {
+        const auto [host, guest] = os::parse_volume_spec("C:\\data:C:\\guest");
+        EXPECT_EQ(host.string(), "C:\\data");
+        EXPECT_EQ(guest, "C:\\guest");
+        EXPECT_THROW(os::parse_volume_spec("no-separator"), qiling::QlErrorBase);
+        EXPECT_THROW(os::parse_volume_spec(":guest"), qiling::QlErrorBase);
+    }
+
+    // a directory volume expands to one entry per file, sorted, backslashed
+    {
+        const auto tree = fs::temp_directory_path() / "ql_volume_tree";
+        std::error_code ec;
+        fs::remove_all(tree, ec);
+        fs::create_directories(tree / "sub");
+        std::ofstream(tree / "a.txt") << "a";
+        std::ofstream(tree / "sub" / "b.txt") << "b";
+
+        const auto entries = os::expand_volume_entries(tree, "C:\\mnt");
+        ASSERT_EQ(entries.size(), 2u);
+        EXPECT_EQ(entries[0].first, "C:\\mnt\\a.txt");
+        EXPECT_EQ(entries[1].first, "C:\\mnt\\sub\\b.txt");
+        fs::remove_all(tree, ec);
+    }
+
+    // and the run end: the mapping is visible to the guest's file APIs, the
+    // volume's file is readable, and the registry patch answers a read
+    qiling::os::register_dlls();
+    SampleOptions opts;
+
+    const auto host_file = fs::temp_directory_path() / "ql_volume_host.txt";
+    std::ofstream(host_file) << "volume";
+
+    opts.fs_mappings = {{"C:\\qltest\\mapped.txt", host_file.string()}};
+    opts.volumes = {host_file.string() + ":C:\\qltest\\vol.txt"};
+    opts.registry_patches = {{"HKEY_CURRENT_USER\\Software\\QilingTest", "Greeting", 1, "hi"}};
+
+    opts.after_run = [](qiling::Qiling& ql) {
+        auto* win = &ql.os<qiling::os::windows::QlOsWindows>();
+        EXPECT_TRUE(win->fs_mapper()->file_exists("C:\\qltest\\mapped.txt"));
+        EXPECT_TRUE(win->fs_mapper()->file_exists("C:\\qltest\\vol.txt"));
+
+        // the patched value is readable and typed (REG_SZ -> text)
+        const auto [type, value] = win->registry_manager().read("HKEY_CURRENT_USER\\Software\\QilingTest",
+                                                               "Greeting", 1);
+        ASSERT_TRUE(type.has_value());
+        EXPECT_EQ(*type, 1);
+        ASSERT_TRUE(value.has_value());
+        const auto* text = std::get_if<std::string>(&*value);
+        ASSERT_NE(text, nullptr);
+        EXPECT_EQ(*text, "hi");
+    };
+
+    const auto out = run_pe_sample("argv_test_x86.exe", opts);
+    ASSERT_EQ(out.exit_code, 0);
+    fs::remove(host_file);
 }
 
 TEST(PegasusParity, ArtifactStoreIsContentAddressedAndManifested) {

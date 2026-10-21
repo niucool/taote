@@ -73,6 +73,10 @@ public:
     }
     void record_entry_point_error(std::string type, std::string message);
 
+    // PLAN_PARITY Phase 3 item 6: the config-parity surface
+    void apply_filesystem_config();
+    void apply_registry_patches();
+
     // PLAN_PARITY Phase 3 item 4: the memory/coverage hooks (QilingOptions::analysis).
     // HookRet is RAII - destroying it unregisters the hook - so the handles are
     // kept for the run's lifetime.

@@ -667,6 +667,10 @@ std::uint64_t RegistryManager::write_reg_value_into_mem(int data_type, std::uint
     return reg_mem_write(data_type, data_addr, data_val, max_size, wide, ql);
 }
 
+void RegistryManager::write_value(std::string_view key, std::string_view subkey, int reg_type, RegValue data) {
+    regconf_->write(key, subkey, reg_type, std::move(data));
+}
+
 void RegistryManager::write(std::string_view key, std::string_view subkey, int reg_type, std::uint64_t data_addr,
                             std::uint64_t data_size, bool wide) {
     const auto data = reg_mem_read(reg_type, data_addr, data_size, wide, *ql_);

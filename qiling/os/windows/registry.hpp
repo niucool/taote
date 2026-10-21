@@ -119,6 +119,10 @@ public:
     void create(std::string_view key);
     void delete_entry(std::string_view key, std::string_view subkey);
 
+    // the configuration-patch path (PLAN_PARITY Phase 3 item 6): record a typed
+    // value in the diff store directly - no guest memory, no hive mutation
+    void write_value(std::string_view key, std::string_view subkey, int reg_type, RegValue data);
+
     // registry.py write: read the typed value from the guest memory at
     // data_addr, then record it in the diff (and the hive, a no-op)
     void write(std::string_view key, std::string_view subkey, int reg_type, std::uint64_t data_addr,

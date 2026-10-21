@@ -40,6 +40,9 @@ Qiling::Qiling(const QilingOptions& options) {
     api_replay_serve_ = options.api_replay_serve;
     analysis_ = options.analysis;
     artifact_dir_ = options.artifact_dir;
+    fs_mappings_ = options.fs_mappings;
+    volumes_ = options.volumes;
+    registry_patches_ = options.registry_patches;
 
     // ---- argv setup (core.py) ----
     if (!options.argv.empty()) {

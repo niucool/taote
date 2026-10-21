@@ -1,5 +1,7 @@
 #include "qiling/os/windows/windows.hpp"
 
+#include "qiling/os/volumes.hpp"
+
 #include <cstdio>
 #include <cstdlib>
 #include <array>
@@ -330,6 +332,35 @@ std::string_view QlOsWindows::bits_section() const noexcept {
     return bits_ == 64 ? "OS64" : "OS32";
 }
 
+void QlOsWindows::apply_filesystem_config() {
+    // the explicit guest->host list first, then the volumes (a volume overrides)
+    for (const auto& [guest, host] : ql_->fs_mappings()) {
+        fs_mapper()->add_mapping(guest, host, true);
+    }
+    os::apply_volumes(*fs_mapper(), ql_->volumes());
+}
+
+void QlOsWindows::apply_registry_patches() {
+    // applied to the in-memory diff store only: the hive files stay read-only
+    for (const auto& patch : ql_->registry_patches()) {
+        os::RegValue value;
+        switch (patch.type) {
+        case 1:   // REG_SZ
+        case 2:   // REG_EXPAND_SZ
+            value = patch.data;
+            break;
+        case 4:    // REG_DWORD
+        case 11:   // REG_QWORD
+            value = static_cast<std::int64_t>(std::stoll(patch.data, nullptr, 0));
+            break;
+        default:
+            value = std::vector<std::uint8_t>(patch.data.begin(), patch.data.end());
+            break;
+        }
+        registry_manager_->write_value(patch.key, patch.name, patch.type, std::move(value));
+    }
+}
+
 void QlOsWindows::init_analysis_hooks() {
 
     const auto* self = this;
@@ -443,6 +474,8 @@ QlFunctionCall& QlOsWindows::fcall_select(WinCc cc) {
 void QlOsWindows::load() {
     // windows.py load: the GDT/segments (FS/GS regions) + the api dispatch hook
     ensure_profile_state();
+
+
 
     // the thread scheduler hook (windows.py __setup_components: the
     // QlWindowsThreadManagement ctor hooks the code stream; the port defers
@@ -638,6 +671,13 @@ void QlOsWindows::run() {
 
     // the analysis surface (PLAN_PARITY Phase 3 item 4): one option turns on
     // per-region memory counters and the retired-pc coverage set
+    // PLAN_PARITY Phase 3 item 6: the config-parity surface (pegasus's
+    // cfg.filesystem entries / volumes and registry patches). load() is not
+    // reached by the port's construction path, so the config is applied here,
+    // before the guest runs, where the mapper and the registry store exist.
+    apply_filesystem_config();
+    apply_registry_patches();
+
     if (ql_->analysis()) {
         init_analysis_hooks();
     }
