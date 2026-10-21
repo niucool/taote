@@ -54,6 +54,13 @@ struct ApiEntry {
     ApiParams params;
     bool passthru = false;
     ApiHandler handler;
+    // Optional stand-down predicate: when it answers false the dispatch treats
+    // the name as if no handler were registered, i.e. the guest's own code at
+    // the import target runs. Needed for CRT-internal state that only the real
+    // CRT can own: on a stub rootfs the stand-in handler is right, on a rootfs
+    // with genuine vendor DLLs it corrupts exactly the state the real body
+    // maintains (see the ucrt onexit family).
+    std::function<bool(Qiling&)> guard;
 };
 
 // the static registration table (the `@winsdkapi` decorator analogue). DLL
@@ -94,7 +101,8 @@ std::optional<std::uint64_t> call_api(Qiling& ql, std::uint64_t pc, const std::s
 // fluent builder used by the dll modules at static-init time
 class WinsdkApi {
 public:
-    WinsdkApi(std::string name, WinCc cc, ApiParams params = {}, bool passthru = false);
+    WinsdkApi(std::string name, WinCc cc, ApiParams params = {}, bool passthru = false,
+              std::function<bool(Qiling&)> guard = {});
 
     // completes the registration with the handler body
     void operator=(ApiHandler handler);

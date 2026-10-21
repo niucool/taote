@@ -215,6 +215,21 @@ public:
     bool loader_done() const noexcept { return loader_done_; }
     // does the rootfs carry a real _except_handler4_common? (cached; seh.cpp)
     bool has_real_seh_unwinder();
+    // The same question asked for CRT-internal state rather than for the
+    // unwinder: the rootfs carries genuine vendor CRT binaries, so a stand-in
+    // handler must not own state the real body maintains. Deliberately NOT an
+    // alias of has_real_seh_unwinder: x64 has no EH4 handler at all (it unwinds
+    // through __C_specific_handler tables), so that probe answers "no" on a
+    // perfectly real x64 CRT.
+    bool has_real_crt();
+
+    // The per-guest UCRT locale-state cells the stand-in accessors hand out.
+    // They must live on the instance: the values are *this* guest's heap
+    // addresses, and a process-static cache carried them into the next run in
+    // the same process, where they point into an unmapped heap — measured as
+    // the second run of a C++ fixture in one process dying right after the CRT
+    // startup's locale accessor calls.
+    std::uint64_t ucrt_locale_cell(int which, std::uint64_t size);
     // the staged SEH return page (0 when the dispatch never armed)
     std::uint64_t seh_sentinel() const noexcept { return seh_sentinel_; }
     bool seh_dispatch() const noexcept { return seh_dispatch_enabled_; }
@@ -299,6 +314,7 @@ private:
     int seh_repeat_count_ = 0;
     bool seh_dispatch_enabled_ = true;   // the set_seh_dispatch switch
     bool loader_done_ = false;           // the PE load walk finished
+    std::optional<std::uint64_t> ucrt_locale_cells_[6];  // see ucrt_locale_cell
     // cached: does the rootfs carry a real _except_handler4_common? (seh.cpp)
     std::optional<bool> real_seh_unwinder_;
     uc_hook seh_intr_hook_ = 0;

@@ -544,6 +544,21 @@ void QlOsWindows::init_api_replay() {
     }
 }
 
+// one lazily allocated zeroed guest cell per locale-state accessor (the map:
+// 0 codepage, 1 collate cp, 2 mb_cur_max, 3 locale name pointers, 4 pctype,
+// 5 the pctype table behind it)
+std::uint64_t QlOsWindows::ucrt_locale_cell(int which, std::uint64_t size) {
+    if (which < 0 || which >= 6) {
+        return 0;
+    }
+    if (!ucrt_locale_cells_[which].has_value()) {
+        const auto cell = heap().alloc(size);
+        ql_->mem().write(cell, std::vector<std::uint8_t>(static_cast<std::size_t>(size), 0));
+        ucrt_locale_cells_[which] = cell;
+    }
+    return *ucrt_locale_cells_[which];
+}
+
 bool QlOsWindows::virtual_clock() const noexcept {
     return ql_->virtual_clock();
 }
@@ -705,6 +720,13 @@ void QlOsWindows::hook_winapi(std::uint64_t address, std::uint32_t size) {
         if (!synthesized_cell) {
             return;  // the image has the real unwinder: run it
         }
+    }
+
+    // a handler may declare itself a stand-in that must not run when the rootfs
+    // supplies the genuine article: fall through to the real code exactly as if
+    // the name were unregistered
+    if (api->guard && !api->guard(*ql_)) {
+        return;
     }
 
     // select the calling convention for this call site and run the handler

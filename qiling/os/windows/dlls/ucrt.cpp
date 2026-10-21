@@ -32,6 +32,17 @@ void register_ucrt_family() {
         return 0;
     };
 
+    // The stand-in for CRT-internal state. When the rootfs ships genuine vendor
+    // CRT DLLs the real body owns this state and must run: answering the
+    // stand-in instead leaves the state the real code walks uninitialized
+    // (measured: with a no-op _initialize_onexit_table in place, ucrtbase's own
+    // exit() walked a never-initialized _onexit_table_t and faulted
+    // UC_ERR_READ_UNMAPPED, which the harness reported as the run's entry-point
+    // error). On a stub rootfs nothing else answers, so the stand-in stays.
+    static const std::function<bool(Qiling&)> kStubRootfsOnly = [](Qiling& ql) {
+        return !w(ql).has_real_crt();
+    };
+
     // int _configure_narrow_argv(int mode); — the argv walk is a no-op (the
     // __p___argc/__p___argv cells answer the pointers)
     WinsdkApi("_configure_narrow_argv", WinCc::Cdecl, {
@@ -79,6 +90,36 @@ void register_ucrt_family() {
     WinsdkApi("_execute_onexit_table", WinCc::Cdecl, {
         {"table", PVOID_},
     }) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
+        return 0;
+    };
+
+    // int _crt_atexit(_PVFV function); — the registration succeeds (the
+    // teardown list never runs: the exit path stops the emulation)
+    WinsdkApi("_crt_atexit", WinCc::Cdecl, {
+        {"function", PVOID_},
+    }, false, kStubRootfsOnly) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
+        return 0;
+    };
+
+    // int _register_onexit_t(onexit_t function); (the _onexit_t shapes)
+    WinsdkApi("_register_onexit_function", WinCc::Cdecl, {
+        {"table", PVOID_},
+        {"function", PVOID_},
+    }, false, kStubRootfsOnly) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
+        return 0;
+    };
+
+    // int _initialize_onexit_table(_onexit_table_t*);
+    WinsdkApi("_initialize_onexit_table", WinCc::Cdecl, {
+        {"table", PVOID_},
+    }, false, kStubRootfsOnly) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
+        return 0;
+    };
+
+    // int _execute_onexit_table(_onexit_table_t*);
+    WinsdkApi("_execute_onexit_table", WinCc::Cdecl, {
+        {"table", PVOID_},
+    }, false, kStubRootfsOnly) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
         return 0;
     };
 
@@ -161,9 +202,10 @@ void register_ucrt_family() {
         }
     };
 
-    // FILE* __acrt_iob_func(unsigned index);
-    //
-    // Deliberately NO handler. Answering the *index* (as the retired handler
+    // FILE* __acrt_iob_func(unsigned index); — the stdio table probe (the
+    // stdin/stdout/stderr cells ride the handle ids 0/1/2). The index is only
+    // an opaque token: MSVC's C++ runtime dereferences the FILE* through
+    // _get_stream_buffer_pointers, so with a real CRT the export must answer. Answering the *index* (as the retired handler
     // did, so that "stdout" was the literal 1) works only for code that treats
     // the FILE* as an opaque token. MSVC's own C++ runtime dereferences it:
     // msvcp140's filebuf constructor calls
@@ -179,6 +221,12 @@ void register_ucrt_family() {
     // objects and the export answers a real pointer. On a stub rootfs the
     // synthesized cell answers 0, which is what the retired handler's callers
     // did with the index anyway (an opaque token, never dereferenced).
+
+    WinsdkApi("__acrt_iob_func", WinCc::Cdecl, {
+        {"index", UINT_},
+    }, false, kStubRootfsOnly) = [](Qiling&, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        return api_get_int(get_param(params, "index"));
+    };
 
     // ---- the locale-state accessors -------------------------------------
     //
@@ -207,44 +255,33 @@ void register_ucrt_family() {
     //
     // __pctype_func is the one that is dereferenced twice (`*(*p + ch)`), so it
     // gets a real 256-entry table rather than a NULL.
-    struct LocaleState {
-        std::optional<std::uint64_t> codepage;
-        std::optional<std::uint64_t> collate_cp;
-        std::optional<std::uint64_t> mb_cur_max;
-        std::optional<std::uint64_t> locale_names;
-        std::optional<std::uint64_t> pctype;
-        std::optional<std::uint64_t> ctype_table;
-    };
-    static LocaleState locale;
-
-    const auto locale_cell = [](Qiling& ql, std::optional<std::uint64_t>& slot,
+    // the cells live on the QlOsWindows instance (see ucrt_locale_cell): a
+    // process-static cache would hand the next run this run's heap addresses
+    enum : int { kCodepage = 0, kCollateCp, kMbCurMax, kLocaleNames, kPctype, kCtypeTable };
+    const auto locale_cell = [](Qiling& ql, int which,
                                 std::uint64_t size) -> std::uint64_t {
-        if (!slot.has_value()) {
-            slot = ql.os<os::windows::QlOsWindows>().heap().alloc(size);
-            ql.mem().write(*slot, std::vector<std::uint8_t>(static_cast<std::size_t>(size), 0));
-        }
-        return *slot;
+        return w(ql).ucrt_locale_cell(which, size);
     };
 
     // int* ___lc_codepage_func(void);
     WinsdkApi("___lc_codepage_func", WinCc::Cdecl, {}) =
-        [&locale, &locale_cell](Qiling& ql, std::uint64_t,
+        [&locale_cell](Qiling& ql, std::uint64_t,
                                 const ResolvedParams&) -> std::optional<std::uint64_t> {
-        return locale_cell(ql, locale.codepage, 4);
+        return locale_cell(ql, kCodepage, 4);
     };
 
     // int* ___lc_collate_cp_func(void);
     WinsdkApi("___lc_collate_cp_func", WinCc::Cdecl, {}) =
-        [&locale, &locale_cell](Qiling& ql, std::uint64_t,
+        [&locale_cell](Qiling& ql, std::uint64_t,
                                 const ResolvedParams&) -> std::optional<std::uint64_t> {
-        return locale_cell(ql, locale.collate_cp, 4);
+        return locale_cell(ql, kCollateCp, 4);
     };
 
     // unsigned int* ___mb_cur_max_func(void); — 1 for the C locale
     WinsdkApi("___mb_cur_max_func", WinCc::Cdecl, {}) =
-        [&locale, &locale_cell](Qiling& ql, std::uint64_t,
+        [&locale_cell](Qiling& ql, std::uint64_t,
                                 const ResolvedParams&) -> std::optional<std::uint64_t> {
-        const auto cell = locale_cell(ql, locale.mb_cur_max, 4);
+        const auto cell = locale_cell(ql, kMbCurMax, 4);
         ql.mem().write_ptr(cell, 1, 4);
         return cell;
     };
@@ -252,29 +289,21 @@ void register_ucrt_family() {
     // char** ___lc_locale_name_func(void); — LC_MIN..LC_MAX slots, all NULL
     // ("C"), so the callers' `if (name)` guards skip their free/replace paths
     WinsdkApi("___lc_locale_name_func", WinCc::Cdecl, {}) =
-        [&locale, &locale_cell](Qiling& ql, std::uint64_t,
+        [&locale_cell](Qiling& ql, std::uint64_t,
                                 const ResolvedParams&) -> std::optional<std::uint64_t> {
-        return locale_cell(ql, locale.locale_names, 6 * ql.arch().pointersize());
+        return locale_cell(ql, kLocaleNames, 6 * ql.arch().pointersize());
     };
 
     // unsigned short** __pctype_func(void); — a real table behind the pointer,
     // because the caller indexes it twice
     WinsdkApi("__pctype_func", WinCc::Cdecl, {}) =
-        [&locale, &locale_cell](Qiling& ql, std::uint64_t,
+        [&locale_cell](Qiling& ql, std::uint64_t,
                                 const ResolvedParams&) -> std::optional<std::uint64_t> {
-        const auto cell = locale_cell(ql, locale.pctype, ql.arch().pointersize());
-        if (!locale.ctype_table.has_value()) {
-            locale.ctype_table = ql.os<os::windows::QlOsWindows>().heap().alloc(256 * 2);
-            std::vector<std::uint8_t> table(256 * 2, 0);
-            for (std::size_t i = 0; i < 256; ++i) {
-                // the C-locale ctype flags: the CRT only tests them, so the
-                // zero table ("no category") is the conservative shape
-                table[i * 2] = 0;
-                table[i * 2 + 1] = 0;
-            }
-            ql.mem().write(*locale.ctype_table, table);
-        }
-        ql.mem().write_ptr(cell, *locale.ctype_table);
+        const auto cell = locale_cell(ql, kPctype, ql.arch().pointersize());
+        // the C-locale ctype flags: the CRT only tests them, so the zero table
+        // ("no category") is the conservative shape
+        const auto table = locale_cell(ql, kCtypeTable, 256 * 2);
+        ql.mem().write_ptr(cell, table);
         return cell;
     };
 

@@ -117,11 +117,13 @@ std::optional<std::uint64_t> call_api(Qiling& ql, std::uint64_t pc, const std::s
 
 // ---- the @winsdkapi builder ----
 
-WinsdkApi::WinsdkApi(std::string name, WinCc cc, ApiParams params, bool passthru) {
+WinsdkApi::WinsdkApi(std::string name, WinCc cc, ApiParams params, bool passthru,
+                     std::function<bool(Qiling&)> guard) {
     entry_.name = std::move(name);
     entry_.cc = cc;
     entry_.params = std::move(params);
     entry_.passthru = passthru;
+    entry_.guard = std::move(guard);
 }
 
 void WinsdkApi::operator=(ApiHandler handler) {

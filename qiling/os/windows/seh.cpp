@@ -195,6 +195,32 @@ bool QlOsWindows::has_real_seh_unwinder() {
     return real;
 }
 
+// "is the CRT a genuine vendor binary?" — by image size, which is what actually
+// distinguishes the two cases: the synthesized stub images are a few pages
+// (measured 8-12K for ntdll/ucrtbase/vcruntime140 on a stub rootfs) while the
+// real ones are hundreds of kilobytes (ucrtbase 1.1M, msvcrt 826K in the
+// Windows 11 trees). No export probe here: x64 exports no
+// _except_handler4_common, so an export-based test is x86-only by accident.
+bool QlOsWindows::has_real_crt() {
+    try {
+        const auto& pe_loader = static_cast<const loader::QlLoaderPE&>(ql_->loader());
+        for (const auto& image : pe_loader.images) {
+            auto name = std::filesystem::path(image.path).filename().string();
+            std::transform(name.begin(), name.end(), name.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (name.rfind("ucrtbase", 0) != 0 && name != "msvcrt.dll") {
+                continue;
+            }
+            if (image.end > image.base && image.end - image.base > 0x10000) {
+                return true;
+            }
+        }
+    } catch (...) {
+        return false;
+    }
+    return false;
+}
+
 bool QlOsWindows::seh_on_fault(int access, std::uint64_t address) {
     if (bits_ != 32 || !seh_dispatch_enabled_) {
         return false;  // the dispatch is not armed (or switched off)
