@@ -2,6 +2,7 @@
 #ifndef QILING_HOST_HPP
 #define QILING_HOST_HPP
 
+#include <filesystem>
 #include <optional>
 
 #include "qiling/const.hpp"
@@ -27,6 +28,11 @@ private:
     mutable bool os_done_ = false;
     mutable bool arch_done_ = false;
 };
+
+// Absolute path of the running executable, or an empty path when the platform
+// has no way to ask. Used to find the install tree's data directory relative to
+// the binary, so a copied build/deploy keeps working (see qiling::data_dir).
+std::filesystem::path host_executable_path();
 
 }  // namespace qiling
 

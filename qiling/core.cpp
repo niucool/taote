@@ -432,19 +432,50 @@ std::string_view os_profile_stem(QL_OS ostype) {
     return "blob";
 }
 
+// Where the bundled profiles live. utils.py reads them from
+// qiling_home/profiles; the port has to work both from a build tree and from a
+// copied install tree, so the lookup is, in order:
+//   1. $TAOTE_PROFILE_DIR                        (an explicit override)
+//   2. <exedir>/../share/qiling/profiles          (the installed layout:
+//                                                 bin/ + share/)
+//   3. <exedir>/share/qiling/profiles            (a vendored/side-by-side tree)
+//   4. QILING_SOURCE_DIR/qiling/profiles         (the build tree)
+// The exe-relative probes are what make `build/deploy` relocatable: it can be
+// copied anywhere and the binaries still find their data.
+std::filesystem::path profile_dir() {
+    if (const char* env = std::getenv("TAOTE_PROFILE_DIR"); env != nullptr && *env != '\0') {
+        return std::filesystem::path(env);
+    }
+    const auto exe = host_executable_path();
+    if (!exe.empty()) {
+        const auto bin_dir = exe.parent_path();
+        std::error_code ec;
+        const auto installed = bin_dir / ".." / "share" / "qiling" / "profiles";
+        if (std::filesystem::is_directory(installed, ec)) {
+            return std::filesystem::weakly_canonical(installed, ec);
+        }
+        const auto side_by_side = bin_dir / "share" / "qiling" / "profiles";
+        if (std::filesystem::is_directory(side_by_side, ec)) {
+            return std::filesystem::weakly_canonical(side_by_side, ec);
+        }
+    }
+#ifdef QILING_SOURCE_DIR
+    return std::filesystem::path(QILING_SOURCE_DIR) / "qiling" / "profiles";
+#else
+    return {};
+#endif
+}
+
 IniConfig profile_setup(QL_OS ostype, const std::optional<std::string>& user_config) {
     IniConfig config;
 
     // read the default profile first (utils.py: qiling_home/profiles/<os>.ql)
     const std::filesystem::path profile_name =
         std::filesystem::path(os_profile_stem(ostype)).replace_extension(".ql");
-#ifdef QILING_SOURCE_DIR
-    const std::filesystem::path os_profile =
-        std::filesystem::path(QILING_SOURCE_DIR) / "qiling" / "profiles" / profile_name;
-    config.read(os_profile);
-#else
-    (void)profile_name;
-#endif
+    const auto dir = profile_dir();
+    if (!dir.empty()) {
+        config.read(dir / profile_name);
+    }
 
     // a user-specified profile adds or overrides existing settings
     if (user_config.has_value()) {
