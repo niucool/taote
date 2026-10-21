@@ -16,11 +16,11 @@ below, and a phase does not close without its tests.
 | metric | upstream | taote today | target |
 |---|---|---|---|
 | qiling PE suite parity, **stub mode** (default) (`../qiling/tests/test_pe.py`, `test_peshellcode.py`, `test_windows_cpp_*.py`) | passes **on a Windows host only** (its CI runs `test_pe.bat`, which needs `dllscollector.bat` to copy the real System32 DLLs) | **26 passed / 10 skipped / 0 failed** of 36 ported cases (`tests/QilingPe_Compat_Test.cpp`) | all but the documented deferrals |
-| qiling PE suite parity, **real-dll mode** (`TAOTE_WINDOWS_ROOTFS=~/source/jim/rootfs-win7`) | the reference's own configuration; upstream itself fails every case on this rootfs (§2.3) | **26 passed / 1 skipped / 9 failed** | all 36 |
+| qiling PE suite parity, **real-dll mode** (`TAOTE_WINDOWS_ROOTFS=~/source/jim/qiling/examples/scripts/examples/rootfs`, the Windows 11 harvest — §0.2) | **25/25** `test_pe.py` + **8/8** C++/SEH cases | **30 passed / 1 skipped / 5 failed** | all 36 |
 | pegasus sample sweep (`../pegasus/tests/bins`, 101 bins) | asserts dispatch only | **101 exit 0** | maintained |
 | pegasus suite parity (`PegasusParity.*`, 18 cases) | 357 cases | **18 passed** | maintained |
 | PMA corpus (`~/source/jim/capa-testfiles`) | 12 curated | **1/12 curated** (raw sweep 24/32 exit 0) | 12/12 |
-| taote suite | — | **567 passed / 0 failed / 15 skipped** (582 cases) | 0 failed |
+| taote suite | — | **570 passed / 0 failed / 15 skipped** | 0 failed |
 
 The two modes are reported separately because they measure different things: stub
 mode is deterministic and is what the default suite runs; real-dll mode is the
@@ -28,6 +28,29 @@ reference's own configuration. Stub mode used to be the only safe mode — five
 cases passed on stubs and failed with real DLLs. Those five are now green in both
 modes (they were one port bug, §2.2 #9), so real-dll mode is the *strictly
 stronger* mode: it runs every case that stub mode skips.
+
+### 0.0 The harness bug that contaminated every earlier real-dll number
+
+**Every real-dll verdict recorded in this document before 2026-10-21 was a stub
+verdict.** `run_fixture` derived the arch directory as
+`sample.parent_path().parent_path().filename()`, which for a fixture under
+`bin/except/` — every C++/SEH case — is `"bin"`, not `"x86_windows"`.
+`real_rootfs("bin")` found nothing, `opts.rootfs` stayed empty, and
+`run_pe_sample` fell through to the synthesized-stub path, while
+`REQUIRE_REAL_DLLS` had already passed on the mere existence of the tree. The
+measurement that exposed it: the C++ x86 run had ntdll, ucrtbase and
+vcruntime140 all mapped as **8-12K stub images** instead of loading the real
+1.1M `ucrtbase.dll` from the rootfs.
+
+The arch component is now searched for by name. With that fixed, four cases
+turned green and their failures moved to where the real defects are:
+
+| case | before (stub dressed as real) | now (real DLLs) |
+|---|---|---|
+| CppHelloWorldX86 | UC_ERR_FETCH_PROT at the stub `[SEH sentinel]` 0x70000000 | **pass** |
+| CppTypesX86 | same | **pass** |
+| CppHelloWorldX8664 | streambuf slot = 0x1 -> fault in msvcp140 | **pass** |
+| CppTypesX8664 | same | **pass** |
 
 ### 0.1 Per-case state, with the upstream-oracle differential
 
@@ -148,6 +171,45 @@ The next step is to find the remaining writer of `0x70000000`: after the fault,
 inspect the guest stack and `fs:[0]` for the value and the code that pushed it.
 The two `seh_sentinel_` staging sites are both inside the now-gated
 `seh_dispatch`/`seh_continue`, so the value arrives from somewhere else.
+
+### 0.3 The five cases still red on the Windows 11 real-dll rootfs
+
+Upstream passes all of the first four on the same tree, so they are provable
+taote port bugs; GandCrab is a shared upstream/rootfs question (§0.2).
+
+| case | measured failure |
+|---|---|
+| SoftSehX8664 | `failed to read memory (uc_err 6) at 0x80000004e8b0` right after `RaiseException` -> `RtlRaiseException` -> `RtlLookupFunctionEntry` -> `memset`. The x64 unwinder path: taote serves `RtlLookupFunctionEntry` from the loaded `.pdata` (`lookup_function_entry`), so the next suspect is the RUNTIME_FUNCTION/`.xdata` content or the 12-byte stride the handler returns. |
+| SoftCppExX8664 | stdout count 1 where 2 is expected |
+| CppExUnhandledFilteredX8664 | 0 where 3 is expected |
+| CppExUnhandledUnfilteredX8664 | exit-code assertion (upstream: 0xC0000409) |
+| PeWinX86GandcrabProfileChangesBehaviour | admin run fails in ~25 ms |
+
+Two defects that were found and fixed on the way to this list, both visible only
+once real DLLs actually loaded:
+
+* **`__acrt_iob_func` answered the stream index**, so a guest's `stdout` was the
+  literal pointer 0x1. MSVC's runtime dereferences it —
+  `_get_stream_buffer_pointers(stdout, &base, &ptr, &count)` — and real ucrtbase
+  wrote the garbage back, which is exactly the 0x1 that then appeared in the
+  C++ streambuf slots on both arches (measured: msvcp140 stored the three
+  returns into the filebuf's get/put slots at pc msvcp140+0xc75d..0xc772).
+* **The UCRT locale-state cells were a process-static cache**, so a second
+  Qiling in one process handed the guest the previous run's heap addresses.
+  `--gtest_repeat=2` reproduced it every time; the cells now live on
+  `QlOsWindows`.
+
+And one mechanism added because the two modes need opposite answers from the
+same handler: `ApiEntry` carries an optional **guard** predicate. When it
+answers false the dispatch behaves as if the name were unregistered and the
+guest's own code at the import target runs. The onexit family
+(`_initialize_onexit_table`, `_execute_onexit_table`,
+`_register_onexit_function`, `_crt_atexit`) and `__acrt_iob_func` are guarded on
+`QlOsWindows::has_real_crt()`, which is decided by **image size** (a synthesized
+stub is 8-12K, a real CRT DLL is hundreds of K) rather than by an export probe —
+x64 exports no `_except_handler4_common`, so an export test is x86-only by
+accident. Answering the onexit stand-ins on a real rootfs left
+`_onexit_table_t` uninitialized while ucrtbase's own `exit()` walked it.
 
 ## 1. The harness (`tests/QilingPe_Compat_Test.cpp`)
 
