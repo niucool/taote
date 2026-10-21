@@ -99,6 +99,12 @@ inline constexpr Layout kLayouts[] = {
     {"EXCEPTION_POINTERS", {EXCEPTION_POINTERS_SIZE_X86, 2}, {EXCEPTION_POINTERS_SIZE_X64, 2}},
     {"CONTEXT", {CONTEXT_SIZE_X86, 36}, {CONTEXT_SIZE_X64, 62}},
     {"MSG", {MSG_SIZE_X86, 7}, {MSG_SIZE_X64_W, 7}},
+    // the loader structures: the x86 column is loader_layout(32)'s word set,
+    // the x64 column the structs.hpp one (PEB/TEB/LDR entry/UNICODE_STRING)
+    {"PEB", {1148, 6}, {0x7c8, 6}},
+    {"TEB", {420, 5}, {488, 5}},
+    {"LDR_DATA_TABLE_ENTRY", {156, 6}, {304, 6}},
+    {"PEB_LDR_DATA", {48, 4}, {88, 4}},
 };
 
 // the pointer-sized field offset helper the handlers use instead of computing

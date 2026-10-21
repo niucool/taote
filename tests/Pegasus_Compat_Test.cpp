@@ -31,6 +31,7 @@
 
 #include "Pe_Sample_Runner.hpp"
 #include "qiling/os/windows/ntdefs.hpp"
+#include "qiling/os/windows/structs.hpp"
 
 using qiling::testing::SampleOptions;
 using qiling::testing::SampleOutcome;
@@ -646,6 +647,30 @@ namespace ntdefs = qiling::os::windows::ntdefs;
 
 TEST(PegasusParity, NtDefsLayoutTableMatchesTheGuestAbi) {
     // the x86 / x64 pairs the reference suite's size validation walks
+    // the loader structures: the layout table's columns are the loader's own
+    // word set (loader_layout(32) for x86, structs.hpp for x64)
+    {
+        using namespace qiling::os::win;
+        const auto loader32 = loader_layout(32);
+        const auto loader64 = loader_layout(64);
+        for (const auto& layout : qiling::os::windows::ntdefs::kLayouts) {
+            const std::string name = layout.name;
+            if (name == "PEB") {
+                EXPECT_EQ(layout.x86.size, loader32.peb_size);
+                EXPECT_EQ(layout.x64.size, loader64.peb_size);
+            } else if (name == "TEB") {
+                EXPECT_EQ(layout.x86.size, loader32.teb_size);
+                EXPECT_EQ(layout.x64.size, loader64.teb_size);
+            } else if (name == "LDR_DATA_TABLE_ENTRY") {
+                EXPECT_EQ(layout.x86.size, loader32.ldr_entry_size);
+                EXPECT_EQ(layout.x64.size, loader64.ldr_entry_size);
+            } else if (name == "PEB_LDR_DATA") {
+                EXPECT_EQ(layout.x86.size, loader32.ldr_data_size);
+                EXPECT_EQ(layout.x64.size, loader64.ldr_data_size);
+            }
+        }
+    }
+
     EXPECT_EQ(ntdefs::UNICODE_STRING_SIZE_X86, 8u);
     EXPECT_EQ(ntdefs::UNICODE_STRING_SIZE_X64, 16u);
     EXPECT_EQ(ntdefs::UNICODE_STRING_OFF_BUFFER_X86, 4u);

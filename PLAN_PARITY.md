@@ -914,8 +914,13 @@ Driven by `tools/gap_census` over both corpora:
   `EXCEPTION_POINTERS`, `CONTEXT`, `MSG`, `KEY_VALUE_FULL_INFORMATION`), with
   the x86/x64 columns, a `kLayouts` table and a `ptr_field` helper; `seh.cpp`'s
   record writer now reads its offsets from it. The `PegasusParity.NtDefsLayout`
-  test pins every value. The `PEB`/`TEB`/`RTL_USER_PROCESS_PARAMETERS` rows are
-  still pending (they live in `structs.hpp` already and need the same table).
+  test pins every value, **including the loader rows**: `PEB` (1148 / 0x7c8),
+  `TEB` (420 / 488), `LDR_DATA_TABLE_ENTRY` (156 / 304) and `PEB_LDR_DATA`
+  (48 / 88), asserted against `loader_layout(32)` / `loader_layout(64)` so the
+  table cannot drift from what the loader actually writes.
+  `RTL_USER_PROCESS_PARAMETERS` stays out of the table on purpose: the port
+  carries its field **offsets** (the loader seeds them) but no size constant, and
+  inventing one would be a number no handler reads.
 
 Exit: the parity map has no `[portable, deferred]` rows left.
 
