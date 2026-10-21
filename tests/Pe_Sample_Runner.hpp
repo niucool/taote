@@ -339,6 +339,69 @@ struct SampleOptions {
     bool api_replay_serve = false;
 };
 
+// ---------------------------------------------------------------------------
+// The real-dll comparison mode.
+//
+// Every comparison against ../pegasus runs with the real System32 tree: the
+// reference's own fixtures are ordinary CRT-linked binaries, and a synthesized
+// stub dll cannot answer for the CRT (the initializer walk, the locale
+// accessors, the unwinder). Set TAOTE_WINDOWS_ROOTFS to a tree holding
+// x86_windows/ and x8664_windows/ and the comparison suites resolve the arch for
+// the sample, stage it at <rootfs>/Windows/<name> (the runner does not stage into
+// a caller-provided rootfs) and return the rootfs to run against. Unset, the
+// suites keep the deterministic stub path.
+inline std::filesystem::path real_comparison_base() {
+    if (const char* env = std::getenv("TAOTE_WINDOWS_ROOTFS"); env != nullptr && *env != '\0') {
+        return std::filesystem::path(env);
+    }
+    return {};
+}
+
+// the PE COFF machine of a sample (0x14c i386, 0x8664 amd64)
+inline unsigned real_comparison_machine(const std::filesystem::path& sample) {
+    std::ifstream f(sample, std::ios::binary);
+    if (!f) {
+        return 0;
+    }
+    std::vector<char> head(0x400);
+    f.read(head.data(), static_cast<std::streamsize>(head.size()));
+    const auto got = static_cast<std::size_t>(f.gcount());
+    if (got < 0x40 || head[0] != 'M' || head[1] != 'Z') {
+        return 0;
+    }
+    const auto read_at = [&](std::size_t off, std::size_t n) -> std::uint32_t {
+        std::uint32_t v = 0;
+        for (std::size_t i = 0; i < n; ++i) {
+            v |= static_cast<std::uint32_t>(static_cast<unsigned char>(head[off + i])) << (8 * i);
+        }
+        return v;
+    };
+    const auto lfanew = read_at(0x3c, 4);
+    if (lfanew + 6 > got) {
+        return 0;
+    }
+    return read_at(lfanew + 4, 2);
+}
+
+// The rootfs to compare against for one sample, with the sample staged into it.
+// An empty path means "no real tree configured: use the stub rootfs".
+inline std::filesystem::path stage_into_real_rootfs(const std::filesystem::path& sample) {
+    const auto base = real_comparison_base();
+    if (base.empty()) {
+        return {};
+    }
+    const auto arch = real_comparison_machine(sample) == 0x8664 ? "x8664_windows" : "x86_windows";
+    const auto rootfs = base / arch;
+    std::error_code ec;
+    if (!std::filesystem::exists(rootfs / "Windows" / "System32" / "kernel32.dll", ec)) {
+        return {};
+    }
+    std::filesystem::create_directories(rootfs / "Windows", ec);
+    std::filesystem::copy_file(sample, rootfs / "Windows" / sample.filename(),
+                               std::filesystem::copy_options::overwrite_existing, ec);
+    return ec ? std::filesystem::path{} : rootfs;
+}
+
 inline SampleOutcome run_pe_sample(const std::string& bin_name, const SampleOptions& opts = {}) {
     using namespace pe_sample_detail;
     namespace fs = std::filesystem;
@@ -348,6 +411,18 @@ inline SampleOutcome run_pe_sample(const std::string& bin_name, const SampleOpti
     if (!fs::exists(sample)) {
         out.error = "missing fixture: " + sample.string();
         return out;
+    }
+
+    // Every comparison against ../pegasus runs in real-dll mode: when a real
+    // tree is configured and the caller did not pin a rootfs, stage this sample
+    // into it and run there (see stage_into_real_rootfs). The caller's explicit
+    // opts.rootfs still wins, and with no tree configured the stub path runs
+    // exactly as before.
+    SampleOptions run_opts = opts;
+    if (!run_opts.rootfs.has_value()) {
+        if (const auto real = stage_into_real_rootfs(sample); !real.empty()) {
+            run_opts.rootfs = real;
+        }
     }
 
     std::unique_ptr<Qiling> ql_storage;
@@ -406,18 +481,18 @@ inline SampleOutcome run_pe_sample(const std::string& bin_name, const SampleOpti
     std::shared_ptr<HookRet> trace_hook;
     try {
         const auto plan = plan_for(sample);
-        const auto rootfs = opts.rootfs.has_value() ? *opts.rootfs
+        const auto rootfs = run_opts.rootfs.has_value() ? *run_opts.rootfs
                                                     : make_rootfs(fs::path(bin_name).stem().string());
 
         // the synthesized system dlls (plus the caller-provided extra exports —
         // the real modules export far more than the import table names)
         for (const auto& [dll, exports] : plan.imports) {
-            if (opts.rootfs.has_value()) {
+            if (run_opts.rootfs.has_value()) {
                 break;
             }
             auto names = exports;
-            const auto extra = opts.stub_extras.find(dll);
-            if (extra != opts.stub_extras.end()) {
+            const auto extra = run_opts.stub_extras.find(dll);
+            if (extra != run_opts.stub_extras.end()) {
                 for (const auto& name : extra->second) {
                     if (std::find(names.begin(), names.end(), name) == names.end()) {
                         names.push_back(name);
@@ -433,7 +508,7 @@ inline SampleOutcome run_pe_sample(const std::string& bin_name, const SampleOpti
         // guest allocation - an environment difference, not a guest one
         for (const char* key_dll : {"ntdll.dll", "kernelbase.dll", "kernel32.dll",
                                     "ucrtbase.dll", "mscoree.dll"}) {
-            if (opts.rootfs.has_value()) {
+            if (run_opts.rootfs.has_value()) {
                 break;
             }
             if (!fs::exists(rootfs / "Windows" / "System32" / key_dll)) {
@@ -448,7 +523,7 @@ inline SampleOutcome run_pe_sample(const std::string& bin_name, const SampleOpti
         }
         fs::create_directories(rootfs / "Windows" / "registry");
         fs::create_directories(rootfs / "qltest");
-        for (const auto& [name, content] : opts.files) {
+        for (const auto& [name, content] : run_opts.files) {
             const auto path = rootfs / name;
             fs::create_directories(path.parent_path());
             std::ofstream f(path, std::ios::binary);
@@ -456,7 +531,7 @@ inline SampleOutcome run_pe_sample(const std::string& bin_name, const SampleOpti
         }
 
         const auto exe_in_rootfs = rootfs / "Windows" / sample.filename().string();
-        if (!opts.rootfs.has_value()) {
+        if (!run_opts.rootfs.has_value()) {
             fs::copy_file(sample, exe_in_rootfs, fs::copy_options::overwrite_existing);
         }
 
@@ -470,21 +545,21 @@ inline SampleOutcome run_pe_sample(const std::string& bin_name, const SampleOpti
         if (const char* v = std::getenv("TAOTE_VERBOSE"); v != nullptr && std::strcmp(v, "debug") == 0) {
             options.verbose = QL_VERBOSE::DEBUG;
         }
-        options.max_api_count = opts.max_api_count;
-        options.timeout = opts.timeout;
-        options.count = opts.count;
-        options.api_record_path = opts.api_record;
-        options.api_replay_path = opts.api_replay;
-        options.analysis = opts.analysis;
-        options.artifact_dir = opts.artifact_dir;
-        options.fs_mappings = opts.fs_mappings;
-        options.volumes = opts.volumes;
-        options.registry_patches = opts.registry_patches;
-        options.api_replay_serve = opts.api_replay_serve;
-        options.profile = opts.profile;
-        options.stop = opts.stop;
+        options.max_api_count = run_opts.max_api_count;
+        options.timeout = run_opts.timeout;
+        options.count = run_opts.count;
+        options.api_record_path = run_opts.api_record;
+        options.api_replay_path = run_opts.api_replay;
+        options.analysis = run_opts.analysis;
+        options.artifact_dir = run_opts.artifact_dir;
+        options.fs_mappings = run_opts.fs_mappings;
+        options.volumes = run_opts.volumes;
+        options.registry_patches = run_opts.registry_patches;
+        options.api_replay_serve = run_opts.api_replay_serve;
+        options.profile = run_opts.profile;
+        options.stop = run_opts.stop;
         options.argv.push_back(exe_in_rootfs.string());
-        for (const auto& a : opts.argv) {
+        for (const auto& a : run_opts.argv) {
             options.argv.push_back(a);
         }
 
@@ -500,16 +575,16 @@ inline SampleOutcome run_pe_sample(const std::string& bin_name, const SampleOpti
 
         // the seeded guest stdin (core.py hooking the fd table; here the tests
         // that need a scripted input hand it in whole)
-        if (!opts.stdin_text.empty()) {
+        if (!run_opts.stdin_text.empty()) {
             const auto stdin_path = rootfs / "guest_stdin.txt";
             {
                 std::ofstream f(stdin_path, std::ios::binary);
-                f.write(opts.stdin_text.data(), static_cast<std::streamsize>(opts.stdin_text.size()));
+                f.write(run_opts.stdin_text.data(), static_cast<std::streamsize>(run_opts.stdin_text.size()));
             }
             ql.os().set_stdin(QlFile::open_mode(stdin_path.string(), "rb"));
         }
 
-        for (const auto& [addr, bytes] : opts.patches) {
+        for (const auto& [addr, bytes] : run_opts.patches) {
             ql.patch(addr, bytes);
         }
 
@@ -540,11 +615,11 @@ inline SampleOutcome run_pe_sample(const std::string& bin_name, const SampleOpti
                 }));
         }
 
-        if (opts.configure) {
-            opts.configure(ql);
+        if (run_opts.configure) {
+            run_opts.configure(ql);
         }
 
-        if (!opts.rootfs.has_value()) {
+        if (!run_opts.rootfs.has_value()) {
             // the data-export shim only applies to the synthesized stubs
             patch_data_export_slots(ql, sample);
         }
@@ -604,8 +679,8 @@ inline SampleOutcome run_pe_sample(const std::string& bin_name, const SampleOpti
             out.ran = true;
             out.exit_code = 0;
         } else {
-            if (opts.end.has_value()) {
-                ql.run(std::nullopt, opts.end);
+            if (run_opts.end.has_value()) {
+                ql.run(std::nullopt, run_opts.end);
             } else {
                 ql.run();
             }
@@ -615,15 +690,15 @@ inline SampleOutcome run_pe_sample(const std::string& bin_name, const SampleOpti
 
         // the artifact store: save the requested guest ranges while the memory
         // is still there (the manifest is captured below)
-        for (const auto& spec : opts.artifacts) {
+        for (const auto& spec : run_opts.artifacts) {
             const auto colon = spec.find(':');
             const auto begin = static_cast<std::uint64_t>(std::stoull(spec.substr(0, colon), nullptr, 0));
             const auto size = static_cast<std::uint64_t>(std::stoull(spec.substr(colon + 1), nullptr, 0));
             ql.os().artifacts().save_memory(ql, begin, size);
         }
 
-        if (opts.after_run) {
-            opts.after_run(ql);
+        if (run_opts.after_run) {
+            run_opts.after_run(ql);
         }
 
         capture_stats();
@@ -635,9 +710,9 @@ inline SampleOutcome run_pe_sample(const std::string& bin_name, const SampleOpti
                 std::fprintf(stderr, "  0x%llx\n", static_cast<unsigned long long>(pc));
             }
         }
-        if (opts.after_run && ql_after != nullptr) {
+        if (run_opts.after_run && ql_after != nullptr) {
             try {
-                opts.after_run(*ql_after);
+                run_opts.after_run(*ql_after);
             } catch (...) {
             }
         }
@@ -650,6 +725,7 @@ inline SampleOutcome run_pe_sample(const std::string& bin_name, const SampleOpti
 }
 
 }  // namespace testing
+
 }  // namespace qiling
 
 #endif  // QILING_TESTS_PE_SAMPLE_RUNNER_HPP

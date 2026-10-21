@@ -226,14 +226,23 @@ bool QlOsWindows::seh_on_fault(int access, std::uint64_t address) {
         return false;  // the dispatch is not armed (or switched off)
     }
 
-    // A real CRT does NOT stand the dispatch down. The dispatch's job is to
-    // *deliver* the fault — build the EXCEPTION_RECORD/CONTEXT and call the
-    // frame handler in fs:[0] — and with a real CRT that handler is the guest's
-    // own __except_handler4 (which calls the real _except_handler4_common).
-    // What must not happen is taote decoding the scope table itself, and that is
-    // already handled: the _except_handler4_common handler stands down when the
-    // rootfs has real code (see the hook), so seh_frames_ stays empty and
-    // seh_continue only applies what the guest's handler decided.
+    // A real CRT stands the *synthetic* dispatch down: the guest owns its
+    // exception frames, and driving them from here corrupts the run.
+    //
+    // Delivering the fault to the guest's own handler instead is the right
+    // design on paper (build the record/context, call the handler in fs:[0],
+    // apply the disposition) and it was implemented and measured: it makes
+    // pegasus's seh_test_x86.exe (a deliberate `mov [0],0x14`) render its
+    // __except filter and body and exit 0. But it also corrupts al-khaser: with
+    // delivery on, that sample's control flow lands in its .data at 0x411cd5
+    // (UC_ERR_READ_UNMAPPED), where the upstream-parity suite requires it to stay
+    // green. The resume state after a real-CRT handler answers is not faithful
+    // yet — the same gap that leaves seh_test_x86's post-__except tail unprinted
+    // — so the stand-down stays until that is fixed. PLAN_PE_PARITY §0.6 records
+    // both measurements.
+    if (has_real_seh_unwinder()) {
+        return false;
+    }
 
     // Only the *program's* faults dispatch. The loader drives every DllMain from
     // `emu_start` while the emulation state is not STARTED, and a fault in one of

@@ -1320,6 +1320,14 @@ void QlLoaderPE::call_dll_entrypoint(LIEF::PE::Binary& dll, std::uint64_t dll_ba
 
         ql_->arch().restore(*regs_state);
 
+        // A bailed drive is tolerated, so it must not stay in the program's
+        // error records: emu_start already reported it through
+        // on_emulation_error, and leaving it there made a run that later faulted
+        // of its own accord carry two entries — measured with a real System32
+        // tree, where an early oracle DllMain bails before the guest even starts
+        // (PegasusParity.SehDispatchDisabled expected one record and saw two).
+        static_cast<os::windows::QlOsWindows&>(ql_->os()).drop_last_entry_point_error();
+
         // emu_start leaves the state at STARTED when it raises; reset it so a
         // single failing DllMain does not gate every subsequently loaded
         // DLL's entry point. (verbatim comment)

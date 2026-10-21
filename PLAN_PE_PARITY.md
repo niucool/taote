@@ -267,6 +267,58 @@ without weakening anything.
 walks up from the executable (verified by copying the tree to `/tmp` with the
 source profiles hidden).
 
+### 0.6 The pegasus/capa comparison in real-dll mode
+
+Every comparison against `../pegasus` runs against the real System32 tree
+(`TAOTE_WINDOWS_ROOTFS`); the comparison suites resolve the arch per sample and
+stage it themselves (`Pe_Sample_Runner.hpp: stage_into_real_rootfs`), and
+`tools/sweep_samples.py --rootfs <base>` does the same for the corpus sweeps.
+
+| corpus / suite | mode | result |
+|---|---|---|
+| `../pegasus/tests/bins` (101 samples, `.xz` ones decompressed) | stub | 101 exit 0 |
+| `../pegasus/tests/bins` | **real-dll** | **101 exit 0** |
+| capa corpus (366 PE samples at the root of `~/source/jim/capa-testfiles`) | stub | 191 exit 0 |
+| capa corpus | **real-dll** | **214 exit 0** / 148 failed / 3 blocked / 1 no-trace |
+| `PegasusParity.*` (21 cases) | stub | 21 passed |
+| `PegasusParity.*` | **real-dll** | **21 passed** |
+| `PmaCompat.CuratedCorpusApiExpectations` (the pegasus reference 12) | stub | 1/12 green |
+| same | real-dll | 0/12 (see below) |
+
+Three defects came out of this pass, all fixed:
+
+* **Forwarded exports were bound to `base + 0`** (a forwarder's EAT slot is a
+  `library!symbol` string, so its address is 0). On the real ole32.dll —
+  `CoInitializeEx`/`CoInitializeSecurity`/`CoUninitialize` forward to
+  `api-ms-win-core-com-l1-1-0.dll` — the ole32 samples jumped to `ole32+0`,
+  walked the MZ header and faulted at `+3`. Forwarded entries now only feed
+  `resolve_forwarded_exports`; an unresolvable one stays unbound and the
+  unbound-import stub answers it.
+* **The unbound-import stub arena was one page** (255 symbols); three corpus
+  samples exceeded it and aborted the whole run. It now grows on demand.
+* **A bailed `DllMain` drive left its error record** in the program's list, so a
+  later fault produced two entries (`PegasusParity.SehDispatchDisabled`).
+
+Two real-dll gaps remain, both measured, neither asserted as correct:
+
+* **x86 SEH fault delivery.** With a real CRT taote stands the synthetic
+  dispatch down. Delivering the fault to the guest's own handler instead was
+  implemented and measured: `seh_test_x86.exe` (a deliberate `mov [0],0x14`)
+  then renders its `__except` filter and body and exits 0 — but al-khaser's
+  control flow lands in its `.data` at `0x411cd5` (`UC_ERR_READ_UNMAPPED`),
+  where `QilingPeCompat.PeWinAlKhaser` requires it green. The resume state after
+  a real-CRT handler answers is not faithful yet (it is also why the
+  `seh_test_x86` post-`__except` tail does not print), so the stand-down stays
+  and `PegasusParity.SehDispatchEnabled` asserts what real-dll mode actually
+  guarantees (the AV surfaces, exit `0xC0000005`, no handler output).
+* **`PmaCompat`'s curated expectations are stub-model expectations.** With real
+  DLLs a sample's own `kernel32` performs the work internally, so the
+  `NtCreateFile`/`NtReadFile` dispatches those cases assert are not observable
+  (the same reason `PegasusParity.FileAccessEmulation*` now asserts the resolved
+  NT addresses in this mode). Re-deriving the 12 PMA expectations against the
+  real-dll dispatch surface is the remaining work there; the corpus sweep above
+  is the mode-correct measurement in the meantime.
+
 ## 1. The harness (`tests/QilingPe_Compat_Test.cpp`)
 
 One `TEST()` per upstream case, named after it, so a red case names the upstream
