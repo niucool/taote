@@ -846,6 +846,11 @@ void QlLoaderPE::run() {
         init_imports();
     }
 
+    // the load walk is over (the DllMain drives included): from here on the
+    // guest's own execution owns its faults, so the synthetic SEH dispatch is
+    // allowed to serve them
+    ql_->os<os::windows::QlOsWindows>().set_loader_done(true);
+
     init_sp = ql_->arch().regs().arch_sp();
 }
 

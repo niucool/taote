@@ -294,23 +294,28 @@ void QlOsWindows::ensure_profile_state() {
     // needs the not-handled return so the run loop can restart at the
     // staged handler
     if (bits_ == 32 && seh_hook_ == 0) {
-        if (seh_map_sentinel()) {
-            // the sentinel page is mapped read/write *without* execute on
-            // purpose: a guest returning into it is a fault the dispatch must
-            // recognize. Unicorn reports a fetch from a mapped-but-noexec page
-            // as UC_MEM_FETCH_PROT (UC_HOOK_MEM_FETCH_PROT), not as an
-            // invalid-memory access, so listening only on MEM_INVALID missed
-            // exactly the sentinel-return case — the guest's own SEH walk then
-            // died jumping into the sentinel (UC_ERR_FETCH_PROT at 0x70000000)
-            uc_hook_add(&ql_->arch().uc(), &seh_hook_, UC_HOOK_MEM_INVALID,
-                        reinterpret_cast<void*>(&seh_fault_trampoline), this, 1, 0);
-            uc_hook_add(&ql_->arch().uc(), &seh_prot_hook_, UC_HOOK_MEM_FETCH_PROT,
-                        reinterpret_cast<void*>(&seh_fault_trampoline), this, 1, 0);
-            // the guest software interrupts ride the same dispatch (a `call`
-            // into a debugger probe, an int 0x2d kernel door)
-            uc_hook_add(&ql_->arch().uc(), &seh_intr_hook_, UC_HOOK_INTR,
-                        reinterpret_cast<void*>(&seh_intr_trampoline), this, 1, 0);
-        }
+        // The sentinel page is NOT mapped here. It is an implementation detail
+        // of the synthetic dispatch and `seh_map_sentinel` runs on demand from
+        // `seh_on_fault`, *after* the checks that let a real CRT unwinder own
+        // SEH. Mapping it eagerly put a live rw-noexec page at 0x70000000 for
+        // every run, real unwinder or not, and the x86 fixtures ended fetching
+        // from it. The hooks are registered unconditionally: with the dispatch
+        // gated off they simply return false, and with a stub rootfs the page
+        // appears the first time a fault needs it.
+        //
+        // The page is read/write *without* execute on purpose: a guest returning
+        // into it is a fault the dispatch must recognize. Unicorn reports a fetch
+        // from a mapped-but-noexec page as UC_MEM_FETCH_PROT
+        // (UC_HOOK_MEM_FETCH_PROT), not as an invalid-memory access, so both
+        // events are subscribed.
+        uc_hook_add(&ql_->arch().uc(), &seh_hook_, UC_HOOK_MEM_INVALID,
+                    reinterpret_cast<void*>(&seh_fault_trampoline), this, 1, 0);
+        uc_hook_add(&ql_->arch().uc(), &seh_prot_hook_, UC_HOOK_MEM_FETCH_PROT,
+                    reinterpret_cast<void*>(&seh_fault_trampoline), this, 1, 0);
+        // the guest software interrupts ride the same dispatch (a `call`
+        // into a debugger probe, an int 0x2d kernel door)
+        uc_hook_add(&ql_->arch().uc(), &seh_intr_hook_, UC_HOOK_INTR,
+                    reinterpret_cast<void*>(&seh_intr_trampoline), this, 1, 0);
     }
 }
 

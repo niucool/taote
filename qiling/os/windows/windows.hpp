@@ -208,6 +208,11 @@ public:
     bool seh_on_interrupt(std::uint32_t intno);
 
     void set_seh_dispatch(bool enabled) noexcept { seh_dispatch_enabled_ = enabled; }
+    // the PE loader finished its load walk (DllMain drives included). The
+    // program's own execution is what follows, so the synthetic SEH dispatch
+    // only serves faults from here on (see seh_on_fault).
+    void set_loader_done(bool done) noexcept { loader_done_ = done; }
+    bool loader_done() const noexcept { return loader_done_; }
     // does the rootfs carry a real _except_handler4_common? (cached; seh.cpp)
     bool has_real_seh_unwinder();
     // the staged SEH return page (0 when the dispatch never armed)
@@ -293,6 +298,7 @@ private:
     std::uint64_t seh_fault_addr_ = 0;      // the repeat-guard key (fault address)
     int seh_repeat_count_ = 0;
     bool seh_dispatch_enabled_ = true;   // the set_seh_dispatch switch
+    bool loader_done_ = false;           // the PE load walk finished
     // cached: does the rootfs carry a real _except_handler4_common? (seh.cpp)
     std::optional<bool> real_seh_unwinder_;
     uc_hook seh_intr_hook_ = 0;

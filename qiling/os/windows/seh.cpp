@@ -178,7 +178,7 @@ bool QlOsWindows::has_real_seh_unwinder() {
 }
 
 bool QlOsWindows::seh_on_fault(int access, std::uint64_t address) {
-    if (seh_sentinel_ == 0 || bits_ != 32 || !seh_dispatch_enabled_) {
+    if (bits_ != 32 || !seh_dispatch_enabled_) {
         return false;  // the dispatch is not armed (or switched off)
     }
 
@@ -195,7 +195,14 @@ bool QlOsWindows::seh_on_fault(int access, std::uint64_t address) {
     // not mapped yet), and the program later returns into it — the
     // UC_ERR_FETCH_PROT at 0x70000000 that the x86 C++ fixtures and GandCrab all
     // ended on.
-    if (ql_->emu_state() != QL_STATE::STARTED) {
+    if (!loader_done()) {
+        return false;
+    }
+
+    // the staged-return page is created on demand, and only past both gates:
+    // with a real unwinder (or during load) the synthetic dispatch never runs,
+    // so its page must never exist either
+    if (seh_sentinel_ == 0 && !seh_map_sentinel()) {
         return false;
     }
 
