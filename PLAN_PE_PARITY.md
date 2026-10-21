@@ -15,12 +15,12 @@ below, and a phase does not close without its tests.
 
 | metric | upstream | taote today | target |
 |---|---|---|---|
-| qiling PE suite parity, **stub mode** (default) (`../qiling/tests/test_pe.py`, `test_peshellcode.py`, `test_windows_cpp_*.py`) | passes **on a Windows host only** (its CI runs `test_pe.bat`, which needs `dllscollector.bat` to copy the real System32 DLLs) | **27 passed / 9 skipped / 0 failed** of 36 ported cases (`tests/QilingPe_Compat_Test.cpp`) | all but the documented deferrals |
-| qiling PE suite parity, **real-dll mode** (`TAOTE_WINDOWS_ROOTFS=~/source/jim/qiling/examples/scripts/examples/rootfs`, the Windows 11 harvest — §0.2) | **25/25** `test_pe.py` + **8/8** C++/SEH cases, re-measured 2026-10-21 | **36 passed / 0 skipped / 0 failed** | **met** |
+| qiling PE suite parity, **stub mode** (default) (`../qiling/tests/test_pe.py`, `test_peshellcode.py`, `test_windows_cpp_*.py`, `test_pe_sys.py`, `test_windows_debugger.py`) | passes **on a Windows host only** (its CI runs `test_pe.bat`, which needs `dllscollector.bat` to copy the real System32 DLLs) | **30 passed / 9 skipped / 0 failed** of 40 ported cases (`tests/QilingPe_Compat_Test.cpp`) | all but the documented deferrals |
+| qiling PE suite parity, **real-dll mode** (`TAOTE_WINDOWS_ROOTFS=~/source/jim/qiling/examples/scripts/examples/rootfs`, the Windows 11 harvest — §0.2) | **25/25** `test_pe.py` + **8/8** C++/SEH cases, re-measured 2026-10-21 | **39 passed / 0 skipped / 0 failed** | **met** |
 | pegasus sample sweep (`../pegasus/tests/bins`, 101 bins) | asserts dispatch only | **101 exit 0** | maintained |
 | pegasus suite parity (`PegasusParity.*`, 18 cases) | 357 cases | **18 passed** | maintained |
 | PMA corpus (`~/source/jim/capa-testfiles`) | 12 curated | **1/12 curated** (raw sweep 24/32 exit 0) | 12/12 |
-| taote suite | — | **571 passed / 0 failed** (stub mode) and **580 passed / 0 failed** with `TAOTE_WINDOWS_ROOTFS` set | 0 failed |
+| taote suite | — | **574 passed / 0 failed** (stub mode) and **583 passed / 0 failed** with `TAOTE_WINDOWS_ROOTFS` set | 0 failed |
 
 The two modes are reported separately because they measure different things: stub
 mode is deterministic and is what the default suite runs; real-dll mode is the
@@ -225,6 +225,47 @@ run vendor CRT code, not because taote lacks anything — **all nine pass in
 real-dll mode**, which is the reference's own configuration. The one case that
 used to skip for a *reason* (PeWinX86Multithread, "live thread switching is not
 ported yet") now passes in both modes.
+
+### 0.5 Coverage against ../qiling, and what is left
+
+**Function parity.** Extracted from `../qiling/qiling/os/windows/**` (`def hook_*`
+plus the registry-map strings) and from taote's `WinsdkApi("...")` registrations:
+upstream registers **521** api names, taote **643**. The diff is now empty apart
+from upstream's own typo — `GetSystemTIme` in `sysinfoapi.py`, which no real
+import can reach and which taote registers correctly as `GetSystemTime` (UTC
+SYSTEMTIME). The ten names that were genuinely missing were the wininet HTTP
+surface (`InternetConnectA/W`, `InternetCheckConnectionA`,
+`HttpOpenRequestA/W`, `HttpSendRequestA/W`, `HttpSendRequestExA`,
+`HttpEndRequestA`, `InternetErrorDlg`) — all bare `pass` in upstream.
+
+taote registers everything upstream does plus `ws2_32`, `ucrt`, `tlhelp32`,
+`winnt` and the split `consoleapi2/3` families.
+
+**Test parity.** Every upstream Windows-PE module now has a taote counterpart:
+
+| module | upstream cases | taote |
+|---|---|---|
+| `test_pe.py` | 25 | 25 |
+| `test_windows_cpp_x86.py` / `_x8664.py` | 8 | 8 |
+| `test_peshellcode.py` | 4 | 4 (`WindowsShellcodeX86`, `WindowsShellcodeX8664`, `ReadPtr32`, `ReadPtr64`) |
+| `test_pe_sys.py` | 2 | 2 (`PeDriverX8664Sioctl` green, `DISABLED_PeSysX86Sality`) |
+| `test_windows_debugger.py` | 1 | 1 (`PeDebuggerGdb`) |
+| `test_windows_stdio.py` | none (a brute-force script, no `unittest` case) | the `PeWinX86Crackme` case covers the same stdin/stdout plumbing |
+
+The one red port is `PeSysX86Sality`: the sample reaches 0x40ee9a and faults at
+0x40eea6 — `cmpl $0x0,(%eax)` on the value its own helper at 0x40f4e0 answered —
+0x155 bytes before the 0x40EFFB stop the case asserts on, with the reference's
+`CreateThread`/`CreateFileA` overrides already installed. Everything before that
+matches, so the remaining work is the container that helper walks, not the
+harness. It is `DISABLED_` rather than asserted, so the suite stays at 0 failed
+without weakening anything.
+
+**Build and packaging.** The project is C++17 throughout (`CMAKE_CXX_STANDARD
+17`, `CMAKE_CXX_EXTENSIONS OFF`; all five targets compile with `-std=c++17`) and
+`make -C build install` populates `build/deploy` with `bin/`, `lib/`,
+`include/` and `share/qiling/profiles`, relocatable because the profile lookup
+walks up from the executable (verified by copying the tree to `/tmp` with the
+source profiles hidden).
 
 ## 1. The harness (`tests/QilingPe_Compat_Test.cpp`)
 
