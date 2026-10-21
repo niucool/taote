@@ -18,6 +18,7 @@
 
 #include <memory>
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -206,6 +207,16 @@ public:
     // winsys default, the loaded check), map it, and register its exports
     std::uint64_t load_dll(const std::string& name);
 
+    // the real-system-dll fallback: an import no loaded image exports used to
+    // leave the guest's IAT slot holding its raw hint/name RVA, which the
+    // guest then executes as code (win7 msvcrt lacks _initialize_onexit_table,
+    // so msvcp140's CRT startup fetched into 0x90fa4 and its DllMain bailed
+    // before the initializer walk could construct std::cout). The slot is
+    // answered by a lazily-mapped page of xor eax,eax; ret cells instead —
+    // one per unresolved symbol name, matching the stub-rootfs ret-cell
+    // philosophy for APIs the environment genuinely cannot provide
+    std::uint64_t unbound_import_stub(const std::string& name, std::uint64_t ordinal = 0);
+
     // loader/pe.py cmdline: `cmdline args...`
     const std::vector<std::uint8_t>& cmdline() const noexcept { return cmdline_; }
 
@@ -255,6 +266,8 @@ private:
     std::map<std::string, ImportTable> import_address_table_;
     std::vector<std::uint8_t> cmdline_;
     std::vector<ForwardedExport> forwarded_exports_;
+    std::optional<std::uint64_t> stub_page_;
+    std::map<std::string, std::uint64_t> stub_cells_;
 
     // the ntoskrnl-family rider addresses (the init_* walks seed them)
     std::uint64_t kuser_shared_data_address_ = 0;

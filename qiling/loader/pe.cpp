@@ -248,6 +248,38 @@ std::pair<std::string, std::string> QlLoaderPE::dll_path_elements(const std::str
     return {host_path, folded};
 }
 
+std::uint64_t QlLoaderPE::unbound_import_stub(const std::string& name, std::uint64_t ordinal) {
+    // lazily map one executable page full of xor eax,eax; ret cells (16 bytes
+    // each, int3-padded) and hand out a cell per unresolved symbol name
+    auto& mem = ql_->mem();
+    if (!stub_page_.has_value()) {
+        const auto page = mem.find_free_space(0x1000, 0x400000ull, std::nullopt, 0x1000ull);
+        mem.map(page, 0x1000, UC_PROT_ALL, "[unbound import stubs]");
+        for (std::size_t i = 0; i < 0x1000 / 16; ++i) {
+            // xor eax,eax; ret — cdecl-clean and x64-clean; the ordinal-
+            // denominated stdcall deficit is left to the caller since the
+            // stub has no knowledge of the convention it stands in for
+            const std::vector<std::uint8_t> cell = {0x31, 0xc0, 0xc3, 0xcc};
+            mem.write(page + i * 16, cell);
+        }
+        stub_page_ = page;
+    }
+    auto key = name.empty() ? ("#" + std::to_string(ordinal)) : name;
+    for (auto& c : key) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    const auto it = stub_cells_.find(key);
+    if (it != stub_cells_.end()) {
+        return it->second;
+    }
+    if (stub_cells_.size() >= 0x1000 / 16 - 1) {
+        throw QlErrorBase("too many unresolved imports for the stub page");
+    }
+    const auto cell_addr = *stub_page_ + stub_cells_.size() * 16;
+    stub_cells_.emplace(std::move(key), cell_addr);
+    return cell_addr;
+}
+
 std::uint64_t QlLoaderPE::load_dll(const std::string& name) {
     auto [dll_path, dll_name] = dll_path_elements(name);
     if (dll_name.rfind("api-ms-win-", 0) == 0) {
@@ -268,6 +300,27 @@ std::uint64_t QlLoaderPE::load_dll(const std::string& name) {
 
     std::error_code ec;
     std::string dll_path_host = dll_path;
+
+    // the debug CRT twin: a binary built against the debug runtime imports
+    // `ucrtbased.dll` / `vcruntime140d.dll` / `msvcp140d.dll`, which only exist
+    // on a machine with Visual Studio installed (upstream's dllscollector
+    // expects them). A Wine rootfs — and any Windows box without the toolchain —
+    // has only the release twins, which export the same surface: alias to them
+    // rather than failing the whole import group.
+    if (!std::filesystem::exists(dll_path_host, ec)) {
+        const auto dot = dll_name.rfind('.');
+        if (dot != std::string::npos && dot > 0 && dll_name[dot - 1] == 'd') {
+            const auto release_name = dll_name.substr(0, dot - 1) + dll_name.substr(dot);
+            const auto release_path = ql_->os().path()->virtual_to_host_path(
+                dll_path.substr(0, dll_path.size() - dll_name.size()) + release_name);
+            if (std::filesystem::exists(release_path)) {
+                ql_->log().debug("Debug dll " + dll_name + " aliased to " + release_name);
+                dll_name = release_name;
+                dll_path_host = release_path;
+            }
+        }
+    }
+
         if (!std::filesystem::exists(dll_path_host, ec)) {
         // posix hosts may not find the requested filename if it was saved
         // under a different case. (verbatim comment; the casefold walk)
@@ -304,26 +357,41 @@ std::uint64_t QlLoaderPE::load_dll(const std::string& name) {
             relocate = true;
         }
 
-        // the relocation walk rides AFTER the map (the guest-memory patching)
-        const auto relocations = parsed->relocations();
+        // the relocation walk rides AFTER the map (the guest-memory patching).
+        // The entries are COPIED out of the parsed image first: LIEF's
+        // relocations() is a ref_iterator over the Binary, and load_parsed()
+        // takes ownership of (and destroys) that Binary — iterating the range
+        // afterwards reads freed memory (a heap-use-after-free that only fires
+        // when the image actually has to move, e.g. a real system dll at a base
+        // already taken).
+        using RelEntry = LIEF::PE::RelocationEntry;
+        struct RelocFixup {
+            std::uint64_t address;  // block VA + entry position
+            bool is_dir64;
+        };
+        std::vector<RelocFixup> fixups;
+        for (const auto& block : parsed->relocations()) {
+            const auto block_va = block.virtual_address();
+            for (const auto& entry : block.entries()) {
+                const auto type = entry.type();
+                if (type == RelEntry::BASE_TYPES::DIR64 || type == RelEntry::BASE_TYPES::HIGHLOW) {
+                    fixups.push_back({block_va + entry.position(), type == RelEntry::BASE_TYPES::DIR64});
+                }
+            }
+        }
         const auto original_image_base = parsed->imagebase();
-        relocate = relocate && !relocations.empty();
+        relocate = relocate && !fixups.empty();
 
         const std::uint64_t mapped_base = load_parsed(std::move(parsed), dll_path_host, dll_name, false, image_base);
 
         if (relocate) {
             const auto delta = static_cast<std::int64_t>(mapped_base) - static_cast<std::int64_t>(original_image_base);
-            using RelEntry = LIEF::PE::RelocationEntry;
-            for (const auto& block : relocations) {
-                const auto block_va = block.virtual_address();
-                for (const auto& entry : block.entries()) {
-                    if (entry.type() == RelEntry::BASE_TYPES::DIR64) {
-                        const auto addr = mapped_base + block_va + entry.position();
-                        mem.write_ptr(addr, mem.read_ptr(addr, 8) + static_cast<std::uint64_t>(delta), 8);
-                    } else if (entry.type() == RelEntry::BASE_TYPES::HIGHLOW) {
-                        const auto addr = mapped_base + block_va + entry.position();
-                        mem.write_ptr(addr, mem.read_ptr(addr, 4) + static_cast<std::uint64_t>(delta), 4);
-                    }
+            for (const auto& fixup : fixups) {
+                const auto addr = mapped_base + fixup.address;
+                if (fixup.is_dir64) {
+                    mem.write_ptr(addr, mem.read_ptr(addr, 8) + static_cast<std::uint64_t>(delta), 8);
+                } else {
+                    mem.write_ptr(addr, mem.read_ptr(addr, 4) + static_cast<std::uint64_t>(delta), 4);
                 }
             }
         }
@@ -500,7 +568,36 @@ void QlLoaderPE::init_imports_for(LIEF::PE::Binary& parsed, std::uint64_t image_
                 // base when the image is already mapped)
                 const auto direct_base = load_dll(orig_dll_name);
                 if (direct_base == 0) {
-                    ql_->log().debug("Failed to resolve " + dll_name);
+                    // no api-ms image at all (a Wine rootfs ships none: it
+                    // folds the API sets into ucrtbase/msvcrt). The upstream
+                    // never hits this because a real Windows rootfs carries
+                    // every api-ms-win-* stub. Resolve entry by entry against
+                    // the images already loaded instead of dropping the whole
+                    // group — a group is all-or-nothing upstream, and one
+                    // symbol the key set lacks (wine's ucrtbase has
+                    // `_seh_filter_dll` but not every `_register_*`) used to
+                    // leave the guest's IAT slots holding their hint/name RVAs
+                    ql_->log().debug("Failed to resolve " + dll_name +
+                                     "; resolving its symbols against the loaded images");
+                    for (const LIEF::PE::ImportEntry& imp : entry.entries()) {
+                        if (imp.name().empty()) {
+                            continue;
+                        }
+                        std::uint64_t addr = 0;
+                        for (const auto& [loaded_name, table] : import_address_table_) {
+                            addr = table.lookup(imp.name());
+                            if (addr != 0) {
+                                break;
+                            }
+                        }
+                        if (addr == 0) {
+                            // nowhere to bind: answer 0 from a stub cell
+                            // instead of leaving the raw hint/name RVA for
+                            // the guest to execute
+                            addr = unbound_import_stub(std::string(imp.name()));
+                        }
+                        ql_->mem().write_ptr(image_base + imp.iat_address(), addr);
+                    }
                     continue;
                 }
                 dll_name = orig_dll_name;
@@ -525,6 +622,21 @@ void QlLoaderPE::init_imports_for(LIEF::PE::Binary& parsed, std::uint64_t image_
                 if (dll_base == 0) {
                     continue;
                 }
+                // bind against the image that actually landed: a debug-CRT
+                // import resolves to its release twin (load_dll's alias), so the
+                // caller's name is not necessarily the loaded image's name
+                for (const auto& image : images) {
+                    if (image.base == dll_base) {
+                        std::string loaded = std::filesystem::path(image.path).filename().string();
+                        for (auto& c : loaded) {
+                            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                        }
+                        if (!loaded.empty()) {
+                            dll_name = loaded;
+                        }
+                        break;
+                    }
+                }
             }
 
             const auto it = import_address_table_.find(dll_name);
@@ -539,15 +651,16 @@ void QlLoaderPE::init_imports_for(LIEF::PE::Binary& parsed, std::uint64_t image_
                     addr = iat.lookup(std::string(imp->name()));
                     if (addr == 0) {
                         ql_->log().debug("Error in loading function " + std::string(imp->name()) +
-                                         " (" + orig_dll_name + ")");
-                        continue;
+                                         " (" + orig_dll_name + "); answering 0 via the unbound-import stub");
+                        addr = unbound_import_stub(std::string(imp->name()));
                     }
                 } else {
                     const auto oit = iat.by_ordinal.find(imp->ordinal());
                     if (oit == iat.by_ordinal.end()) {
-                        continue;
+                        addr = unbound_import_stub(std::string(), imp->ordinal());
+                    } else {
+                        addr = oit->second;
                     }
-                    addr = oit->second;
                 }
                 ql_->mem().write_ptr(image_base + imp->iat_address(), addr);
             }
@@ -885,11 +998,17 @@ void QlLoaderPE::init_teb() {
     const std::uint64_t teb_addr = structure_last_addr_;
     const std::uint64_t peb_addr = ql_->mem().align_up(teb_addr + layout.teb_size, 0x10);
 
+    // the pointer fields are guest-pointer sized (4 on an x86 guest: the 32-bit
+    // layout's offsets assume it, and an 8-byte write spills into the next
+    // field — and, for the heap-allocated structures, off the end of the
+    // allocation)
+    const std::size_t ptr = ql_->arch().pointersize();
+
     std::vector<std::uint8_t> image(layout.teb_size, 0);
-    put_le(image, layout.teb_off_stack_base, stack_address_ + stack_size_, 8);
-    put_le(image, layout.teb_off_stack_limit, stack_address_, 8);
-    put_le(image, layout.teb_off_teb_address, teb_addr, 8);
-    put_le(image, layout.teb_off_peb_address, peb_addr, 8);
+    put_le(image, layout.teb_off_stack_base, stack_address_ + stack_size_, ptr);
+    put_le(image, layout.teb_off_stack_limit, stack_address_, ptr);
+    put_le(image, layout.teb_off_teb_address, teb_addr, ptr);
+    put_le(image, layout.teb_off_peb_address, peb_addr, ptr);
 
     // the x86 (32-bit) TEB layout: the pointer fields shrink to 4 bytes —
     // StackBase/StackLimit ride at 4/8, the Self at 0x18 (the fs:0x18 read the
@@ -922,11 +1041,13 @@ void QlLoaderPE::init_peb() {
     const std::uint64_t peb_addr = structure_last_addr_;
     const std::uint64_t ldr_addr = ql_->mem().align_up(peb_addr + layout.peb_size, 0x10);
 
+    const std::size_t ptr = ql_->arch().pointersize();
+
     std::vector<std::uint8_t> image(layout.peb_size, 0);
-    put_le(image, layout.peb_off_image_base_address, pe_image_address_, 8);
-    put_le(image, layout.peb_off_ldr_address, ldr_addr, 8);
-    put_le(image, layout.peb_off_process_parameters, os_win.heap().alloc(0x100), 8);
-    put_le(image, layout.peb_off_process_heap, os_win.heap().alloc(0x100), 8);
+    put_le(image, layout.peb_off_image_base_address, pe_image_address_, ptr);
+    put_le(image, layout.peb_off_ldr_address, ldr_addr, ptr);
+    put_le(image, layout.peb_off_process_parameters, os_win.heap().alloc(0x100), ptr);
+    put_le(image, layout.peb_off_process_heap, os_win.heap().alloc(0x100), ptr);
     put_le(image, layout.peb_off_number_of_processors,
            static_cast<std::uint64_t>(ql_->profile().get_int("HARDWARE", "number_processors")), 4);
     ql_->mem().write(peb_addr, image);
@@ -942,12 +1063,14 @@ void QlLoaderPE::init_ldr_data() {
     const auto layout = loader_layout(ql_->arch().bits() == 32 ? 32 : 64);
     const std::uint64_t nobj_addr = ql_->mem().align_up(ldr_addr + layout.ldr_data_size, 0x10);
 
+    const std::size_t ptr = ql_->arch().pointersize();
+
     std::vector<std::uint8_t> image(layout.ldr_data_size, 0);
     for (const auto off : {layout.ldr_data_off_in_load_order,
                            layout.ldr_data_off_in_memory_order,
                            layout.ldr_data_off_in_initialization_order}) {
-        put_le(image, off, ldr_addr + off, 8);       // Flink
-        put_le(image, off + 8, ldr_addr + off, 8);   // Blink
+        put_le(image, off, ldr_addr + off, ptr);          // Flink
+        put_le(image, off + ptr, ldr_addr + off, ptr);    // Blink
     }
     ql_->mem().write(ldr_addr, image);
 
@@ -974,6 +1097,7 @@ void QlLoaderPE::add_ldr_data_table_entry(const std::string& dll_name) {
     // make_unicode_string(bits), and both structures are heap allocations, so
     // using the 64-bit sizes on an x86 guest shifts every later heap chunk
     const auto layout = loader_layout(ql_->arch().bits() == 32 ? 32 : 64);
+    const std::size_t ptr = ql_->arch().pointersize();
 
     const std::uint64_t entry_addr = os_win.heap().alloc(layout.ldr_entry_size);
 
@@ -997,12 +1121,12 @@ void QlLoaderPE::add_ldr_data_table_entry(const std::string& dll_name) {
         std::vector<std::uint8_t> ucs(layout.unicode_string_size, 0);
         put_le(ucs, UNICODE_STRING_OFF_LENGTH, ucslen, 2);
         put_le(ucs, UNICODE_STRING_OFF_MAXIMUM_LENGTH, ucslen + 2, 2);
-        put_le(ucs, layout.unicode_string_off_buffer, ucsbuf, 8);
+        put_le(ucs, layout.unicode_string_off_buffer, ucsbuf, ptr);
         ql_->mem().write(entry_base + ucs_off, ucs);
     };
 
     std::vector<std::uint8_t> entry(layout.ldr_entry_size, 0);
-    put_le(entry, layout.entry_off_dll_base, image_rec->base, 8);
+    put_le(entry, layout.entry_off_dll_base, image_rec->base, ptr);
     ql_->mem().write(entry_addr, entry);
 
     const std::string full_name = os_win.winsys() + "\\" + dll_name;
@@ -1025,19 +1149,21 @@ void QlLoaderPE::add_ldr_data_table_entry(const std::string& dll_name) {
             const std::uint64_t last = ldr_list_.back();
             // the Flink rides the last entry's current head link; the blink
             // rides the LDR list head's Blink cell
-            flink = ql_->mem().read_ptr(last + entry_off, 8);
-            blink = ql_->mem().read_ptr(ldr_address_ + ldr_off + 8, 8);
+            flink = ql_->mem().read_ptr(last + entry_off, ptr);
+            blink = ql_->mem().read_ptr(ldr_address_ + ldr_off + ptr, ptr);
         } else {
-            flink = ql_->mem().read_ptr(ldr_address_ + ldr_off, 8);
-            blink = ql_->mem().read_ptr(ldr_address_ + ldr_off + 8, 8);
+            flink = ql_->mem().read_ptr(ldr_address_ + ldr_off, ptr);
+            blink = ql_->mem().read_ptr(ldr_address_ + ldr_off + ptr, ptr);
         }
-        put_le(entry, entry_off, flink, 8);            // In*OrderLinks.Flink
-        put_le(entry, entry_off + 8, blink, 8);        // In*OrderLinks.Blink
+        // a LIST_ENTRY is two guest pointers: on an x86 guest the Blink sits
+        // right after the 4-byte Flink, not 8 bytes in
+        put_le(entry, entry_off, flink, ptr);              // In*OrderLinks.Flink
+        put_le(entry, entry_off + ptr, blink, ptr);        // In*OrderLinks.Blink
         ql_->mem().write(entry_addr + entry_off,
                          std::vector<std::uint8_t>(entry.begin() + entry_off,
-                                                   entry.begin() + entry_off + 16));
-        ql_->mem().write_ptr(ldr_address_ + ldr_off, entry_addr + entry_off);       // head Flink
-        ql_->mem().write_ptr(ldr_address_ + ldr_off + 8, entry_addr + entry_off);   // head Blink
+                                                   entry.begin() + entry_off + 2 * ptr));
+        ql_->mem().write_ptr(ldr_address_ + ldr_off, entry_addr + entry_off);            // head Flink
+        ql_->mem().write_ptr(ldr_address_ + ldr_off + ptr, entry_addr + entry_off);      // head Blink
         if (!ldr_list_.empty()) {
             ql_->mem().write_ptr(ldr_list_.back() + entry_off, entry_addr + entry_off);
         }
