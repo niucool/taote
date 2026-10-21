@@ -350,6 +350,11 @@ int main(int argc, char** argv) {
     js << ",\"exit_code\":" << outcome.exit_code;
     js << ",\"image_base\":" << outcome.imagebase;
     js << ",\"unsupported\":" << outcome.unsupported;
+    js << ",\"unsupported_apis\":[";
+    for (std::size_t i = 0; i < outcome.unsupported_apis.size(); ++i) {
+        js << (i ? "," : "") << "\"" << json_escape(outcome.unsupported_apis[i]) << "\"";
+    }
+    js << "]";
     js << ",\"error\":\"" << json_escape(outcome.error) << "\"";
     js << ",\"error_types\":[";
     for (std::size_t i = 0; i < outcome.error_types.size(); ++i) {

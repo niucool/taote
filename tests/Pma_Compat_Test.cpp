@@ -142,14 +142,26 @@ std::string evaluate(const PmaCase& tc) {
         }
     }
     if (!unexpected.empty()) {
+        std::string names;
+        for (const auto& n : out.unsupported_apis) {
+            names += " " + n;
+        }
         return "unexpected entry-point errors" + unexpected + (out.error.empty() ? "" : " (" + out.error + ")") +
-               (missing.empty() ? "" : "; missing apis" + missing);
+               (names.empty() ? "" : "; unsupported apis:" + names) + (missing.empty() ? "" : "; never reached:" + missing);
     }
     if (out.unsupported != 0) {
-        return std::to_string(out.unsupported) + " unsupported apis" + (missing.empty() ? "" : "; missing apis" + missing);
+        // the names, not just the count: an unsupported import is a real gap
+        // (a handler answered it with the zero policy), while a "missing" api
+        // was simply never dispatched - two different facts
+        std::string names;
+        for (const auto& n : out.unsupported_apis) {
+            names += " " + n;
+        }
+        return std::to_string(out.unsupported) + " unsupported apis:" + names +
+               (missing.empty() ? "" : "; never reached:" + missing);
     }
     if (!missing.empty()) {
-        return "missing apis" + missing;
+        return "never reached:" + missing;
     }
     return {};
 }

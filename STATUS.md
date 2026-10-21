@@ -1833,3 +1833,33 @@ rather than killing the process.
 Two stale figures corrected in the same pass: the scoreboard's suite count
 (540 -> 550) and the parity map's PMA row (0/12 -> 1/12 with a pointer to the
 per-case evidence).
+
+---
+
+PLAN_PARITY_AUDIT: the unsupported-API names are measured, and the evidence
+separates "unsupported" from "never reached".
+
+`QlOsStats::unsupported_apis()` now reaches both outputs (`parity_trace`'s
+`unsupported_apis` array and the PMA harness's failure text), because the count
+alone conflates two facts: a name answered by the zero policy (a dispatch that
+found no handler) and a name the guest never called (observed-vs-expected). The
+nine unsupported names measured across the curated cases - `GetShortPathNameA`;
+`Process32First`, `Process32Next`, `_stricmp`, `strcat`, `strcpy`, `strncpy`,
+`strrchr`; `strncat` - are **all absent from the reference too** (upstream has
+only `GetShortPathNameW` and the `W` process walk, and none of the six CRT string
+forms), so none of them is a handler gap against the parity target: adding them
+would be a taote extension, which the census verdict already ruled against. The
+`never reached` names split the same way: `CopyFileA`, `RegSetValueExA`,
+`WinExec`, `IoDeleteDevice`, `CreateToolhelp32Snapshot`, `VirtualProtect`,
+`InternetOpenUrlA`, `CreateProcessA` and `ExitProcess` are registered in taote
+and the guest dies before calling them; `ChangeServiceConfigA`,
+`GetCurrentHwProfileA`, `URLDownloadToCacheFileA`, `CreateRemoteThread`,
+`ResumeThread`, `NtUnmapViewOfSection` and `SfcTerminateWatcherThread` exist in
+neither emulator.
+
+Numbers unchanged by the audit (the names explain them rather than move them):
+API sweep **101/101 exit 0** (antidbg alone: 40 calls, exit 0; its parallel-sweep
+failure is the recorded load artifact), PMA **24/32 exit 0** with the
+differential at **10 match / 0 environment / 16 reference_limit / 2 blocked / 4
+diverged**, curated PMA **1/12** green (kGreenBaseline stays 1 - no case moved),
+`ctest` **550 passed / 0 failed / 3 skipped**, twice.

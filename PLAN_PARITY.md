@@ -1161,17 +1161,17 @@ The curated 12 (each case's own blocker, measured):
 
 | case | blocker |
 |---|---|
-| pma-01-02-exe | missing `WININET.InternetOpenUrlA` (the guest never reaches it) |
+| pma-01-02-exe | never reached `WININET.InternetOpenUrlA` (handler exists; the guest dies first) |
 | pma-03-02-dll | three entry-point errors: the guest faults on a bad indirect call |
-| pma-03-04-in | 1 unsupported api; missing `ChangeServiceConfigA`/`CopyFileA`/`RegSetValueExA` |
-| pma-05-01-dll | 7 unsupported apis; missing `RegSetValueExA` (faults first) |
-| pma-10-03-sys | missing `ntoskrnl.IoDeleteDevice` (driver path dispatches create only) |
-| pma-11-02-dll | 1 unsupported api; missing `CreateToolhelp32Snapshot`/`VirtualProtect`/`RegSetValueExA` |
-| pma-12-02-exe | missing `CreateProcessA`/`ResumeThread`/`NtUnmapViewOfSection` |
-| pma-12-04-exe | missing `CreateRemoteThread`/`WinExec`/`SfcTerminateWatcherThread` |
-| pma-14-01-exe | `max_api_count` (600) plus missing `GetCurrentHwProfileA`/`URLDownloadToCacheFileA` |
-| pma-16-03-exe | `invalid_fetch` before `ExitProcess` |
-| pma-21-01-exe | `invalid_insn` at a stub-dll data page |
+| pma-03-04-in | **unsupported: `GetShortPathNameA`** (absent in the reference too); never reached `ChangeServiceConfigA`/`CopyFileA`/`RegSetValueExA` (`CopyFileA`/`RegSetValueExA` exist in taote; `ChangeServiceConfigA` exists in neither) |
+| pma-05-01-dll | **unsupported: `Process32First` `Process32Next` `_stricmp` `strcat` `strcpy` `strncpy` `strrchr`** (all absent in the reference too - it has only the `W` process walk); never reached `RegSetValueExA` (handler exists; the guest exhausts its stack) |
+| pma-10-03-sys | never reached `ntoskrnl.IoDeleteDevice` (handler exists; the driver path dispatches create only) |
+| pma-11-02-dll | **unsupported: `strncat`** (absent in the reference too); never reached `CreateToolhelp32Snapshot`/`VirtualProtect`/`RegSetValueExA` (all three exist in taote) |
+| pma-12-02-exe | never reached `CreateProcessA` (exists), `ResumeThread`/`NtUnmapViewOfSection` (exist in neither) |
+| pma-12-04-exe | never reached `WinExec` (exists), `CreateRemoteThread`/`SfcTerminateWatcherThread` (exist in neither) |
+| pma-14-01-exe | `max_api_count` (600); never reached `GetCurrentHwProfileA`/`URLDownloadToCacheFileA` (exist in neither) |
+| pma-16-03-exe | `invalid_fetch` before `ExitProcess` (handler exists) |
+| pma-21-01-exe | `invalid_insn` at a stub-dll data page (486 dispatches in) |
 | pma-06-03-exe | **green** (the one case whose expectation set the port reaches) |
 
 **Target, revised deliberately:** PMA **>= 24 exit 0** and curated **1/12**, from
@@ -1180,6 +1180,22 @@ guest-side death, the reference's own limit, or an expectation set the reference
 satisfies only through its kernel/profile fixtures - not by a missing taote
 handler. Raising these numbers is new emulation scope (guest-code fidelity and
 kernel IRP dispatch), not parity repair.
+
+**Audited separately: "unsupported" vs "never reached".** The harness's
+`missing apis` line only ever meant *never dispatched* (observed-vs-expected),
+not *no handler*; the two facts are now printed separately (`unsupported apis:
+<names>` from `QlOsStats::unsupported_apis()`, `never reached: <names>`), and
+the trace JSON carries `unsupported_apis`. The measured unsupported set is nine
+names across three cases - `GetShortPathNameA`; `Process32First`,
+`Process32Next`, `_stricmp`, `strcat`, `strcpy`, `strncpy`, `strrchr`; `strncat`
+- and **every one of them is absent from the reference too** (upstream has only
+`GetShortPathNameW` and `Process32FirstW`/`Process32NextW`, and none of the six
+CRT string forms), so they are not handler gaps against the parity target: a
+taote extension would move it away, exactly as the census verdict says. The
+`never reached` names split the same way - `CopyFileA`, `RegSetValueExA`,
+`WinExec`, `IoDeleteDevice`, `CreateToolhelp32Snapshot`, `VirtualProtect`,
+`InternetOpenUrlA`, `CreateProcessA`, `ExitProcess` are registered in taote and
+the guest dies before calling them; the rest exist in neither emulator.
 
 **Found during this audit and fixed:** `03-02.dll_` aborted the *host* -
 `terminate called after throwing an instance of 'qiling::QlErrorBase'`, thrown by

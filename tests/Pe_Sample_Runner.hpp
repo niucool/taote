@@ -189,6 +189,7 @@ struct SampleOutcome {
     std::set<std::uint64_t> coverage;                            // the retired pcs (analysis)
     std::vector<qiling::os::ArtifactRecord> artifacts;           // the artifact manifest
     std::size_t unsupported = 0;                                 // imports with no handler
+    std::vector<std::string> unsupported_apis;                   // their names (the real gap signal)
 
     // the call records for one api name (empty when never dispatched)
     const std::vector<std::uint64_t>& retvals(const std::string& name) const {
@@ -272,6 +273,7 @@ inline SampleOutcome run_pe_sample(const std::string& bin_name, const SampleOpti
         }
         const auto& stats = qlr.os().stats();
         out.unsupported = stats.unsupported_api_count();
+        out.unsupported_apis.assign(stats.unsupported_apis().begin(), stats.unsupported_apis().end());
         for (const auto& [name, records] : stats.syscalls()) {
             auto& dst = out.api[name];
             for (const auto& r : records) {
