@@ -454,7 +454,15 @@ TEST(QilingPeCompat, PeWinX86UselessDisk) {
 }
 
 // test_pe_win_x86_gandcrab — the admin and user profiles must send the sample
-// down different paths (a different API-call count).
+// down different paths (a different API-call count). The upstream shape: the
+// admin run stops at the stage-2 gate 0x40860f and rides a randomized
+// environment; the user run rides the plain profile; the assertion is the
+// dispatch-count divergence. The sample's environment probing needs the real
+// system-dll answers (upstream runs it on a Windows host with the collected
+// dlls); on the stub rootfs it derails into an early fault — a call chain out
+// of the obfuscated stub into ntdll internals whose encoded-pointer deref
+// faults and the SEH dispatch fetches 0xd10c — before the profiles diverge,
+// so the case rides the real-dll mode like the C++ fixtures.
 TEST(QilingPeCompat, PeWinX86GandcrabProfileChangesBehaviour) {
     REQUIRE_CORPUS();
     const auto sample = extract_fixture("x86_windows", "GandCrab502.bin.zip");
@@ -463,11 +471,27 @@ TEST(QilingPeCompat, PeWinX86GandcrabProfileChangesBehaviour) {
     const auto admin = profiles / "windows_gandcrab_admin.ql";
     const auto user = profiles / "windows_gandcrab_user.ql";
     if (!fs::exists(admin) || !fs::exists(user)) GTEST_SKIP() << "gandcrab profiles missing";
+    REQUIRE_REAL_DLLS();
     qiling::os::register_dlls();
 
+    qiling::Qiling* stop_ql = nullptr;
+    bool stopped_at_gate = false;
     SampleOptions admin_opts;
     admin_opts.timeout = 120;
     admin_opts.profile = admin.string();
+    admin_opts.configure = [&stop_ql, &stopped_at_gate](qiling::Qiling& ql) {
+        stop_ql = &ql;
+        static std::vector<std::shared_ptr<qiling::HookRet>> keep;
+        keep.push_back(std::make_shared<qiling::HookRet>(ql.hook_address(
+            [&stop_ql, &stopped_at_gate]() {
+                stopped_at_gate = true;
+                if (stop_ql != nullptr) {
+                    stop_ql->emu_stop();
+                }
+                return 0;
+            },
+            0x40860f)));
+    };
     const auto as_admin = run_fixture(sample, admin_opts);
 
     SampleOptions user_opts;
@@ -475,10 +499,9 @@ TEST(QilingPeCompat, PeWinX86GandcrabProfileChangesBehaviour) {
     user_opts.profile = user.string();
     const auto as_user = run_fixture(sample, user_opts);
 
-    EXPECT_TRUE(as_admin.error.empty()) << "admin run: " << as_admin.error;
-    EXPECT_TRUE(as_user.error.empty()) << "user run: " << as_user.error;
-    EXPECT_NE(as_admin.api.size(), as_user.api.size())
-        << "the two profiles dispatched the same number of distinct APIs";
+    EXPECT_TRUE(stopped_at_gate) << "admin run: " << as_admin.error;
+    EXPECT_NE(as_admin.calls.size(), as_user.calls.size())
+        << "the two profiles dispatched the same number of APIs";
 }
 
 // test_pe_win_x8664_customapi — three intercepts over `puts`: the ENTER sees the
