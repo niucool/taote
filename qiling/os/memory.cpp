@@ -221,7 +221,14 @@ std::vector<std::uint8_t> QlMemoryManager::read(std::uint64_t addr, std::uint64_
 void QlMemoryManager::write(std::uint64_t addr, const std::vector<std::uint8_t>& data) {
     const uc_err err = uc_mem_write(uc_, addr, data.data(), data.size());
     if (err != UC_ERR_OK) {
-        throw QlErrorBase("failed to write memory (uc_err " + std::to_string(static_cast<int>(err)) + ")");
+        // the address and size belong in the message: "failed to write memory
+        // (uc_err 7)" alone cannot be acted on (the read path already reports
+        // its address), and a handler bug is exactly what it usually is
+        char where[80];
+        std::snprintf(where, sizeof(where), " at 0x%llx (%zu bytes)",
+                      static_cast<unsigned long long>(addr), data.size());
+        throw QlErrorBase("failed to write memory (uc_err " +
+                          std::to_string(static_cast<int>(err)) + where + ")");
     }
 }
 

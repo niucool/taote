@@ -148,9 +148,15 @@ void register_shell32_family() {
 
     // BOOL SHGetSpecialFolderPathW(HWND hwnd, LPWSTR pszPath, int csidl,
     //     BOOL fCreate);
+    // pszPath is an OUT buffer: the reference types it LPWSTR (a pointer), not
+    // LPCWSTR (an input string). With the input type the resolver turned the
+    // argument into its *content* and api_get_int answered 0, so the handler
+    // wrote the wide path to address 0 — measured as GandCrab's admin run
+    // dying 24 ms in with "failed to write memory (uc_err 7 at 0x0 (50 bytes))"
+    // from this handler's ql.mem().write.
     WinsdkApi("SHGetSpecialFolderPathW", WinCc::Stdcall, {
         {"hwnd", HWND_},
-        {"pszPath", LPCWSTR_},
+        {"pszPath", LPWSTR_},
         {"csidl", INT_},
         {"fCreate", BOOL_},
     }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
