@@ -9,6 +9,7 @@
 #include "qiling/os/windows/structs.hpp"
 #include "qiling/os/windows/api.hpp"
 
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include "qiling/os/os.hpp"
@@ -1230,14 +1231,28 @@ void QlLoaderPE::call_dll_entrypoint(LIEF::PE::Binary& dll, std::uint64_t dll_ba
 
     const auto regs_state = ql_->arch().save();
 
-    auto& fcall = ql_->os().fcall();
+    // pe.py call_dll_entrypoint: `fcall = self.ql.os.fcall_select(CDECL)`.
+    // The drive must ride the CDECL convention explicitly — the ambient fcall
+    // is whatever the last API dispatch selected (a STDCALL handler, or the
+    // x64 convention on an x86 guest), and staging the arguments through it
+    // leaves rcx/rdx/r8 (or the 32-bit stack slots) unwritten: the guest then
+    // sees fdwReason == 0, i.e. DLL_PROCESS_DETACH, takes the detach branch
+    // and returns FALSE without ever running the CRT attach path. That is what
+    // kept msvcp140's std::cout unconstructed and failed the C++ fixtures.
+    auto& fcall = ql_->os<os::windows::QlOsWindows>().fcall_select(os::WinCc::Cdecl);
     fcall.call_native(entry_point, args, exit_point);
 
     // Execute the call to the entry point
     try {
         ql_->emu_start(entry_point, exit_point);
     } catch (const QlErrorBase&) {
-        ql_->log().debug("Error encountered while running " + dll_name + " DllMain, bailing");
+        {
+            char b[128];
+            std::snprintf(b, sizeof(b), "Error encountered while running %s DllMain, bailing (pc=0x%llx)",
+                          dll_name.c_str(),
+                          (unsigned long long)ql_->arch().regs().arch_pc());
+            ql_->log().debug(b);
+        }
 
         ql_->arch().restore(*regs_state);
 
