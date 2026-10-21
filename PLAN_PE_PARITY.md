@@ -89,7 +89,7 @@ from a composed tree with the sample corpus staged inside):
 
 | suite | result |
 |---|---|
-| `test_pe.py` (25 cases) | **24 pass, 1 error** — only `test_pe_win_x86_gandcrab`, erroring inside upstream's *own* `lstrcmpiW` handler (UC_ERR_READ_UNMAPPED) |
+| `test_pe.py` (25 cases) | **25 pass** (was 24 + 1 error: `test_pe_win_x86_gandcrab` crashed inside upstream's own `lstrcmpiW`, because `utils.read_string` read one unit past the end of the mapped region when a guest string ran to a page boundary — fixed upstream, see below) |
 | `test_windows_cpp_x8664.py` + `..._x86.py` (8 cases) | **8 pass** |
 
 **taote on the same rootfs**: **26 pass / 9 fail / 1 skip** of 36. The
@@ -113,6 +113,16 @@ described: the C++ initializer walk binds the stream's `filebuf` inconsistently.
 (`msvcp140+0x516d8..+0x518a0`, 56 entries inside the image, one null), so the
 walk runs; what is left is to find which entry binds the streambuf and why its
 effect is missing.
+
+**The string-read bug (fixed in upstream and taote).** `read_string` advanced one
+unit at a time and let any read fault escape. A guest string that runs to the end
+of its mapped region has no terminator there, so the walk read one unit past the
+mapping and the fault aborted the whole run from inside a handler that merely
+*reads* an argument — GandCrab's `lstrcmpiW` argument pointed 2 bytes below a page
+end. Real Windows takes an access violation when it never finds the terminator;
+the emulation now ends the string at the edge. Upstream: `test_pe.py` 24/25 ->
+**25/25**. taote: the same guard on `read_string` and `read_wstring`; GandCrab's
+admin run moves past that read fault.
 
 Fixed on this rootfs in this pass: `PeWinX86RegDemo` (it passed on rootfs-win7
 and regressed here) — taote substituted its synthetic `_except_handler4_common`
