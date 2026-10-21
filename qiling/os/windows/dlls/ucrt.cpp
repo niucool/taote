@@ -161,13 +161,24 @@ void register_ucrt_family() {
         }
     };
 
-    // FILE* __acrt_iob_func(unsigned index); — the stdio table probe (the
-    // stdin/stdout/stderr cells ride the handle ids 0/1/2)
-    WinsdkApi("__acrt_iob_func", WinCc::Cdecl, {
-        {"index", UINT_},
-    }) = [](Qiling&, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
-        return api_get_int(get_param(params, "index"));
-    };
+    // FILE* __acrt_iob_func(unsigned index);
+    //
+    // Deliberately NO handler. Answering the *index* (as the retired handler
+    // did, so that "stdout" was the literal 1) works only for code that treats
+    // the FILE* as an opaque token. MSVC's own C++ runtime dereferences it:
+    // msvcp140's filebuf constructor calls
+    //     _get_stream_buffer_pointers(stdout, &base, &ptr, &count)
+    // so that it can wrap the C stream. Real ucrtbase then reads the FILE
+    // structure at 0x1, finds garbage and writes garbage back through the out
+    // params — measured on the Windows 11 x86 tree: the three pointers came
+    // back as 0x1 and were stored into the filebuf's get/put slots, so the
+    // first `operator<<` loaded 0x1 as a pointer and died (UC_ERR_READ_UNMAPPED
+    // at msvcp140+0xf12a); the x64 fixture shows the same 0x1 in
+    // basic_ios<char>'s streambuf slot. Upstream qiling hooks this name nowhere
+    // and passes both, because ucrtbase's own DllMain builds the real FILE
+    // objects and the export answers a real pointer. On a stub rootfs the
+    // synthesized cell answers 0, which is what the retired handler's callers
+    // did with the index anyway (an opaque token, never dereferenced).
 
     // ---- the locale-state accessors -------------------------------------
     //

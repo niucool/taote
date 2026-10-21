@@ -638,7 +638,12 @@ TEST(PegasusParity, UnsupportedImportsAreRecorded) {    qiling::os::register_dll
     // that nothing *else* leaks into the set — a regression that starts
     // answering unimplemented imports through a synthetic frame shows up as a
     // new name here.
-    static const std::set<std::string> kDeliberatelyUnhooked = {"_initterm", "_initterm_e"};
+    // `__acrt_iob_func` joined the list for the same reason: answering it with
+    // the stream *index* made "stdout" the literal 1, and MSVC's C++ runtime
+    // dereferences the FILE* through _get_stream_buffer_pointers. ucrtbase owns
+    // the real FILE objects, so the name must reach the guest's own CRT.
+    static const std::set<std::string> kDeliberatelyUnhooked = {
+        "_initterm", "_initterm_e", "__acrt_iob_func"};
     std::string names;
     std::size_t unexpected = 0;
     for (const auto& n : out.unsupported_apis) {
