@@ -140,31 +140,49 @@ bool QlOsWindows::has_real_seh_unwinder() {
     bool real = false;
     try {
         const auto& pe_loader = static_cast<const loader::QlLoaderPE&>(ql_->loader());
+
+        // The import tables are keyed by the *imported* name, which is what the
+        // image's .idata asks for — not by the module the redirect ladder
+        // resolved it to. A guest that imports the api-ms-win-crt-* groups
+        // (every VC++ fixture does) therefore has no "ucrtbase.dll" key even
+        // though the loader mapped ucrtbase as the redirect target: measured on
+        // the Windows 11 x86 tree, the keys were exactly
+        // api-ms-win-crt-{heap,locale,math,runtime,stdio}-l1-1-0.dll,
+        // kernel32.dll, msvcp140.dll and vcruntime140.dll. So the symbol is
+        // resolved through every table and attributed by *image ownership*.
+        const auto tables = pe_loader.import_address_table_keys();
         for (const auto& image : pe_loader.images) {
-            const auto name = std::filesystem::path(image.path).filename().string();
-            if (lower_ascii(name).rfind("ucrtbase", 0) != 0 && lower_ascii(name) != "msvcrt.dll") {
+            const auto name = lower_ascii(std::filesystem::path(image.path).filename().string());
+            const bool crt_image = name.rfind("ucrtbase", 0) == 0 || name == "msvcrt.dll" ||
+                                   name.rfind("api-ms-win-crt-", 0) == 0;
+            if (!crt_image) {
                 continue;
             }
-            const auto* iat = pe_loader.import_address_table_at(lower_ascii(name));
-            if (iat == nullptr) {
-                continue;
+            for (const auto& key : tables) {
+                const auto* iat = pe_loader.import_address_table_at(key);
+                if (iat == nullptr) {
+                    continue;
+                }
+                const auto addr = iat->lookup("_except_handler4_common");
+                if (addr == 0 || addr < image.base || addr >= image.end) {
+                    continue;  // this table's answer is not code in a CRT image
+                }
+                std::vector<std::uint8_t> prologue;
+                try {
+                    prologue = ql_->mem().read(addr, 3);
+                } catch (...) {
+                    continue;
+                }
+                const bool synthesized_cell =
+                    prologue.size() >= 1 &&
+                    (prologue[0] == 0xC3 ||
+                     (prologue.size() >= 3 && prologue[0] == 0x31 && prologue[1] == 0xC0 && prologue[2] == 0xC3));
+                if (!synthesized_cell) {
+                    real = true;
+                    break;
+                }
             }
-            const auto addr = iat->lookup("_except_handler4_common");
-            if (addr == 0) {
-                continue;
-            }
-            std::vector<std::uint8_t> prologue;
-            try {
-                prologue = ql_->mem().read(addr, 3);
-            } catch (...) {
-                continue;
-            }
-            const bool synthesized_cell =
-                prologue.size() >= 1 &&
-                (prologue[0] == 0xC3 ||
-                 (prologue.size() >= 3 && prologue[0] == 0x31 && prologue[1] == 0xC0 && prologue[2] == 0xC3));
-            if (!synthesized_cell) {
-                real = true;
+            if (real) {
                 break;
             }
         }

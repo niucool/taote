@@ -198,6 +198,15 @@ public:
 
     // loader/pe.py: the import-address tables keyed by the casefolded dll
     // basename (the by_name/by_ordinal views over one table)
+    // the keys the import-table map was filled under (a redirect target such as
+    // ucrtbase.dll is not necessarily keyed by its own name)
+    std::vector<std::string> import_address_table_keys() const {
+        std::vector<std::string> keys;
+        for (const auto& [k, _] : import_address_table_) {
+            keys.push_back(k);
+        }
+        return keys;
+    }
     const ImportTable* import_address_table_at(const std::string& dll) const {
         const auto it = import_address_table_.find(dll);
         return it == import_address_table_.end() ? nullptr : &it->second;

@@ -171,7 +171,22 @@ SampleOutcome run_fixture(const fs::path& sample, const SampleOptions& base = {}
     // pick the real rootfs for this fixture when one is installed: the sample
     // has to sit where the guest expects it (<rootfs>/Windows/<name>)
     if (!opts.rootfs.has_value()) {
-        const auto arch_dir = sample.parent_path().parent_path().filename().string();
+        // The arch directory is the *path component* that names it, not a fixed
+        // number of levels up: every C++/SEH fixture sits in bin/except/, so
+        // parent_path().parent_path().filename() is "bin", the lookup found no
+        // rootfs, opts.rootfs stayed empty — and the run silently fell back to
+        // synthesized stub DLLs even though REQUIRE_REAL_DLLS had passed.
+        // Measured before this fix: ntdll, ucrtbase and vcruntime140 were all
+        // 8-12K stub images instead of the real 1.1M ucrtbase, so every C++
+        // verdict was really a stub-mode verdict.
+        std::string arch_dir;
+        for (auto p = sample.parent_path(); !p.empty() && p != p.root_path(); p = p.parent_path()) {
+            const auto component = p.filename().string();
+            if (component == "x86_windows" || component == "x8664_windows") {
+                arch_dir = component;
+                break;
+            }
+        }
         if (const auto rootfs = real_rootfs(arch_dir); !rootfs.empty()) {
             const auto staged = rootfs / "Windows" / sample.filename().string();
             std::error_code ec;
