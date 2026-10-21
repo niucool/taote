@@ -86,7 +86,19 @@ bool QlOsWindows::seh_map_sentinel() {
 bool QlOsWindows::seh_fault_trampoline(uc_engine*, uc_mem_type access, std::uint64_t address,
                                         std::uint32_t /*size*/, std::int64_t /*value*/, void* user_data) {
     auto* self = static_cast<QlOsWindows*>(user_data);
-    return self->seh_on_fault(static_cast<int>(access), address);
+    // this trampoline is a C boundary (unicorn calls it directly): a C++
+    // exception escaping here reaches std::terminate, i.e. a host abort on a
+    // guest fault - never acceptable. The failure becomes the run's entry-point
+    // error and the fault goes on to surface normally.
+    try {
+        return self->seh_on_fault(static_cast<int>(access), address);
+    } catch (const std::exception& e) {
+        self->on_emulation_error(e.what());
+        return false;
+    } catch (...) {
+        self->on_emulation_error("SEH dispatch failed");
+        return false;
+    }
 }
 
 // the raw invalid-memory hook: the first-chance SEH dispatch. Returns false
@@ -165,7 +177,15 @@ bool QlOsWindows::seh_check_cpu_exception(std::uint64_t pc) {
 }
 
 void QlOsWindows::seh_intr_trampoline(uc_engine* /*uc*/, std::uint32_t intno, void* user_data) {
-    static_cast<QlOsWindows*>(user_data)->seh_on_interrupt(intno);
+    auto* self = static_cast<QlOsWindows*>(user_data);
+    try {
+        (void)self->seh_on_interrupt(intno);
+    } catch (const std::exception& e) {
+        // same C-boundary rule as the fault trampoline
+        self->on_emulation_error(e.what());
+    } catch (...) {
+        self->on_emulation_error("SEH interrupt dispatch failed");
+    }
 }
 
 bool QlOsWindows::seh_on_interrupt(std::uint32_t intno) {

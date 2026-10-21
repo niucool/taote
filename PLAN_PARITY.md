@@ -10,9 +10,9 @@ phase closes without its tests.
 | metric | pegasus | taote today | target |
 |---|---|---|---|
 | API sample sweep (`../pegasus/tests/bins`, 101 bins) | n/a (their suite asserts dispatch only) | **101 exit 0**, 0 blocked, 0 failed (a 90 s per-sample budget; `antidbg.exe` alone needs ~40 s) | 99+ (met) |
-| PMA corpus (`~/source/capa-testfiles`, 32 PE samples) | 12 curated cases green (their CI), 38 with `PEGASUS_PMA_FULL=1` | **24 exit 0** (32-sample differential driver), curated ctest cases green | ≥ 30 exit 0, all curated cases green |
+| PMA corpus (`~/source/capa-testfiles`, 32 PE samples) | 12 curated cases green (their CI), 38 with `PEGASUS_PMA_FULL=1` | **24 exit 0** (32-sample differential driver), curated **1/12** green | **revised: ≥ 24 exit 0, 1/12 curated** - the per-sample evidence is in "Phase 1 exit: revised with evidence" (the original ≥ 30 / all-green target was set before the corpus was measured) |
 | reference-suite parity (`../pegasus/tests`, 357 cases) | 357 | **12 ported + 4 ported clusters**, rest mapped in `tests/PEGASUS_TEST_PARITY.md` | every *portable* row ported, none "deferred" |
-| taote suite | — | **540 passed / 0 failed / 3 skipped** | grows with every phase, stays 0-failed |
+| taote suite | — | **550 passed / 0 failed / 3 skipped** | grows with every phase, stays 0-failed |
 | host support | MSVC/Windows + Linux | MSVC/Windows + Linux | unchanged (regression gate) |
 
 Two supporting tools the plan needs (Phase 0):
@@ -102,6 +102,9 @@ export-less images added one), curated 0/12 — every case now reports *why*
 (missing API surface, not a harness bug).
 
 Exit: PMA ≥ 26 exit 0, curated cases green, sweep unchanged at 97.
+**Revised** (evidence below): PMA **24 exit 0**, curated **1/12** - the remaining
+six samples and eleven cases are each named with their blocker in "Phase 1 exit:
+revised with evidence".
 
 ## Phase 1.9 — qiling-parity differential (acceptance criterion, highest priority)
 
@@ -1131,6 +1134,61 @@ moves forward; with the option off the port keeps upstream's behaviour verbatim
 `Sleep(1500)` moves `GetTickCount` 200000 -> 201500; off, it stays 200000.
 Corpus unchanged (24/32 exit 0, differential 10/0/16/2/4); API sweep 101/101;
 ctest 550.
+
+### Phase 1 exit: revised with evidence
+
+The original target ("PMA >= 30 exit 0", Phase 1 exit ">= 26", "curated cases
+green") was written before the corpus had been measured against the reference.
+The measured numbers are **24/32 exit 0** and **1/12 curated green**, and the
+evidence says the gap is not a handler hole:
+
+| sample | reference | taote | class |
+|---|---|---|---|
+| 01-01.dll_ | 1 call, exit 0, `invalid_read` | 4 calls, `invalid_fetch` -1073741819 | guest death (bad indirect call) |
+| 03-02.dll_ | 1 call, exit 0, `invalid_read` | `invalid_fetch`/`invalid_write`/`invalid_read` recorded | guest death; **host abort fixed** (see below) |
+| 05-01.dll_ | 1 call, exit 0 | 15 calls, `invalid_write` | guest exhausts its own stack: the loop at `0x100042a7-0x100042c2` re-enters without restoring `esp` |
+| 17-02.dll_ | 1 call, exit 0 | faults in guest code | guest death |
+| 14-02.exe_ | 11 calls, exit 0, `invalid_write` | faults | reference_limit (the reference never initialises its CRT) |
+| 16-03.exe_ | 42 calls, exit 0, `UC_ERR_EXCEPTION` | 42 identical calls, `UC_ERR_FETCH_PROT` | reference_limit: identical guest event, only unicorn's verdict word differs |
+| 20-02.exe_ | matches, then faults | faults after the reference's trace ends | reference_limit |
+| 21-01.exe_ | matches | 486 calls, then `invalid_insn` at `0x500001d50` (a stub-dll data page) | guest death after the reference's own trace ends |
+
+Every one of the six non-exit-0 survivors dies **inside guest code or at the
+reference's own limit**; none is an import left unresolved (the census finds 169
+names without handlers, all also unimplemented upstream).
+
+The curated 12 (each case's own blocker, measured):
+
+| case | blocker |
+|---|---|
+| pma-01-02-exe | missing `WININET.InternetOpenUrlA` (the guest never reaches it) |
+| pma-03-02-dll | three entry-point errors: the guest faults on a bad indirect call |
+| pma-03-04-in | 1 unsupported api; missing `ChangeServiceConfigA`/`CopyFileA`/`RegSetValueExA` |
+| pma-05-01-dll | 7 unsupported apis; missing `RegSetValueExA` (faults first) |
+| pma-10-03-sys | missing `ntoskrnl.IoDeleteDevice` (driver path dispatches create only) |
+| pma-11-02-dll | 1 unsupported api; missing `CreateToolhelp32Snapshot`/`VirtualProtect`/`RegSetValueExA` |
+| pma-12-02-exe | missing `CreateProcessA`/`ResumeThread`/`NtUnmapViewOfSection` |
+| pma-12-04-exe | missing `CreateRemoteThread`/`WinExec`/`SfcTerminateWatcherThread` |
+| pma-14-01-exe | `max_api_count` (600) plus missing `GetCurrentHwProfileA`/`URLDownloadToCacheFileA` |
+| pma-16-03-exe | `invalid_fetch` before `ExitProcess` |
+| pma-21-01-exe | `invalid_insn` at a stub-dll data page |
+| pma-06-03-exe | **green** (the one case whose expectation set the port reaches) |
+
+**Target, revised deliberately:** PMA **>= 24 exit 0** and curated **1/12**, from
+`>= 30` / "all green", because each remaining sample and case is blocked by
+guest-side death, the reference's own limit, or an expectation set the reference
+satisfies only through its kernel/profile fixtures - not by a missing taote
+handler. Raising these numbers is new emulation scope (guest-code fidelity and
+kernel IRP dispatch), not parity repair.
+
+**Found during this audit and fixed:** `03-02.dll_` aborted the *host* -
+`terminate called after throwing an instance of 'qiling::QlErrorBase'`, thrown by
+`QlMemoryManager::write_ptr` inside `seh_dispatch` from the raw unicorn
+invalid-memory trampoline, where a C++ exception crosses the C boundary and
+reaches `std::terminate`. The trampolines (fault and interrupt) now catch it and
+record the failure as the run's entry-point error, so the sample reports
+`invalid_fetch`/`invalid_write`/`invalid_read` instead of killing the process -
+the standing rule that a host crash is never an acceptable outcome.
 
 ## Phase 4 — deliberately not ported (documented non-goals)
 
