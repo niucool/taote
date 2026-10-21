@@ -1749,3 +1749,52 @@ answered 0), and `MessageBoxA/W` decode their text/caption into the string log.
 Linux host (23 pre-existing disabled, all non-PE). The pegasus sample sweep is
 unchanged at 97 of 101 bins (the 2 tcp servers block in a real `accept`, the 2
 wdm drivers are kernel-mode).
+
+---
+
+PLAN_PARITY_COMPLETE: every documented phase of PLAN_PARITY.md is implemented.
+
+* **Phase 0** - `tools/gap_census` + the PMA harness/sweeps as the measurement
+  surface for everything that follows.
+* **Phase 1** - the fault clusters: unsupported-API accounting and
+  `max_api_count`, the entry-point error taxonomy (`invalid_fetch`/`_write`/
+  `_read`, `max_api_count`, `unsupported_api`, `timeout`, `replay_mismatch`) with
+  the guest pc recorded, the deterministic instruction/timeout hang guard, SEH
+  dispatch, x86/x64 `AddVectoredExceptionHandler`, the path-separator and
+  null-page return fixes, and the qiling-parity differential (10 match / 0
+  environment / 16 reference_limit / 2 blocked / 4 diverged over the 32-file PMA
+  corpus, 24/32 raw exit 0). Phase 1.2's dynamic-import cluster is **closed by
+  evidence**: the census finds 169 unimplemented import names, all of them
+  unimplemented in the reference too, so taote's handler surface is a superset
+  and the remaining divergences are guest faults, not resolution gaps.
+* **Phase 2** - the census verdict recorded, the NT registry hive reader
+  (`regf` base block, hbins, negative-size cells, `nk` keys with `lf`/`lh`/`li`
+  subkeys, `vk` values with inline data and the typed value domain), and the
+  `ntdefs` size/offset table including the loader rows (`PEB`, `TEB`,
+  `LDR_DATA_TABLE_ENTRY`, `PEB_LDR_DATA`) pinned against `loader_layout(32/64)`.
+* **Phase 3** - the analysis surface: typed API records carrying the module and
+  rendered arguments, `(kind, target)` indicators for file/registry/network,
+  the error taxonomy in the report, memory-access counters plus coverage behind
+  `QilingOptions::analysis`, the content-addressed artifact store over the
+  `Snapshot` envelope, config parity (`fs_mappings`, `host:guest` volumes,
+  `registry_patches`) and the gdbserver slice (`QlGdb`, bounded listener and
+  read budgets).
+* **Phase 4** - the documented non-goals (JS engine, unpacker/JIT-PE/loader
+  classification, the `EmuStruct` class library) stay unported on purpose.
+* **Phase 5** - beyond pegasus: kernel-mode drivers (`wdm_test_x64/x86.sys`
+  dispatch to exit 0, `/GS` cookie seeding with a null-guarded load config),
+  the x64 virtual unwinder (prologue replay, handler RVA, `EstablisherFrame`),
+  the socket wall-clock budget with `blocked` as a verdict, fidelity over stubs
+  (no host-blocking `Sleep`/`accept`, a virtual clock), and the deterministic
+  replay store (record/verify plus opt-in serving).
+
+**Final state:** pegasus API sample sweep **101/101 exit 0** (pegasus itself is
+97/101); PMA corpus **24/32 exit 0**, differential **10 match / 0 environment /
+16 reference_limit / 2 blocked / 4 diverged** - every remaining non-zero exit is
+a guest-side death or a reference limit, not a handler gap; `ctest`
+**550 passed / 0 failed / 3 skipped** (serial, twice).
+
+Known measurement notes: `antidbg.exe` reports `failed to write memory (uc_err
+7)` under a loaded parallel sweep and exits 0 alone (40 calls) - verdicts come
+from serialized runs with a generous budget; `ctest -j` shows a pre-existing
+`PegasusParity.FileAccessEmulationX86` flake that does not reproduce serially.
