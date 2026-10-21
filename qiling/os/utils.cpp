@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstring>
 #include <string_view>
+#include <vector>
 
 #include "qiling/core.hpp"
 #include "qiling/os/os.hpp"
@@ -25,7 +26,20 @@ std::string QlOsUtils::read_string(Qiling& ql, std::uint64_t address, int charle
         return data;
     }
     while (true) {
-        const auto unit = ql.mem().read(address, static_cast<std::size_t>(charlen));
+        // a guest-supplied pointer can be unterminated: a string that runs to
+        // the end of its mapped region has no terminator, so the walk would read
+        // one unit past the mapping. Real Windows takes an access violation when
+        // it never finds the terminator; for the emulation the string ends at
+        // the edge. Letting the fault escape aborts the whole run from inside a
+        // handler that merely *reads* an argument — upstream had the identical
+        // bug (utils.py read_string) and it is what failed its GandCrab case:
+        // lstrcmpiW's second argument pointed 2 bytes below a page end.
+        std::vector<std::uint8_t> unit;
+        try {
+            unit = ql.mem().read(address, static_cast<std::size_t>(charlen));
+        } catch (const QlErrorBase&) {
+            break;
+        }
         bool is_terminator = true;
         for (const auto b : unit) {
             if (b != 0) {
@@ -60,7 +74,13 @@ std::string QlOsUtils::read_wstring(Qiling& ql, std::uint64_t address, int maxle
     int strlen = 0;
 
     while (true) {
-        const auto unit = ql.mem().read(address, 2);
+        // the same edge-of-mapping guard as read_string (see the note there)
+        std::vector<std::uint8_t> unit;
+        try {
+            unit = ql.mem().read(address, 2);
+        } catch (const QlErrorBase&) {
+            break;
+        }
         bool is_terminator = unit[0] == 0 && unit[1] == 0;
         if (is_terminator) {
             break;
