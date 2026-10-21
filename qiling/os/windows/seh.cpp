@@ -187,6 +187,18 @@ bool QlOsWindows::seh_on_fault(int access, std::uint64_t address) {
         return false;
     }
 
+    // Only the *program's* faults dispatch. The loader drives every DllMain from
+    // `emu_start` while the emulation state is not STARTED, and a fault in one of
+    // those drives is not the program's exception: treating it as one stages the
+    // sentinel page as a guest return address (measured: fault 0xc3c3c3c7 at
+    // pc 0x40104a during load, real_unwinder still 0 because the system DLLs are
+    // not mapped yet), and the program later returns into it — the
+    // UC_ERR_FETCH_PROT at 0x70000000 that the x86 C++ fixtures and GandCrab all
+    // ended on.
+    if (ql_->emu_state() != QL_STATE::STARTED) {
+        return false;
+    }
+
     // the sentinel fetch: a guest SEH handler / filter returned — continue
     // the dispatch walk
     if ((access == UC_MEM_FETCH_PROT || access == UC_MEM_FETCH_UNMAPPED) && address == seh_sentinel_) {
