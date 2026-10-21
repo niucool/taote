@@ -677,6 +677,31 @@ void QlOsWindows::hook_winapi(std::uint64_t address, std::uint32_t size) {
         return;
     }
 
+    // A CRT-internal entry point that taote models with its own walk must yield
+    // to the real implementation when the rootfs actually has one. Upstream
+    // hooks `_except_handler4_common` nowhere, so with real system DLLs the
+    // guest's own ucrtbase code unwinds the frame; taote's synthetic walk exists
+    // to stand in for the synthesized stub rootfs's `ret` cell, and running it
+    // against a real UCRT re-entered the dispatch eight times and then faulted
+    // (RegDemo on the Windows 11 rootfs). Detect the stand-in case by the code
+    // at the export: a synthesized cell is a bare `ret` (0xC3) or
+    // `xor eax,eax; ret` (31 C0 C3). Real code means "let the guest run it".
+    if (imported->name == "_except_handler4_common") {
+        std::vector<std::uint8_t> prologue;
+        try {
+            prologue = ql_->mem().read(address, 3);
+        } catch (...) {
+            prologue.clear();
+        }
+        const bool synthesized_cell =
+            prologue.size() >= 1 &&
+            (prologue[0] == 0xC3 ||
+             (prologue.size() >= 3 && prologue[0] == 0x31 && prologue[1] == 0xC0 && prologue[2] == 0xC3));
+        if (!synthesized_cell) {
+            return;  // the image has the real unwinder: run it
+        }
+    }
+
     // select the calling convention for this call site and run the handler
     // through the os.call orchestration: the ENTER/EXIT intercepts fire around
     // it with the resolved params and the fcall unwinds the frame (rax + the
