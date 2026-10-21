@@ -84,7 +84,6 @@ void register_dlls() {
     win::register_ucrtbased_family();
     win::register_wsock32_family();
     win::register_ws2_32_family();
-    win::register_wininet_family();
     win::register_ucrt_family();
     win::register_ole32_family();
     win::register_shlwapi_family();

@@ -201,6 +201,135 @@ void register_wininet_family() {
         (void)params;
         return 1;
     };
+
+    // ---- the HTTP request surface ---------------------------------------
+    //
+    // Ported from wininet.py, where every one of these is a bare `pass`: the
+    // reference resolves the arguments (so a bad string is still caught) and
+    // leaves the return register alone. A handler returning nullopt is the same
+    // shape here — qiling's fcall only writes the return register when the
+    // handler answered, so "no answer" and `pass` are indistinguishable to the
+    // guest. The handles/requests these would produce are not modelled: the
+    // samples that walk this surface treat a failure as "no network", which is
+    // what an emulator without a socket has to say.
+    const auto noop_passthru = [](Qiling&, std::uint64_t,
+                                  const ResolvedParams&) -> std::optional<std::uint64_t> {
+        return std::nullopt;
+    };
+
+    // HINTERNET InternetConnectA(HINTERNET hInternet, LPCSTR lpszServerName,
+    //     INTERNET_PORT nServerPort, LPCSTR lpszUserName, LPCSTR lpszPassword,
+    //     DWORD dwService, DWORD dwFlags, DWORD_PTR dwContext);
+    WinsdkApi("InternetConnectA", WinCc::Stdcall, {
+        {"hInternet", api::HANDLE_},
+        {"lpszServerName", api::LPCSTR_},
+        {"nServerPort", api::WORD_},
+        {"lpszUserName", api::LPCSTR_},
+        {"lpszPassword", api::LPCSTR_},
+        {"dwService", api::DWORD_},
+        {"dwFlags", api::DWORD_},
+        {"dwContext", api::DWORD_PTR_},
+    }) = noop_passthru;
+
+    // HINTERNET InternetConnectW(HINTERNET hInternet, LPCWSTR lpszServerName,
+    //     INTERNET_PORT nServerPort, LPCWSTR lpszUserName, LPCWSTR lpszPassword,
+    //     DWORD dwService, DWORD dwFlags, DWORD_PTR dwContext);
+    WinsdkApi("InternetConnectW", WinCc::Stdcall, {
+        {"hInternet", api::HANDLE_},
+        {"lpszServerName", api::LPCWSTR_},
+        {"nServerPort", api::WORD_},
+        {"lpszUserName", api::LPCWSTR_},
+        {"lpszPassword", api::LPCWSTR_},
+        {"dwService", api::DWORD_},
+        {"dwFlags", api::DWORD_},
+        {"dwContext", api::DWORD_PTR_},
+    }) = noop_passthru;
+
+    // BOOL InternetCheckConnectionA(LPCSTR lpszUrl, DWORD dwFlags,
+    //     DWORD dwReserved);
+    WinsdkApi("InternetCheckConnectionA", WinCc::Stdcall, {
+        {"lpszUrl", api::LPCSTR_},
+        {"dwFlags", api::DWORD_},
+        {"dwReserved", api::DWORD_},
+    }) = noop_passthru;
+
+    // HINTERNET HttpOpenRequestA(HINTERNET hConnect, LPCSTR lpszVerb,
+    //     LPCSTR lpszObjectName, LPCSTR lpszVersion, LPCSTR lpszReferrer,
+    //     LPCSTR *lplpszAcceptTypes, DWORD dwFlags, DWORD_PTR dwContext);
+    WinsdkApi("HttpOpenRequestA", WinCc::Stdcall, {
+        {"hConnect", api::HANDLE_},
+        {"lpszVerb", api::LPCSTR_},
+        {"lpszObjectName", api::LPCSTR_},
+        {"lpszVersion", api::LPCSTR_},
+        {"lpszReferrer", api::LPCSTR_},
+        {"lplpszAcceptTypes", api::LPCSTR_},
+        {"dwFlags", api::DWORD_},
+        {"dwContext", api::DWORD_PTR_},
+    }) = noop_passthru;
+
+    // HINTERNET HttpOpenRequestW(HINTERNET hConnect, LPCWSTR lpszVerb,
+    //     LPCWSTR lpszObjectName, LPCWSTR lpszVersion, LPCWSTR lpszReferrer,
+    //     LPCWSTR *lplpszAcceptTypes, DWORD dwFlags, DWORD_PTR dwContext);
+    WinsdkApi("HttpOpenRequestW", WinCc::Stdcall, {
+        {"hConnect", api::HANDLE_},
+        {"lpszVerb", api::LPCWSTR_},
+        {"lpszObjectName", api::LPCWSTR_},
+        {"lpszVersion", api::LPCWSTR_},
+        {"lpszReferrer", api::LPCWSTR_},
+        {"lplpszAcceptTypes", api::LPCWSTR_},
+        {"dwFlags", api::DWORD_},
+        {"dwContext", api::DWORD_PTR_},
+    }) = noop_passthru;
+
+    // BOOL HttpSendRequestA(HINTERNET hRequest, LPCSTR lpszHeaders,
+    //     DWORD dwHeadersLength, LPVOID lpOptional, DWORD dwOptionalLength);
+    WinsdkApi("HttpSendRequestA", WinCc::Stdcall, {
+        {"hRequest", api::HANDLE_},
+        {"lpszHeaders", api::LPCSTR_},
+        {"dwHeadersLength", api::DWORD_},
+        {"lpOptional", api::LPVOID_},
+        {"dwOptionalLength", api::DWORD_},
+    }) = noop_passthru;
+
+    // BOOL HttpSendRequestW(HINTERNET hRequest, LPCWSTR lpszHeaders,
+    //     DWORD dwHeadersLength, LPVOID lpOptional, DWORD dwOptionalLength);
+    WinsdkApi("HttpSendRequestW", WinCc::Stdcall, {
+        {"hRequest", api::HANDLE_},
+        {"lpszHeaders", api::LPCWSTR_},
+        {"dwHeadersLength", api::DWORD_},
+        {"lpOptional", api::LPVOID_},
+        {"dwOptionalLength", api::DWORD_},
+    }) = noop_passthru;
+
+    // BOOL HttpSendRequestExA(HINTERNET hRequest,
+    //     LPINTERNET_BUFFERSA lpBuffersIn, LPINTERNET_BUFFERSA lpBuffersOut,
+    //     DWORD dwFlags, DWORD_PTR dwContext);
+    WinsdkApi("HttpSendRequestExA", WinCc::Stdcall, {
+        {"hRequest", api::HANDLE_},
+        {"lpBuffersIn", api::LPVOID_},
+        {"lpBuffersOut", api::LPVOID_},
+        {"dwFlags", api::DWORD_},
+        {"dwContext", api::DWORD_PTR_},
+    }) = noop_passthru;
+
+    // BOOL HttpEndRequestA(HINTERNET hRequest, LPINTERNET_BUFFERSA lpBuffersOut,
+    //     DWORD dwFlags, DWORD_PTR dwContext);
+    WinsdkApi("HttpEndRequestA", WinCc::Stdcall, {
+        {"hRequest", api::HANDLE_},
+        {"lpBuffersOut", api::LPVOID_},
+        {"dwFlags", api::DWORD_},
+        {"dwContext", api::DWORD_PTR_},
+    }) = noop_passthru;
+
+    // DWORD InternetErrorDlg(HWND hWnd, HINTERNET hRequest, DWORD dwError,
+    //     DWORD dwFlags, LPVOID *lppvData);
+    WinsdkApi("InternetErrorDlg", WinCc::Stdcall, {
+        {"hWnd", api::HWND_},
+        {"hRequest", api::HANDLE_},
+        {"dwError", api::DWORD_},
+        {"dwFlags", api::DWORD_},
+        {"lppvData", api::LPVOID_},
+    }) = noop_passthru;
 }
 
 }  // namespace win

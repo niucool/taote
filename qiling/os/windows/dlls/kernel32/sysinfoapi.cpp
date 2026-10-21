@@ -190,6 +190,48 @@ void register_sysinfoapi_family() {
         return 0;
     };
 
+    // void GetSystemTime(
+    //   LPSYSTEMTIME lpSystemTime
+    // );
+    //
+    // The UTC sibling of GetLocalTime. Upstream registers this under the typo
+    // `GetSystemTIme` (sysinfoapi.py) and writes a raw microsecond stamp over
+    // the struct's first 8 bytes, so a real guest import never reaches it; the
+    // port fills the SYSTEMTIME the way the API defines it, which is what a
+    // guest actually reads back.
+    WinsdkApi("GetSystemTime", WinCc::Stdcall, {
+        {"lpSystemTime", LPVOID_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto lp_system_time = api_get_int(get_param(params, "lpSystemTime"));
+
+        const auto now = std::chrono::system_clock::now();
+        const std::time_t tt = std::chrono::system_clock::to_time_t(now);
+        const auto ms_part = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 now.time_since_epoch()).count() % 1000;
+
+        std::tm tmbuf{};
+#ifdef _WIN32
+        gmtime_s(&tmbuf, &tt);
+#else
+        gmtime_r(&tt, &tmbuf);
+#endif
+
+        std::string buf(SYSTEMTIME_SIZE, '\0');
+        const auto isoweekday = static_cast<std::uint16_t>(tmbuf.tm_wday == 0 ? 7 : tmbuf.tm_wday);
+        write_systemtime(buf.data(),
+                         static_cast<std::uint16_t>(tmbuf.tm_year + 1900),
+                         static_cast<std::uint16_t>(tmbuf.tm_mon + 1),
+                         isoweekday,
+                         static_cast<std::uint16_t>(tmbuf.tm_mday),
+                         static_cast<std::uint16_t>(tmbuf.tm_hour),
+                         static_cast<std::uint16_t>(tmbuf.tm_min),
+                         static_cast<std::uint16_t>(tmbuf.tm_sec),
+                         static_cast<std::uint16_t>(ms_part));
+        ql.mem().write(lp_system_time, std::vector<std::uint8_t>(buf.begin(), buf.end()));
+
+        return 0;
+    };
+
     // void GetSystemTimeAsFileTime(
     //   LPFILETIME lpSystemTimeAsFileTime
     // );

@@ -42,6 +42,9 @@
 
 #include "Pe_Sample_Runner.hpp"
 
+#include "qiling/os/windows/wdk_const.hpp"
+#include "qiling/os/windows/wdk_ioctl.hpp"
+
 namespace fs = std::filesystem;
 
 namespace {
@@ -708,6 +711,30 @@ const std::vector<std::uint8_t> kShellcodeX86 = {
     0x3c, 0x06, 0x7c, 0x0a, 0x80, 0xfb, 0xe0, 0x75, 0x05, 0xbb, 0x47, 0x13, 0x72, 0x6f, 0x6a, 0x00,
     0x53, 0xff, 0xd5, 0xe8, 0xd5, 0xff, 0xff, 0xff, 0x63, 0x61, 0x6c, 0x63, 0x00,
 };
+
+// X8664_WIN from test_peshellcode.py: the same Metasploit payload for x64, which
+// pops calc through MessageBoxA.
+const std::vector<std::uint8_t> kShellcodeX8664 = {
+    0xfc, 0x48, 0x81, 0xe4, 0xf0, 0xff, 0xff, 0xff, 0xe8, 0xd0, 0x00, 0x00, 0x00, 0x41, 0x51, 0x41,
+    0x50, 0x52, 0x51, 0x56, 0x48, 0x31, 0xd2, 0x65, 0x48, 0x8b, 0x52, 0x60, 0x3e, 0x48, 0x8b, 0x52,
+    0x18, 0x3e, 0x48, 0x8b, 0x52, 0x20, 0x3e, 0x48, 0x8b, 0x72, 0x50, 0x3e, 0x48, 0x0f, 0xb7, 0x4a,
+    0x4a, 0x4d, 0x31, 0xc9, 0x48, 0x31, 0xc0, 0xac, 0x3c, 0x61, 0x7c, 0x02, 0x2c, 0x20, 0x41, 0xc1,
+    0xc9, 0x0d, 0x41, 0x01, 0xc1, 0xe2, 0xed, 0x52, 0x41, 0x51, 0x3e, 0x48, 0x8b, 0x52, 0x20, 0x3e,
+    0x8b, 0x42, 0x3c, 0x48, 0x01, 0xd0, 0x3e, 0x8b, 0x80, 0x88, 0x00, 0x00, 0x00, 0x48, 0x85, 0xc0,
+    0x74, 0x6f, 0x48, 0x01, 0xd0, 0x50, 0x3e, 0x8b, 0x48, 0x18, 0x3e, 0x44, 0x8b, 0x40, 0x20, 0x49,
+    0x01, 0xd0, 0xe3, 0x5c, 0x48, 0xff, 0xc9, 0x3e, 0x41, 0x8b, 0x34, 0x88, 0x48, 0x01, 0xd6, 0x4d,
+    0x31, 0xc9, 0x48, 0x31, 0xc0, 0xac, 0x41, 0xc1, 0xc9, 0x0d, 0x41, 0x01, 0xc1, 0x38, 0xe0, 0x75,
+    0xf1, 0x3e, 0x4c, 0x03, 0x4c, 0x24, 0x08, 0x45, 0x39, 0xd1, 0x75, 0xd6, 0x58, 0x3e, 0x44, 0x8b,
+    0x40, 0x24, 0x49, 0x01, 0xd0, 0x66, 0x3e, 0x41, 0x8b, 0x0c, 0x48, 0x3e, 0x44, 0x8b, 0x40, 0x1c,
+    0x49, 0x01, 0xd0, 0x3e, 0x41, 0x8b, 0x04, 0x88, 0x48, 0x01, 0xd0, 0x41, 0x58, 0x41, 0x58, 0x5e,
+    0x59, 0x5a, 0x41, 0x58, 0x41, 0x59, 0x41, 0x5a, 0x48, 0x83, 0xec, 0x20, 0x41, 0x52, 0xff, 0xe0,
+    0x58, 0x41, 0x59, 0x5a, 0x3e, 0x48, 0x8b, 0x12, 0xe9, 0x49, 0xff, 0xff, 0xff, 0x5d, 0x49, 0xc7,
+    0xc1, 0x00, 0x00, 0x00, 0x00, 0x3e, 0x48, 0x8d, 0x95, 0xfe, 0x00, 0x00, 0x00, 0x3e, 0x4c, 0x8d,
+    0x85, 0x0f, 0x01, 0x00, 0x00, 0x48, 0x31, 0xc9, 0x41, 0xba, 0x45, 0x83, 0x56, 0x07, 0xff, 0xd5,
+    0x48, 0x31, 0xc9, 0x41, 0xba, 0xf0, 0xb5, 0xa2, 0x56, 0xff, 0xd5, 0x48, 0x65, 0x6c, 0x6c, 0x6f,
+    0x2c, 0x20, 0x66, 0x72, 0x6f, 0x6d, 0x20, 0x4d, 0x53, 0x46, 0x21, 0x00, 0x4d, 0x65, 0x73, 0x73,
+    0x61, 0x67, 0x65, 0x42, 0x6f, 0x78, 0x00,
+};
 const std::vector<std::uint8_t> kPointerTest = {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88};
 }  // namespace
 
@@ -732,6 +759,29 @@ TEST(QilingPeCompat, WindowsShellcodeX86) {
             ql.run();
         } catch (const std::exception&) {
             // the upstream tolerates the guest fault here
+        }
+    });
+}
+
+// test_windowssc_x64 — the same shape for the 64-bit payload
+TEST(QilingPeCompat, WindowsShellcodeX8664) {
+    REQUIRE_CORPUS();
+    qiling::os::register_dlls();
+
+    qiling::QilingOptions options;
+    options.rootfs = (qiling_rootfs_dir() / "x8664_windows").string();
+    options.ostype = qiling::QL_OS::WINDOWS;
+    options.archtype = qiling::QL_ARCH::X8664;
+    options.verbose = qiling::QL_VERBOSE::OFF;
+    options.code = kShellcodeX8664;
+    options.count = 5'000'000;  // the payload never returns; bound it
+
+    EXPECT_NO_THROW({
+        qiling::Qiling ql{options};
+        try {
+            ql.run();
+        } catch (const std::exception&) {
+            // the upstream tolerates the guest fault here too
         }
     });
 }
@@ -776,6 +826,65 @@ TEST(QilingPeCompat, ReadPtr64) {
     EXPECT_EQ(ql.mem().read_ptr(addr, 4) & 0xffffffff, 0x44332211u);
     EXPECT_EQ(static_cast<std::uint64_t>(ql.mem().read_ptr(addr, 8)), 0x8877665544332211ull);
     EXPECT_EQ(static_cast<std::uint64_t>(ql.mem().read_ptr(addr)), 0x8877665544332211ull);
+}
+
+// =========================================================================
+// test_pe_sys.py — the driver cases
+// =========================================================================
+
+// test_pe_win_x8664_driver — sioctl.sys (the Microsoft ioctl/wdm sample). The
+// run stops on the stack-pointer sentinel, DriverEntry must fill the
+// MajorFunction table and DriverUnload, and one METHOD_OUT_DIRECT IOCTL has to
+// come back with the driver's string.
+TEST(QilingPeCompat, PeDriverX8664Sioctl) {
+    REQUIRE_CORPUS();
+    const auto sample = fixture("x8664_windows", "sioctl.sys");
+    if (!fs::exists(sample)) GTEST_SKIP() << "missing fixture";
+    qiling::os::register_dlls();
+
+    qiling::QilingOptions options;
+    options.rootfs = (qiling_rootfs_dir() / "x8664_windows").string();
+    options.ostype = qiling::QL_OS::WINDOWS;
+    options.archtype = qiling::QL_ARCH::X8664;
+    options.verbose = qiling::QL_VERBOSE::OFF;
+    options.stop = qiling::QL_STOP::STACK_POINTER;  // the upstream's driver stop
+    options.argv.push_back(sample.string());
+
+    qiling::Qiling ql{options};
+
+    const auto* pe = static_cast<qiling::loader::QlLoaderPE*>(&ql.loader());
+    ASSERT_NE(pe->driver_object_address(), 0u) << "the loader built no DRIVER_OBJECT";
+
+    // the table starts zeroed
+    EXPECT_EQ(qiling::os::win::driver_major_function(ql, qiling::os::win::IRP_MJ_CREATE), 0u);
+    EXPECT_EQ(qiling::os::win::driver_major_function(ql, qiling::os::win::IRP_MJ_CLOSE), 0u);
+    EXPECT_EQ(qiling::os::win::driver_major_function(ql, qiling::os::win::IRP_MJ_DEVICE_CONTROL), 0u);
+    const auto layout = qiling::os::win::driver_object_layout(64);
+    EXPECT_EQ(ql.mem().read_ptr(pe->driver_object_address() + layout.driver_unload, 8), 0u);
+
+    ql.run();
+
+    // and DriverEntry filled them
+    EXPECT_NE(qiling::os::win::driver_major_function(ql, qiling::os::win::IRP_MJ_CREATE), 0u);
+    EXPECT_NE(qiling::os::win::driver_major_function(ql, qiling::os::win::IRP_MJ_CLOSE), 0u);
+    EXPECT_NE(qiling::os::win::driver_major_function(ql, qiling::os::win::IRP_MJ_DEVICE_CONTROL), 0u);
+    EXPECT_NE(ql.mem().read_ptr(pe->driver_object_address() + layout.driver_unload, 8), 0u);
+
+    // IOCTL_SIOCTL_METHOD_OUT_DIRECT from the Microsoft sample's own header:
+    //   CTL_CODE(40000, 0x901, METHOD_OUT_DIRECT, FILE_ANY_ACCESS)
+    // (the device type is the sample's literal 40000, not FILE_DEVICE_UNKNOWN —
+    // with the wrong type the driver answers STATUS_INVALID_DEVICE_REQUEST,
+    // measured as 0xC0000010.)
+    const auto code = qiling::os::win::ioctl_code(40000, 0x901, qiling::os::win::METHOD_OUT_DIRECT,
+                                                  qiling::os::win::FILE_ANY_ACCESS);
+    const std::string in_buffer = "Test input\0";
+
+    const auto result = qiling::os::win::ioctl(ql, code, 0x1000, in_buffer);
+    static const char kExpectedText[] = "This String is from Device Driver !!!";
+    static const std::string kExpected(kExpectedText, sizeof(kExpectedText));  // the NUL rides along
+    EXPECT_EQ(result.status, 0);
+    EXPECT_EQ(result.information, kExpected.size());
+    EXPECT_EQ(result.output, kExpected);
 }
 
 // =========================================================================

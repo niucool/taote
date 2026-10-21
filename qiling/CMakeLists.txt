@@ -69,6 +69,7 @@ add_library(qiling STATIC
     os/windows/fiber.cpp
     os/windows/thread.cpp
     os/windows/structs.cpp
+    os/windows/wdk_ioctl.cpp
     os/windows/dlls/dlls.cpp
     os/blob/blob.cpp
     loader/loader.cpp
