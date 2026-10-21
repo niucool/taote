@@ -232,8 +232,10 @@ void register_sysinfoapi_family() {
     // DWORD GetTickCount(
     // );
     WinsdkApi("GetTickCount", WinCc::Stdcall, {}) =
-        [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
-        return 200000;
+        [](Qiling& ql, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
+        // the verbatim constant, or the virtual clock once Sleep has moved it
+        auto& win = w(ql);
+        return win.virtual_clock() ? win.virtual_time_ms() : 200000;
     };
 
     // UINT GetWindowsDirectoryW(

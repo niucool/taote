@@ -1117,6 +1117,21 @@ load artifact: run alone it makes 40 calls and exits 0.
 Corpus unchanged (24/32 exit 0, differential 10/0/16/2/4); API sweep 101/101;
 ctest 549.
 
+### Phase 5.4: the virtual clock
+
+The missing half of "fidelity over stubs": `QilingOptions::virtual_clock` makes
+`Sleep` **advance the guest's clock** instead of spending host time, and
+`GetTickCount` read it - so a sample that measures elapsed time is deterministic
+and no wall-clock second is burned. The base is the upstream constant
+(200000), so an enabled clock starts exactly where the fake one did and only
+moves forward; with the option off the port keeps upstream's behaviour verbatim
+(passthrough `Sleep`, constant `GetTickCount`).
+
+`PegasusParity.VirtualClockAdvancesOnSleepInsteadOfWallTime` pins both arms: on,
+`Sleep(1500)` moves `GetTickCount` 200000 -> 201500; off, it stays 200000.
+Corpus unchanged (24/32 exit 0, differential 10/0/16/2/4); API sweep 101/101;
+ctest 550.
+
 ## Phase 4 — deliberately not ported (documented non-goals)
 
 * **JS engine** (`test_js_*`, 54 cases) — excluded by instruction; qiling hooks

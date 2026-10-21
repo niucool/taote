@@ -152,6 +152,55 @@ TEST(PegasusParity, AnalysisOptionRecordsRegionCountersAndCoverage) {
     EXPECT_TRUE(plain.memory_access.empty());
 }
 
+TEST(PegasusParity, VirtualClockAdvancesOnSleepInsteadOfWallTime) {
+    // PLAN_PARITY Phase 5.4: with the virtual clock on, Sleep advances the
+    // guest's clock instead of spending host time, so a sample that measures
+    // elapsed time is deterministic; with it off the port keeps upstream's
+    // behaviour (a passthrough and a constant GetTickCount).
+    namespace os = qiling::os;
+    os::register_dlls();
+
+    const auto tick = [](const std::optional<std::uint64_t>& v) { return v.value_or(0); };
+
+    {
+        qiling::QilingOptions options;
+        options.ostype = qiling::QL_OS::WINDOWS;
+        options.archtype = qiling::QL_ARCH::X86;
+        options.rootfs = std::filesystem::temp_directory_path().string();
+        options.code = std::vector<std::uint8_t>{0xC3};
+        options.virtual_clock = true;
+        qiling::Qiling ql{options};
+
+        auto* tick_api = os::ApiRegistry::instance().find("GetTickCount");
+        auto* sleep_api = os::ApiRegistry::instance().find("Sleep");
+        ASSERT_NE(tick_api, nullptr);
+        ASSERT_NE(sleep_api, nullptr);
+
+        const auto before = tick(tick_api->handler(ql, 0, {}));
+        EXPECT_EQ(before, 200000u);  // the upstream base
+
+        (void)sleep_api->handler(ql, 0, os::ResolvedParams{{"dwMilliseconds", 1500ull}});
+
+        EXPECT_EQ(tick(tick_api->handler(ql, 0, {})), 201500u) << "Sleep must move the virtual clock";
+        EXPECT_EQ(ql.os<os::windows::QlOsWindows>().virtual_time_ms(), 201500u);
+    }
+
+    {
+        // off: the upstream constant, and Sleep changes nothing
+        qiling::QilingOptions options;
+        options.ostype = qiling::QL_OS::WINDOWS;
+        options.archtype = qiling::QL_ARCH::X86;
+        options.rootfs = std::filesystem::temp_directory_path().string();
+        options.code = std::vector<std::uint8_t>{0xC3};
+        qiling::Qiling ql{options};
+
+        auto* tick_api = os::ApiRegistry::instance().find("GetTickCount");
+        auto* sleep_api = os::ApiRegistry::instance().find("Sleep");
+        (void)sleep_api->handler(ql, 0, os::ResolvedParams{{"dwMilliseconds", 1500ull}});
+        EXPECT_EQ(tick(tick_api->handler(ql, 0, {})), 200000u);
+    }
+}
+
 TEST(PegasusParity, GdbServerServesRegistersMemoryAndSingleStep) {
     // PLAN_PARITY Phase 3 item 7: the gdbserver slice covers the three intents
     // the reference's test_gdb.cpp names (connect + read registers, read

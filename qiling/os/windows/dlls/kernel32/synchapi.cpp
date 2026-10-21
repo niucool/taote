@@ -170,8 +170,15 @@ void register_synchapi_family() {
     // );
     WinsdkApi("Sleep", WinCc::Stdcall, {
         {"dwMilliseconds", DWORD_},
-    }) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
         // time.sleep(params["dwMilliseconds"] * 10**(-3))  (verbatim: pass)
+        // with the virtual clock on, the passthrough becomes a clock advance -
+        // no host second is spent, and the guest's own measurement of elapsed
+        // time stays honest (PLAN_PARITY Phase 5.4)
+        auto& win = w(ql);
+        if (win.virtual_clock()) {
+            win.advance_virtual_time(static_cast<std::uint32_t>(api_get_int(get_param(params, "dwMilliseconds"))));
+        }
         return std::nullopt;
     };
 

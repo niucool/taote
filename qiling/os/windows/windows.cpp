@@ -524,6 +524,10 @@ void QlOsWindows::init_api_replay() {
     }
 }
 
+bool QlOsWindows::virtual_clock() const noexcept {
+    return ql_->virtual_clock();
+}
+
 int QlOsWindows::socket_wait_budget_ms() const noexcept {
     const auto seconds = static_cast<long long>(ql_->timeout());
     if (seconds > 0) {

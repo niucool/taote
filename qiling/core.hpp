@@ -117,6 +117,11 @@ struct QilingOptions {
     };
     std::vector<RegistryPatch> registry_patches;
 
+    // PLAN_PARITY Phase 5.4: a virtual clock instead of wall time - Sleep
+    // advances it, GetTickCount reads it, so a sample that measures elapsed
+    // time is deterministic and no host second is spent waiting
+    bool virtual_clock = false;
+
     // PLAN_PARITY Phase 3 item 5: where the content-addressed artifact store
     // keeps its blobs (empty = off; the store still hashes and accounts)
     std::string artifact_dir;
@@ -180,6 +185,7 @@ public:
     const std::string& api_replay_path() const noexcept { return api_replay_path_; }
     bool api_replay_serve() const noexcept { return api_replay_serve_; }
     bool analysis() const noexcept { return analysis_; }
+    bool virtual_clock() const noexcept { return virtual_clock_; }
     const std::string& artifact_dir() const noexcept { return artifact_dir_; }
     const std::vector<std::pair<std::string, std::string>>& fs_mappings() const noexcept { return fs_mappings_; }
     const std::vector<std::string>& volumes() const noexcept { return volumes_; }
@@ -268,6 +274,7 @@ private:
     std::string api_replay_path_;
     bool api_replay_serve_ = false;
     bool analysis_ = false;
+    bool virtual_clock_ = false;
     std::string artifact_dir_;
     std::vector<std::pair<std::string, std::string>> fs_mappings_;
     std::vector<std::string> volumes_;

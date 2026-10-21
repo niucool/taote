@@ -128,6 +128,13 @@ public:
     // blocks forever and stalls a corpus sweep). The os `timeout` profile knob
     // is the budget when it is set, else one second.
     int socket_wait_budget_ms() const noexcept;
+
+    // PLAN_PARITY Phase 5.4: the virtual clock (QilingOptions::virtual_clock).
+    // The base is GetTickCount's upstream constant, so an enabled clock starts
+    // where the fake one did and only ever moves forward.
+    bool virtual_clock() const noexcept;
+    std::uint64_t virtual_time_ms() const noexcept { return 200000 + virtual_time_ms_; }
+    void advance_virtual_time(std::uint32_t delta_ms) noexcept { virtual_time_ms_ += delta_ms; }
     const std::string& username() const noexcept { return username_; }
     // os.py last_error: ONE surface — the QlOs base field (the fiber.py
     // manager and the api handlers share it; the port previously shadowed
@@ -240,6 +247,7 @@ private:
     std::map<std::string, std::string> services_;
     std::optional<HookRet> hook_handle_;
     std::vector<HookRet> analysis_hooks_;
+    std::uint64_t virtual_time_ms_ = 0;
     std::string windir_;
     std::string winsys_;
     std::string userprofile_;

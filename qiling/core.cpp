@@ -39,6 +39,7 @@ Qiling::Qiling(const QilingOptions& options) {
     api_replay_path_ = options.api_replay_path;
     api_replay_serve_ = options.api_replay_serve;
     analysis_ = options.analysis;
+    virtual_clock_ = options.virtual_clock;
     artifact_dir_ = options.artifact_dir;
     fs_mappings_ = options.fs_mappings;
     volumes_ = options.volumes;
