@@ -129,6 +129,26 @@ and regressed here) — taote substituted its synthetic `_except_handler4_common
 walk for a real ucrtbase unwinder; the handler now yields when the image has real
 code at that export (detected by the synthesized-cell `ret` signature).
 
+**The synthetic-SEH question (open, with measurements).** Everything x86 still
+failing ends on one signature: `UC_ERR_FETCH_PROT at 0x70000000` — a fetch from
+the `[SEH sentinel]` page (mapped rw-noexec on purpose, first free slot in the
+0x70000000-0x78000000 arena). Two mechanism changes landed toward it and flipped
+nothing, because neither was the only staging path:
+
+* the dispatch now stands down when a loaded image exports a *real*
+  `_except_handler4_common` (the synthesized-cell `ret` test), since upstream has
+  no synthetic SEH at all and simply lets the guest's CRT unwind;
+* the dispatch no longer runs while the emulator state is not `STARTED`, i.e.
+  during the loader's `DllMain` drives. Instrumented `seh_dispatch` showed one
+  firing at `fault=0xc3c3c3c7, pc=0x40104a, real_unwinder=0` — the DLLs are not
+  mapped yet at that moment, which is why the unwinder probe answers 0 there and
+  why only the *positive* probe answer may be cached.
+
+The next step is to find the remaining writer of `0x70000000`: after the fault,
+inspect the guest stack and `fs:[0]` for the value and the code that pushed it.
+The two `seh_sentinel_` staging sites are both inside the now-gated
+`seh_dispatch`/`seh_continue`, so the value arrives from somewhere else.
+
 ## 1. The harness (`tests/QilingPe_Compat_Test.cpp`)
 
 One `TEST()` per upstream case, named after it, so a red case names the upstream
