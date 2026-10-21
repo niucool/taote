@@ -212,9 +212,17 @@ void register_wininet_family() {
     // guest. The handles/requests these would produce are not modelled: the
     // samples that walk this surface treat a failure as "no network", which is
     // what an emulator without a socket has to say.
-    const auto noop_passthru = [](Qiling&, std::uint64_t,
-                                  const ResolvedParams&) -> std::optional<std::uint64_t> {
-        return std::nullopt;
+    // The port's convention for upstream's bare `pass` bodies (see
+    // tests/Windows_Api_Test.cpp WinApiWininet): a pass-family handler answers 0
+    // and a BOOLAPI one answers 1, so the guest sees a definite failure/success
+    // instead of whatever its own rax held.
+    const auto noop_zero = [](Qiling&, std::uint64_t,
+                              const ResolvedParams&) -> std::optional<std::uint64_t> {
+        return std::uint64_t{0};
+    };
+    const auto noop_one = [](Qiling&, std::uint64_t,
+                             const ResolvedParams&) -> std::optional<std::uint64_t> {
+        return std::uint64_t{1};
     };
 
     // HINTERNET InternetConnectA(HINTERNET hInternet, LPCSTR lpszServerName,
@@ -229,7 +237,7 @@ void register_wininet_family() {
         {"dwService", api::DWORD_},
         {"dwFlags", api::DWORD_},
         {"dwContext", api::DWORD_PTR_},
-    }) = noop_passthru;
+    }) = noop_zero;
 
     // HINTERNET InternetConnectW(HINTERNET hInternet, LPCWSTR lpszServerName,
     //     INTERNET_PORT nServerPort, LPCWSTR lpszUserName, LPCWSTR lpszPassword,
@@ -243,7 +251,7 @@ void register_wininet_family() {
         {"dwService", api::DWORD_},
         {"dwFlags", api::DWORD_},
         {"dwContext", api::DWORD_PTR_},
-    }) = noop_passthru;
+    }) = noop_zero;
 
     // BOOL InternetCheckConnectionA(LPCSTR lpszUrl, DWORD dwFlags,
     //     DWORD dwReserved);
@@ -251,7 +259,7 @@ void register_wininet_family() {
         {"lpszUrl", api::LPCSTR_},
         {"dwFlags", api::DWORD_},
         {"dwReserved", api::DWORD_},
-    }) = noop_passthru;
+    }) = noop_zero;
 
     // HINTERNET HttpOpenRequestA(HINTERNET hConnect, LPCSTR lpszVerb,
     //     LPCSTR lpszObjectName, LPCSTR lpszVersion, LPCSTR lpszReferrer,
@@ -265,7 +273,7 @@ void register_wininet_family() {
         {"lplpszAcceptTypes", api::LPCSTR_},
         {"dwFlags", api::DWORD_},
         {"dwContext", api::DWORD_PTR_},
-    }) = noop_passthru;
+    }) = noop_zero;
 
     // HINTERNET HttpOpenRequestW(HINTERNET hConnect, LPCWSTR lpszVerb,
     //     LPCWSTR lpszObjectName, LPCWSTR lpszVersion, LPCWSTR lpszReferrer,
@@ -279,7 +287,7 @@ void register_wininet_family() {
         {"lplpszAcceptTypes", api::LPCWSTR_},
         {"dwFlags", api::DWORD_},
         {"dwContext", api::DWORD_PTR_},
-    }) = noop_passthru;
+    }) = noop_zero;
 
     // BOOL HttpSendRequestA(HINTERNET hRequest, LPCSTR lpszHeaders,
     //     DWORD dwHeadersLength, LPVOID lpOptional, DWORD dwOptionalLength);
@@ -289,7 +297,7 @@ void register_wininet_family() {
         {"dwHeadersLength", api::DWORD_},
         {"lpOptional", api::LPVOID_},
         {"dwOptionalLength", api::DWORD_},
-    }) = noop_passthru;
+    }) = noop_one;
 
     // BOOL HttpSendRequestW(HINTERNET hRequest, LPCWSTR lpszHeaders,
     //     DWORD dwHeadersLength, LPVOID lpOptional, DWORD dwOptionalLength);
@@ -299,7 +307,7 @@ void register_wininet_family() {
         {"dwHeadersLength", api::DWORD_},
         {"lpOptional", api::LPVOID_},
         {"dwOptionalLength", api::DWORD_},
-    }) = noop_passthru;
+    }) = noop_one;
 
     // BOOL HttpSendRequestExA(HINTERNET hRequest,
     //     LPINTERNET_BUFFERSA lpBuffersIn, LPINTERNET_BUFFERSA lpBuffersOut,
@@ -310,7 +318,7 @@ void register_wininet_family() {
         {"lpBuffersOut", api::LPVOID_},
         {"dwFlags", api::DWORD_},
         {"dwContext", api::DWORD_PTR_},
-    }) = noop_passthru;
+    }) = noop_zero;
 
     // BOOL HttpEndRequestA(HINTERNET hRequest, LPINTERNET_BUFFERSA lpBuffersOut,
     //     DWORD dwFlags, DWORD_PTR dwContext);
@@ -319,7 +327,7 @@ void register_wininet_family() {
         {"lpBuffersOut", api::LPVOID_},
         {"dwFlags", api::DWORD_},
         {"dwContext", api::DWORD_PTR_},
-    }) = noop_passthru;
+    }) = noop_one;
 
     // DWORD InternetErrorDlg(HWND hWnd, HINTERNET hRequest, DWORD dwError,
     //     DWORD dwFlags, LPVOID *lppvData);
@@ -329,7 +337,7 @@ void register_wininet_family() {
         {"dwError", api::DWORD_},
         {"dwFlags", api::DWORD_},
         {"lppvData", api::LPVOID_},
-    }) = noop_passthru;
+    }) = noop_zero;
 }
 
 }  // namespace win
