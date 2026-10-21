@@ -243,6 +243,13 @@ public:
     // walk (0 = none); QlOsWindows::run consumes it after emu_start errors
     std::uint64_t seh_retarget() const noexcept { return seh_retarget_; }
     void seh_consume_retarget() noexcept { seh_retarget_ = 0; }
+    // Arm the run loop's restart target. The SEH dispatch is the other user;
+    // the thread scheduler needs the same facility for a different reason:
+    // restoring another thread's registers while unicorn is mid-stream does not
+    // move execution (the retired instruction stream decides the next pc), so a
+    // live switch has to end the emulation and restart at the resumed thread's
+    // pc.
+    void set_run_retarget(std::uint64_t target) noexcept { seh_retarget_ = target; }
 
     ~QlOsWindows() override;
 

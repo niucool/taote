@@ -92,7 +92,14 @@ bool QlWindowsThread::has_waitfor() const {
 
 QlWindowsThreadManagement::QlWindowsThreadManagement(Qiling* ql, QlWindowsThread* cur_thread)
     : ql_(ql), cur_thread_(cur_thread) {
-    threads_.push_back(cur_thread);
+    // thread.py sets threads = [cur_thread] here and the os does not append the
+    // main thread again. The port both pushed here *and* had the os call
+    // append(), so the main thread sat in threads_ twice: the round robin then
+    // "switched" to the main thread itself, suspending and immediately resuming
+    // it — which is how a run reached its own context restore and the eip
+    // truncation above. Ownership comes from append() (windows.cpp holds the
+    // unique_ptr), so the ctor only records cur_thread_.
+    (void)cur_thread;
 }
 
 // thread.py __init__ allocates the thread return-address cell from the windows
@@ -108,6 +115,9 @@ void QlWindowsThreadManagement::alloc_ret_addr(qiling::QlMemoryHeap& heap) {
 }
 
 void QlWindowsThreadManagement::install_hook() {
+    if (scheduler_hook_.has_value()) {
+        return;  // idempotent: run() may install it after a nested drive
+    }
     // thread.py __init__: self.thread_ret_addr = os.heap.alloc(8) rides the
     // ctor; the port defers the alloc here so the pure-logic tests can build
     // the manager without an engine (the install_hook runs from the os setup
@@ -141,9 +151,24 @@ int QlWindowsThreadManagement::on_hook(std::uint64_t address, std::uint32_t size
 
     const bool switched = do_schedule();
 
+    // thread.py gets the switch for free: its threads are gevent greenlets, so
+    // resuming one is a host-level context switch. Here the registers are a
+    // copy the engine reads at the *next* instruction it retires, so restoring
+    // another thread's context mid-stream changes nothing — unicorn keeps
+    // running the retired instruction stream and the child never starts at its
+    // entry (measured: only thread id 0 was ever observed). The switch
+    // therefore ends the emulation and hands the resumed thread's pc to the run
+    // loop's restart target, the same facility the SEH dispatch uses.
+    if (switched && ql_ != nullptr) {
+        auto* os = static_cast<os::windows::QlOsWindows*>(&ql_->os());
+        os->set_run_retarget(ql_->arch().regs().arch_pc());
+        ql_->emu_stop();
+        return static_cast<int>(QL_HOOK_BLOCK);
+    }
+
     // thread.py: when another thread resumed, skip the remaining hooks of the
     // current address to avoid running them with the new context
-    return switched ? static_cast<int>(QL_HOOK_BLOCK) : 0;
+    return 0;
 }
 
 void QlWindowsThreadManagement::release_hooks() {

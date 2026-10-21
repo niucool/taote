@@ -1,5 +1,7 @@
 #include "qiling/arch/register.hpp"
 
+#include <set>
+
 #include <algorithm>
 #include <stdexcept>
 
@@ -64,7 +66,30 @@ std::map<std::string, std::uint64_t> QlRegisterManager::save() const {
 }
 
 void QlRegisterManager::restore(const std::map<std::string, std::uint64_t>& context) const {
+    // The mapping carries every width of the same physical register (x86:
+    // rax/r8/eax/ax/al/ah, rip/eip/ip, ...), and a restore writes them in name
+    // order — so the *narrow* alias lands last and clobbers the wide value.
+    // Measured: a thread context saved at eip=0x401636 restored to 0x1636
+    // because "ip" was written after "eip", which put the child at an unmapped
+    // address. The narrow aliases are truncations of the canonical register, so
+    // restoring them is never needed and always harmful.
+    static const std::set<std::string> kNarrowAliases = {
+        "ax", "ah", "al", "bx", "bh", "bl", "cx", "ch", "cl", "dx", "dh", "dl",
+        "si", "di", "sp", "bp", "ip",
+    };
+    // on a 64-bit machine the 32-bit family is the narrow one
+    const bool is64 = register_mapping_.find("rip") != register_mapping_.end();
+    static const std::set<std::string> kNarrow32 = {
+        "eax", "ebx", "ecx", "edx", "esi", "edi", "ebp", "esp", "eip",
+    };
+
     for (const auto& [name, value] : context) {
+        if (kNarrowAliases.count(name) != 0) {
+            continue;
+        }
+        if (is64 && kNarrow32.count(name) != 0) {
+            continue;
+        }
         const auto it = register_mapping_.find(name);
         if (it != register_mapping_.end()) write(it->second, value);
     }

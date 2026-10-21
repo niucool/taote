@@ -769,6 +769,18 @@ void QlOsWindows::run() {
         init_analysis_hooks();
     }
 
+    // the thread scheduler hook. windows.py installs it in
+    // __setup_components; here the code stream belongs to the engine, which
+    // exists by run() time — and QlOsWindows::load() (where this used to live)
+    // is never called: nothing invokes it, and its own FS/GS guard would throw
+    // because ensure_profile_state already mapped those regions. The result was
+    // that the scheduler hook was never registered at all, so a guest thread
+    // could be created and appended and still never be scheduled.
+    if (thread_manager_ != nullptr) {
+        thread_manager_->install_hook();
+        thread_ret_addr_ = thread_manager_->thread_ret_addr();
+    }
+
     // windows.py run: the explicit entry/exit overrides, then the emulation
     ensure_profile_state();
     init_sp_ = ql_->arch().regs().arch_sp();
