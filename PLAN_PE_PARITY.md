@@ -15,12 +15,12 @@ below, and a phase does not close without its tests.
 
 | metric | upstream | taote today | target |
 |---|---|---|---|
-| qiling PE suite parity, **stub mode** (default) (`../qiling/tests/test_pe.py`, `test_peshellcode.py`, `test_windows_cpp_*.py`) | passes **on a Windows host only** (its CI runs `test_pe.bat`, which needs `dllscollector.bat` to copy the real System32 DLLs) | **26 passed / 10 skipped / 0 failed** of 36 ported cases (`tests/QilingPe_Compat_Test.cpp`) | all but the documented deferrals |
-| qiling PE suite parity, **real-dll mode** (`TAOTE_WINDOWS_ROOTFS=~/source/jim/qiling/examples/scripts/examples/rootfs`, the Windows 11 harvest — §0.2) | **25/25** `test_pe.py` + **8/8** C++/SEH cases | **30 passed / 1 skipped / 5 failed** | all 36 |
+| qiling PE suite parity, **stub mode** (default) (`../qiling/tests/test_pe.py`, `test_peshellcode.py`, `test_windows_cpp_*.py`) | passes **on a Windows host only** (its CI runs `test_pe.bat`, which needs `dllscollector.bat` to copy the real System32 DLLs) | **27 passed / 9 skipped / 0 failed** of 36 ported cases (`tests/QilingPe_Compat_Test.cpp`) | all but the documented deferrals |
+| qiling PE suite parity, **real-dll mode** (`TAOTE_WINDOWS_ROOTFS=~/source/jim/qiling/examples/scripts/examples/rootfs`, the Windows 11 harvest — §0.2) | **25/25** `test_pe.py` + **8/8** C++/SEH cases, re-measured 2026-10-21 | **36 passed / 0 skipped / 0 failed** | **met** |
 | pegasus sample sweep (`../pegasus/tests/bins`, 101 bins) | asserts dispatch only | **101 exit 0** | maintained |
 | pegasus suite parity (`PegasusParity.*`, 18 cases) | 357 cases | **18 passed** | maintained |
 | PMA corpus (`~/source/jim/capa-testfiles`) | 12 curated | **1/12 curated** (raw sweep 24/32 exit 0) | 12/12 |
-| taote suite | — | **570 passed / 0 failed / 15 skipped** | 0 failed |
+| taote suite | — | **571 passed / 0 failed** (stub mode) and **580 passed / 0 failed** with `TAOTE_WINDOWS_ROOTFS` set | 0 failed |
 
 The two modes are reported separately because they measure different things: stub
 mode is deterministic and is what the default suite runs; real-dll mode is the
@@ -52,7 +52,12 @@ turned green and their failures moved to where the real defects are:
 | CppHelloWorldX8664 | streambuf slot = 0x1 -> fault in msvcp140 | **pass** |
 | CppTypesX8664 | same | **pass** |
 
-### 0.1 Per-case state, with the upstream-oracle differential
+### 0.1 Per-case state, with the upstream-oracle differential (HISTORICAL)
+
+> **Superseded.** This table is the rootfs-win7 differential, kept because it
+> records how the structural findings were reached. The authoritative current
+> state is §0.2 plus §0.3: on the Windows 11 harvest taote is **36/36** in
+> real-dll mode, and the oracle is 25/25 (`test_pe.py`) + 8/8 (C++/SEH).
 
 `upstream` = `../qiling` run against the same `rootfs-win7` per §2.3;
 `taote` = `TAOTE_WINDOWS_ROOTFS=~/source/jim/rootfs-win7`. Every row was
@@ -93,9 +98,8 @@ measured, not inferred.
 | **PeWinX86CppTypes** | FAIL | fail | idem |
 | **PeWinX86GandcrabProfile** | FAIL | fail | **port gap** — see §3 Phase C |
 
-Stub mode is unchanged by all of this: 26 passed / 10 skipped / 0 failed, the ten
-skips being the same cases that need a real C++ runtime, a real `MSVCR110.dll`,
-or live thread switching.
+Stub mode is unchanged by all of this: 27 passed / 9 skipped / 0 failed (§0.4
+explains why those nine are mode gates, not gaps).
 
 ### 0.2 The Windows 11 rootfs (the UCRT harvest) and the clean differential
 
@@ -172,21 +176,22 @@ inspect the guest stack and `fs:[0]` for the value and the code that pushed it.
 The two `seh_sentinel_` staging sites are both inside the now-gated
 `seh_dispatch`/`seh_continue`, so the value arrives from somewhere else.
 
-### 0.3 The five cases still red on the Windows 11 real-dll rootfs
+### 0.3 The last six cases: what each one actually was
 
-Upstream passes all of the first four on the same tree, so they are provable
-taote port bugs; GandCrab is a shared upstream/rootfs question (§0.2).
+Real-dll mode is **36/36**, 0 failed, 0 skipped. Every one of these was a provable
+port bug — the oracle is green on the same tree — and each was measured before it
+was fixed.
 
-| case | measured failure |
+| case | what it really was |
 |---|---|
-| SoftSehX8664 | `failed to read memory (uc_err 6) at 0x80000004e8b0` right after `RaiseException` -> `RtlRaiseException` -> `RtlLookupFunctionEntry` -> `memset`. The x64 unwinder path: taote serves `RtlLookupFunctionEntry` from the loaded `.pdata` (`lookup_function_entry`), so the next suspect is the RUNTIME_FUNCTION/`.xdata` content or the 12-byte stride the handler returns. |
-| SoftCppExX8664 | stdout count 1 where 2 is expected |
-| CppExUnhandledFilteredX8664 | 0 where 3 is expected |
-| CppExUnhandledUnfilteredX8664 | exit-code assertion (upstream: 0xC0000409) |
-| PeWinX86GandcrabProfileChangesBehaviour | admin run fails in ~25 ms |
+| SoftSehX8664 | `RtlVirtualUnwind` decoded `UNWIND_CODE` wrong: it took the op from byte 0 (the CodeOffset) and the whole of byte 1 (op + info) as its info. ntdll's own frame reads `0x27,0x74` = offset 0x27, `UWOP_SAVE_NONVOL` rdi; the old decode read op 7 / info 0x74, applied an `UWOP_ALLOC_LARGE` that was never there and moved rsp 0x32100 into unmapped memory. |
+| SoftSehX8664 / SoftCppExX8664 | `iretq`: ntdll's `KiUserExceptionDispatcher` resumes the handler with it, and unicorn reports `UC_ERR_EXCEPTION` (measured at ntdll+0x1245b0). Nothing catches that — no memory hook, no `UC_HOOK_INTR` — so the trace hook now performs the documented five-qword pop itself. |
+| SoftCppExX8664 / CppExUnhandledFilteredX8664 | `__C_specific_handler` was answered `EXCEPTION_CONTINUE_SEARCH`, which makes every guest filter and `__except` block dead code. Upstream hooks the name nowhere; the real handler walks the SCOPE_TABLE from the DISPATCHER_CONTEXT. |
+| CppExUnhandledUnfilteredX8664 | `terminate` answered exit code 3; the reference's `abort` mapping is `STATUS_STACK_BUFFER_OVERRUN` (0xC0000409), which is what the case asserts. |
+| PeWinX86GandcrabProfileChangesBehaviour | `SHGetSpecialFolderPathW` typed its OUT buffer as `LPCWSTR_` (the *input* string type), so the resolver returned the string and `api_get_int` gave 0 — the handler wrote the wide path to address 0 and the admin run died 24 ms in, before the stage-2 gate. |
+| PeWinX86Multithread | three defects in one: the scheduler hook was never registered (`QlOsWindows::load()` is never called and its own FS/GS guard would throw), the main thread was in `threads_` twice (ctor push + `append`), and `QlRegisterManager::restore` wrote narrow register aliases after the wide ones (eip 0x401636 → 0x1636). Plus the switch itself: restoring registers does not move execution mid-stream, so a live switch now arms the run loop's restart target with the resumed thread's pc. |
 
-Two defects that were found and fixed on the way to this list, both visible only
-once real DLLs actually loaded:
+Two defects found on the way, both only visible once real DLLs actually loaded:
 
 * **`__acrt_iob_func` answered the stream index**, so a guest's `stdout` was the
   literal pointer 0x1. MSVC's runtime dereferences it —
@@ -204,12 +209,22 @@ same handler: `ApiEntry` carries an optional **guard** predicate. When it
 answers false the dispatch behaves as if the name were unregistered and the
 guest's own code at the import target runs. The onexit family
 (`_initialize_onexit_table`, `_execute_onexit_table`,
-`_register_onexit_function`, `_crt_atexit`) and `__acrt_iob_func` are guarded on
-`QlOsWindows::has_real_crt()`, which is decided by **image size** (a synthesized
-stub is 8-12K, a real CRT DLL is hundreds of K) rather than by an export probe —
-x64 exports no `_except_handler4_common`, so an export test is x86-only by
-accident. Answering the onexit stand-ins on a real rootfs left
-`_onexit_table_t` uninitialized while ucrtbase's own `exit()` walked it.
+`_register_onexit_function`, `_crt_atexit`), `__acrt_iob_func` and
+`__C_specific_handler` are guarded on `QlOsWindows::has_real_crt()`, which is
+decided by **image size** (a synthesized stub is 8-12K, a real CRT DLL is
+hundreds of K) rather than by an export probe — x64 exports no
+`_except_handler4_common`, so an export test is x86-only by accident. Answering
+the onexit stand-ins on a real rootfs left `_onexit_table_t` uninitialized while
+ucrtbase's own `exit()` walked it.
+
+### 0.4 Why the nine stub-mode skips are not gaps
+
+The 9 skipped cases in stub mode are the `REQUIRE_REAL_DLLS` gates: the eight
+C++/SEH fixtures plus GandCrab. They skip because a synthesized stub DLL cannot
+run vendor CRT code, not because taote lacks anything — **all nine pass in
+real-dll mode**, which is the reference's own configuration. The one case that
+used to skip for a *reason* (PeWinX86Multithread, "live thread switching is not
+ported yet") now passes in both modes.
 
 ## 1. The harness (`tests/QilingPe_Compat_Test.cpp`)
 
