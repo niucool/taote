@@ -20,8 +20,10 @@
 #define QILING_TESTS_PE_SAMPLE_RUNNER_HPP
 
 #include <algorithm>
+#include <deque>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -115,8 +117,24 @@ inline void write_stub_dll(const fs::path& rootfs, const std::string& dll_name,
     auto factory = LIEF::PE::Factory::create(LIEF::PE::PE_TYPE::PE32_PLUS);
 
     // the content rides the constructor (Section::content(vector) is a no-op
-    // in this LIEF build — the cells would be zero-filled)
+    // in this LIEF build — the cells would be zero-filled). The default fill
+    // is the plain `ret` cell the API hooks never execute. Two exceptions:
+    //   * _initterm_e — with no handler registered any more (ucrt.cpp: the
+    //     walk must run the real CRT body on a real-dll rootfs) the stub cell
+    //     executes on the stub path, and it has to answer 0 (the success the
+    //     retired no-op hook gave) or the CRT startup bails out.
+    //   * _initterm — void; the plain ret already matches the old no-op.
     std::vector<std::uint8_t> code(std::max<std::size_t>(exports.size(), 1) * 16, 0xC3);
+    for (std::size_t i = 0; i < exports.size(); ++i) {
+        if (exports[i] == "_initterm_e") {
+            code[i * 16 + 0] = 0x31;  // xor eax, eax
+            code[i * 16 + 1] = 0xC0;
+            code[i * 16 + 2] = 0xC3;  // ret
+            for (std::size_t j = 3; j < 16; ++j) {
+                code[i * 16 + j] = 0xCC;
+            }
+        }
+    }
     LIEF::PE::Section text(".text", code);
     factory->add_section(text);
 
@@ -154,6 +172,88 @@ inline void write_stub_dll(const fs::path& rootfs, const std::string& dll_name,
     std::ofstream out(dir / dll_name, std::ios::binary);
     const auto& bytes = builder.get_build();
     out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+}
+
+// The CRT keeps the command line in *data* exports (`_acmdln` is a char*, not
+// a function). A real msvcrt.dll exports the variable itself, so the loader's
+// IAT write is correct; a synthesized stub can only export a code cell, and a
+// guest reading it as a pointer dereferences the 0xC3 fill. For the stub
+// rootfs the IAT slot is therefore pointed at a heap copy of the command line
+// (the value the real variable holds).
+inline void patch_data_export_slots(Qiling& ql, const fs::path& sample) {
+    auto parsed = LIEF::PE::Parser::parse(sample.string());
+    if (parsed == nullptr) {
+        return;
+    }
+    const auto& loader = static_cast<const loader::QlLoaderPE&>(ql.loader());
+    const auto& cmdline = loader.cmdline();
+    if (cmdline.empty()) {
+        return;
+    }
+    const auto image_base = static_cast<std::uint64_t>(parsed->imagebase());
+    const auto ptr = ql.arch().pointersize();
+
+    // `_acmdln` is the *variable* (a char*): the import slot holds the
+    // address of the variable, and the variable holds the pointer to the
+    // text. The synthesized stub exports a 16-byte code cell, so the cell
+    // itself becomes the variable: the text pointer is written into it.
+    auto& heap = ql.os<os::windows::QlOsWindows>().heap();
+    std::uint64_t narrow_text = 0;
+    std::uint64_t wide_text = 0;
+    const auto ensure_narrow = [&]() {
+        if (narrow_text == 0) {
+            std::vector<std::uint8_t> bytes(cmdline.begin(), cmdline.end());
+            bytes.push_back(0);
+            narrow_text = heap.alloc(bytes.size() + 8);
+            ql.mem().write(narrow_text, bytes);
+        }
+        return narrow_text;
+    };
+    const auto ensure_wide = [&]() {
+        if (wide_text == 0) {
+            std::vector<std::uint8_t> bytes;
+            for (const auto c : cmdline) {
+                if (c == 0) {
+                    break;
+                }
+                bytes.push_back(c);
+                bytes.push_back(0);
+            }
+            bytes.push_back(0);
+            bytes.push_back(0);
+            wide_text = heap.alloc(bytes.size() + 8);
+            ql.mem().write(wide_text, bytes);
+        }
+        return wide_text;
+    };
+
+    for (const auto& imported : parsed->imports()) {
+        auto dll = imported.name();
+        for (auto& c : dll) {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+        for (const auto& entry : imported.entries()) {
+            const auto name = entry.name();
+            std::uint64_t text = 0;
+            if (name == "_acmdln") {
+                text = ensure_narrow();
+            } else if (name == "_wcmdln") {
+                text = ensure_wide();
+            } else {
+                continue;
+            }
+            // the stub dll's export cell is the variable: the loader's IAT map
+            // already points the guest's slot at it, so both the direct
+            // `_acmdln` read and `__p__acmdln`'s `*p` land on the text
+            const auto* iat = loader.import_address_table_at(dll);
+            const auto cell = iat != nullptr ? iat->lookup(name) : 0;
+            if (cell != 0) {
+                ql.mem().write_ptr(cell, static_cast<std::int64_t>(text), ptr);
+            } else {
+                ql.mem().write_ptr(image_base + entry.iat_address(), text, ptr);
+            }
+        }
+    }
 }
 
 // a unique, wiped rootfs per run (the temp dirs persist across processes; the
@@ -221,6 +321,12 @@ struct SampleOptions {
     std::optional<std::filesystem::path> rootfs;
     std::string api_record;   // the deterministic-replay store (Phase 5.5)
     std::string api_replay;
+    // the upstream test knobs the qiling PE suite drives
+    QL_STOP stop = QL_STOP::NONE;                                       // the stop condition (return_main fixtures)
+    std::optional<std::uint64_t> end;                                   // run(end=...) — a pc to stop at
+    std::string stdin_text;                                             // seeded guest stdin (the crackme fixture)
+    std::vector<std::pair<std::uint64_t, std::vector<std::uint8_t>>> patches;  // ql.patch(addr, bytes)
+    std::optional<std::string> profile;                                 // a user profile (the gandcrab fixtures)
     bool analysis = false;  // memory-tracing + coverage (PLAN_PARITY Phase 3 item 4)
     // PLAN_PARITY Phase 3 item 5: a non-empty dir turns on the content-addressed
     // artifact store; `artifacts` selects guest ranges to save as `BEGIN:SIZE`
@@ -296,6 +402,8 @@ inline SampleOutcome run_pe_sample(const std::string& bin_name, const SampleOpti
     };
 
     Qiling* ql_after = nullptr;  // the post-run probe's handle (set once the run owns it)
+    std::shared_ptr<std::deque<std::uint64_t>> pc_ring;  // TAOTE_PE_TRACE ring
+    std::shared_ptr<HookRet> trace_hook;
     try {
         const auto plan = plan_for(sample);
         const auto rootfs = opts.rootfs.has_value() ? *opts.rootfs
@@ -356,6 +464,12 @@ inline SampleOutcome run_pe_sample(const std::string& bin_name, const SampleOpti
         options.rootfs = rootfs.string();
         options.ostype = QL_OS::WINDOWS;
         options.archtype = plan.is64 ? QL_ARCH::X8664 : QL_ARCH::X86;
+        // the loader's debug walk (the redirect ladder, the unbound imports, the
+        // DllMain bail-outs) is the tool for the real-dll rootfs debugging —
+        // flip it with TAOTE_VERBOSE=debug instead of an opt field
+        if (const char* v = std::getenv("TAOTE_VERBOSE"); v != nullptr && std::strcmp(v, "debug") == 0) {
+            options.verbose = QL_VERBOSE::DEBUG;
+        }
         options.max_api_count = opts.max_api_count;
         options.timeout = opts.timeout;
         options.count = opts.count;
@@ -367,6 +481,8 @@ inline SampleOutcome run_pe_sample(const std::string& bin_name, const SampleOpti
         options.volumes = opts.volumes;
         options.registry_patches = opts.registry_patches;
         options.api_replay_serve = opts.api_replay_serve;
+        options.profile = opts.profile;
+        options.stop = opts.stop;
         options.argv.push_back(exe_in_rootfs.string());
         for (const auto& a : opts.argv) {
             options.argv.push_back(a);
@@ -382,6 +498,21 @@ inline SampleOutcome run_pe_sample(const std::string& bin_name, const SampleOpti
         capture_file = captured;
         ql.os().set_stdout(captured);
 
+        // the seeded guest stdin (core.py hooking the fd table; here the tests
+        // that need a scripted input hand it in whole)
+        if (!opts.stdin_text.empty()) {
+            const auto stdin_path = rootfs / "guest_stdin.txt";
+            {
+                std::ofstream f(stdin_path, std::ios::binary);
+                f.write(opts.stdin_text.data(), static_cast<std::streamsize>(opts.stdin_text.size()));
+            }
+            ql.os().set_stdin(QlFile::open_mode(stdin_path.string(), "rb"));
+        }
+
+        for (const auto& [addr, bytes] : opts.patches) {
+            ql.patch(addr, bytes);
+        }
+
         // the loader state the module-system checks assert on
         {
             const auto& pe_loader = static_cast<const loader::QlLoaderPE&>(ql.loader());
@@ -394,8 +525,28 @@ inline SampleOutcome run_pe_sample(const std::string& bin_name, const SampleOpti
             }
         }
 
+        // a pc-ring for diagnostics: TAOTE_PE_TRACE=N keeps the last N retired
+        // instructions (with their pcs) so a fault can be read back in order
+        if (const char* env = std::getenv("TAOTE_PE_TRACE"); env != nullptr && *env != '\0') {
+            const auto keep = static_cast<std::size_t>(std::strtoull(env, nullptr, 0));
+            pc_ring = std::make_shared<std::deque<std::uint64_t>>();
+            trace_hook = std::make_shared<HookRet>(ql.hook_code(
+                [pc_ring, keep](std::uint64_t address, std::uint32_t) {
+                    pc_ring->push_back(address);
+                    while (pc_ring->size() > (keep == 0 ? 64 : keep)) {
+                        pc_ring->pop_front();
+                    }
+                    return 0;
+                }));
+        }
+
         if (opts.configure) {
             opts.configure(ql);
+        }
+
+        if (!opts.rootfs.has_value()) {
+            // the data-export shim only applies to the synthesized stubs
+            patch_data_export_slots(ql, sample);
         }
 
         const auto file_name = lower(sample.filename().string());
@@ -453,7 +604,11 @@ inline SampleOutcome run_pe_sample(const std::string& bin_name, const SampleOpti
             out.ran = true;
             out.exit_code = 0;
         } else {
-            ql.run();
+            if (opts.end.has_value()) {
+                ql.run(std::nullopt, opts.end);
+            } else {
+                ql.run();
+            }
             out.ran = true;
             out.exit_code = ql.os().exit_code();
         }
@@ -474,6 +629,12 @@ inline SampleOutcome run_pe_sample(const std::string& bin_name, const SampleOpti
         capture_stats();
     } catch (const std::exception& e) {
         out.error = e.what();
+        if (pc_ring) {
+            std::fprintf(stderr, "pc trace (last %zu):\n", pc_ring->size());
+            for (const auto pc : *pc_ring) {
+                std::fprintf(stderr, "  0x%llx\n", static_cast<unsigned long long>(pc));
+            }
+        }
         if (opts.after_run && ql_after != nullptr) {
             try {
                 opts.after_run(*ql_after);

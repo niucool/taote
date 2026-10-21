@@ -83,7 +83,19 @@ fs::path pma_dir() {
         return fs::path(env);
     }
     const auto home = std::getenv("HOME");
-    return home == nullptr ? fs::path() : fs::path(home) / "source" / "capa-testfiles";
+    if (home == nullptr) {
+        return fs::path();
+    }
+    // Two layouts in the wild: the corpus clones directly under $HOME
+    // ($HOME/source/capa-testfiles) and under the project tree
+    // ($HOME/source/<project>/capa-testfiles). Whichever exists first wins.
+    for (const auto& candidate : {fs::path(home) / "source" / "capa-testfiles",
+                                  fs::path(home) / "source" / "jim" / "capa-testfiles"}) {
+        if (fs::exists(candidate)) {
+            return candidate;
+        }
+    }
+    return fs::path(home) / "source" / "capa-testfiles";
 }
 
 // "KERNEL32.GetProcAddress" -> "getprocaddress": taote's stats key on the bare

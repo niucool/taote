@@ -24,6 +24,12 @@ Makefile
 *.pdb
 *.ilk
 
+# Test fixtures are checked in, including the PE samples the parity suites
+# drive (`*.exe` / `*.dll` under tests/data). The generic binary ignores below
+# apply everywhere else.
+!tests/data/**/*.exe
+!tests/data/**/*.dll
+
 # vcpkg
 vcpkg_installed/
 
