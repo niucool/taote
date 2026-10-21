@@ -40,25 +40,17 @@ void register_ucrt_family() {
         return 0;
     };
 
-    // void _initterm(_PVFV* pfbegin, _PVFV* pfend); — the C initializer
-    // table walk. The initializers ride the host-side no-ops on the stub
-    // hosts (the CRT-internal state setups); the calls would need the
-    // nested emu_start frame per entry — skipped verbatim-shape
-    WinsdkApi("_initterm", WinCc::Cdecl, {
-        {"pfbegin", PVOID_},
-        {"pfend", PVOID_},
-    }) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
-        return std::nullopt;  // void
-    };
-
-    // errno_t _initterm_e(_PIFV* pfbegin, _PIFV* pfend); — the error-code
-    // initializer walk (the 0 answer = the success)
-    WinsdkApi("_initterm_e", WinCc::Cdecl, {
-        {"pfbegin", PVOID_},
-        {"pfend", PVOID_},
-    }) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
-        return 0;
-    };
+    // _initterm / _initterm_e deliberately have NO handlers here (the
+    // upstream's shape: msvcrt.py never hooks them either). The initializer
+    // walk must execute the CRT's real body:
+    //   * real-dll rootfs — the call lands on the real ucrtbase code and walks
+    //     the table, which is what constructs the C++ statics (std::cout in
+    //     msvcp140's DllMain) the vendor fixtures need. A no-op hook intercepts
+    //     that walk and leaves the statics unconstructed (the operator<< crash).
+    //   * stub rootfs — the call lands on the synthesized 0xC3 cell and answers
+    //     immediately (no walk; _initterm_e's cell is seeded to answer 0, the
+    //     answer the retired no-op hook gave, so the startup keeps taking the
+    //     success path).
 
     // int _crt_atexit(_PVFV function); — the registration succeeds (the
     // teardown list never runs: the exit path stops the emulation)
