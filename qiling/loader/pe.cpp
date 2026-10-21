@@ -114,8 +114,19 @@ std::uint64_t QlLoaderPE::load_parsed(std::unique_ptr<LIEF::PE::Binary> parsed, 
         }
 
         for (const LIEF::PE::ExportEntry& entry : export_->entries()) {
-            const std::uint64_t ea = base + entry.address();
-
+            // A forwarded export has no code of its own: its EAT slot is a
+            // library!symbol string, so entry.address() carries no usable RVA
+            // (LIEF reports 0). Binding it to base + 0 put the exporter's PE
+            // header in the IAT, and a guest calling such an import executed the
+            // header bytes — measured on the real ole32.dll, whose
+            // CoInitializeEx/CoInitializeSecurity/CoUninitialize are forwarders
+            // to api-ms-win-core-com-l1-1-0.dll: the pegasus samples jumped to
+            // ole32+0 and faulted at +3. (Upstream binds the forwarder *string*
+            // RVA instead, which is equally not code.) The entry is only
+            // recorded for resolve_forwarded_exports; if that cannot resolve the
+            // target the symbol stays unbound and the loader's unbound-import
+            // stub answers it, which is what "this api has no implementation
+            // here" should look like.
             if (entry.is_forwarded()) {
                 std::string target_dll = entry.forward_information().library;
                 for (auto& c : target_dll) {
@@ -126,7 +137,10 @@ std::uint64_t QlLoaderPE::load_parsed(std::unique_ptr<LIEF::PE::Binary> parsed, 
                 }
                 forwarded_exports_.push_back(ForwardedExport{dll_name, entry.name(), entry.ordinal(),
                                                              target_dll, entry.forward_information().function});
+                continue;
             }
+
+            const std::uint64_t ea = base + entry.address();
 
             ExportSymbol symbol;
             symbol.address = ea;

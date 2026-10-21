@@ -226,10 +226,14 @@ bool QlOsWindows::seh_on_fault(int access, std::uint64_t address) {
         return false;  // the dispatch is not armed (or switched off)
     }
 
-    // the guest owns SEH when its CRT does: see has_real_seh_unwinder
-    if (has_real_seh_unwinder()) {
-        return false;
-    }
+    // A real CRT does NOT stand the dispatch down. The dispatch's job is to
+    // *deliver* the fault — build the EXCEPTION_RECORD/CONTEXT and call the
+    // frame handler in fs:[0] — and with a real CRT that handler is the guest's
+    // own __except_handler4 (which calls the real _except_handler4_common).
+    // What must not happen is taote decoding the scope table itself, and that is
+    // already handled: the _except_handler4_common handler stands down when the
+    // rootfs has real code (see the hook), so seh_frames_ stays empty and
+    // seh_continue only applies what the guest's handler decided.
 
     // Only the *program's* faults dispatch. The loader drives every DllMain from
     // `emu_start` while the emulation state is not STARTED, and a fault in one of
@@ -318,10 +322,6 @@ bool QlOsWindows::seh_check_cpu_exception(std::uint64_t pc) {
     if (bits_ != 32 || !seh_dispatch_enabled_ || seh_sentinel_ == 0 || seh_retarget_ != 0) {
         return false;
     }
-    if (has_real_seh_unwinder()) {
-        return false;
-    }
-
     std::vector<std::uint8_t> code;
     try {
         code = ql_->mem().read(pc, 3);
@@ -491,6 +491,28 @@ bool QlOsWindows::seh_dispatch(std::uint64_t fault_addr, std::uint32_t access_ty
 bool QlOsWindows::seh_continue() {
     auto& regs = ql_->arch().regs();
     const auto ret = static_cast<std::uint32_t>(regs.read("eax"));
+
+    if (seh_frames_.empty()) {
+        // No synthetic frame was recorded, i.e. the handler that just returned
+        // was the guest's own CRT one. Windows' dispatcher does two things with
+        // its answer: EXCEPTION_EXECUTE_HANDLER means "resume at the handler the
+        // CRT patched into the CONTEXT" (EH4 stores the __except block's address
+        // in ContextRecord->Eip and the frame in Ebp before answering), and
+        // EXCEPTION_CONTINUE_EXECUTION means "resume at the faulting context the
+        // handler repaired". Both are a context load plus a retarget.
+        //
+        // Measured need: pegasus's seh_test_x86.exe deliberately writes to
+        // address 0 (`movl $0x14,0x0` — the file has no relocation there, it is
+        // the sample's own access violation) and expects its __except block to
+        // run. On stubs the synthetic walk did that; with the Windows 11 tree the
+        // run died on the write because nothing applied the disposition.
+        if (ret == kExceptionExecuteHandler || ret == kExceptionContinueExecution) {
+            seh_load_context();
+            seh_retarget_ = regs.arch_pc();
+            return true;
+        }
+        return false;
+    }
 
     for (auto& frame : seh_frames_) {
         if (frame.searched) {
