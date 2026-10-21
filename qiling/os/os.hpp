@@ -180,8 +180,29 @@ public:
     // hook.py: the CALL-intercept callables run raw with (ql, address, name)
     using UserApiHandler = std::function<void(Qiling&, std::uint64_t, const std::string&)>;
 
+    // the resolved-params view the ENTER/EXIT intercepts read and mutate
+    // (fncc.py hands the *resolved* dict to the hooks, so a STRING param
+    // arrives as text and a rewrite is visible to the handler)
+    using NamedParams = std::vector<std::pair<std::string, FcallValue>>;
+
+    // os/fcall.py OnEnterHook: fires before the handler, may rewrite the params
+    // and (by answering a pc) redirect the call; os/fcall.py OnExitHook fires
+    // after and may override the return value
+    using ApiEnterHandler =
+        std::function<std::optional<std::uint64_t>(Qiling&, NamedParams& params)>;
+    using ApiExitHandler = std::function<std::optional<std::uint64_t>(
+        Qiling&, const NamedParams& params, std::optional<std::uint64_t> retval)>;
+
     void set_api(std::uint64_t target, UserApiHandler handler, QL_INTERCEPT intercept = QL_INTERCEPT::CALL);
     void set_api(std::string_view target, UserApiHandler handler, QL_INTERCEPT intercept = QL_INTERCEPT::CALL);
+
+    // the typed ENTER/EXIT registration (fncc.py wrapper: onenter/onexit ride the
+    // resolved-params shape; the CALL-intercept surface above keeps the raw
+    // (ql, address, name) signature the upstream hook_winapi uses)
+    void set_api_enter(std::string_view target, ApiEnterHandler handler);
+    void set_api_exit(std::string_view target, ApiExitHandler handler);
+    const ApiEnterHandler* find_api_enter(const std::string& name) const;
+    const ApiExitHandler* find_api_exit(const std::string& name) const;
 
     // hook.py: user_defined_api[intercept].get(name) — null when unregistered
     const UserApiHandler* find_user_api(const std::string& name, QL_INTERCEPT intercept = QL_INTERCEPT::CALL) const;
@@ -259,6 +280,8 @@ protected:
     // the PARAM_PTRX arithmetic is the portable spelling)
     std::map<int, Resolver> resolvers_;
     std::map<QL_INTERCEPT, std::map<std::string, UserApiHandler>> user_defined_api_;
+    std::map<std::string, ApiEnterHandler> user_enter_api_;
+    std::map<std::string, ApiExitHandler> user_exit_api_;
     std::unique_ptr<QlOsPath> path_;
     std::unique_ptr<QlFsMapper> fs_mapper_;
 };

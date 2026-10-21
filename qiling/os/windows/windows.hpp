@@ -77,6 +77,23 @@ public:
     void apply_filesystem_config();
     void apply_registry_patches();
 
+    // the nested-emulation scope: an API handler that has to run guest code
+    // (the CRT initializer walk, the driver init call) re-enters run(); while
+    // nested, a fault belongs to that handler — it must not be recorded as
+    // the program's entry-point error (the handler decides what to do with it)
+    // and run() must not take the process-exit path
+    class NestedRun {
+    public:
+        explicit NestedRun(QlOsWindows& os) : os_(os) { ++os_.nested_depth_; }
+        ~NestedRun() { --os_.nested_depth_; }
+        NestedRun(const NestedRun&) = delete;
+        NestedRun& operator=(const NestedRun&) = delete;
+
+    private:
+        QlOsWindows& os_;
+    };
+    bool in_nested_run() const noexcept { return nested_depth_ > 0; }
+
     // PLAN_PARITY Phase 3 item 4: the memory/coverage hooks (QilingOptions::analysis).
     // HookRet is RAII - destroying it unregisters the hook - so the handles are
     // kept for the run's lifetime.
@@ -274,6 +291,7 @@ private:
     uc_hook seh_intr_hook_ = 0;
     std::uint64_t env_cell_ = 0;
     std::vector<EntryPointError> entry_point_errors_;
+    int nested_depth_ = 0;  // NestedRun depth (an API handler running guest code)
     std::uint64_t instructions_ = 0;
     bool instruction_budget_hit_ = false;         // the __p___initenv cell
     std::vector<SehFrame> seh_frames_;

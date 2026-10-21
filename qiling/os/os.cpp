@@ -137,6 +137,24 @@ const QlOs::UserApiHandler* QlOs::find_user_api(const std::string& name, QL_INTE
     return it == table->second.end() ? nullptr : &it->second;
 }
 
+void QlOs::set_api_enter(std::string_view target, ApiEnterHandler handler) {
+    user_enter_api_[std::string(target)] = std::move(handler);
+}
+
+void QlOs::set_api_exit(std::string_view target, ApiExitHandler handler) {
+    user_exit_api_[std::string(target)] = std::move(handler);
+}
+
+const QlOs::ApiEnterHandler* QlOs::find_api_enter(const std::string& name) const {
+    const auto it = user_enter_api_.find(name);
+    return it == user_enter_api_.end() ? nullptr : &it->second;
+}
+
+const QlOs::ApiExitHandler* QlOs::find_api_exit(const std::string& name) const {
+    const auto it = user_exit_api_.find(name);
+    return it == user_exit_api_.end() ? nullptr : &it->second;
+}
+
 std::vector<std::uint64_t> QlOs::resolve_fcall_params(const std::vector<std::pair<std::string, int>>& params) const {
     // os.py resolve_fcall_params: read the raw values through the fcall layer
     // in proto order

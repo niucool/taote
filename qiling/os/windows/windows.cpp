@@ -449,6 +449,12 @@ WinCc default_cc_for(const std::string& name, std::size_t bits) {
 }  // namespace
 
 void QlOsWindows::on_emulation_error(std::string_view message) {
+    // a fault raised by a nested emulation (an API handler that runs guest
+    // code) is the handler's business, not the program's: the handler catches
+    // the error and continues (the CRT initializer walk)
+    if (in_nested_run()) {
+        return;
+    }
     record_entry_point_error(classify_emulation_error(std::string(message)), std::string(message));
 }
 
@@ -560,6 +566,23 @@ void QlOsWindows::hook_winapi(std::uint64_t address, std::uint32_t size) {
 
     const auto* api = ApiRegistry::instance().find(imported->name);
 
+    // windows.py hook_winapi: a user CALL-intercept *replaces* the implementation
+    // (`user_defined_api[QL_INTERCEPT.CALL].get(api_name)`), and the replacement
+    // runs its own os.call orchestration — so the frame unwinding below is
+    // skipped entirely. An exception inside it surfaces as the upstream's
+    // QlErrorSyscallError("Windows API Implementation Error").
+    if (const auto* user = find_user_api(imported->name, QL_INTERCEPT::CALL); user != nullptr) {
+        try {
+            (*user)(*ql_, address, imported->name);
+        } catch (const QlErrorBase&) {
+            throw;
+        } catch (const std::exception& e) {
+            ql_->log().error(std::string("Windows API Implementation Error: ") + e.what());
+            throw QlErrorSyscallError("Windows API Implementation Error");
+        }
+        return;
+    }
+
     // the max_api_count guard (pegasus cfg.max_api_count): a dispatch beyond
     // the budget ends the entry point instead of letting a runaway sample eat
     // the whole analysis
@@ -631,30 +654,11 @@ void QlOsWindows::hook_winapi(std::uint64_t address, std::uint32_t size) {
     }
 
     // select the calling convention for this call site and run the handler
-    // through the os.call orchestration: the handler resolves through
-    // resolve_named_params (the placeholder-typed entries decode to strings)
-    // and the fcall call unwinds the frame (rax + the pc = the return
-    // address) unless the handler stopped the emulation first
-    set_fcall_ptr(fcall_select(api->cc));
-
-    // the upstream's os.call(func, params, ...) resolution: the raw values
-    // read through the cc apply the resolvers table (the placeholder-typed
-    // entries decode to the guest strings) before the handler runs
-    const auto proto = api->params;
-    const auto handler = api->handler;
-    auto* self = this;
+    // through the os.call orchestration: the ENTER/EXIT intercepts fire around
+    // it with the resolved params and the fcall unwinds the frame (rax + the
+    // pc = the return address) unless the handler stopped the emulation first
     set_api_dll(imported->dll);
-    call(address, imported->name,
-         [self, proto, handler](std::uint64_t pc, const QlFunctionCall::Params& raw) -> std::optional<std::uint64_t> {
-             std::vector<std::uint64_t> rawvals;
-             rawvals.reserve(raw.size());
-             for (const auto& [n, v] : raw) {
-                 (void)n;
-                 rawvals.push_back(v);
-             }
-             return handler(*self->ql_, pc, self->resolve_named_params(proto, rawvals));
-         },
-         api->params, nullptr, nullptr, api->passthru);
+    call_api(*ql_, address, imported->name, api->params, api->cc, api->handler, api->passthru);
 
     // the answer the environment gave is what a replay re-produces; an entry the
     // serving path already consumed (a pointer answer, re-derived by the real
@@ -742,6 +746,10 @@ void QlOsWindows::run() {
             seh_retarget_ = 0;
             continue;
         } catch (const QlErrorBase& e) {
+            if (in_nested_run()) {
+                // the handler owns this failure (it staged the nested run)
+                throw;
+            }
             if (seh_retarget_ == 0) {
                 // a control transfer to the null page is how a hosted entry
                 // point returns to its caller: the exe's entry does a bare

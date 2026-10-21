@@ -80,6 +80,16 @@ private:
     std::map<std::string, ApiEntry> entries_;
 };
 
+// fncc.py `winsdkapi.wrapper`: run `handler` as the implementation of
+// `api_name` — the ENTER/EXIT intercepts fire around it with the *resolved*
+// params, the return value is written back and the frame is unwound. A user
+// CALL-intercept replacement (os.set_api with QL_INTERCEPT::CALL) is a
+// winsdkapi-decorated function upstream, i.e. exactly this call, so the
+// replacement can reuse it to keep the ENTER/EXIT chain working.
+std::optional<std::uint64_t> call_api(Qiling& ql, std::uint64_t pc, const std::string& api_name,
+                                      const ApiParams& params, WinCc cc, const ApiHandler& handler,
+                                      bool passthru = false);
+
 // the `@winsdkapi(cc=..., params=..., passthru=...)` decorator analogue: a
 // fluent builder used by the dll modules at static-init time
 class WinsdkApi {

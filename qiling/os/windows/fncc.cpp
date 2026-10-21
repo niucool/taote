@@ -1,5 +1,7 @@
 #include "qiling/os/windows/fncc.hpp"
 
+#include "qiling/core.hpp"
+#include "qiling/os/windows/windows.hpp"
 #include "qiling/os/os.hpp"
 #include "qiling/os/utils.hpp"
 #include "qiling/exception.hpp"
@@ -67,6 +69,50 @@ std::vector<std::string> ApiRegistry::names() const {
 
 void ApiRegistry::clear() {
     entries_.clear();
+}
+
+std::optional<std::uint64_t> call_api(Qiling& ql, std::uint64_t pc, const std::string& api_name,
+                                      const ApiParams& params, WinCc cc, const ApiHandler& handler,
+                                      bool passthru) {
+    auto& os = ql.os<windows::QlOsWindows>();
+    os.set_fcall_ptr(os.fcall_select(cc));
+
+    const auto* onenter = os.find_api_enter(api_name);
+    const auto* onexit = os.find_api_exit(api_name);
+
+    return os.call(
+        pc, api_name,
+        [&ql, &os, params, handler, onenter, onexit](std::uint64_t use_pc,
+                                                     const QlFunctionCall::Params& raw)
+            -> std::optional<std::uint64_t> {
+            std::vector<std::uint64_t> rawvals;
+            rawvals.reserve(raw.size());
+            for (const auto& [name, value] : raw) {
+                (void)name;
+                rawvals.push_back(value);
+            }
+            auto resolved = os.resolve_named_params(params, rawvals);
+            if (onenter != nullptr) {
+                if (const auto new_pc = (*onenter)(ql, resolved); new_pc.has_value()) {
+                    use_pc = *new_pc;
+                }
+            }
+            auto retval = handler(ql, use_pc, resolved);
+            if (onexit != nullptr) {
+                // the upstream passes the *same* dict to onenter, func and
+                // onexit, so a rewrite the func makes is visible on exit. The
+                // C++ handlers take const params (they cannot rewrite the
+                // dict), so the exit hook re-resolves the guest memory instead:
+                // a handler that rewrote the string in place is observed the
+                // same way
+                resolved = os.resolve_named_params(params, rawvals);
+                if (const auto override_ret = (*onexit)(ql, resolved, retval); override_ret.has_value()) {
+                    retval = *override_ret;
+                }
+            }
+            return retval;
+        },
+        params, nullptr, nullptr, passthru);
 }
 
 // ---- the @winsdkapi builder ----
