@@ -281,6 +281,7 @@ private:
 
     // the SEH dispatch state (seh.hpp)
     uc_hook seh_hook_ = 0;
+    uc_hook seh_prot_hook_ = 0;   // the sentinel-return fetch (MEM_FETCH_PROT)
     std::uint64_t seh_sentinel_ = 0;        // the staged return page (mapped rw-noexec)
     std::uint64_t seh_retarget_ = 0;        // the pending run-loop restart target
     std::uint64_t seh_context_addr_ = 0;    // the mapped CONTEXT (the reload path)
