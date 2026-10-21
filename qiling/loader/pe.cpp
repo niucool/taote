@@ -621,6 +621,17 @@ void QlLoaderPE::init_imports_for(LIEF::PE::Binary& parsed, std::uint64_t image_
             if (!redirected) {
                 const auto dll_base = load_dll(entry.name());
                 if (dll_base == 0) {
+                    // the module is not in the rootfs: same hazard as a missing
+                    // export table — every slot in this group would keep its
+                    // raw hint/name RVA for the guest to execute
+                    ql_->log().debug("Failed to load " + entry.name() +
+                                     "; answering its imports via the stub page");
+                    for (const LIEF::PE::ImportEntry* imp : unbound) {
+                        const auto addr = imp->name().empty()
+                                              ? unbound_import_stub(std::string(), imp->ordinal())
+                                              : unbound_import_stub(std::string(imp->name()));
+                        ql_->mem().write_ptr(image_base + imp->iat_address(), addr);
+                    }
                     continue;
                 }
                 // bind against the image that actually landed: a debug-CRT
@@ -642,6 +653,21 @@ void QlLoaderPE::init_imports_for(LIEF::PE::Binary& parsed, std::uint64_t image_
 
             const auto it = import_address_table_.find(dll_name);
             if (it == import_address_table_.end()) {
+                // The image loaded but registered no export table under the name
+                // we look it up by (a forwarded/alised module, or an image whose
+                // export walk failed). Dropping the whole group left every slot
+                // holding its raw hint/name RVA, which the guest then executed
+                // as code — the UC_ERR_FETCH_UNMAPPED at 0x20a88 / 0x24c6 shape
+                // seen with the real win7 system DLLs. Answer each entry from
+                // the unbound-import stub instead.
+                ql_->log().debug("No export table for " + dll_name +
+                                 " (" + orig_dll_name + "); answering its imports via the stub page");
+                for (const LIEF::PE::ImportEntry* imp : unbound) {
+                    const auto addr = imp->name().empty()
+                                          ? unbound_import_stub(std::string(), imp->ordinal())
+                                          : unbound_import_stub(std::string(imp->name()));
+                    ql_->mem().write_ptr(image_base + imp->iat_address(), addr);
+                }
                 continue;
             }
             const ImportTable& iat = it->second;
