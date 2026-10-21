@@ -12,6 +12,11 @@
 
 #include "qiling/os/windows/ntdefs.hpp"
 #include "qiling/os/windows/windows.hpp"
+#include "qiling/loader/pe.hpp"
+
+#include <algorithm>
+#include <cctype>
+#include <filesystem>
 
 namespace qiling {
 namespace os {
@@ -107,9 +112,79 @@ bool QlOsWindows::seh_fault_trampoline(uc_engine*, uc_mem_type access, std::uint
 // the staged target. Returning false also lets the later-registered hooks
 // (the ql-layer mem hooks) still observe the fault (unicorn continues the
 // hook list on a false return).
+// Does the rootfs carry a *real* x86 CRT unwinder? `_except_handler4_common` is
+// the MSVC CRT's SEH entry point; when a loaded image exports it with real code
+// (rather than the synthesized stub rootfs's `ret` cell) the guest can walk its
+// own exception frames, and it must be allowed to. Upstream has no synthetic SEH
+// at all — no sentinel, no dispatch — it simply lets that code run, which is why
+// it passes the x86 fixtures on a real rootfs.
+//
+// Keeping the pegasus-style dispatch armed in that situation makes the emulator
+// drive a walk the guest is already driving: the dispatch stages its sentinel
+// page as the return address for the guest's filters/handlers, the guest returns
+// into it, `seh_continue` finds its own frames exhausted and the run dies on the
+// fetch from 0x70000000 (GandCrab and both x86 C++ fixtures ended exactly there).
+bool QlOsWindows::has_real_seh_unwinder() {
+    // only the *positive* answer is cached: the probe runs during load too, when
+    // the system DLLs are not mapped yet, and caching that "no" would pin the
+    // dispatch on for the whole run (measured: the probe answered 0 while
+    // ucrtbase's _except_handler4_common sat at a real 0x104c6ce0)
+    if (real_seh_unwinder_.value_or(false)) {
+        return true;
+    }
+    const auto lower_ascii = [](std::string v) {
+        std::transform(v.begin(), v.end(), v.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return v;
+    };
+    bool real = false;
+    try {
+        const auto& pe_loader = static_cast<const loader::QlLoaderPE&>(ql_->loader());
+        for (const auto& image : pe_loader.images) {
+            const auto name = std::filesystem::path(image.path).filename().string();
+            if (lower_ascii(name).rfind("ucrtbase", 0) != 0 && lower_ascii(name) != "msvcrt.dll") {
+                continue;
+            }
+            const auto* iat = pe_loader.import_address_table_at(lower_ascii(name));
+            if (iat == nullptr) {
+                continue;
+            }
+            const auto addr = iat->lookup("_except_handler4_common");
+            if (addr == 0) {
+                continue;
+            }
+            std::vector<std::uint8_t> prologue;
+            try {
+                prologue = ql_->mem().read(addr, 3);
+            } catch (...) {
+                continue;
+            }
+            const bool synthesized_cell =
+                prologue.size() >= 1 &&
+                (prologue[0] == 0xC3 ||
+                 (prologue.size() >= 3 && prologue[0] == 0x31 && prologue[1] == 0xC0 && prologue[2] == 0xC3));
+            if (!synthesized_cell) {
+                real = true;
+                break;
+            }
+        }
+    } catch (...) {
+        real = false;
+    }
+    if (real) {
+        real_seh_unwinder_ = true;
+    }
+    return real;
+}
+
 bool QlOsWindows::seh_on_fault(int access, std::uint64_t address) {
     if (seh_sentinel_ == 0 || bits_ != 32 || !seh_dispatch_enabled_) {
         return false;  // the dispatch is not armed (or switched off)
+    }
+
+    // the guest owns SEH when its CRT does: see has_real_seh_unwinder
+    if (has_real_seh_unwinder()) {
+        return false;
     }
 
     // the sentinel fetch: a guest SEH handler / filter returned — continue
@@ -132,6 +207,9 @@ bool QlOsWindows::seh_on_fault(int access, std::uint64_t address) {
 // surface as an uncatchable UC_ERR_EXCEPTION
 bool QlOsWindows::seh_check_cpu_exception(std::uint64_t pc) {
     if (bits_ != 32 || !seh_dispatch_enabled_ || seh_sentinel_ == 0 || seh_retarget_ != 0) {
+        return false;
+    }
+    if (has_real_seh_unwinder()) {
         return false;
     }
 

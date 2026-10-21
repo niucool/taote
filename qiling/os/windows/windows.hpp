@@ -208,6 +208,10 @@ public:
     bool seh_on_interrupt(std::uint32_t intno);
 
     void set_seh_dispatch(bool enabled) noexcept { seh_dispatch_enabled_ = enabled; }
+    // does the rootfs carry a real _except_handler4_common? (cached; seh.cpp)
+    bool has_real_seh_unwinder();
+    // the staged SEH return page (0 when the dispatch never armed)
+    std::uint64_t seh_sentinel() const noexcept { return seh_sentinel_; }
     bool seh_dispatch() const noexcept { return seh_dispatch_enabled_; }
 
     // the CRT environment cell (the __p___initenv global): allocated once and
@@ -289,6 +293,8 @@ private:
     std::uint64_t seh_fault_addr_ = 0;      // the repeat-guard key (fault address)
     int seh_repeat_count_ = 0;
     bool seh_dispatch_enabled_ = true;   // the set_seh_dispatch switch
+    // cached: does the rootfs carry a real _except_handler4_common? (seh.cpp)
+    std::optional<bool> real_seh_unwinder_;
     uc_hook seh_intr_hook_ = 0;
     std::uint64_t env_cell_ = 0;
     std::vector<EntryPointError> entry_point_errors_;
