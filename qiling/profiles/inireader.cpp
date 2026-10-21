@@ -1,4 +1,5 @@
 #include <set>
+#include <utility>
 #include "qiling/profiles/inireader.hpp"
 
 #include <fstream>
@@ -28,10 +29,13 @@ void IniConfig::read_string(std::string_view text, const std::string& source) {
     std::string current;      // current section name (verbatim case)
     bool in_section = false;  // options before any section are an error
 
-    // the strict=True duplicate-section check applies WITHIN one read call
-    // (the python config.read of a second file merges into the existing
-    // sections — the user-config override ride over the base profile)
+    // the strict=True duplicate checks apply WITHIN one read call: the python
+    // config.read of a second file merges into the existing sections and
+    // overwrites the option (elements_added tracks what THIS read added, so a
+    // cross-file override such as the gandcrab [SYSTEM] permission profile is
+    // legal while a repeated option inside one file is not)
     std::set<std::string> seen_this_read;
+    std::set<std::pair<std::string, std::string>> options_added_this_read;
 
     std::size_t lineno = 0;
     std::size_t pos = 0;
@@ -88,12 +92,18 @@ void IniConfig::read_string(std::string_view text, const std::string& source) {
         }
         const std::string_view value = trim(line.substr(sep + 1));
 
-        // optionxform=str.lower: keys stored lowercase; duplicate options rejected
+        // optionxform=str.lower: keys stored lowercase; a duplicate option is
+        // rejected only when this read added it (configparser's
+        // elements_added), otherwise the later value wins
         auto& options = sections_.at(current);
-        if (!options.emplace(ascii_casefold(key), std::string(value)).second) {
-            throw QlErrorBase(parse_error(source, lineno, "duplicate option '" + ascii_casefold(key) +
+        const auto key_folded = ascii_casefold(key);
+        const auto exists = options.find(key_folded) != options.end();
+        if (exists && options_added_this_read.count({current, key_folded}) != 0) {
+            throw QlErrorBase(parse_error(source, lineno, "duplicate option '" + key_folded +
                                                           "' in section [" + current + "]"));
         }
+        options[key_folded] = std::string(value);
+        options_added_this_read.emplace(current, key_folded);
     }
 }
 
