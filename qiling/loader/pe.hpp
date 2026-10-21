@@ -286,6 +286,9 @@ private:
     std::vector<std::uint8_t> cmdline_;
     std::vector<ForwardedExport> forwarded_exports_;
     std::optional<std::uint64_t> stub_page_;
+    // how many 4K pages of stub cells the arena currently spans (it grows on
+    // demand: see unbound_import_stub)
+    std::size_t stub_pages_ = 0;
     std::map<std::string, std::uint64_t> stub_cells_;
     std::map<std::uint64_t, std::string> stub_addr_names_;
 

@@ -250,20 +250,27 @@ std::pair<std::string, std::string> QlLoaderPE::dll_path_elements(const std::str
 }
 
 std::uint64_t QlLoaderPE::unbound_import_stub(const std::string& name, std::uint64_t ordinal) {
-    // lazily map one executable page full of xor eax,eax; ret cells (16 bytes
-    // each, int3-padded) and hand out a cell per unresolved symbol name
+    // Lazily map a run of executable pages full of xor eax,eax; ret cells (16
+    // bytes each, int3-padded) and hand out one cell per unresolved symbol name.
+    //
+    // The arena grows on demand. A single 4K page holds 255 cells, which the
+    // real-world samples in the capa corpus exceed (measured: three samples —
+    // 5e6764534b3a1e4d3abacc4810b6985d.exe, 648fc498110b11b4313a47a776e6ba40.exe
+    // and 9ff8e68343cc29c1036650fc153e69f7.exe — aborted the whole run with
+    // "too many unresolved imports for the stub page"). Each cell is
+    // independent, so growing the arena is a pure addition.
+    constexpr std::size_t kCellsPerPage = 0x1000 / 16;
+    constexpr std::size_t kMaxPages = 16;  // 4080 cells: far past any real image
     auto& mem = ql_->mem();
     if (!stub_page_.has_value()) {
         const auto page = mem.find_free_space(0x1000, 0x400000ull, std::nullopt, 0x1000ull);
         mem.map(page, 0x1000, UC_PROT_ALL, "[unbound import stubs]");
-        for (std::size_t i = 0; i < 0x1000 / 16; ++i) {
-            // xor eax,eax; ret — cdecl-clean and x64-clean; the ordinal-
-            // denominated stdcall deficit is left to the caller since the
-            // stub has no knowledge of the convention it stands in for
-            const std::vector<std::uint8_t> cell = {0x31, 0xc0, 0xc3, 0xcc};
+        const std::vector<std::uint8_t> cell = {0x31, 0xc0, 0xc3, 0xcc};
+        for (std::size_t i = 0; i < kCellsPerPage; ++i) {
             mem.write(page + i * 16, cell);
         }
         stub_page_ = page;
+        stub_pages_ = 1;
     }
     auto key = name.empty() ? ("#" + std::to_string(ordinal)) : name;
     for (auto& c : key) {
@@ -273,10 +280,21 @@ std::uint64_t QlLoaderPE::unbound_import_stub(const std::string& name, std::uint
     if (it != stub_cells_.end()) {
         return it->second;
     }
-    if (stub_cells_.size() >= 0x1000 / 16 - 1) {
-        throw QlErrorBase("too many unresolved imports for the stub page");
+    const std::size_t used = stub_cells_.size();
+    if (used >= kCellsPerPage * stub_pages_) {
+        // the current page is full: map the next one right after the arena
+        if (stub_pages_ >= kMaxPages) {
+            throw QlErrorBase("too many unresolved imports for the stub arena");
+        }
+        const auto next = *stub_page_ + stub_pages_ * 0x1000;
+        mem.map(next, 0x1000, UC_PROT_ALL, "[unbound import stubs]");
+        const std::vector<std::uint8_t> cell = {0x31, 0xc0, 0xc3, 0xcc};
+        for (std::size_t i = 0; i < kCellsPerPage; ++i) {
+            mem.write(next + i * 16, cell);
+        }
+        ++stub_pages_;
     }
-    const auto cell_addr = *stub_page_ + stub_cells_.size() * 16;
+    const auto cell_addr = *stub_page_ + used * 16;
     stub_addr_names_.emplace(cell_addr, name.empty() ? key : name);
     stub_cells_.emplace(std::move(key), cell_addr);
     return cell_addr;
