@@ -298,7 +298,14 @@ bool QlOsWindows::seh_on_fault(int access, std::uint64_t address) {
     if (access == UC_MEM_READ_UNMAPPED) {
         return seh_dispatch(address, 0u);
     }
-    if (access == UC_MEM_FETCH_PROT) {
+    // An execute on a no-exec page (#PF on instruction fetch) is only a guest
+    // exception when the image is mapped with real section permissions. taote
+    // maps the whole image RWX by default, so the only fetch-prot faults are the
+    // synthetic sentinel (handled above) and anti-emulation probes; dispatching
+    // those into SEH was measured to crash the host on aspack_AccessEnum
+    // (SIGSEGV at the 960th dispatch), so it is opt-in until the loader maps
+    // real permissions and the family gates exist.
+    if (access == UC_MEM_FETCH_PROT && std::getenv("TAOTE_SEH_FETCHPROT") != nullptr) {
         return seh_dispatch(address, 8u);
     }
     // the remaining fetch faults stay on the existing failure path
