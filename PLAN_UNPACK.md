@@ -403,6 +403,31 @@ and what they actually measured:
    repeat guard) and the decryptor walker dies on a read from `0x1`
    (`sim 0.80 -> 0.07`, exact OEP lost). PEtite stays 0/3.
 
+4. **The exception-vector → NT-status map was wrong for #GP/#PF** (round 3
+   follow-on). `seh_on_interrupt` mapped every non-int1/int3 vector to
+   `STATUS_ILLEGAL_INSTRUCTION` (`0xC000001D`); the reference's
+   `intr_to_ntstatus` maps `#DE→0xC0000094`, `int1→0x80000004`,
+   `int3→0x80000003`, `#BR→0xC000008C`, `#UD→0xC000001D`,
+   `#GP/#PF→0xC0000005`, `#AC→0x80000002`, and **ignores** every vector
+   outside the table (the `int 0x20/0x29/0x2d` probes become NOPs). Fixed to
+   match; S75 re-run confirms no regression (still 40/75).
+
+5. **TELock's real blocker is a self-modifying-decryptor register divergence,
+   not the exception path.** A fs:[0] write trace on telock_AkelAdmin.exe
+   shows the ICEBP frame is installed (`fs:[0]=0xfffeffb0` at `0x408a05`),
+   the relocation tail intentionally restores `fs:[0]=0` (`pop fs:[edx]` at
+   `0x408a2f`), the single-step ladder re-installs it (`0x408a4d`) and pops it
+   back to 0 (`0x408a61`) — all correct. The run then reaches the `les
+   edi,[esi]` at `0x408a92` with `esi=0x408992`, `[esi+4]=0xc1eb` (invalid
+   selector → #GP), while the oracle's next interrupt after the same
+   single-step is `int 3` at `0x40708d` (the main decrypt loop) over ~1.79M
+   insns. The bytes at `0x408a61..0x408a90` are identical in both dumps, so
+   the divergence is the *runtime* (decrypt-execute-re-encrypt) code, i.e.
+   bit-exact register parity through TELock's self-modifying decryptor — the
+   `test esp,esp;jns` / `or esp,esp;jne` branches read the (high-address,
+   sign-negative) guest stack and self-modify the handler (`setno [edx+3]`).
+   TELock stays 0/3.
+
 ### 0.5.4 What this changes in the plan
 
 1. **The GPA sentinel lane is Phase 1, not Phase 1b.** UPX's import restorer calls

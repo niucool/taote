@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <map>
 #include <filesystem>
 
 namespace qiling {
@@ -404,11 +405,16 @@ void QlOsWindows::seh_intr_trampoline(uc_engine* /*uc*/, std::uint32_t intno, vo
 bool QlOsWindows::seh_on_interrupt(std::uint32_t intno) {
     if (std::getenv("TAOTE_SEHDBG") != nullptr) {
         auto& dbg_regs = ql_->arch().regs();
-        std::fprintf(stderr, "[intr] intno=0x%x pc=0x%llx esi=0x%llx edx=0x%llx esp=0x%llx\n", intno,
+        std::fprintf(stderr, "[intr] intno=0x%x pc=0x%llx esi=0x%llx edx=0x%llx esp=0x%llx ebp=0x%llx ebx=0x%llx eax=0x%llx ecx=0x%llx edi=0x%llx\n", intno,
                      static_cast<unsigned long long>(dbg_regs.arch_pc()),
                      static_cast<unsigned long long>(dbg_regs.read("esi")),
                      static_cast<unsigned long long>(dbg_regs.read("edx")),
-                     static_cast<unsigned long long>(dbg_regs.arch_sp()));
+                     static_cast<unsigned long long>(dbg_regs.arch_sp()),
+                     static_cast<unsigned long long>(dbg_regs.read("ebp")),
+                     static_cast<unsigned long long>(dbg_regs.read("ebx")),
+                     static_cast<unsigned long long>(dbg_regs.read("eax")),
+                     static_cast<unsigned long long>(dbg_regs.read("ecx")),
+                     static_cast<unsigned long long>(dbg_regs.read("edi")));
         if (intno == 0xd) {
             try {
                 const auto esi = dbg_regs.read("esi");
@@ -428,11 +434,40 @@ bool QlOsWindows::seh_on_interrupt(std::uint32_t intno) {
     if (seh_sentinel_ == 0 && !seh_map_sentinel()) {
         return false;
     }
-    // int3 = breakpoint, int1 = the TF/ICEBP single-step trap, any other
-    // software interrupt is the illegal-instruction class (an `int 0x2d` /
-    // `int 0x29` kernel-door probe lands there)
-    const auto code = intno == 3 ? 0x80000003u : (intno == 1 ? 0x80000004u : 0xC000001Du);
+    // Map the hardware exception vector to its NT status, matching the
+    // reference's intr_to_ntstatus (unpacker.cpp:66-79). #GP (13) and #PF (14)
+    // are access violations, not illegal instructions — misclassifying them as
+    // 0xC000001D leaves the guest SEH handler (which selects on the code)
+    // un-consumed and escalates to a #DF double fault. Vectors outside the
+    // table are software `int` probes (int 0x20/0x29/0x2d): ignore them and
+    // let the instruction pass, as the reference does.
+    static const std::map<std::uint32_t, std::uint32_t> kIntrToNt = {
+        {0,  0xC0000094u}, // #DE  -> STATUS_INTEGER_DIVIDE_BY_ZERO
+        {1,  0x80000004u}, // int1 -> STATUS_SINGLE_STEP
+        {3,  0x80000003u}, // int3 -> STATUS_BREAKPOINT
+        {5,  0xC000008Cu}, // #BR  -> STATUS_ARRAY_BOUNDS_EXCEEDED
+        {6,  0xC000001Du}, // #UD  -> STATUS_ILLEGAL_INSTRUCTION
+        {13, 0xC0000005u}, // #GP  -> STATUS_ACCESS_VIOLATION
+        {14, 0xC0000005u}, // #PF  -> STATUS_ACCESS_VIOLATION
+        {17, 0x80000002u}, // #AC  -> STATUS_DATATYPE_MISALIGNMENT
+    };
+    const auto it = kIntrToNt.find(intno);
+    if (it == kIntrToNt.end()) {
+        return true;
+    }
+    const auto code = it->second;
     const auto pc = ql_->arch().regs().arch_pc();
+    if (std::getenv("TAOTE_SEHDBG") != nullptr) {
+        try {
+            const auto ch = ql_->mem().read_ptr(FS_SEGMENT_ADDR, 4);
+            std::fprintf(stderr, "[intr]   chain=%08llx next=%08llx handler=%08llx\n",
+                         static_cast<unsigned long long>(ch),
+                         static_cast<unsigned long long>(ql_->mem().read_ptr(ch, 4)),
+                         static_cast<unsigned long long>(ql_->mem().read_ptr(ch + 4, 4)));
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "[intr]   chain-read-fail: %s\n", e.what());
+        }
+    }
     if (!seh_dispatch(pc, 0u, code)) {
         return false;
     }
