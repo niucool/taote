@@ -2145,7 +2145,14 @@ UnpackResult Unpacker::finalize(Qiling& ql) {
         // MEW's stub memsets the decoded image right before handing off, so the
         // terminal dump is zeroed where the payload lives; the reference keeps the
         // full first-write overlay for this family alone (unpacker.cpp:178-200).
-        if (opts_.family == "MEW" && shadow_seen_.size() == image.size()) {
+        // the full first-write overlay is right for the families whose decoder
+        // writes each decrypted byte once and then RE-ENCRYPTS the page after
+        // executing it (MEW memsets the image; PECompact re-encrypts), and wrong
+        // for the JIT families that write transient ciphertext pages first
+        // (JDPack .text 0.93 -> 0.47, PEtite 0.80 -> 0.69, measured §0.5.3b)
+        const bool shadow_family = opts_.family == "MEW" || opts_.family == "PECompact";
+        const bool shadow_all = std::getenv("TAOTE_UNPACK_SHADOW_ALL") != nullptr;
+        if ((shadow_family || shadow_all) && shadow_seen_.size() == image.size()) {
             std::size_t restored = 0;
             for (std::size_t i = 0; i < image.size(); ++i) {
                 if (shadow_seen_[i] && shadow_image_[i] != image[i]) {

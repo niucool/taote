@@ -24,6 +24,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <algorithm>
 #include <fstream>
 #include <iostream>
 #include <memory>
@@ -123,6 +124,62 @@ std::string guess_family(const fs::path& sample) {
     if (has(".bero")) return "BeRoEXEPacker";
     if (has(".eronana")) return "Eronana";
     if (has(".ex_cod") || has(".ex_dat")) return "EXpressor";
+    // PECompact compresses in place and keeps the original section names, so the
+    // only signature is the stub's entry: `b8 <imm32> 50 64 ff 35` (mov eax,
+    // imm32; push eax; push dword ptr fs:[0]). Measured over the whole packed
+    // corpus: it hits 118/118 PECompact samples and nothing else (PEtite's entry
+    // shares the `b8 <imm32> 50` head but continues `6a 00 68`, not `64 ff 35`).
+    {
+        try {
+            std::ifstream ef(sample, std::ios::binary);
+            std::vector<std::uint8_t> hdr(0x1000);
+            ef.read(reinterpret_cast<char*>(hdr.data()), static_cast<std::streamsize>(hdr.size()));
+            hdr.resize(static_cast<std::size_t>(ef.gcount()));
+            if (hdr.size() > 0x40) {
+                const auto lfanew = static_cast<std::size_t>(hdr[0x3c]) |
+                                    (static_cast<std::size_t>(hdr[0x3d]) << 8) |
+                                    (static_cast<std::size_t>(hdr[0x3e]) << 16) |
+                                    (static_cast<std::size_t>(hdr[0x3f]) << 24);
+                if (lfanew + 0x100 < hdr.size()) {
+                    const auto ep = static_cast<std::uint32_t>(hdr[lfanew + 24 + 16]) |
+                                    (static_cast<std::uint32_t>(hdr[lfanew + 24 + 17]) << 8) |
+                                    (static_cast<std::uint32_t>(hdr[lfanew + 24 + 18]) << 16) |
+                                    (static_cast<std::uint32_t>(hdr[lfanew + 24 + 19]) << 24);
+                    const auto nsec = static_cast<std::size_t>(hdr[lfanew + 6]) |
+                                      (static_cast<std::size_t>(hdr[lfanew + 7]) << 8);
+                    const auto optsz = static_cast<std::size_t>(hdr[lfanew + 20]) |
+                                       (static_cast<std::size_t>(hdr[lfanew + 21]) << 8);
+                    const std::size_t secoff = lfanew + 24 + optsz;
+                    for (std::size_t i = 0; i < nsec && secoff + 40 * (i + 1) <= hdr.size(); ++i) {
+                        const std::size_t e = secoff + 40 * i;
+                        const auto rd32 = [&hdr](std::size_t o) {
+                            return static_cast<std::uint32_t>(hdr[o]) | (static_cast<std::uint32_t>(hdr[o + 1]) << 8) |
+                                   (static_cast<std::uint32_t>(hdr[o + 2]) << 16) |
+                                   (static_cast<std::uint32_t>(hdr[o + 3]) << 24);
+                        };
+                        const auto vs = rd32(e + 8);
+                        const auto va = rd32(e + 12);
+                        const auto rs = rd32(e + 16);
+                        const auto rp = rd32(e + 20);
+                        if (rs == 0 || ep < va || ep >= va + std::max(vs, rs)) {
+                            continue;
+                        }
+                        const std::uint64_t off = static_cast<std::uint64_t>(rp) + (ep - va);
+                        std::ifstream f2(sample, std::ios::binary);
+                        f2.seekg(static_cast<std::streamoff>(off));
+                        std::uint8_t b[10] = {0};
+                        f2.read(reinterpret_cast<char*>(b), 10);
+                        if (f2.gcount() == 10 && b[0] == 0xb8 && b[5] == 0x50 && b[6] == 0x64 && b[7] == 0xff &&
+                            b[8] == 0x35) {
+                            return "PECompact";
+                        }
+                        break;
+                    }
+                }
+            }
+        } catch (...) {
+        }
+    }
     return "unknown";
 }
 
