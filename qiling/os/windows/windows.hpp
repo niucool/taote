@@ -231,6 +231,12 @@ public:
     bool seh_dispatch_cpu(std::uint32_t exception_code);
 
     void set_seh_dispatch(bool enabled) noexcept { seh_dispatch_enabled_ = enabled; }
+    // unpack mode: a guest handler that answers EXCEPTION_CONTINUE_SEARCH when
+    // fs:[0] is exhausted resumes at the saved CONTEXT's Eip instead of ending
+    // the run (the reference's "raw-chain continue", winemu.cpp:4859-4920): the
+    // handler has usually patched the trapping instruction, so the retry
+    // progresses. Bounded by seh_dispatch's identical-fault repeat guard.
+    void set_seh_continue_on_exhausted(bool enabled) noexcept { seh_continue_on_exhausted_ = enabled; }
     // the PE loader finished its load walk (DllMain drives included). The
     // program's own execution is what follows, so the synthetic SEH dispatch
     // only serves faults from here on (see seh_on_fault).
@@ -365,6 +371,7 @@ private:
     std::uint64_t seh_fault_addr_ = 0;      // the repeat-guard key (fault address)
     int seh_repeat_count_ = 0;
     bool seh_dispatch_enabled_ = true;   // the set_seh_dispatch switch
+    bool seh_continue_on_exhausted_ = false;  // the unpack-mode raw-chain continue
     bool loader_done_ = false;           // the PE load walk finished
     std::optional<std::uint64_t> ucrt_locale_cells_[6];  // see ucrt_locale_cell
     // cached: does the rootfs carry a real _except_handler4_common? (seh.cpp)

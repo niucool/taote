@@ -619,6 +619,14 @@ bool QlOsWindows::seh_dispatch(std::uint64_t fault_addr, std::uint32_t access_ty
         return false;
     }
 
+    if (std::getenv("TAOTE_SEHDBG") != nullptr) {
+        std::fprintf(stderr, "[sehd] code=%08x fault=%llx pc=%llx chain=%llx next=%llx handler=%llx\n",
+                     exception_code, static_cast<unsigned long long>(fault_addr),
+                     static_cast<unsigned long long>(regs.arch_pc()),
+                     static_cast<unsigned long long>(chain),
+                     static_cast<unsigned long long>(next),
+                     static_cast<unsigned long long>(handler));
+    }
     // the repeat guard: an identical (pc, address) fault storm (a handler
     // that resumes without fixing anything) must not spin forever
     const auto pc = regs.arch_pc();
@@ -732,6 +740,22 @@ bool QlOsWindows::seh_continue() {
         // page (0x70000001) with the handler's ContinUE_SEARCH in eax.
         const auto next = ql_->mem().read_ptr(seh_walk_frame_, 4);
         if (next == 0 || next == 0xffffffffull || next < 0x1000 || next >= 0xfffff000) {
+            // Unpack mode (the reference's raw-chain continue): a declining
+            // handler usually patched the trapping instruction before answering,
+            // so re-executing the saved CONTEXT's Eip makes progress where
+            // ending the run would lose the sample (measured: PECompact's
+            // decryptor SEH answers CONTINUE_SEARCH at the null write on
+            // 0x407aae and then installs its real frame). seh_dispatch's
+            // identical-fault repeat guard bounds a handler that fixes nothing.
+            if (seh_continue_on_exhausted_) {
+                seh_load_context();
+                seh_retarget_ = regs.arch_pc();
+                if (std::getenv("TAOTE_SEHDBG") != nullptr) {
+                    std::fprintf(stderr, "[sehc] exhausted -> resume %llx\n",
+                                 static_cast<unsigned long long>(seh_retarget_));
+                }
+                return true;
+            }
             return false;  // the chain is exhausted: the fault is unhandled
         }
         return seh_call_frame(next);

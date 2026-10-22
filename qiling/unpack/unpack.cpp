@@ -500,6 +500,16 @@ void Unpacker::install(Qiling& ql) {
 
     install_gpa_sentinel(ql);
 
+    // unpack mode: an unhandled access violation whose guest handler answered
+    // EXCEPTION_CONTINUE_SEARCH resumes at the saved CONTEXT (the reference's
+    // raw-chain continue) instead of ending the run. The handler has usually
+    // patched the trapping instruction, so the retry progresses; the dispatch's
+    // identical-fault repeat guard bounds a handler that fixes nothing.
+    try {
+        ql.os<os::windows::QlOsWindows>().set_seh_continue_on_exhausted(true);
+    } catch (...) {
+    }
+
     // The invalid-instruction dispatch (the reference's install_invalid_insn_,
     // unpacker.cpp:4773-4811): TELock's self-modifying ladder executes 0xf1
     // (ICEBP) and the undefined `lea reg,reg` (ModRM mod==3) form as exception
@@ -2115,7 +2125,7 @@ UnpackResult Unpacker::finalize(Qiling& ql) {
         }
         // the executed-page view: for the JIT-decrypting stubs this is the decoded
         // code; it overlays only pages that were actually executed
-        if (exec_view_.size() == image.size()) {
+        if (exec_view_.size() == image.size() && std::getenv("TAOTE_UNPACK_NO_EXECVIEW") == nullptr) {
             std::size_t restored = 0;
             for (std::size_t page = 0; page < exec_page_seen_.size(); ++page) {
                 if (!exec_page_seen_[page]) {
