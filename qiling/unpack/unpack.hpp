@@ -114,7 +114,8 @@ private:
     int section_index_at(std::uint64_t addr) const;
 
     // write-claim (the reference's on_section_write, unpacker.cpp:5197-5381)
-    int on_section_write(std::uint64_t pc, std::uint64_t addr);
+    int on_section_write(std::uint64_t pc, std::uint64_t addr, std::uint32_t size = 1,
+                         std::uint64_t value = 0);
     // section-hop exec (on_section_exec, unpacker.cpp:5520-5810)
     int on_section_exec(std::uint64_t addr);
     // the accept gate + latch (dump_module, unpacker.cpp:6610-6834)
@@ -137,6 +138,11 @@ private:
     // import set for the stubs that never call GetProcAddress (they resolve from
     // their own table / walk the EAT directly).
     void salvage_iat(Qiling& ql, const std::vector<std::uint8_t>& image);
+    // The payload's OWN import descriptors, read out of the dumped image (RVAs +
+    // dll/name strings live inside it). Packers that restore the original table
+    // — EnigmaVB, Molebox, Neolite, PECompact — leave it intact, so this recovers
+    // their import set without any emulation evidence.
+    void harvest_image_imports(const std::vector<std::uint8_t>& image);
 
     UnpackOptions opts_;
     std::vector<PackSection> sections_;
@@ -174,8 +180,22 @@ private:
     // (measured: MPRESS's decode target is entered mid-decode first, and erasing
     // the range there lost the true OEP at 0x407a98)
     std::set<std::uint64_t> dumped_addrs_;
+    // the FIRST write per image byte (the reference's shadow_image_/shadow_seen_,
+    // unpacker.h:919-945): anti-dump stubs memset the decoded image after the
+    // payload is in place (MEW) and just-in-time packers re-encrypt it (TELock), so
+    // the terminal dump alone loses bytes the stub had already decoded
+    std::vector<std::uint8_t> shadow_image_;
+    std::vector<bool> shadow_seen_;
+    // MEW's statically parsed OEP (install time, when the family is MEW)
+    std::uint64_t mew_oep_candidate_ = 0;
     // the light pick (the reference's V1 prologue-shape vote, :8060-8110)
     std::uint64_t pick_oep(const std::vector<std::uint8_t>& image) const;
+    // A stub that patches the in-memory PE header's AddressOfEntryPoint (the
+    // EnigmaVB class, PLAN_UNPACK Phase 3 row 13) or MEW's header table records
+    // the payload entry statically. Both are read here and join the pick as
+    // strong candidates.
+    std::uint64_t header_ep_candidate(const std::vector<std::uint8_t>& image) const;
+    std::uint64_t mew_static_oep() const;
     std::uint64_t meta_oep_ = 0;
     std::uint64_t last_oep_ = 0;
     std::string reason_;
