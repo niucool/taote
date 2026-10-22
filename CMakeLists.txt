@@ -74,7 +74,7 @@ endif()
 
 install(TARGETS qiling
         ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}")
-install(TARGETS qltool parity_trace gap_census qiling_tests
+install(TARGETS qltool parity_trace gap_census taote_unpack qiling_tests
         RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
 install(DIRECTORY qiling/
         DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/qiling"

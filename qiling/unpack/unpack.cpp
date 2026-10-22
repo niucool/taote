@@ -1,0 +1,1422 @@
+// qiling/unpack/unpack.cpp — the generic unpacker core (PLAN_UNPACK.md §1.3-§1.8).
+//
+// Ported from ../pegasus/src/unpacker/unpacker.cpp; the plan records the
+// file:line map for every decision below. Phase 1 scope: section classification
+// + watch set, write-claim tracking, section-hop OEP detection with an accept
+// gate, image dump + meta sidecar, and a hand-rolled PE rebuilder that appends a
+// .pgimp import section.
+#include "qiling/unpack/unpack.hpp"
+
+#include <LIEF/PE.hpp>
+
+#include <algorithm>
+#include <cstdio>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <numeric>
+
+#include <nlohmann/json.hpp>
+
+#include "qiling/exception.hpp"
+#include "qiling/loader/pe.hpp"
+#include "qiling/os/memory.hpp"
+#include "qiling/os/os.hpp"
+#include "qiling/os/utils.hpp"
+
+namespace qiling {
+namespace unpack {
+
+namespace {
+
+namespace fs = std::filesystem;
+
+std::string lower_ascii(std::string s) {
+    for (auto& c : s) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    return s;
+}
+
+std::string sanitize_ascii(std::string s) {
+    for (auto& c : s) {
+        const auto u = static_cast<unsigned char>(c);
+        if (u < 0x20 || u > 0x7E) {
+            c = '.';
+        }
+    }
+    return s;
+}
+
+std::string hex(std::uint64_t v) {
+    char buf[24];
+    std::snprintf(buf, sizeof(buf), "0x%llx", static_cast<unsigned long long>(v));
+    return buf;
+}
+
+std::uint32_t align_up(std::uint32_t v, std::uint32_t a) {
+    if (a == 0) {
+        return v;
+    }
+    return (v + a - 1) / a * a;
+}
+
+}  // namespace
+
+Unpacker::Unpacker(UnpackOptions opts) : opts_(std::move(opts)) {}
+
+// hooks_ is cleared by finalize()/detach_hooks() while the engine is alive; a
+// HookRet destructor after that would call uc_hook_del on a dead engine
+Unpacker::~Unpacker() { hooks_.clear(); }
+
+
+
+int Unpacker::section_index_at(std::uint64_t addr) const {
+    for (std::size_t i = 0; i < sections_.size(); ++i) {
+        if (addr >= sections_[i].start && addr < sections_[i].end) {
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
+}
+
+bool Unpacker::inside_inplace(std::uint64_t addr) const {
+    for (const auto& r : inplace_ranges_) {
+        if (addr >= r.first && addr < r.second) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// The reference's classify_sections (unpacker.cpp:95-171): turn the mapped
+// sections into PackSection records, then choose what to watch.
+void Unpacker::classify_sections(Qiling& ql) {
+    sections_.clear();
+    watched_.clear();
+    inplace_ranges_.clear();
+
+    const auto& pe_loader = static_cast<const loader::QlLoaderPE&>(ql.loader());
+    base_ = pe_loader.pe_image_address();
+    image_size_ = pe_loader.pe_image_size();
+    is_64_ = ql.arch().bits() == 64;
+    // the loader keeps the header's AddressOfEntryPoint verbatim: an RVA by
+    // spec, but packers write a VA there (ASPack stores 0x42a001 = RVA|base with
+    // base 0x400000), so resolve both forms instead of double-adding the base
+    const auto raw_ep = pe_loader.entry_point;
+    packed_ep_va_ = (raw_ep >= base_ && raw_ep < base_ + image_size_) ? raw_ep : base_ + raw_ep;
+
+    auto parsed = LIEF::PE::Parser::parse(opts_.sample_path);
+    if (parsed == nullptr) {
+        throw QlErrorBase("unpack: LIEF could not parse " + opts_.sample_path);
+    }
+    for (const auto& section : parsed->sections()) {
+        PackSection ps;
+        ps.name = sanitize_ascii(section.name());
+        ps.start = base_ + section.virtual_address();
+        ps.vsize = static_cast<std::uint32_t>(section.virtual_size());
+        ps.end = ps.start + (ps.vsize ? ps.vsize : 1);
+        ps.raw = static_cast<std::uint32_t>(section.sizeof_raw_data());
+        ps.is_exec = section.has_characteristic(LIEF::PE::Section::CHARACTERISTICS::MEM_EXECUTE);
+        sections_.push_back(ps);
+    }
+
+    // primary watch set: exec sections + hollow (raw == 0) ones
+    bool any_exec_watched = false;
+    for (const auto& ps : sections_) {
+        const bool hollow = ps.raw == 0 && ps.vsize > 0;
+        const bool tiny_raw = ps.is_exec && ps.raw > 0 && ps.raw < ps.vsize / 4;
+        if (!((ps.is_exec && ps.vsize > 0) || hollow)) {
+            continue;
+        }
+        watched_.push_back(ps);
+        if (ps.is_exec) {
+            any_exec_watched = true;
+            if (!hollow && !tiny_raw) {
+                inplace_ranges_.insert({ps.start, ps.end});
+            }
+        }
+    }
+    // JDPack-class fallback: no exec candidate at all -> watch anything the
+    // stub has to fill (unpacker.cpp:136-143)
+    if (!any_exec_watched) {
+        watched_.clear();
+        for (const auto& ps : sections_) {
+            if (ps.vsize > 0 && ps.vsize > ps.raw) {
+                watched_.push_back(ps);
+            }
+        }
+    }
+    // secondary watch set: every remaining section except the packed EP's own
+    // (unpacker.cpp:145-157) — Amber/MEW payloads land in sections that are not
+    // marked exec in the packed layout
+    for (const auto& ps : sections_) {
+        bool already = false;
+        for (const auto& w : watched_) {
+            if (w.start == ps.start && w.end == ps.end) {
+                already = true;
+                break;
+            }
+        }
+        if (already) {
+            continue;
+        }
+        if (packed_ep_va_ >= ps.start && packed_ep_va_ < ps.end) {
+            continue;
+        }
+        if (ps.vsize == 0) {
+            continue;
+        }
+        watched_.push_back(ps);
+    }
+
+    if (opts_.debug) {
+        std::fprintf(stderr, "[unpack] base=%s image=%s ep=%s sections:\n", hex(base_).c_str(),
+                     hex(image_size_).c_str(), hex(packed_ep_va_).c_str());
+        for (const auto& ps : sections_) {
+            std::fprintf(stderr, "  %-10s %s-%s vs=0x%x raw=0x%x exec=%d%s\n", ps.name.c_str(),
+                         hex(ps.start).c_str(), hex(ps.end).c_str(), ps.vsize, ps.raw, ps.is_exec ? 1 : 0,
+                         inside_inplace(ps.start) ? " inplace" : "");
+        }
+        std::fprintf(stderr, "[unpack] watched=%zu\n", watched_.size());
+    }
+
+    // the packed file's header (anti-emu stubs zero the in-memory MZ:
+    // unpacker.cpp:213-221)
+    try {
+        std::ifstream in(opts_.sample_path, std::ios::binary);
+        if (in) {
+            header_snapshot_.resize(0x400);
+            in.read(reinterpret_cast<char*>(header_snapshot_.data()), 0x400);
+            header_snapshot_.resize(static_cast<std::size_t>(in.gcount()));
+        }
+    } catch (...) {
+        header_snapshot_.clear();
+    }
+}
+
+void Unpacker::note_import(const std::string& dll, const std::string& name) {
+    if (dll.empty() || name.empty()) {
+        return;
+    }
+    const bool fresh = import_seen_.insert(dll + "\n" + name).second;
+    if (fresh) {
+        imports_.emplace_back(dll, name);
+    }
+    if (opts_.debug) {
+        static int n = 0;
+        if (n++ < 6) {
+            std::fprintf(stderr, "[unpack] note_import %s!%s fresh=%d imports_=%zu\n", dll.c_str(), name.c_str(),
+                         fresh ? 1 : 0, imports_.size());
+        }
+    }
+}
+
+// One export-less decoy image for a dll the stub asked for (the reference's
+// fabricated decoy module): a valid PE with a single `ret` cell, so the loader
+// maps it, LoadLibrary answers its base, and GetProcAddress's module lookup names
+// the dll for attribution.
+bool Unpacker::materialize_decoy_dll(const std::string& dll_name) {
+    if (!opts_.allow_decoy_dlls || opts_.rootfs.empty() || dll_name.empty()) {
+        return false;
+    }
+    std::string name = fs::path(dll_name).filename().string();
+    for (auto& c : name) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    if (name.find('.') == std::string::npos) {
+        name += ".dll";
+    }
+    const auto dir = fs::path(opts_.rootfs) / "Windows" / "System32";
+    const auto path = dir / name;
+    std::error_code ec;
+    if (!fs::exists(path, ec)) {
+        try {
+            fs::create_directories(dir, ec);
+            auto factory = LIEF::PE::Factory::create(LIEF::PE::PE_TYPE::PE32_PLUS);
+            std::vector<std::uint8_t> code(16, 0xC3);
+            LIEF::PE::Section text(".text", code);
+            factory->add_section(text);
+            auto bin = factory->get();
+            std::uint32_t text_rva = 0;
+            for (const auto& sec : bin->sections()) {
+                if (sec.name() == ".text") {
+                    text_rva = sec.virtual_address();
+                }
+            }
+            LIEF::PE::Export exp(name, {LIEF::PE::ExportEntry("decoy_export", text_rva)});
+            bin->set_export(exp);
+            LIEF::PE::Builder::config_t cfg;
+            cfg.exports = true;
+            cfg.resources = false;
+            cfg.relocations = false;
+            cfg.load_configuration = false;
+            cfg.tls = false;
+            cfg.overlay = false;
+            cfg.debug = false;
+            cfg.dos_stub = false;
+            LIEF::PE::Builder builder(*bin, cfg);
+            builder.build();
+            std::ofstream out(path, std::ios::binary | std::ios::trunc);
+            const auto& bytes = builder.get_build();
+            out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+        } catch (...) {
+            return false;
+        }
+    }
+    return fs::exists(path, ec);
+}
+
+void Unpacker::install_gpa_sentinel(Qiling& ql) {
+    auto& os = ql.os();
+
+    // the LoadLibrary/GetModuleHandle name tracker (the reference's llname hook,
+    // unpacker.cpp:269-330)
+    const auto track = [this](Qiling& q, const QlOs::NamedParams& params, std::optional<std::uint64_t> retval)
+        -> std::optional<std::uint64_t> {
+        // the param is typed LPCSTR_/LPCWSTR_, so the resolved value arrives as a
+        // std::string; a raw-pointer form (uint64) is read from guest memory
+        std::string name;
+        for (const auto& [key, value] : params) {
+            if (key.rfind("lpLibFileName", 0) != 0 && key.rfind("lpModuleName", 0) != 0) {
+                continue;
+            }
+            if (const auto* v = std::get_if<std::uint64_t>(&value); v != nullptr) {
+                if (*v > 0x10000) {
+                    try {
+                        name = os::QlOsUtils::read_cstring(q, *v);
+                    } catch (...) {
+                        name.clear();
+                    }
+                }
+            } else if (const auto* str = std::get_if<std::string>(&value); str != nullptr) {
+                name = *str;
+            }
+            break;
+        }
+        if (name.empty()) {
+            return std::nullopt;
+        }
+        std::string base = fs::path(name).filename().string();
+        for (auto& c : base) {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+        last_ll_name_ = base;
+        if (retval.has_value() && *retval > 0x10000) {
+            handle_names_[*retval] = base;
+            return std::nullopt;
+        }
+        // the loader could not find it: fabricate a decoy so the module handle is
+        // real and the dll is identifiable
+        if (opts_.debug) {
+            std::fprintf(stderr, "[unpack] loadlib %s retval=%s\n", base.c_str(),
+                         retval.has_value() ? hex(*retval).c_str() : "none");
+        }
+        if (!retval.has_value() || *retval == 0) {
+            const bool ok = materialize_decoy_dll(base);
+            if (opts_.debug) {
+                std::fprintf(stderr, "[unpack] decoy %s -> %d\n", base.c_str(), ok ? 1 : 0);
+            }
+            if (ok) {
+                try {
+                    const auto loaded = static_cast<loader::QlLoaderPE&>(q.loader()).load_dll(base);
+                    if (loaded != 0) {
+                        handle_names_[loaded] = base;
+                        return loaded;
+                    }
+                } catch (...) {
+                }
+            }
+        }
+        return std::nullopt;
+    };
+    for (const char* api : {"LoadLibraryA", "LoadLibraryW", "LoadLibraryExA", "LoadLibraryExW",
+                            "GetModuleHandleA", "GetModuleHandleW"}) {
+        os.set_api_exit(api, track);
+    }
+    os.set_api_exit("GetProcAddress",
+                    [this](Qiling& q, const QlOs::NamedParams& params, std::optional<std::uint64_t> retval)
+                        -> std::optional<std::uint64_t> {
+        std::uint64_t hmod = 0;
+        std::uint64_t name_ptr = 0;
+        for (const auto& [key, value] : params) {
+            const auto* v = std::get_if<std::uint64_t>(&value);
+            if (v == nullptr) {
+                continue;
+            }
+            if (key == "hModule" || key == "hLibModule") {
+                hmod = *v;
+            } else if (key == "lpProcName") {
+                name_ptr = *v;
+            }
+        }
+        std::string name;
+        if (name_ptr > 0x10000) {
+            try {
+                const auto raw = q.mem().read(name_ptr, 256);
+                std::size_t nul = 0;
+                while (nul < raw.size() && raw[nul] != 0) {
+                    ++nul;
+                }
+                name.assign(reinterpret_cast<const char*>(raw.data()), nul);
+            } catch (...) {
+                name.clear();
+            }
+        } else if (name_ptr != 0) {
+            name = "ordinal_" + std::to_string(name_ptr);
+        }
+        // the dll: the module handle's image, else the image the name resolves in
+        std::string dll;
+        try {
+            const auto& pe_loader = static_cast<const loader::QlLoaderPE&>(q.loader());
+            if (hmod != 0) {
+                if (const auto* img = pe_loader.find_containing_image(hmod); img != nullptr) {
+                    dll = lower_ascii(fs::path(img->path).filename().string());
+                }
+            }
+            if (dll.empty() && retval.has_value() && *retval != 0) {
+                if (const auto* img = pe_loader.find_containing_image(*retval); img != nullptr) {
+                    dll = lower_ascii(fs::path(img->path).filename().string());
+                }
+            }
+        } catch (...) {
+            dll.clear();
+        }
+        if (dll.empty() && !name.empty()) {
+            // the handle is often a decoy: attribute by who exports the name
+            // (the reference's last_ll_name_/alias evidence analogue)
+            try {
+                const auto& pe_loader = static_cast<const loader::QlLoaderPE&>(q.loader());
+                for (const auto& key : pe_loader.import_address_table_keys()) {
+                    const auto* iat = pe_loader.import_address_table_at(key);
+                    if (iat == nullptr || iat->lookup(name) == 0) {
+                        continue;
+                    }
+                    dll = lower_ascii(key);
+                    break;
+                }
+            } catch (...) {
+                dll.clear();
+            }
+        }
+        if (dll.empty()) {
+            const auto hit = handle_names_.find(hmod);
+            if (hit != handle_names_.end()) {
+                dll = hit->second;
+            }
+        }
+        if (dll.empty()) {
+            dll = last_ll_name_;
+        }
+        if (dll.empty()) {
+            dll = "kernel32.dll";
+        }
+        dll = sanitize_ascii(dll);
+        name = sanitize_ascii(name);
+        if (retval.has_value() && *retval != 0) {
+            note_import(dll, name);  // the loader really resolved it
+            return std::nullopt;
+        }
+        if (name.empty()) {
+            return std::nullopt;  // nothing to mint for an unreadable name
+        }
+        // Mint a *callable* sentinel: the loader's synthesized stub arena gives a
+        // mapped `xor eax,eax; ret` cell (a bare address would fault the moment
+        // the stub calls it — measured: ASPack's stub calls VirtualAlloc through
+        // the value and died with UC_ERR_FETCH_UNMAPPED), and registering the
+        // name at that cell makes the dispatcher answer the call when taote has a
+        // handler for it.
+        std::uint64_t sentinel = 0;
+        try {
+            auto& pe_loader = static_cast<loader::QlLoaderPE&>(q.loader());
+            sentinel = pe_loader.unbound_import_stub(name);
+            if (sentinel != 0) {
+                pe_loader.register_import_symbol(sentinel, dll, name);
+            }
+        } catch (...) {
+            sentinel = 0;
+        }
+        if (sentinel == 0) {
+            sentinel = gpa_sentinel_ += 0x10;
+        }
+        note_import(dll, name);
+        if (opts_.debug) {
+            std::fprintf(stderr, "[unpack] gpa sentinel %s!%s -> %s\n", dll.c_str(), name.c_str(),
+                         hex(sentinel).c_str());
+        }
+        return sentinel;
+    });
+}
+
+void Unpacker::install(Qiling& ql) {
+    ql_ = &ql;
+    classify_sections(ql);
+
+    // no hops at all (the Phase 0 artifact-only mode): the dump is the entry
+    // state, which is what "no unpacking" means for the scoreboard
+    if (!opts_.enable_hop) {
+        return;
+    }
+
+    install_gpa_sentinel(ql);
+
+    for (const auto& ps : watched_) {
+        const std::uint64_t start = ps.start;
+        const std::uint64_t end = ps.end;
+
+        // the write-claim hook: first write into a watched section claims it
+        auto write_hook = std::make_shared<HookRet>(
+            ql.hook_mem_write([this, start](int /*access*/, std::uint64_t addr, std::uint32_t /*size*/,
+                                            std::int64_t /*value*/) -> int {
+                return on_section_write(0, addr);
+            }, start, end));
+        if (write_hook->obj() != nullptr) {
+            hooks_.push_back(std::move(write_hook));
+        }
+
+        // the section-hop hook: an exec whose range was claimed is the
+        // write-then-execute hand-off
+        auto code_hook = std::make_shared<HookRet>(
+            ql.hook_code([this](std::uint64_t addr, std::uint32_t /*size*/) -> int {
+                return on_section_exec(addr);
+            }, start, end));
+        if (code_hook->obj() != nullptr) {
+            hooks_.push_back(std::move(code_hook));
+        }
+    }
+}
+
+// The reference's on_section_write (unpacker.cpp:5197-5381). `pc` is unused: the
+// hook fires after the store, so the pc is read from the arch state.
+int Unpacker::on_section_write(std::uint64_t /*pc*/, std::uint64_t addr) {
+    for (const auto& ps : watched_) {
+        if (!(addr >= ps.start && addr < ps.end)) {
+            continue;
+        }
+        const auto key = std::make_pair(ps.start, ps.end);
+        if (muted_.count(ps.start) != 0) {
+            return 0;
+        }
+        // keep the write ordinal current for the OEP pick (the hook stays armed
+        // for this even after the claim; the reference's YODA_PLATEAU stamp)
+        ++write_seq_;
+        last_write_seq_[ps.start] = write_seq_;
+        if (claimed_.count(ps.start) != 0) {
+            return 0;  // already claimed: only the ordinal is interesting now
+        }
+        const bool is_ep_section = packed_ep_va_ >= ps.start && packed_ep_va_ < ps.end;
+        // self-write suppression (unpacker.cpp:5251-5284): the stub writing its
+        // own section is not a decode; claim nothing and stop listening there
+        const std::uint64_t pc = ql_->arch().regs().arch_pc();
+        const bool pc_in_same_section = pc >= ps.start && pc < ps.end;
+        if (pc_in_same_section && !is_ep_section) {
+            if (opts_.debug) {
+                std::fprintf(stderr, "[unpack] mute self-write %s (pc=%s addr=%s ep=%s)\n", ps.name.c_str(),
+                             hex(pc).c_str(), hex(addr).c_str(), hex(packed_ep_va_).c_str());
+            }
+            muted_.insert(ps.start);
+            return 0;
+        }
+        // hollow-predecessor cap (unpacker.cpp:5324-5350): a raw==0 section
+        // immediately before the stub's EP section is the decode target, but the
+        // stub's own code sits at the EP — claim only below it
+        std::uint64_t claim_start = ps.start;
+        std::uint64_t claim_end = ps.end;
+        if (is_ep_section) {
+            bool hollow_pred = false;
+            for (const auto& q : sections_) {
+                if (q.end <= ps.start && ps.start - q.end < 0x1000 && q.raw == 0 && q.vsize > 0) {
+                    hollow_pred = true;
+                    break;
+                }
+            }
+            if (hollow_pred && packed_ep_va_ > 0x100 && packed_ep_va_ - 0x100 > ps.start) {
+                claim_end = packed_ep_va_ - 0x100;
+            }
+        }
+        const auto claim = std::make_pair(claim_start, claim_end);
+        ever_written_.insert(claim);
+        written_ranges_.insert(claim);
+        // one claim per section per run (the reference disables the write hook on
+        // first fire): the stub's own traffic in a claimed section cannot
+        // re-claim it, but the write ordinals keep flowing for the OEP pick
+        claimed_.insert(ps.start);
+        if (opts_.debug) {
+            std::fprintf(stderr, "[unpack] claim %s [%s,%s) write=%s pc=%s\n", ps.name.c_str(),
+                         hex(claim_start).c_str(), hex(claim_end).c_str(), hex(addr).c_str(),
+                         hex(pc).c_str());
+        }
+        return 0;
+    }
+    return 0;
+}
+
+// The reference's on_section_exec (unpacker.cpp:5520-5810): a written section
+// that starts executing is the payload hand-off.
+int Unpacker::on_section_exec(std::uint64_t addr) {
+    if (opts_.debug) {
+        static int fires = 0;
+        ++fires;
+        if (fires % 200000 == 0) {
+            std::fprintf(stderr, "[unpack] exec fires=%d at %s written=%zu\n", fires, hex(addr).c_str(),
+                         written_ranges_.size());
+        }
+        static int in_payload = 0;
+        if (addr >= 0x401000 && addr < 0x422000 && in_payload < 12) {
+            std::fprintf(stderr, "[unpack] exec PAYLOAD %s (written=%zu)\n", hex(addr).c_str(),
+                         written_ranges_.size());
+            ++in_payload;
+        }
+    }
+    const bool in_written = [&] {
+        for (const auto& r : written_ranges_) {
+            if (addr >= r.first && addr <= r.second) {
+                return true;
+            }
+        }
+        return false;
+    }();
+
+    // the stub's own code near the packed EP is not the payload (unless the
+    // stub decoded over itself there)
+    const std::uint64_t ep_delta = addr > packed_ep_va_ ? addr - packed_ep_va_ : packed_ep_va_ - addr;
+    if (ep_delta < 0x1000 && !in_written) {
+        return 0;
+    }
+    // in-place exec sections are noise unless written
+    if (inside_inplace(addr) && !in_written) {
+        return 0;
+    }
+    if (!in_written) {
+        return 0;
+    }
+    for (const auto& r : ever_written_) {
+        if (addr >= r.first && addr <= r.second) {
+            // the reference's CF-hop observer: every first-exec of an address in a
+            // decoded section is a candidate, and the pick decides (erasing the
+            // range here lost the real transfer after an early mid-decode hop)
+            if (dumped_addrs_.insert(addr).second && stages_ < opts_.max_stages) {
+                dump_module(*ql_, addr, "section_hop");
+            }
+            break;
+        }
+    }
+    return 0;
+}
+
+// The reference's dump_module accept gate (unpacker.cpp:6610-6834), cut down to
+// the generic rules: never a zero page, never a printable data blob (unless the
+// target section is exec/hollow), first hop wins, later hops must not shrink.
+void Unpacker::dump_module(Qiling& ql, std::uint64_t addr, const std::string& reason) {
+    // The reference ledgers candidates during the run and emits the dump once at
+    // pick time from terminal memory (unpacker.cpp:6789-6830 + pick_and_emit_oep
+    // :7991-8366). Emitting per candidate here burned the stage cap on junk hops
+    // and made the artifact depend on which hop happened to be 16th.
+    if (hop_ledger_.size() >= 4096) {
+        return;
+    }
+    bool accept = true;
+    std::vector<std::uint8_t> head;
+    try {
+        head = ql.mem().read(addr, 16);
+    } catch (...) {
+        head.clear();
+    }
+    bool all_zero = !head.empty();
+    int printable = 0;
+    for (auto c : head) {
+        const auto u = static_cast<unsigned char>(c);
+        if (u != 0) {
+            all_zero = false;
+        }
+        if (u >= 0x20 && u <= 0x7E) {
+            ++printable;
+        }
+    }
+    const int sec = section_index_at(addr);
+    const bool privileged = sec >= 0 && (sections_[static_cast<std::size_t>(sec)].is_exec ||
+                                         sections_[static_cast<std::size_t>(sec)].raw == 0);
+    if (head.empty()) {
+        accept = privileged;  // unreadable: only an exec/hollow target qualifies
+    } else if (all_zero) {
+        accept = false;  // nothing to fetch there
+    } else if (printable > 12 && !privileged) {
+        accept = false;  // a data blob, not code
+    }
+    if (accept && meta_oep_ != 0) {
+        const int new_sec = section_index_at(addr);
+        const int cur_sec = section_index_at(meta_oep_);
+        const int ep_sec = section_index_at(packed_ep_va_);
+        if (new_sec >= 0 && new_sec == ep_sec && cur_sec != ep_sec) {
+            if (opts_.debug) {
+                std::fprintf(stderr, "[unpack] reject hop %s (stub-section junk, keeping %s)\n",
+                             hex(addr).c_str(), hex(meta_oep_).c_str());
+            }
+            return;
+        }
+    }
+    if (!accept) {
+        if (opts_.debug) {
+            std::fprintf(stderr, "[unpack] reject hop %s (%s)\n", hex(addr).c_str(), reason.c_str());
+        }
+        return;
+    }
+    hop_ledger_.push_back(addr);
+    hop_write_seq_.push_back(write_seq_);
+    meta_oep_ = addr;
+    last_oep_ = addr;
+    reason_ = reason;
+    if (opts_.debug) {
+        std::fprintf(stderr, "[unpack] OEP candidate %s (%s)\n", hex(addr).c_str(), reason.c_str());
+    }
+}
+
+// The reference harvests imports from the loader table + the GPA hook + family
+// tables (unpacker.cpp:6145-6496). Phase 1 takes the packed file's own import
+// descriptors (the loader loaded exactly those); the sentinel lane lands in
+// Phase 1b.
+void Unpacker::harvest_loader_imports(Qiling& /*ql*/) {
+    // ACCUMULATES: the GPA lane recorded pairs during the run (measured: the FSG
+    // stub resolves 315 names through GetProcAddress and this clear() threw them
+    // away, leaving the rebuild with the packed file's own 2 imports)
+    if (opts_.debug) {
+        std::fprintf(stderr, "[unpack] harvest_loader_imports (have %zu)\n", imports_.size());
+    }
+    try {
+        auto parsed = LIEF::PE::Parser::parse(opts_.sample_path);
+        if (parsed == nullptr) {
+            return;
+        }
+        for (const auto& imp : parsed->imports()) {
+            const auto dll = lower_ascii(imp.name());
+            for (const auto& e : imp.entries()) {
+                std::string fn = e.name();
+                if (fn.empty()) {
+                    fn = "ordinal_" + std::to_string(e.ordinal());
+                }
+                note_import(sanitize_ascii(dll), sanitize_ascii(fn));
+            }
+        }
+    } catch (...) {
+    }
+}
+
+void Unpacker::detach_hooks() {
+    // HookRet::~HookRet -> QlCoreHooks::hook_del -> uc_hook_del: only valid while
+    // the engine lives. Clearing here is what makes the tool's scope order safe.
+    hooks_.clear();
+}
+
+// The reference builds stub_map_ from the GPA sentinels + every emulated module's
+// export address, then scans the dump (unpacker.cpp:8652-9560). Slot coherence is
+// the noise filter: a same-dll run of adjacent slots, or a singleton anchored
+// within two slots of a kept one.
+void Unpacker::salvage_iat(Qiling& ql, const std::vector<std::uint8_t>& image) {
+    salvaged_slots_ = 0;
+    salvaged_pairs_ = 0;
+    if (image.size() < 8) {
+        return;
+    }
+    // addr -> (dll, name)
+    std::map<std::uint64_t, std::pair<std::string, std::string>> stub_map;
+    try {
+        const auto& pe_loader = static_cast<const loader::QlLoaderPE&>(ql.loader());
+        for (const auto& [addr, entry] : pe_loader.import_symbols()) {
+            if (addr == 0 || entry.name.empty()) {
+                continue;
+            }
+            std::string dll = lower_ascii(fs::path(entry.dll).filename().string());
+            if (dll.empty()) {
+                continue;
+            }
+            stub_map.emplace(addr, std::make_pair(sanitize_ascii(dll), sanitize_ascii(entry.name)));
+        }
+    } catch (...) {
+        return;
+    }
+    if (stub_map.empty()) {
+        return;
+    }
+
+    const std::size_t ptr = is_64_ ? 8 : 4;
+    struct Hit {
+        std::uint32_t off;
+        std::string dll;
+        std::string name;
+    };
+    std::vector<Hit> hits;
+    for (std::size_t o = 0; o + ptr <= image.size(); o += ptr) {
+        std::uint64_t v = 0;
+        for (std::size_t k = 0; k < ptr; ++k) {
+            v |= static_cast<std::uint64_t>(image[o + k]) << (8 * k);
+        }
+        if (v < 0x10000) {
+            continue;
+        }
+        const auto it = stub_map.find(v);
+        if (it == stub_map.end()) {
+            continue;
+        }
+        hits.push_back(Hit{static_cast<std::uint32_t>(o), it->second.first, it->second.second});
+    }
+    if (hits.empty()) {
+        return;
+    }
+    std::sort(hits.begin(), hits.end(), [](const Hit& a, const Hit& b) { return a.off < b.off; });
+
+    // pass 1: runs of >= 2 adjacent pointer-spaced slots of the same dll
+    std::set<std::size_t> kept;
+    for (std::size_t i = 0; i < hits.size();) {
+        std::size_t j = i + 1;
+        while (j < hits.size() && hits[j].off == hits[j - 1].off + ptr && hits[j].dll == hits[j - 1].dll) {
+            ++j;
+        }
+        if (j - i >= 2) {
+            for (std::size_t k = i; k < j; ++k) {
+                kept.insert(k);
+            }
+        }
+        i = j;
+    }
+    // pass 2: singletons anchored within two slots of a kept neighbour
+    for (std::size_t i = 0; i < hits.size(); ++i) {
+        if (kept.count(i) != 0) {
+            continue;
+        }
+        bool anchor = false;
+        for (std::size_t k = 0; k < hits.size() && !anchor; ++k) {
+            if (kept.count(k) == 0) {
+                continue;
+            }
+            const auto d = hits[i].off > hits[k].off ? hits[i].off - hits[k].off : hits[k].off - hits[i].off;
+            anchor = d <= 2 * ptr && hits[i].dll == hits[k].dll;
+        }
+        if (anchor) {
+            kept.insert(i);
+        }
+    }
+    for (const auto idx : kept) {
+        note_import(hits[idx].dll, hits[idx].name);
+        ++salvaged_pairs_;
+    }
+    salvaged_slots_ = kept.size();
+    if (opts_.debug) {
+        std::fprintf(stderr, "[unpack] salvage: %zu hits -> %zu slots, %zu pairs\n", hits.size(), kept.size(),
+                     salvaged_pairs_);
+        for (std::size_t i = 0; i < hits.size() && i < 4; ++i) {
+            std::fprintf(stderr, "[unpack]   hit off=0x%x dll=<%s> name=<%s>\n", hits[i].off,
+                         hits[i].dll.c_str(), hits[i].name.c_str());
+        }
+    }
+}
+
+// The reference's OEP pick, cut to the shape vote (docs/oep-pick-design.md V1):
+// a real entry point starts like a function, a junk hop does not. Ties go to the
+// later candidate, and a candidate inside the packed EP's own section is penalised
+// (the stub keeps executing there after the payload has been decoded).
+std::uint64_t Unpacker::pick_oep(const std::vector<std::uint8_t>& image) const {
+    if (hop_ledger_.empty()) {
+        return meta_oep_;
+    }
+    const int ep_sec = section_index_at(packed_ep_va_);
+    float best_score = -1e9f;
+    std::uint64_t best = meta_oep_;
+    // The INCUMBENT prior (the reference's +1e6, unpacker.h:1200-1210): the first
+    // accepted hop wins unless it is provably not an entry — measured, the first
+    // hop is the true OEP for UPX/ASPack/FSG/Molebox/Packman/WinUpack, and a
+    // scoring pass that ignored that demoted 11 verified samples.
+    const auto shape_at = [&image, this](std::uint64_t va) -> int {
+        if (va < base_ || va - base_ + 16 > image.size()) {
+            return 0;
+        }
+        const auto* p = image.data() + (va - base_);
+        if (p[0] == 0x55 && p[1] == 0x8b && p[2] == 0xec) {
+            return 3;
+        }
+        if (p[0] == 0x6a && p[2] == 0x68 && p[7] == 0xe8) {
+            return 3;
+        }
+        if (p[0] == 0xe8 && p[5] == 0xe9) {
+            return 2;
+        }
+        if (p[0] == 0xe9) {
+            return 1;
+        }
+        return 0;
+    };
+    {
+        const auto first = hop_ledger_.front();
+        const int first_sec = section_index_at(first);
+        const bool in_stub_section = first_sec >= 0 && first_sec == ep_sec;
+        if (!in_stub_section && shape_at(first) >= 2) {
+            return first;
+        }
+    }
+    // the incumbent is junk: take the first real prologue outside the stub section
+    for (const auto va : hop_ledger_) {
+        const int sec = section_index_at(va);
+        if (sec >= 0 && sec == ep_sec) {
+            continue;
+        }
+        if (shape_at(va) >= 3) {
+            return va;
+        }
+    }
+    for (std::size_t i = 0; i < hop_ledger_.size(); ++i) {
+        const auto va = hop_ledger_[i];
+        if (va < base_ || va - base_ + 16 > image.size()) {
+            continue;
+        }
+        const auto* p = image.data() + (va - base_);
+        float score = 0.f;
+        int printable = 0;
+        bool all_zero = true;
+        for (int k = 0; k < 16; ++k) {
+            const auto u = p[k];
+            if (u != 0) {
+                all_zero = false;
+            }
+            if (u >= 0x20 && u <= 0x7E) {
+                ++printable;
+            }
+        }
+        if (all_zero) {
+            score -= 4.f;
+        } else if (printable > 12) {
+            score -= 2.f;
+        }
+        // classic prologues: 6a xx 68 imm32 e8 (MSVC CRT), 55 8b ec (frame), e8 .. e9
+        if (p[0] == 0x6a && p[2] == 0x68 && p[7] == 0xe8) {
+            score += 5.f;
+        }
+        if (p[0] == 0x55 && p[1] == 0x8b && p[2] == 0xec) {
+            score += 4.5f;
+        }
+        if (p[0] == 0xe8 && p[5] == 0xe9) {
+            score += 3.f;
+        }
+        if (p[0] == 0xe9) {
+            score += 2.f;  // a tail jump (the payload's own thunk chain)
+        }
+        const int sec = section_index_at(va);
+        if (sec >= 0 && sec == ep_sec) {
+            score -= 3.f;  // still in the stub's section
+        } else if (sec >= 0 && sections_[static_cast<std::size_t>(sec)].is_exec) {
+            score += 1.f;
+        }
+        // the write-ordinal rule: a section still being written after this hop is
+        // mid-decode, not the hand-off (MPRESS/RLPack park an early hop inside the
+        // decode target and keep writing)
+        if (sec >= 0) {
+            const auto start = sections_[static_cast<std::size_t>(sec)].start;
+            const auto it = last_write_seq_.find(start);
+            if (it != last_write_seq_.end() && i < hop_write_seq_.size() && it->second > hop_write_seq_[i]) {
+                score -= 2.f;
+            } else {
+                score += 1.f;
+            }
+        }
+        score -= 0.001f * static_cast<float>(i);  // an entry precedes its callees: earlier wins a tie
+        if (score > best_score) {
+            best_score = score;
+            best = va;
+        }
+    }
+    return best;
+}
+
+UnpackResult Unpacker::finalize(Qiling& ql) {
+    detach_hooks();
+    UnpackResult res;
+    res.base = base_;
+    res.image_size = image_size_;
+    res.is_64 = is_64_;
+    res.family = opts_.family;
+    try {
+        // the terminal image. base_/image_size_ come from install(); a caller that
+        // skipped install() (a Phase 0 smoke) gets them here.
+        if (base_ == 0) {
+            const auto& pe_loader = static_cast<const loader::QlLoaderPE&>(ql.loader());
+            base_ = pe_loader.pe_image_address();
+            image_size_ = pe_loader.pe_image_size();
+            const auto raw_ep = pe_loader.entry_point;
+            packed_ep_va_ = (raw_ep >= base_ && raw_ep < base_ + image_size_) ? raw_ep : base_ + raw_ep;
+            is_64_ = ql.arch().bits() == 64;
+        }
+        harvest_loader_imports(ql);
+
+        std::vector<std::uint8_t> image;
+        if (base_ != 0 && image_size_ != 0) {
+            try {
+                image = ql.mem().read(base_, image_size_);
+            } catch (...) {
+                image.clear();
+            }
+        }
+        if (image.empty()) {
+            res.error = "image read failed";
+            return res;
+        }
+        // the OEP pick over the hop ledger (terminal image in hand)
+        if (opts_.debug) {
+            std::fprintf(stderr, "[unpack] hop ledger (%zu):", hop_ledger_.size());
+            for (auto va : hop_ledger_) {
+                std::fprintf(stderr, " %s", hex(va).c_str());
+            }
+            std::fprintf(stderr, "\n");
+        }
+        if (!hop_ledger_.empty()) {
+            const auto picked = pick_oep(image);
+            if (picked != meta_oep_) {
+                if (opts_.debug) {
+                    std::fprintf(stderr, "[unpack] pick OEP %s (was %s)\n", hex(picked).c_str(),
+                                 hex(meta_oep_).c_str());
+                }
+                meta_oep_ = picked;
+            }
+            reason_ = "section_hop";
+            stages_ = 1;  // one dump, at the picked OEP (the reference's semantics)
+        }
+        // Phase 1b: the salvage scan (the reference runs it before the rebuild)
+        salvage_iat(ql, image);
+
+        // no hop fired: park the OEP on a plausible payload prologue so the
+        // artifact is still analysis-usable (the reference's guess_oep,
+        // unpacker.cpp:6920-6981)
+        if (meta_oep_ == 0) {
+            std::uint64_t guess = 0;
+            for (const auto& ps : sections_) {
+                if (ps.raw == 0 || ps.vsize == 0) {
+                    continue;
+                }
+                const auto span = std::min<std::uint64_t>(ps.end - ps.start, 0x10000);
+                std::vector<std::uint8_t> body;
+                try {
+                    body = ql.mem().read(ps.start, span);
+                } catch (...) {
+                    continue;
+                }
+                for (std::size_t i = 0; i + 10 < body.size(); ++i) {
+                    if (body[i] == 0x6a && body[i + 2] == 0x68 && body[i + 7] == 0xe8) {
+                        guess = ps.start + i;
+                        break;
+                    }
+                }
+                if (guess == 0) {
+                    for (std::size_t i = 0; i + 4 <= body.size();) {
+                        if (body[i] != 0) {
+                            std::size_t j = i;
+                            while (j < body.size() && body[j] != 0) {
+                                ++j;
+                            }
+                            if (j - i >= 4) {
+                                guess = ps.start + i;
+                                break;
+                            }
+                            i = j;
+                        } else {
+                            ++i;
+                        }
+                    }
+                }
+                if (guess != 0) {
+                    break;
+                }
+            }
+            if (guess != 0) {
+                meta_oep_ = guess;
+                last_oep_ = guess;
+                reason_ = "fallback_guess";
+                res.error = "no section hop; OEP guessed";
+            }
+        }
+        res.oep = meta_oep_;
+        res.oep_last_hop = last_oep_;
+        res.stages = stages_;
+        res.reason = reason_;
+
+        // ---- the artifacts (the reference's contract, unpacker.cpp:6836-7090)
+        const std::string stem = fs::path(opts_.sample_path).filename().string();
+        std::error_code ec;
+        fs::create_directories(opts_.out_dir, ec);
+        const auto dump_path = fs::path(opts_.out_dir) / (stem + "_dump.bin");
+        {
+            std::ofstream out(dump_path, std::ios::binary | std::ios::trunc);
+            out.write(reinterpret_cast<const char*>(image.data()),
+                      static_cast<std::streamsize>(image.size()));
+            res.dump_written = static_cast<bool>(out);
+            res.dumpfile = dump_path.string();
+        }
+        const auto meta_path = fs::path(opts_.out_dir) / (stem + "_dump.bin.meta.json");
+        {
+            nlohmann::json meta;
+            meta["base"] = hex(res.base);
+            meta["oep"] = hex(res.oep);
+            meta["oep_last_hop"] = hex(res.oep_last_hop);
+            meta["is_64"] = res.is_64;
+            meta["stages"] = res.stages;
+            meta["reason"] = sanitize_ascii(res.reason);
+            meta["family"] = sanitize_ascii(res.family);
+            if (opts_.debug) {
+                std::fprintf(stderr, "[unpack] meta imports=%zu\n", imports_.size());
+            }
+            nlohmann::json imps = nlohmann::json::array();
+            for (const auto& pr : imports_) {
+                imps.push_back({sanitize_ascii(pr.first), sanitize_ascii(pr.second)});
+            }
+            meta["imports"] = imps;
+            std::ofstream out(meta_path, std::ios::binary | std::ios::trunc);
+            out << meta.dump(1) << "\n";
+            res.metafile = meta_path.string();
+        }
+        res.imports = imports_;
+
+        // ---- the rebuild (§1.8)
+        if (opts_.rebuild) {
+            RebuildInput in;
+            in.image = std::move(image);
+            in.base = res.base;
+            in.oep_va = res.oep;
+            in.is_64 = res.is_64;
+            in.imports = imports_;
+            in.header_snapshot = header_snapshot_;
+            auto rebuilt = rebuild_pe(in);
+            if (!rebuilt.empty()) {
+                const auto exe_path = fs::path(opts_.out_dir) / (stem + "_unpacked.exe");
+                std::ofstream out(exe_path, std::ios::binary | std::ios::trunc);
+                out.write(reinterpret_cast<const char*>(rebuilt.data()),
+                          static_cast<std::streamsize>(rebuilt.size()));
+                res.rebuilt = static_cast<bool>(out);
+                res.outfile = exe_path.string();
+            } else {
+                res.error += res.error.empty() ? "rebuild failed" : "; rebuild failed";
+            }
+        }
+    } catch (const QlErrorBase& e) {
+        res.error = e.what();
+    } catch (const std::exception& e) {
+        res.error = e.what();
+    } catch (...) {
+        res.error = "unpack finalize failed";
+    }
+    return res;
+}
+
+// ---------------------------------------------------------------------------
+// the hand-rolled rebuilder (PLAN_UNPACK §1.8, the reference's reconstruct()
+// unpacker.cpp:11581-13700). Every offset read is bounds-checked: the input is
+// attacker-controlled memory.
+// ---------------------------------------------------------------------------
+namespace {
+
+std::uint16_t rd16(const std::vector<std::uint8_t>& v, std::size_t o) {
+    if (o + 2 > v.size()) {
+        return 0;
+    }
+    return static_cast<std::uint16_t>(v[o] | (v[o + 1] << 8));
+}
+
+std::uint32_t rd32(const std::vector<std::uint8_t>& v, std::size_t o) {
+    if (o + 4 > v.size()) {
+        return 0;
+    }
+    return static_cast<std::uint32_t>(v[o]) | (static_cast<std::uint32_t>(v[o + 1]) << 8) |
+           (static_cast<std::uint32_t>(v[o + 2]) << 16) | (static_cast<std::uint32_t>(v[o + 3]) << 24);
+}
+
+void wr16(std::vector<std::uint8_t>& v, std::size_t o, std::uint16_t x) {
+    if (o + 2 > v.size()) {
+        return;
+    }
+    v[o] = static_cast<std::uint8_t>(x & 0xff);
+    v[o + 1] = static_cast<std::uint8_t>((x >> 8) & 0xff);
+}
+
+void wr32(std::vector<std::uint8_t>& v, std::size_t o, std::uint32_t x) {
+    if (o + 4 > v.size()) {
+        return;
+    }
+    v[o] = static_cast<std::uint8_t>(x & 0xff);
+    v[o + 1] = static_cast<std::uint8_t>((x >> 8) & 0xff);
+    v[o + 2] = static_cast<std::uint8_t>((x >> 16) & 0xff);
+    v[o + 3] = static_cast<std::uint8_t>((x >> 24) & 0xff);
+}
+
+struct SecRec {
+    std::size_t entry_off = 0;
+    std::uint32_t va = 0;
+    std::uint32_t vsize = 0;
+    std::uint32_t chars = 0;
+    std::uint32_t raw_ptr = 0;
+    std::uint32_t raw_size = 0;
+};
+
+}  // namespace
+
+std::vector<std::uint8_t> rebuild_pe(const RebuildInput& in) {
+    std::vector<std::uint8_t> mem = in.image;
+    if (mem.size() <= 0x400) {
+        return {};
+    }
+    // anti-emu stubs zero the in-memory MZ: restore the packed file's header
+    if (!(mem[0] == 'M' && mem[1] == 'Z')) {
+        if (in.header_snapshot.size() >= 2 && in.header_snapshot[0] == 'M' && in.header_snapshot[1] == 'Z') {
+            const auto n = std::min(in.header_snapshot.size(), mem.size());
+            std::copy(in.header_snapshot.begin(), in.header_snapshot.begin() + static_cast<std::ptrdiff_t>(n),
+                      mem.begin());
+        }
+    }
+    if (!(mem[0] == 'M' && mem[1] == 'Z')) {
+        return {};
+    }
+    const std::size_t e_lfanew = rd32(mem, 0x3c);
+    if (e_lfanew + 0x18 > mem.size() || mem[e_lfanew] != 'P' || mem[e_lfanew + 1] != 'E') {
+        return {};
+    }
+    const std::size_t coff = e_lfanew + 4;
+    const std::size_t opt_off = coff + 20;
+    const std::uint16_t opt_size = rd16(mem, coff + 16);
+    if (opt_off + opt_size > mem.size()) {
+        return {};
+    }
+    const std::uint16_t magic = rd16(mem, opt_off);
+    const bool is64 = magic == 0x20b;
+    if (!(magic == 0x10b || magic == 0x20b)) {
+        return {};
+    }
+    const std::uint32_t sec_align = rd32(mem, opt_off + 0x20) ? rd32(mem, opt_off + 0x20) : 0x1000;
+    const std::uint32_t file_align = rd32(mem, opt_off + 0x24) ? rd32(mem, opt_off + 0x24) : 0x200;
+
+    // data-directory base, normalised to the 16-entry layout on a corrupt header
+    // (the WinUpack case, unpacker.cpp:11720-11735)
+    const std::uint32_t std_opt_size = is64 ? 0xF0 : 0xE0;
+    std::size_t dd_base = 0;
+    const std::uint32_t n_rva = rd32(mem, opt_off + (is64 ? 0x6c : 0x5c));
+    if (n_rva != 16 && opt_size >= std_opt_size) {
+        dd_base = opt_off + (is64 ? 0x70 : 0x60);
+        wr32(mem, opt_off + (is64 ? 0x6c : 0x5c), 16);
+    } else if (n_rva <= 16 && 8ull * n_rva <= opt_size) {
+        dd_base = opt_off + opt_size - 8ull * n_rva;
+    } else {
+        dd_base = opt_off + (is64 ? 0x70 : 0x60);
+        wr32(mem, opt_off + (is64 ? 0x6c : 0x5c), 16);
+    }
+
+    // the section table, clamped (anti-emu headers claim 0xFFCD sections,
+    // unpacker.cpp:11745-11770)
+    const std::size_t sec_table = opt_off + opt_size;
+    std::uint32_t n_sec = rd16(mem, coff + 2);
+    if (n_sec == 0 || n_sec > 96) {
+        std::uint32_t alt = 0;
+        if (in.header_snapshot.size() >= 0x40) {
+            const std::uint32_t elf = rd32(in.header_snapshot, 0x3c);
+            if (elf + 8 <= in.header_snapshot.size()) {
+                alt = rd16(in.header_snapshot, elf + 6);
+            }
+        }
+        n_sec = (alt > 0 && alt <= 96) ? alt : 16u;
+        wr16(mem, coff + 2, static_cast<std::uint16_t>(n_sec));
+    }
+    std::vector<SecRec> secs;
+    std::uint32_t max_va_end = 0;
+    for (std::uint32_t i = 0; i < n_sec; ++i) {
+        const std::size_t e = sec_table + static_cast<std::size_t>(i) * 40;
+        if (e + 40 > mem.size()) {
+            break;
+        }
+        SecRec s;
+        s.entry_off = e;
+        s.vsize = rd32(mem, e + 8);
+        s.va = rd32(mem, e + 12);
+        s.chars = rd32(mem, e + 36);
+        secs.push_back(s);
+        const std::uint64_t end = static_cast<std::uint64_t>(s.va) + s.vsize;
+        if (end > max_va_end) {
+            max_va_end = static_cast<std::uint32_t>(std::min<std::uint64_t>(end, 0xffffffffull));
+        }
+    }
+    if (secs.empty()) {
+        return {};
+    }
+
+    // the OEP as an RVA (some families store one already, unpacker.cpp:11780-11795)
+    std::uint32_t oep_rva = 0;
+    if (in.oep_va != 0) {
+        if (in.oep_va >= in.base && in.oep_va - in.base < static_cast<std::uint64_t>(max_va_end) + 0x100000) {
+            oep_rva = static_cast<std::uint32_t>(in.oep_va - in.base);
+        } else if (in.oep_va < static_cast<std::uint64_t>(max_va_end) + 0x100000) {
+            oep_rva = static_cast<std::uint32_t>(in.oep_va);
+        }
+    }
+
+    // ---- the .pgimp blob (the reference's build_import_section, :10031-10420)
+    struct Group {
+        std::string dll;
+        std::vector<std::string> names;
+    };
+    std::vector<Group> groups;
+    for (const auto& pr : in.imports) {
+        auto dll = pr.first;
+        std::transform(dll.begin(), dll.end(), dll.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        auto it = std::find_if(groups.begin(), groups.end(), [&](const Group& g) { return g.dll == dll; });
+        if (it == groups.end()) {
+            groups.push_back(Group{dll, {}});
+            it = std::prev(groups.end());
+        }
+        if (std::find(it->names.begin(), it->names.end(), pr.second) == it->names.end()) {
+            it->names.push_back(pr.second);
+        }
+    }
+
+    const std::uint32_t new_va = align_up(max_va_end, sec_align);
+    std::vector<std::uint8_t> blob;
+    const auto put = [&blob](const void* p, std::size_t n) {
+        const auto* b = static_cast<const std::uint8_t*>(p);
+        blob.insert(blob.end(), b, b + n);
+    };
+    // descriptor array first (dd[1]) then, per group, INT + IAT + names
+    const std::size_t desc_off = blob.size();
+    const std::size_t desc_size = (groups.size() + 1) * 20;
+    blob.resize(desc_off + desc_size, 0);
+
+    std::vector<std::size_t> desc_slot(groups.size());
+    for (std::size_t g = 0; g < groups.size(); ++g) {
+        desc_slot[g] = desc_off + g * 20;
+    }
+
+    std::uint32_t iat_rva = 0;
+    std::uint32_t iat_size = 0;
+    for (std::size_t g = 0; g < groups.size(); ++g) {
+        const auto& grp = groups[g];
+        const std::size_t n = grp.names.size();
+        const std::size_t int_off = blob.size();
+        blob.resize(int_off + (n + 1) * 4, 0);
+        const std::size_t iat_off = blob.size();
+        blob.resize(iat_off + (n + 1) * 4, 0);
+        // names
+        std::vector<std::uint32_t> name_rvas;
+        name_rvas.reserve(n);
+        for (const auto& fn : grp.names) {
+            if (blob.size() % 2 != 0) {
+                blob.push_back(0);
+            }
+            name_rvas.push_back(new_va + static_cast<std::uint32_t>(blob.size()));
+            const std::uint16_t hint = 0;
+            put(&hint, 2);
+            put(fn.data(), fn.size());
+            const char nul = '\0';
+            put(&nul, 1);
+        }
+        const std::size_t name_off = blob.size();
+        (void)name_off;
+        const std::uint32_t dll_name_rva = [&] {
+            if (blob.size() % 2 != 0) {
+                blob.push_back(0);
+            }
+            const auto rva = new_va + static_cast<std::uint32_t>(blob.size());
+            put(grp.dll.data(), grp.dll.size());
+            const char nul = '\0';
+            put(&nul, 1);
+            return rva;
+        }();
+
+        // the INT + IAT thunk arrays (hint/name RVAs, both arrays identical: the
+        // loader writes the resolved addresses into the IAT)
+        for (std::size_t i = 0; i < n; ++i) {
+            const std::uint32_t thunk = name_rvas[i];
+            std::memcpy(&blob[int_off + i * 4], &thunk, 4);
+            std::memcpy(&blob[iat_off + i * 4], &thunk, 4);
+        }
+
+        const std::uint32_t int_rva = new_va + static_cast<std::uint32_t>(int_off);
+        const std::uint32_t this_iat_rva = new_va + static_cast<std::uint32_t>(iat_off);
+        if (iat_rva == 0) {
+            iat_rva = this_iat_rva;
+        }
+        iat_size += static_cast<std::uint32_t>((n + 1) * 4);
+
+        wr32(blob, desc_slot[g], int_rva);        // OriginalFirstThunk
+        wr32(blob, desc_slot[g] + 4, 0);          // TimeDateStamp
+        wr32(blob, desc_slot[g] + 8, 0);          // ForwarderChain
+        wr32(blob, desc_slot[g] + 12, dll_name_rva);
+        wr32(blob, desc_slot[g] + 16, this_iat_rva);  // FirstThunk
+    }
+    const std::uint32_t new_vsize = static_cast<std::uint32_t>(blob.size());
+    if (new_vsize == 0) {
+        return {};
+    }
+
+    // ---- file layout (unpacker.cpp:13630-13680)
+    const std::uint32_t n_sec_total = static_cast<std::uint32_t>(secs.size()) + 1;
+    const std::size_t header_end = sec_table + static_cast<std::size_t>(n_sec_total) * 40;
+    const std::uint32_t size_of_headers =
+        align_up(static_cast<std::uint32_t>(std::min<std::size_t>(header_end, 0x10000)), file_align);
+
+    std::uint32_t cursor = size_of_headers;
+    for (auto& s : secs) {
+        const std::uint64_t avail = mem.size() > s.va ? mem.size() - s.va : 0;
+        std::uint64_t content = std::min<std::uint64_t>(s.vsize, avail);
+        if (content == 0) {
+            content = s.vsize;
+        }
+        s.raw_ptr = cursor;
+        s.raw_size = align_up(static_cast<std::uint32_t>(std::min<std::uint64_t>(content, 0x7fffffff)), file_align);
+        cursor += s.raw_size;
+    }
+    const std::uint32_t pgimp_raw_ptr = cursor;
+    const std::uint32_t pgimp_raw_size = align_up(new_vsize, file_align);
+
+    // headers + every section's raw + the .pgimp raw
+    std::vector<std::uint8_t> out(static_cast<std::size_t>(pgimp_raw_ptr) + pgimp_raw_size, 0);
+
+    // headers
+    const std::size_t hdr_n = std::min<std::size_t>(size_of_headers, mem.size());
+    std::copy(mem.begin(), mem.begin() + static_cast<std::ptrdiff_t>(hdr_n), out.begin());
+
+    // section headers + raw content
+    for (const auto& s : secs) {
+        wr32(out, s.entry_off + 16, s.raw_size);
+        wr32(out, s.entry_off + 20, s.raw_ptr);
+        const std::uint64_t avail = mem.size() > s.va ? mem.size() - s.va : 0;
+        const std::uint64_t content = std::min<std::uint64_t>(s.raw_size, avail);
+        if (content > 0 && static_cast<std::size_t>(s.raw_ptr) + content <= out.size()) {
+            std::copy(mem.begin() + static_cast<std::ptrdiff_t>(s.va),
+                      mem.begin() + static_cast<std::ptrdiff_t>(s.va + content),
+                      out.begin() + static_cast<std::ptrdiff_t>(s.raw_ptr));
+        }
+    }
+    // the .pgimp section header
+    {
+        const std::size_t e = sec_table + secs.size() * 40;
+        if (e + 40 <= out.size()) {
+            const char name[8] = {'.', 'p', 'g', 'i', 'm', 'p', 0, 0};
+            std::memcpy(&out[e], name, 8);
+            wr32(out, e + 8, new_vsize);                 // VirtualSize
+            wr32(out, e + 12, new_va);                   // VirtualAddress
+            wr32(out, e + 16, pgimp_raw_size);           // SizeOfRawData
+            wr32(out, e + 20, pgimp_raw_ptr);            // PointerToRawData
+            wr32(out, e + 36, 0x40000040);               // INITIALIZED_DATA | READ
+        }
+        std::copy(blob.begin(), blob.end(), out.begin() + static_cast<std::ptrdiff_t>(pgimp_raw_ptr));
+    }
+
+    // the optional header fields the loader reads
+    const std::uint32_t size_of_image = align_up(new_va + new_vsize, sec_align);
+    wr32(out, opt_off + 0x10, oep_rva);              // AddressOfEntryPoint
+    wr32(out, opt_off + 0x38, size_of_image);        // SizeOfImage
+    wr32(out, opt_off + 0x3c, size_of_headers);      // SizeOfHeaders
+    wr32(out, opt_off + 0x40, 0);                    // CheckSum
+    wr16(out, coff + 2, static_cast<std::uint16_t>(secs.size() + 1));
+    // data directories: import = .pgimp descriptors, IAT = the first thunk array
+    wr32(out, dd_base + 1 * 8, new_va + static_cast<std::uint32_t>(desc_off));
+    wr32(out, dd_base + 1 * 8 + 4, static_cast<std::uint32_t>(desc_size));
+    if (iat_rva != 0) {
+        wr32(out, dd_base + 12 * 8, iat_rva);
+        wr32(out, dd_base + 12 * 8 + 4, iat_size);
+    }
+    return out;
+}
+
+}  // namespace unpack
+}  // namespace qiling

@@ -115,3 +115,12 @@ if(WIN32)
 endif()
 
 add_library(qiling::qiling ALIAS qiling)
+
+# ---- the unpacker (PLAN_UNPACK.md) -----------------------------------------
+# A separate target so the core library stays unpack-free: only the unpack CLI
+# and the unpack tests link it.
+add_library(qiling_unpack STATIC
+    unpack/unpack.cpp
+)
+target_include_directories(qiling_unpack PUBLIC ${CMAKE_SOURCE_DIR})
+target_link_libraries(qiling_unpack PUBLIC qiling LIEF::LIEF nlohmann_json::nlohmann_json)

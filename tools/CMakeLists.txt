@@ -21,3 +21,9 @@ if(TAOTE_PYTHON3)
                          SKIP_RETURN_CODE 77
                          TIMEOUT 900)
 endif()
+
+# tools/taote_unpack.cpp — the packed-PE unpacker (PLAN_UNPACK.md). The flag
+# surface is pegasus's so its evaluation harness drives taote unmodified.
+add_executable(taote_unpack taote_unpack.cpp)
+target_include_directories(taote_unpack PRIVATE ${CMAKE_SOURCE_DIR})
+target_link_libraries(taote_unpack PRIVATE qiling_unpack LIEF::LIEF)
