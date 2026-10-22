@@ -1224,6 +1224,13 @@ std::size_t Unpacker::mine_orphan_descriptors(const std::vector<std::uint8_t>& i
         total_names += names.size();
         unique_dlls.insert(dll);
     }
+    // Measured and NOT accepted: FSG's dll-name list is a separate standalone run
+    // (`KERNEL32.dll\0USER32.dll\0...` at 0xa64e-0xa7a0, four of them after the
+    // groups my walk already pairs), so an ordinal pairing of dll list to name group
+    // is what recovers comctl32/ole32/oleaut32/mpr (coverage 0.667 -> 1.0). A first
+    // attempt keyed on equal list lengths did not fire on the real layout — the dll
+    // strings appear twice (once in the list, once as a group head) — so it stays
+    // unshipped rather than misfiring on the working families.
     if (groups.size() >= 2 && total_names >= 6) {
         for (const auto& [dll, names] : groups) {
             for (const auto& fn : names) {

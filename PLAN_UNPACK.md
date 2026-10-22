@@ -170,6 +170,7 @@ class** — the OEP of the trampoline/VM families.
 | round 2a: the decode-only ladder (Pass-C / Borland / MSVC frame) | **30 / 75** |
 | round 2b: Pass-B ordering, degenerate-layout fallback, inter-map salvage | **33 / 75** |
 | round 2c: orphan import-list mining (the FSG string-blob reconstruction) | **36 / 75** |
+| round 2d: MEW full shadow overlay, exec-page view, NSPack start override | **36 / 75** (all three measured inert) |
 | oracle, same 75 | 66 / 75 (strict 60) |
 
 Per family (VER / PART / FAIL), round 2:
@@ -289,6 +290,17 @@ Per-family cause, evidenced by the debug traces (`TAOTE_UNPACK_DEBUG=1`):
 * **Molebox / Neolite / PECompact / EnigmaVB / Exe32pack** — container/registry/
   header-specific recovery (the plan's tier B/C rows). EnigmaVB improves with the
   header EP (1/3 now); its import coverage (0.36-0.38) needs the VFS import walk.
+
+### 0.5.3b Measured-and-reverted in round 2 (so round 3 does not repeat them)
+
+| attempt | measurement | conclusion |
+|---|---|---|
+| full first-write shadow overlay for PEtite/TELock/JDPack | JDPack `.text` 0.93 -> 0.47, PEtite 0.80 -> 0.69 | the stubs write transient ciphertext pages before the real decode; only the zeros-restore is generic |
+| exec-page snapshot overlay (page captured at first execution) | no change on any family (S75 33/33) | the payloads stop before executing the undecoded pages — the blocker is upstream |
+| MEW full shadow overlay (the reference's own family exception) | restores 9.8-11.2 KB/sample, similarity unchanged (0.758 / 0.832), coverage 0.07 | MEW's deficit is not the memset |
+| embedded-PE adoption for Amber | never fires: Amber allocates nothing (its only non-image map is one heap page) | the stub dies before building the payload |
+| NSPack: force the emulation start (`TAOTE_UNPACK_START`, tool flag) | both 0x42a000 (nsp1 start) and 0x401047 still end at pc 0x40101b with 0 writes | the stub itself jumps to the zero-filled head; needs the oracle's flow, not a different start |
+| inter-map IAT salvage + all-scattered-slots rule | adds only MEW's two known pairs; FSG/BeRo/WinUpack hold no loader-known addresses at all | those families need name mining, not pointer mining |
 
 ### 0.5.4 What this changes in the plan
 
