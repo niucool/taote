@@ -428,6 +428,20 @@ and what they actually measured:
    sign-negative) guest stack and self-modify the handler (`setno [edx+3]`).
    TELock stays 0/3.
 
+6. **NSPack's zero-byte EP relies on a non-zero initial EAX** (probed, not
+   guessed). `nspack_AccessEnum.exe` has EP RVA `0x101b` inside nsp0's raw
+   head, and the EP bytes are genuinely zero (`add [eax],al`). The oracle
+   starts at `0x40101b` too, but its first fault is at pc `0x407b6f` (a real
+   write to address 0), not at the EP — its initial `Eax=feedf338` (an
+   import-sentinel leftover from the loader's import walk) makes the zero-byte
+   `add [eax],al` write to a *valid* sentinel page instead of the null page.
+   taote initialises EAX to 0, so the first instruction faults on a null
+   write with no SEH handler and the run ends with 0 writes. The oracle's
+   later null write IS handled by a real guest SEH frame (handler `0x407a3e`).
+   Fix is to match the loader's register side-effect (or seed EAX), not to
+   zero-map the null page (the oracle maps nothing at 0 and still faults on
+   the genuine null write). NSPack stays 0/3.
+
 ### 0.5.4 What this changes in the plan
 
 1. **The GPA sentinel lane is Phase 1, not Phase 1b.** UPX's import restorer calls
