@@ -314,6 +314,16 @@ std::uint64_t QlLoaderPE::unbound_import_stub(const std::string& name, std::uint
     return cell_addr;
 }
 
+// see pe.hpp: the synthesized-import-stub test the unsupported-api report uses
+bool QlLoaderPE::is_import_stub(std::uint64_t addr) const noexcept {
+    if (!stub_page_.has_value() || stub_pages_ == 0) {
+        return false;
+    }
+    const auto base = *stub_page_;
+    const auto end = base + stub_pages_ * 0x1000ull;
+    return addr >= base && addr < end;
+}
+
 std::uint64_t QlLoaderPE::load_dll(const std::string& name) {
     auto [dll_path, dll_name] = dll_path_elements(name);
     if (dll_name.rfind("api-ms-win-", 0) == 0) {

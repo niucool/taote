@@ -1,6 +1,8 @@
 // The SEH dispatch implementation — see seh.hpp for the design overview and
 // the pegasus reference (src/windows/winemu.cpp dispatch_seh /
 // _dispatch_seh_x86 / _continue_seh_x86).
+#include <cstdio>
+#include <cstdlib>
 #include <unicorn/unicorn.h>
 
 #include <cstring>
@@ -226,23 +228,21 @@ bool QlOsWindows::seh_on_fault(int access, std::uint64_t address) {
         return false;  // the dispatch is not armed (or switched off)
     }
 
-    // A real CRT stands the *synthetic* dispatch down: the guest owns its
-    // exception frames, and driving them from here corrupts the run.
+    // A real CRT does NOT stand the dispatch down. The dispatch's job is to
+    // *deliver* the fault — build the EXCEPTION_RECORD/CONTEXT and call the frame
+    // handler in fs:[0] — and with a real CRT that handler is the guest's own
+    // __except_handler4 (which calls the real _except_handler4_common). What must
+    // not happen is taote decoding the scope table itself, and that is already
+    // handled: the _except_handler4_common hook stands down when the rootfs has
+    // real code (see the hook), so seh_frames_ stays empty and seh_continue only
+    // applies what the guest's handler decided.
     //
-    // Delivering the fault to the guest's own handler instead is the right
-    // design on paper (build the record/context, call the handler in fs:[0],
-    // apply the disposition) and it was implemented and measured: it makes
-    // pegasus's seh_test_x86.exe (a deliberate `mov [0],0x14`) render its
-    // __except filter and body and exit 0. But it also corrupts al-khaser: with
-    // delivery on, that sample's control flow lands in its .data at 0x411cd5
-    // (UC_ERR_READ_UNMAPPED), where the upstream-parity suite requires it to stay
-    // green. The resume state after a real-CRT handler answers is not faithful
-    // yet — the same gap that leaves seh_test_x86's post-__except tail unprinted
-    // — so the stand-down stays until that is fixed. PLAN_PE_PARITY §0.6 records
-    // both measurements.
-    if (has_real_seh_unwinder()) {
-        return false;
-    }
+    // Delivering it is required, not optional: al-khaser's static CRT takes a
+    // genuine access violation (a NULL per-thread locale pointer) that the
+    // sample's own handler catches and recovers from — measured at pc 0x411cd5
+    // (`cmp dword ptr [eax + 0xa8], 0` with eax = 0). With the dispatch standing
+    // down that fault surfaced as an emulation error and the sample never reached
+    // upstream's stop address 0x4016ae.
 
     // Only the *program's* faults dispatch. The loader drives every DllMain from
     // `emu_start` while the emulation state is not STARTED, and a fault in one of
@@ -264,8 +264,20 @@ bool QlOsWindows::seh_on_fault(int access, std::uint64_t address) {
     }
 
     // the sentinel fetch: a guest SEH handler / filter returned — continue
-    // the dispatch walk
-    if ((access == UC_MEM_FETCH_PROT || access == UC_MEM_FETCH_UNMAPPED) && address == seh_sentinel_) {
+    // the dispatch walk.
+    //
+    // The address is not always the page base: a real CRT handler that returns
+    // normally arrives as a fetch at 0x70000001 (unicorn reports the byte after
+    // the one it managed to fetch), so the whole page counts — but only on the
+    // real-CRT path (no synthetic frame recorded). With a synthetic walk in
+    // progress the exact address is the contract, because there the sentinel is
+    // reached by taote's own staged `ret` and any other fetch is a genuine
+    // guest fault (measured: matching the page turned a stub-mode run that ends
+    // cleanly into an exhausted-walk error).
+    const bool in_sentinel_page = seh_sentinel_ != 0 && address >= seh_sentinel_ &&
+                                  address < seh_sentinel_ + 0x1000;
+    if ((access == UC_MEM_FETCH_PROT || access == UC_MEM_FETCH_UNMAPPED) &&
+        (address == seh_sentinel_ || (in_sentinel_page && seh_frames_.empty()))) {
         return seh_continue();
     }
 
@@ -399,6 +411,38 @@ bool QlOsWindows::seh_on_interrupt(std::uint32_t intno) {
     return true;
 }
 
+// stage one fs:[0] frame handler call:
+//   handler(ExceptionRecord, EstablisherFrame, ContextRecord, DispatcherContext)
+// with the sentinel as the return address. Shared by the first dispatch and by
+// the outward walk `seh_continue` performs when a handler answers
+// EXCEPTION_CONTINUE_SEARCH.
+bool QlOsWindows::seh_call_frame(std::uint64_t frame) {
+    auto& regs = ql_->arch().regs();
+    auto& mem = ql_->mem();
+
+    const auto handler = mem.read_ptr(frame + 4, 4);
+    if (handler == 0 || handler == 0xffffffffull) {
+        return false;  // a malformed frame: rather fail than dispatch garbage
+    }
+
+    // the ms_exc convention: the EXCEPTION_POINTERS pointer just below the
+    // registration record — the compiled __except filters read it through
+    // the ebp-based locals ([ebp-0x14] -> the frame slot)
+    mem.write_ptr(frame - 4, seh_walk_ptrs_, 4);
+
+    auto esp = regs.arch_sp();
+    esp -= 4; mem.write_ptr(esp, 0, 4);                        // DispatcherContext
+    esp -= 4; mem.write_ptr(esp, seh_context_addr_, 4);         // ContextRecord
+    esp -= 4; mem.write_ptr(esp, frame, 4);                     // EstablisherFrame
+    esp -= 4; mem.write_ptr(esp, seh_walk_record_, 4);          // ExceptionRecord
+    esp -= 4; mem.write_ptr(esp, seh_sentinel_, 4);             // the return address
+    regs.set_arch_sp(esp);
+
+    seh_walk_frame_ = frame;
+    seh_retarget_ = handler;
+    return true;
+}
+
 // pegasus _dispatch_seh_x86: stage the fs:[0] frame handler call and arm the
 // retarget. Returns true when the dispatch took the fault.
 bool QlOsWindows::seh_dispatch(std::uint64_t fault_addr, std::uint32_t access_type,
@@ -470,27 +514,15 @@ bool QlOsWindows::seh_dispatch(std::uint64_t fault_addr, std::uint32_t access_ty
     // the x86 CONTEXT image
     seh_build_context(p_ctx);
 
-    // the ms_exc convention: the EXCEPTION_POINTERS pointer just below the
-    // registration record — the compiled __except filters read it through
-    // the ebp-based locals ([ebp-0x14] -> the frame slot)
-    mem.write_ptr(chain - 4, p_ptrs, 4);
-
-    // stage the frame handler call:
-    //   handler(ExceptionRecord, EstablisherFrame, ContextRecord, DispatcherContext)
-    // with the sentinel as the return address
-    auto esp = regs.arch_sp();
-    esp -= 4; mem.write_ptr(esp, 0, 4);           // DispatcherContext
-    esp -= 4; mem.write_ptr(esp, p_ctx, 4);       // ContextRecord
-    esp -= 4; mem.write_ptr(esp, chain, 4);       // EstablisherFrame
-    esp -= 4; mem.write_ptr(esp, p_record, 4);    // ExceptionRecord
-    esp -= 4; mem.write_ptr(esp, seh_sentinel_, 4);  // the return address
-    regs.set_arch_sp(esp);
-
     // reset the walk state: _except_handler4_common re-records the frames
     seh_frames_.clear();
+    seh_dispatch_armed_ = true;
     seh_context_addr_ = p_ctx;
-    seh_retarget_ = handler;
-    return true;
+    seh_walk_ptrs_ = p_ptrs;
+    seh_walk_record_ = p_record;
+
+    // stage the frame handler call and arm the retarget
+    return seh_call_frame(chain);
 }
 
 // pegasus _continue_seh_x86: the sentinel return — walk the recorded frames.
@@ -500,6 +532,16 @@ bool QlOsWindows::seh_dispatch(std::uint64_t fault_addr, std::uint32_t access_ty
 bool QlOsWindows::seh_continue() {
     auto& regs = ql_->arch().regs();
     const auto ret = static_cast<std::uint32_t>(regs.read("eax"));
+    if (std::getenv("TAOTE_SEHDBG") != nullptr) {
+        // the walk's decision points, for diagnosing a fixture: which answer the
+        // handler gave (1 = execute handler, 0 = continue search, -1 = continue
+        // execution), how many synthetic frames are recorded, and which frame
+        // the outward walk is on
+        std::fprintf(stderr, "[sehc] ret=%u frames=%zu walk=0x%llx ctx=0x%llx esp=0x%llx eip=0x%llx\n",
+                     ret, seh_frames_.size(), (unsigned long long)seh_walk_frame_,
+                     (unsigned long long)seh_context_addr_, (unsigned long long)regs.arch_sp(),
+                     (unsigned long long)regs.arch_pc());
+    }
 
     if (seh_frames_.empty()) {
         // No synthetic frame was recorded, i.e. the handler that just returned
@@ -520,7 +562,24 @@ bool QlOsWindows::seh_continue() {
             seh_retarget_ = regs.arch_pc();
             return true;
         }
-        return false;
+
+        // EXCEPTION_CONTINUE_SEARCH: this frame does not handle the fault, so
+        // the dispatcher walks outward — the *next* registration in fs:[0]
+        // becomes the establisher frame and its handler is called with the same
+        // record and context. Real EH4 handlers only ever answer
+        // CONTINUE_SEARCH when they are not interested (when they do handle,
+        // they RtlUnwind/RtlRestoreContext instead of returning), so returning
+        // here means "try the next frame".
+        //
+        // Measured need: al-khaser's static CRT takes a genuine access
+        // violation in `_getptd`/locale setup; the first frame's handler
+        // declines it, and without the walk the run died fetching the sentinel
+        // page (0x70000001) with the handler's ContinUE_SEARCH in eax.
+        const auto next = ql_->mem().read_ptr(seh_walk_frame_, 4);
+        if (next == 0 || next == 0xffffffffull || next < 0x1000 || next >= 0xfffff000) {
+            return false;  // the chain is exhausted: the fault is unhandled
+        }
+        return seh_call_frame(next);
     }
 
     for (auto& frame : seh_frames_) {
@@ -591,7 +650,16 @@ void QlOsWindows::seh_load_context() {
     if (seh_context_addr_ == 0) {
         return;
     }
-    const auto image = ql_->mem().read(seh_context_addr_, SEH_CONTEXT_SIZE);
+    seh_apply_context(ql_->mem().read(seh_context_addr_, SEH_CONTEXT_SIZE));
+}
+
+// apply a guest x86 CONTEXT image to the emulated CPU. Shared by the synthetic
+// dispatch (which owns the image it built) and the NtContinue path (which is
+// handed one by real CRT code).
+void QlOsWindows::seh_apply_context(const std::vector<std::uint8_t>& image) {
+    if (image.size() < SEH_CONTEXT_SIZE) {
+        return;
+    }
     auto& regs = ql_->arch().regs();
 
     regs.write("edi", get_u32(image, kCtxEdi));
@@ -604,6 +672,29 @@ void QlOsWindows::seh_load_context() {
     regs.write("eflags", get_u32(image, kCtxEFlags));
     regs.set_arch_sp(get_u32(image, kCtxEsp));
     regs.set_arch_pc(get_u32(image, kCtxEip));
+}
+
+// NtContinue / RtlRestoreContext: the CRT's exception transfer hands the
+// dispatcher a fully built CONTEXT whose Eip is the __except block (or the
+// repaired faulting instruction). The API handler cannot apply it directly —
+// the call's own unwind would overwrite Eax/Esp afterwards — so it parks the
+// image here and stops the emulation; the run loop applies it at the restart.
+void QlOsWindows::set_continue_context(const std::vector<std::uint8_t>& image) {
+    if (image.size() < SEH_CONTEXT_SIZE) {
+        return;
+    }
+    continue_context_ = image;
+    continue_context_pc_ = get_u32(image, kCtxEip);
+}
+
+void QlOsWindows::apply_continue_context() {
+    if (continue_context_.empty()) {
+        return;
+    }
+    const auto image = continue_context_;
+    continue_context_.clear();
+    seh_dispatch_armed_ = false;
+    seh_apply_context(image);
 }
 
 void QlOsWindows::seh_record_frame(std::uint64_t frame, const SehScopeRecord& scope) {

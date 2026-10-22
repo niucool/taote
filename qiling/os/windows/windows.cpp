@@ -683,8 +683,17 @@ void QlOsWindows::hook_winapi(std::uint64_t address, std::uint32_t size) {
         // the calling convention so the caller's frame stays balanced (the stub
         // export cell would answer whatever rax held, which is how an
         // unimplemented import turns into a stale-pointer store), and record
-        // the name so the analysis surface can rank the gap
-        stats().log_unsupported_api(imported->name);
+        // the name so the analysis surface can rank the gap.
+        //
+        // Only a *synthesized* stub cell is a gap. Against a real System32 tree
+        // the same name is Microsoft's own code, which runs here — counting it
+        // as unsupported turned every real-dll run into a wall of false gaps
+        // (measured: the PMA curated cases listed 30+ "unsupported" CRT/ntdll
+        // bodies such as _initterm, DecodePointer and the MSVCP140 exports).
+        const auto& pe_loader = static_cast<const loader::QlLoaderPE&>(ql_->loader());
+        if (pe_loader.is_import_stub(address)) {
+            stats().log_unsupported_api(imported->name);
+        }
         if (ql_->unsupported_api_policy() == QilingOptions::UnsupportedApiPolicy::Abort) {
             record_entry_point_error("unsupported_api", "unsupported api: " + imported->name);
             throw QlErrorBase("unsupported api: " + imported->name);
@@ -832,7 +841,13 @@ void QlOsWindows::run() {
                 break;
             }
             // a CPU-exception dispatch stopped the emulation cleanly (no
-            // unicorn error to bubble up): restart at the staged target
+            // unicorn error to bubble up): restart at the staged target. A
+            // NtContinue/RtlRestoreContext call parked a CONTEXT instead of a
+            // bare target, and it has to be applied *here*: the API call's own
+            // unwind runs after the handler, so registers written inside the
+            // handler would be clobbered (this is how the CRT enters an
+            // __except block).
+            apply_continue_context();
             begin = seh_retarget_;
             seh_retarget_ = 0;
             continue;

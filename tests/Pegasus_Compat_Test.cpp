@@ -610,19 +610,6 @@ TEST(PegasusParity, SehDispatchEnabled) {
 
     const auto out = run_pe_sample("seh_test_x86.exe");
 
-    if (!qiling::testing::real_comparison_base().empty()) {
-        // With a real System32 tree taote stands the synthetic dispatch down and
-        // does not (yet) deliver the fault to the guest's own handler, so the
-        // sample's deliberate access violation surfaces instead of reaching its
-        // __except. That is the measured real-dll gap recorded in
-        // PLAN_PE_PARITY §0.6; what the mode does guarantee is asserted here.
-        EXPECT_TRUE(out.output_has("Hello emulator")) << out.output;
-        EXPECT_TRUE(out.error.find("write") != std::string::npos) << out.error;
-        EXPECT_EQ(out.exit_code, static_cast<int>(0xC0000005u));
-        EXPECT_FALSE(out.output_has("Caught AV as expected")) << out.output;
-        return;
-    }
-
     ASSERT_TRUE(out.error.empty()) << out.error;
     ASSERT_TRUE(out.ran);
     EXPECT_EQ(out.exit_code, 0);

@@ -13,6 +13,7 @@
 #include "qiling/os/windows/fncc.hpp"
 #include "qiling/os/windows/structs.hpp"
 #include "qiling/os/windows/windows.hpp"
+#include "qiling/os/windows/seh.hpp"
 
 #include <spdlog/spdlog.h>
 
@@ -587,7 +588,62 @@ void register_ntdll_family() {
         return STATUS_SUCCESS;
     };
 
-    // ---- the passthru Rtl bodies (the verbatim `return` passes) ----
+    // ---- the CONTEXT transfer (the x86 exception resume) ----
+    //
+    // NtContinue/ZwContinue is how a restored CONTEXT actually reaches the CPU:
+    // the CRT's SEH handler decides EXCEPTION_EXECUTE_HANDLER, patches
+    // ContextRecord->Eip to the __except block (and Ebp/Esp to its frame) and
+    // calls RtlRestoreContext, whose tail is NtContinue. Upstream leaves the
+    // whole chain passthru and the real ntdll body issues a syscall taote does
+    // not implement, so the context was never applied: measured on pegasus's
+    // seh_test_x86.exe with a real System32 tree, the filter printed its line,
+    // answered EXCEPTION_EXECUTE_HANDLER, and control returned to the CRT —
+    // the __except block never ran and the sample exited early with three of
+    // its seven script lines.
+    //
+    // The handler cannot write the registers itself: the API call's own unwind
+    // (return value into Eax, stack pop) runs afterwards. So it parks the image
+    // on the OS and stops the emulation; QlOsWindows::run applies it at the
+    // restart (see apply_continue_context).
+    const auto continue_body = [](Qiling& ql, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        auto* os = &w(ql);
+        // Only a context transfer that resumes a dispatched guest fault is
+        // ours: RtlRestoreContext/NtContinue are also used for plain context
+        // switches, and applying those here changed behaviour (measured: 8 of
+        // the 366 corpus samples stopped exiting cleanly, mimikatz among them).
+        if (!os->seh_dispatch_in_flight()) {
+            return std::nullopt;
+        }
+        const auto ctx_ptr = api_get_int(get_param(params, "ContextRecord"));
+        if (ctx_ptr == 0) {
+            return 0;  // STATUS_SUCCESS: nothing to restore
+        }
+        std::vector<std::uint8_t> image;
+        try {
+            image = ql.mem().read(ctx_ptr, windows::SEH_CONTEXT_SIZE);
+        } catch (...) {
+            return 0xC0000005u;  // STATUS_ACCESS_VIOLATION on a bad CONTEXT
+        }
+        os->set_continue_context(image);
+        os->set_run_retarget(os->continue_context_pc());
+        ql.emu_stop();
+        return std::nullopt;
+    };
+
+    // NTSYSAPI NTSTATUS NTAPI NtContinue( PCONTEXT ContextRecord, BOOLEAN TestAlert );
+    WinsdkApi("NtContinue", WinCc::Stdcall, {
+        {"ContextRecord", PVOID_},
+        {"TestAlert", BOOLEAN_},
+    }) = [continue_body](Qiling& ql, std::uint64_t, const ResolvedParams& params)
+        -> std::optional<std::uint64_t> { return continue_body(ql, params); };
+
+    WinsdkApi("ZwContinue", WinCc::Stdcall, {
+        {"ContextRecord", PVOID_},
+        {"TestAlert", BOOLEAN_},
+    }) = [continue_body](Qiling& ql, std::uint64_t, const ResolvedParams& params)
+        -> std::optional<std::uint64_t> { return continue_body(ql, params); };
+
+    // the passthru Rtl bodies (the verbatim `return` passes) ----
 
     // NTSYSAPI VOID RtlRaiseException( PEXCEPTION_RECORD ExceptionRecord );
     WinsdkApi("RtlRaiseException", WinCc::Stdcall, {
@@ -872,8 +928,15 @@ void register_ntdll_family() {
     WinsdkApi("RtlRestoreContext", WinCc::Cdecl, {
         {"ContextRecord", PVOID_},
         {"ExceptionRecord", PVOID_},
-    }, true) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
-        return std::nullopt;
+    }, true) = [continue_body](Qiling& ql, std::uint64_t, const ResolvedParams& params)
+        -> std::optional<std::uint64_t> {
+        // x86: apply the CONTEXT here (see the NtContinue note above). x64 keeps
+        // the passthru: ntdll's real body walks the extended context and ends in
+        // an iretq the emulator performs (seh_check_iret).
+        if (ql.arch().bits() != 32) {
+            return std::nullopt;
+        }
+        return continue_body(ql, params);
     };
 
     WinsdkApi("RtlCaptureContext", WinCc::Stdcall, {

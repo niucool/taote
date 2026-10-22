@@ -200,6 +200,16 @@ public:
     // current TryLevel's scope record) per chain link
     void seh_record_frame(std::uint64_t frame, const SehScopeRecord& scope);
     void seh_clear_frames() { seh_frames_.clear(); }
+    // the NtContinue path (see continue_context_)
+    void set_continue_context(const std::vector<std::uint8_t>& image);
+    // true between a dispatched guest fault and the CONTEXT transfer that
+    // resumes it: only then is an NtContinue/RtlRestoreContext ours to apply
+    void mark_seh_dispatch() noexcept { seh_dispatch_armed_ = true; }
+    bool seh_dispatch_in_flight() const noexcept { return seh_dispatch_armed_; }
+    void seh_apply_context(const std::vector<std::uint8_t>& image);
+    bool has_continue_context() const noexcept { return !continue_context_.empty(); }
+    void apply_continue_context();
+    std::uint64_t continue_context_pc() const noexcept { return continue_context_pc_; }
     const std::vector<SehFrame>& seh_frames() const noexcept { return seh_frames_; }
 
     // the dispatch switch (pegasus cfg.exceptions.dispatch_handlers): off
@@ -267,6 +277,7 @@ private:
     static bool seh_fault_trampoline(uc_engine* uc, uc_mem_type access, std::uint64_t address,
                                      std::uint32_t size, std::int64_t value, void* user_data);
     bool seh_on_fault(int access, std::uint64_t address);
+    bool seh_call_frame(std::uint64_t frame);
     bool seh_dispatch(std::uint64_t fault_addr, std::uint32_t access_type,
                       std::uint32_t exception_code = 0xC0000005u);
 
@@ -322,6 +333,17 @@ private:
     std::uint64_t seh_sentinel_ = 0;        // the staged return page (mapped rw-noexec)
     std::uint64_t seh_retarget_ = 0;        // the pending run-loop restart target
     std::uint64_t seh_context_addr_ = 0;    // the mapped CONTEXT (the reload path)
+    std::uint64_t seh_walk_frame_ = 0;      // the fs:[0] frame whose handler is running
+    std::uint64_t seh_walk_record_ = 0;     // the EXCEPTION_RECORD shared by the walk
+    std::uint64_t seh_walk_ptrs_ = 0;       // the EXCEPTION_POINTERS for the filters
+    // the CONTEXT a NtContinue/RtlRestoreContext call wants applied: the CRT's
+    // SEH transfer (RtlUnwind -> RtlRestoreContext -> NtContinue) hands control
+    // to the __except block by restoring a full CONTEXT, and the API call's own
+    // unwind would clobber the restored registers, so the image is applied at
+    // the run-loop restart instead (see seh.cpp / apply_continue_context)
+    std::vector<std::uint8_t> continue_context_;
+    std::uint64_t continue_context_pc_ = 0;
+    bool seh_dispatch_armed_ = false;
     std::uint64_t seh_fault_pc_ = 0;        // the repeat-guard key (pc)
     std::uint64_t seh_fault_addr_ = 0;      // the repeat-guard key (fault address)
     int seh_repeat_count_ = 0;

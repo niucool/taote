@@ -226,6 +226,14 @@ public:
     // philosophy for APIs the environment genuinely cannot provide
     std::uint64_t unbound_import_stub(const std::string& name, std::uint64_t ordinal = 0);
 
+    // Is `addr` one of the synthesized import stub cells rather than code in a
+    // loaded image? It matters for reporting: with a stub rootfs an import no
+    // handler serves is answered by a synthesized `xor eax,eax; ret` cell, so it
+    // is a real gap; with a real System32 tree the same name is genuine Microsoft
+    // code and calling it is not a gap at all (measured: the PMA curated cases
+    // reported 30+ "unsupported apis" that were simply real CRT/ntdll bodies).
+    bool is_import_stub(std::uint64_t addr) const noexcept;
+
     // the symbol an unbound-import stub cell stands in for (nullptr when the
     // address is not one of the stub page's cells). hook_winapi consults this
     // so an import the rootfs's DLL does not export — the Win7 rootfs exports

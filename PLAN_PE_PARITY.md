@@ -299,25 +299,66 @@ Three defects came out of this pass, all fixed:
 * **A bailed `DllMain` drive left its error record** in the program's list, so a
   later fault produced two entries (`PegasusParity.SehDispatchDisabled`).
 
-Two real-dll gaps remain, both measured, neither asserted as correct:
+### 0.6.1 The two gaps this pass closed
 
-* **x86 SEH fault delivery.** With a real CRT taote stands the synthetic
-  dispatch down. Delivering the fault to the guest's own handler instead was
-  implemented and measured: `seh_test_x86.exe` (a deliberate `mov [0],0x14`)
-  then renders its `__except` filter and body and exits 0 — but al-khaser's
-  control flow lands in its `.data` at `0x411cd5` (`UC_ERR_READ_UNMAPPED`),
-  where `QilingPeCompat.PeWinAlKhaser` requires it green. The resume state after
-  a real-CRT handler answers is not faithful yet (it is also why the
-  `seh_test_x86` post-`__except` tail does not print), so the stand-down stays
-  and `PegasusParity.SehDispatchEnabled` asserts what real-dll mode actually
-  guarantees (the AV surfaces, exit `0xC0000005`, no handler output).
-* **`PmaCompat`'s curated expectations are stub-model expectations.** With real
-  DLLs a sample's own `kernel32` performs the work internally, so the
-  `NtCreateFile`/`NtReadFile` dispatches those cases assert are not observable
-  (the same reason `PegasusParity.FileAccessEmulation*` now asserts the resolved
-  NT addresses in this mode). Re-deriving the 12 PMA expectations against the
-  real-dll dispatch surface is the remaining work there; the corpus sweep above
-  is the mode-correct measurement in the meantime.
+**x86 SEH delivery against a real CRT — fixed.** The missing piece was not the
+dispatch but the *resume*: when the guest's own `__except_handler4` decides
+`EXCEPTION_EXECUTE_HANDLER` it does not return, it patches
+`ContextRecord->Eip/Ebp` and calls `RtlRestoreContext`, whose tail is
+`NtContinue` — and taote had no handler for either, so the `__except` block
+never ran. Three changes close it:
+
+* `NtContinue`/`ZwContinue` (and x86 `RtlRestoreContext`) park the guest CONTEXT
+  on the OS, arm the retarget at its `Eip` and stop the emulation; the run loop
+  applies the image *at the restart* (`apply_continue_context`), because the API
+  call's own unwind would otherwise clobber the restored registers. Only a
+  transfer that resumes a dispatched guest fault is ours (`seh_dispatch_in_flight`);
+  plain context switches stay passthru (applying those cost 8 of the 366 corpus
+  samples).
+* `seh_continue` walks the `fs:[0]` chain *outward* when a real handler answers
+  `EXCEPTION_CONTINUE_SEARCH`, instead of giving up (`seh_call_frame`).
+* the sentinel return is matched by page, not by address, on the real-CRT path
+  (a handler's `ret` arrives as a fetch at `+1`); the synthetic walk keeps the
+  exact address, where anything else is a genuine guest fault.
+
+Result: pegasus's `seh_test_x86.exe` renders its **whole** DISPATCH_SCRIPT in
+real-dll mode (Hello emulator, In filter, Caught AV as expected, First access
+violation, First+Second nested access violation, After access violations, In
+finally, Returning...), which it previously truncated after three lines;
+`PegasusParity.SehDispatchEnabled` now requires all seven lines in both modes.
+
+**The PMA curated expectations — fixed.** Two of the twelve checks were
+stub-surface facts, not behaviour: `unsupported` counted *every* dispatch with no
+handler, which against a real System32 tree includes Microsoft's own CRT/ntdll
+bodies (`_initterm`, `DecodePointer`, the MSVCP140 exports) that simply run — it
+now counts only names served by taote's synthesized import stub arena
+(`QlLoaderPE::is_import_stub`); and the reference's 600-dispatch cap stops a
+real-DLL run in the middle of CRT startup, so it applies to stub mode only.
+The API-presence list stays the *stub* contract (in real-dll mode a sample
+reaches many of those names through the DLL's own internals, the same reason
+`FileAccessEmulation*` asserts the resolved NT addresses there) and is reported
+informationally. Measured: **1/12 stub (the reference contract, unchanged) and
+10/12 real-dll**, up from 0/12. The two reds are genuine guest faults
+(`invalid_fetch` in PMA 05-01 and 14-01) that the reference contract does not
+allow.
+
+### 0.6.2 Known real-dll reds and corpus movement
+
+* `QilingPeCompat.PeWinAlKhaser` is the one red against the Windows 11 harvest.
+  With a real System32 tree its *static* CRT takes a genuine access violation in
+  `_getptd` (`cmp dword ptr [eax + 0xa8], 0` with `eax = 0`, pc 0x411cd5, image
+  offset 0x10cd5) because the per-thread data's locale pointer at `+0x4c` is
+  zero; the delivery walks the chain outward and the chain then ends in a bad
+  frame (`UC_ERR_FETCH_UNMAPPED`). On the `rootfs-win7-crt` tree the case passes,
+  but only because the run bails earlier (it spins at 0x401990 and returns to
+  0x0, which taote reads as "the entry returned"). TLS bookkeeping is not the
+  cause: measured across the run, one thread (id 0), monotonically allocated
+  indices, `TlsSetValue(5, ptd)` stored and read back correctly.
+* The corpus sweep moved 214 → **210** exit 0 of 366 with the SEH delivery in
+  place (4 samples newly complete, 8 now surface a genuine guest exception where
+  the run was previously stopped silently — `mimikatz.exe` is one: it runs to
+  completion and exits `0xC0000005` with no error record).
+* `../pegasus/tests/bins` stays **101/101** exit 0 in real-dll mode.
 
 ## 1. The harness (`tests/QilingPe_Compat_Test.cpp`)
 
