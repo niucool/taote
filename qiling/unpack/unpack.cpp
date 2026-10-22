@@ -917,6 +917,42 @@ std::uint64_t Unpacker::ladder_oep(const std::vector<std::uint8_t>& image) const
             return tgt->start + off;
         }
     }
+    // A function-boundary thunk: `ret|int3|nop <e8 rel32> <e9 rel32> <prologue>`.
+    // The original entry of the ADInsight-class payloads is
+    //   5d c3 | e8 <call __security_init_cookie> e9 <rel32> | 6a 14 68 <imm32> e8
+    // i.e. a CRT-init thunk sitting on a function boundary, followed by the real
+    // body. The MPRESS packer's runtime fixups rewrite the two rel32 operands, so
+    // the reference's `e9 00000000` test does not survive the decode — the
+    // boundary prefix does. Requiring the set to be corpus-unique (exactly one)
+    // keeps it inert for the samples whose entry is a plain MSVC/Borland frame
+    // (ADExplorer/AccessEnum have zero hits).
+    if (tgt != nullptr) {
+        const auto tb = body_of(*tgt);
+        std::size_t bc_count = 0;
+        std::size_t bc_off = 0;
+        for (std::size_t i = 1; i + 18 < tb.size(); ++i) {
+            if (tb[i] != 0xe8 || tb[i + 5] != 0xe9) {
+                continue;
+            }
+            const auto* q = tb.data() + i + 10;
+            const bool prologue = (q[0] == 0x6a && q[2] == 0x68 && q[7] == 0xe8) ||
+                                  (q[0] == 0x55 && q[1] == 0x8b && q[2] == 0xec);
+            if (!prologue) {
+                continue;
+            }
+            const auto prev = tb[i - 1];
+            if (prev == 0xc3 || prev == 0xcc || prev == 0x90 || prev == 0xc2) {
+                ++bc_count;
+                bc_off = i;
+            }
+        }
+        if (opts_.debug) {
+            std::fprintf(stderr, "[unpack] ladder boundary-thunks in %s: %zu\n", tgt->name.c_str(), bc_count);
+        }
+        if (bc_count == 1) {
+            return tgt->start + bc_off;
+        }
+    }
     // Pass C: a CFG thunk `cc|c3 e8 <rel32> e9 <rel32>`. Every section is scanned
     // (NSPack decodes .text into nsp0 while the OEP lives in nsp1).
     for (const auto& ps : sections_) {
