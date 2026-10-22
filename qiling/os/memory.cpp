@@ -106,7 +106,7 @@ void QlMemoryManager::change_mapinfo(std::uint64_t mem_s, std::uint64_t mem_e, s
         return;
     }
 
-    const auto [lbound, ubound, _, label, mmio_ctx] = *it;
+    const auto& [_, __, ___, label, mmio_ctx] = *it;
     int perms = it->perms;
     std::string info = it->label;
 
@@ -114,7 +114,11 @@ void QlMemoryManager::change_mapinfo(std::uint64_t mem_s, std::uint64_t mem_e, s
     if (new_info.has_value()) info = *new_info;
 
     del_mapinfo(mem_s, mem_e);
-    add_mapinfo(lbound, ubound, perms, std::move(info), mmio_ctx);
+    // re-add the *sub-range* with the new permissions (the previous code
+    // re-added the full containing entry lbound..ubound, which grew the map
+    // entry back over the neighbours del_mapinfo had just split off — the
+    // underlying uc_mem_protect stayed correct but the metadata lied)
+    add_mapinfo(mem_s, mem_e, perms, std::move(info), mmio_ctx);
 }
 
 std::vector<std::tuple<std::uint64_t, std::uint64_t, std::string, std::string, std::string>>
