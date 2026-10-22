@@ -216,6 +216,12 @@ public:
     // leaves every guest fault on the ordinary failure path
     // the guest software-interrupt delivery (public so a test can drive it)
     bool seh_on_interrupt(std::uint32_t intno);
+    // the write-protection fault (a store to a read-only page): the PEtite
+    // stub probes writability by storing to the read-only header page and
+    // dispatches on the AV. Stages STATUS_ACCESS_VIOLATION into fs:[0] and
+    // stops the run so it restarts at the handler; when nothing handles it,
+    // completes the write (the reference's survive behavior).
+    bool seh_on_write_prot(std::uint64_t address, std::uint32_t size, std::uint64_t value);
     // the invalid-instruction delivery (TELock's 0xf1 ICEBP ladder + the #UD
     // `lea reg,reg` trap): stages the given CPU exception into the fs:[0]
     // chain like seh_on_fault/seh_on_interrupt, then stops the run so it
@@ -304,6 +310,9 @@ private:
     // STATUS_BREAKPOINT, everything else STATUS_ILLEGAL_INSTRUCTION, both
     // staged into the fs:[0] chain like the memory faults
     static void seh_intr_trampoline(uc_engine* uc, std::uint32_t intno, void* user_data);
+    // the write-protection fault (UC_HOOK_MEM_WRITE_PROT): see seh_on_write_prot
+    static bool seh_write_prot_trampoline(uc_engine* uc, uc_mem_type type, std::uint64_t address,
+                                          std::uint32_t size, std::int64_t value, void* user_data);
     bool seh_continue();
     void seh_build_context(std::uint64_t dest) const;
     void seh_load_context();
@@ -337,6 +346,7 @@ private:
     // the SEH dispatch state (seh.hpp)
     uc_hook seh_hook_ = 0;
     uc_hook seh_prot_hook_ = 0;   // the sentinel-return fetch (MEM_FETCH_PROT)
+    uc_hook seh_write_prot_hook_ = 0;  // the RO-page store (MEM_WRITE_PROT)
     std::uint64_t seh_sentinel_ = 0;        // the staged return page (mapped rw-noexec)
     std::uint64_t seh_retarget_ = 0;        // the pending run-loop restart target
     std::uint64_t seh_context_addr_ = 0;    // the mapped CONTEXT (the reload path)

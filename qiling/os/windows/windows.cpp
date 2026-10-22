@@ -315,6 +315,8 @@ void QlOsWindows::ensure_profile_state() {
                     reinterpret_cast<void*>(&seh_fault_trampoline), this, 1, 0);
         uc_hook_add(&ql_->arch().uc(), &seh_prot_hook_, UC_HOOK_MEM_FETCH_PROT,
                     reinterpret_cast<void*>(&seh_fault_trampoline), this, 1, 0);
+        uc_hook_add(&ql_->arch().uc(), &seh_write_prot_hook_, UC_HOOK_MEM_WRITE_PROT,
+                    reinterpret_cast<void*>(&seh_write_prot_trampoline), this, 1, 0);
         // the guest software interrupts ride the same dispatch (a `call`
         // into a debugger probe, an int 0x2d kernel door)
         uc_hook_add(&ql_->arch().uc(), &seh_intr_hook_, UC_HOOK_INTR,

@@ -224,6 +224,11 @@ bool QlOsWindows::has_real_crt() {
 }
 
 bool QlOsWindows::seh_on_fault(int access, std::uint64_t address) {
+    if (std::getenv("TAOTE_SEHDBG") != nullptr) {
+        std::fprintf(stderr, "[fault] access=%d addr=0x%llx pc=0x%llx\n", access,
+                     static_cast<unsigned long long>(address),
+                     static_cast<unsigned long long>(ql_->arch().regs().arch_pc()));
+    }
     if (bits_ != 32 || !seh_dispatch_enabled_) {
         return false;  // the dispatch is not armed (or switched off)
     }
@@ -442,6 +447,49 @@ bool QlOsWindows::seh_on_interrupt(std::uint32_t intno) {
     }
     ql_->emu_stop();
     return true;
+}
+
+bool QlOsWindows::seh_write_prot_trampoline(uc_engine*, uc_mem_type /*type*/, std::uint64_t address,
+                                            std::uint32_t size, std::int64_t value, void* user_data) {
+    auto* self = static_cast<QlOsWindows*>(user_data);
+    try {
+        return self->seh_on_write_prot(address, size, static_cast<std::uint64_t>(value));
+    } catch (const std::exception& e) {
+        self->on_emulation_error(e.what());
+        return false;
+    } catch (...) {
+        self->on_emulation_error("SEH write-prot dispatch failed");
+        return false;
+    }
+}
+
+bool QlOsWindows::seh_on_write_prot(std::uint64_t address, std::uint32_t size, std::uint64_t value) {
+    if (bits_ != 32 || !seh_dispatch_enabled_ || !loader_done()) {
+        return false;
+    }
+    if (seh_sentinel_ == 0 && !seh_map_sentinel()) {
+        return false;
+    }
+    if (seh_dispatch(address, 1u, 0xC0000005u)) {
+        ql_->emu_stop();
+        return true;
+    }
+    // nothing handled the AV: complete the write so the stub can proceed (the
+    // reference's unpack-mode survive behavior — Alienyze scrubs import
+    // descriptors inside a read-only .rsrc and must not die on the fault)
+    try {
+        const auto page = address & ~0xfffull;
+        ql_->mem().protect(page, 0x1000, UC_PROT_ALL);
+        std::vector<std::uint8_t> bytes;
+        const auto n = std::min<std::uint32_t>(size, 8);
+        for (std::uint32_t i = 0; i < n; ++i) {
+            bytes.push_back(static_cast<std::uint8_t>((value >> (8 * i)) & 0xff));
+        }
+        ql_->mem().write(address, bytes);
+        return true;
+    } catch (...) {
+        return false;
+    }
 }
 
 bool QlOsWindows::seh_dispatch_cpu(std::uint32_t exception_code) {
