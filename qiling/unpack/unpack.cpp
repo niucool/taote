@@ -1944,6 +1944,21 @@ UnpackResult Unpacker::finalize(Qiling& ql) {
                 std::fprintf(stderr, "[unpack] exec-page overlay: %zu pages\n", restored);
             }
         }
+        // MEW's stub memsets the decoded image right before handing off, so the
+        // terminal dump is zeroed where the payload lives; the reference keeps the
+        // full first-write overlay for this family alone (unpacker.cpp:178-200).
+        if (opts_.family == "MEW" && shadow_seen_.size() == image.size()) {
+            std::size_t restored = 0;
+            for (std::size_t i = 0; i < image.size(); ++i) {
+                if (shadow_seen_[i] && shadow_image_[i] != image[i]) {
+                    image[i] = shadow_image_[i];
+                    ++restored;
+                }
+            }
+            if (opts_.debug) {
+                std::fprintf(stderr, "[unpack] mew shadow overlay %zu bytes\n", restored);
+            }
+        }
         // Measured: a FULL first-write overlay HURTS the JIT families (JDPack .text
         // similarity 0.93 -> 0.47, PEtite 0.80 -> 0.69) because their stubs write
         // transient ciphertext/decoy pages before the real decode; only the

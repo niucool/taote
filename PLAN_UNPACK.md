@@ -169,17 +169,17 @@ class** — the OEP of the trampoline/VM families.
 | round 1 (generic core + pick + salvage) | **18 / 75** |
 | round 2a: the decode-only ladder (Pass-C / Borland / MSVC frame) | **30 / 75** |
 | round 2b: Pass-B ordering, degenerate-layout fallback, inter-map salvage | **33 / 75** |
+| round 2c: orphan import-list mining (the FSG string-blob reconstruction) | **36 / 75** |
 | oracle, same 75 | 66 / 75 (strict 60) |
 
 Per family (VER / PART / FAIL), round 2:
 
 ```
 UPX 3/0/0        ASPack 3/0/0       Eronana 3/0/0     MPRESS 3/0/0      Packman 3/0/0
-RLPack 3/0/0     Exe32pack 3/0/0    Yoda-Crypter 3/0/0                 FSG 2/1/0
-EXpressor 2/1/0  BeRo 1/2/0         EnigmaVB 1/2/0    MEW 1/2/0         Molebox 1/2/0
-WinUpack 1/1/1   JDPack 0/3/0       NSPack 0/3/0      Neolite 0/3/0     PECompact 0/2/1
-PEtite 0/3/0     TELock 0/3/0       Themida 0/3/0     Alienyze 0/0/3    Amber 0/0/3
-Yoda-Protector 0/0/3
+RLPack 3/0/0     Exe32pack 3/0/0    Yoda-Crypter 3/0/0  EnigmaVB 3/0/0   FSG 2/1/0
+EXpressor 2/1/0  BeRo 1/2/0         JDPack 1/2/0      MEW 1/2/0         Molebox 1/2/0
+WinUpack 1/1/1   NSPack 0/3/0       Neolite 0/3/0     PECompact 0/2/1   PEtite 0/3/0
+TELock 0/3/0     Themida 0/3/0      Alienyze 0/0/3    Amber 0/0/3       Yoda-Protector 0/0/3
 ```
 
 Everything the ladder touched is now green in the families where the payload decodes:
@@ -236,11 +236,17 @@ Per-family causes with evidence:
   descriptors are rebuilt by EVB's VFS at runtime and the slots hold EVB
   trampolines, so neither the dump's IDir nor the loader's export map finds them.
   Needs the VFS import walk (`family_reconstruct_orphans`).
-* **BeRo / FSG / WinUpack / MEW (6)** — the stub restores the IAT itself and the
-  payload's descriptors are overwritten; scanning the image AND every other mapped
-  region for loader-known addresses finds nothing (measured: FSG AccessEnum's whole
-  image holds 20 dll-region dwords, none of them an export cell). Needs the
-  reference's orphan-name + INT-chain mining.
+* **BeRo / WinUpack / MEW (5)** — the stub restores the IAT itself and the payload's
+  descriptors are overwritten; scanning the image AND every other mapped region for
+  loader-known addresses finds nothing (measured: FSG AccessEnum's whole image holds
+  20 dll-region dwords, none of them an export cell). The first half of the
+  reference's orphan mining is now in (`mine_orphan_descriptors`): FSG AccessEnum's
+  bare string blob is reconstructed exactly (8 dlls / 215 names, first pair
+  KERNEL32.dll!GetModuleHandleA after undoing FSG's +3 first-character shift) and
+  that is what took EnigmaVB to 3/3. BeRo, MEW and WinUpack store the list
+  differently (no blob found), and fsg_AccessEnum's coverage reaches 0.667 — one dll
+  short of the 0.80 bar, because FSG shifts the dll-name strings' first character
+  too, which `dll_like` still rejects.
 * **Alienyze / Amber (6)** — the decrypter never runs; Amber allocates nothing at
   all (its only non-image map is one heap page), so the embedded-PE scan is inert
   (implemented and measured — see the round-2 commit).
