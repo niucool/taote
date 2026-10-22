@@ -728,7 +728,7 @@ void Unpacker::dump_module(Qiling& ql, std::uint64_t addr, const std::string& re
     // pick time from terminal memory (unpacker.cpp:6789-6830 + pick_and_emit_oep
     // :7991-8366). Emitting per candidate here burned the stage cap on junk hops
     // and made the artifact depend on which hop happened to be 16th.
-    if (hop_ledger_.size() >= 4096) {
+    if (hop_ledger_.size() >= 65536) {
         return;
     }
     bool accept = true;
