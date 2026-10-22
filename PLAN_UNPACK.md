@@ -328,6 +328,19 @@ Nothing about the OEP or the shadow transform can change that: the first work it
 TELock in round 3 is the faulting opcode (bytes at the fault: recorded in this round's
 commit), not the dump transform.
 
+### 0.5.3d Round 3 entry points (measured state, exact first move per class)
+
+| class | rows | measured blocker | first move |
+|---|---|---|---|
+| TELock | 3 | stub dies on `0xf1` (ICEBP) at pc 0x408a08 / 0x419a08; a bare skip makes it loop forever (wall timeout, `rc=124`, measured) | deliver a debug exception through the guest's own handler (the SEH path exists: `QlOsWindows::seh_*`), not a skip |
+| PEtite | 3 | entry exact on 7z but similarity 0.798: lazy per-page decrypt, payload faults at its first import | `PETITE_INT_RUNS`: keep emulating past the OEP with imports answered by the stub arena so the pages decrypt |
+| Neolite | 3 | similarity 0.03-0.04, imports fine: demand-paged decryption, only touched pages decrypt | replay the page-decrypt routine for every page before the dump |
+| PECompact | 3 | similarity 0.004-0.05; the dump holds no chunk of the original `.text` at any offset (byte-searched) | `family_capture_hop_` + `family_post_terminal` seam |
+| NSPack | 3 | packed EP (0x101b) points at zero bytes; forced starts at 0x42a000 and 0x401047 both end at pc 0x40101b with 0 writes | the oracle's flow (it reports stages=2 plus a dynamic-region dump at 0x8000) |
+| Alienyze / Amber | 6 | the decrypter never runs; Amber allocates nothing (one heap page) | `recover_alienyze` port; Amber's embedded-PE is inert until the stub allocates |
+| Molebox / WinUpack / BeRo | 6 | container prepass; table merge; one more import-blob shape (2 dlls short) | tiers B/C of §3 |
+| Themida / Yoda-Protector | 6 | oracle 0/3 on both | deferred |
+
 ### 0.5.4 What this changes in the plan
 
 1. **The GPA sentinel lane is Phase 1, not Phase 1b.** UPX's import restorer calls
