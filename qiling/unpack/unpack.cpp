@@ -808,31 +808,6 @@ std::uint64_t Unpacker::ladder_oep(const std::vector<std::uint8_t>& image) const
             tgt = &ps;
         }
     }
-    // Borland/Delphi pre-check: a UNIQUE `6a ?? 68 <image-addr> e8` (push/push/call
-    // entry) in the largest section is the entry — it also suppresses the Pass-C
-    // override, which would otherwise fire on a false-positive CFG thunk.
-    if (tgt != nullptr) {
-        const auto b = body_of(*tgt);
-        std::size_t count = 0;
-        std::size_t off = 0;
-        for (std::size_t i = 0; i + 8 < b.size(); ++i) {
-            if (b[i] == 0x6a && b[i + 2] == 0x68 && b[i + 7] == 0xe8) {
-                const auto pv = static_cast<std::uint64_t>(
-                    static_cast<std::uint32_t>(b[i + 3]) | (static_cast<std::uint32_t>(b[i + 4]) << 8) |
-                    (static_cast<std::uint32_t>(b[i + 5]) << 16) | (static_cast<std::uint32_t>(b[i + 6]) << 24));
-                if (pv > base_ && pv < base_ + image_size_) {
-                    ++count;
-                    off = i;
-                }
-            }
-        }
-        if (count == 1) {
-            if (opts_.debug) {
-                std::fprintf(stderr, "[unpack] ladder: unique Borland entry in %s\n", tgt->name.c_str());
-            }
-            return tgt->start + off;
-        }
-    }
     // Pass B: the MSVC entry frame `55 8b ec 6a ff 68 <image-addr> 64 a1` is
     // unique per image (every other function shares the `55 8b ec` head but not
     // the SEH push). RLPack AccessEnum's payload has no Pass-C thunk at all.
@@ -859,11 +834,40 @@ std::uint64_t Unpacker::ladder_oep(const std::vector<std::uint8_t>& image) const
         if (opts_.debug) {
             std::fprintf(stderr, "[unpack] ladder passB hits=%zu last=%s\n", hits, hex(hit_va).c_str());
         }
-        if (!mpress && hits >= 1 && hits <= 4) {
+        if (!mpress && hits >= 1 && hits <= 8) {
             if (opts_.debug) {
                 std::fprintf(stderr, "[unpack] ladder: unique MSVC frame entry %s\n", hex(hit_va).c_str());
             }
             return hit_va;
+        }
+    }
+    // Borland/Delphi pre-check: a UNIQUE `6a ?? 68 <image-addr> e8` (push/push/call
+    // entry) in the largest section is the entry — it also suppresses the Pass-C
+    // override, which would otherwise fire on a false-positive CFG thunk. It is
+    // scoped to the decode-only families like the rest of the ladder: 7z's MSVC
+    // payload happens to hold exactly one such sequence and the pre-check then
+    // shadowed the Pass-B entry that the four-frame cluster identifies (measured:
+    // jdpack_7zFM picked 0x405723 instead of its true 0x422ce2).
+    if (tgt != nullptr) {
+        const auto b = body_of(*tgt);
+        std::size_t count = 0;
+        std::size_t off = 0;
+        for (std::size_t i = 0; i + 8 < b.size(); ++i) {
+            if (b[i] == 0x6a && b[i + 2] == 0x68 && b[i + 7] == 0xe8) {
+                const auto pv = static_cast<std::uint64_t>(
+                    static_cast<std::uint32_t>(b[i + 3]) | (static_cast<std::uint32_t>(b[i + 4]) << 8) |
+                    (static_cast<std::uint32_t>(b[i + 5]) << 16) | (static_cast<std::uint32_t>(b[i + 6]) << 24));
+                if (pv > base_ && pv < base_ + image_size_) {
+                    ++count;
+                    off = i;
+                }
+            }
+        }
+        if (count == 1) {
+            if (opts_.debug) {
+                std::fprintf(stderr, "[unpack] ladder: unique Borland entry in %s\n", tgt->name.c_str());
+            }
+            return tgt->start + off;
         }
     }
     // Pass C: a CFG thunk `cc|c3 e8 <rel32> e9 <rel32>`. Every section is scanned
