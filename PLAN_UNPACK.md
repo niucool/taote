@@ -438,9 +438,12 @@ and what they actually measured:
    taote initialises EAX to 0, so the first instruction faults on a null
    write with no SEH handler and the run ends with 0 writes. The oracle's
    later null write IS handled by a real guest SEH frame (handler `0x407a3e`).
-   Fix is to match the loader's register side-effect (or seed EAX), not to
-   zero-map the null page (the oracle maps nothing at 0 and still faults on
-   the genuine null write). NSPack stays 0/3.
+   Seeding EAX with a mapped scratch page was measured: it walks the zero
+   head to `0x401027` where the first non-zero stub byte (`00 80 00 d0 03
+   00` = `add [eax+0x3d000],al`) reads EAX as an image-relative base and
+   faults on the scratch-page offset — so EAX alone is not the fix; the
+   oracle's mapping of nsp0's raw head (or its register setup) must differ
+   further. NSPack stays 0/3.
 
 ### 0.5.4 What this changes in the plan
 
