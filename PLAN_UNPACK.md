@@ -121,14 +121,119 @@ Running pegasus's detector over 3 samples/family (`SE_DEBUG_DETECTOR=1`):
 
 ### 0.4 taote today
 
-| metric | taote today | target |
+| metric | at plan time | after round 1 (§0.5) | target |
+|---|---|---|---|
+| S75 UNPACKED_VERIFIED | 0 | **18 / 75** | P1 45, P3 60 |
+| S500 UNPACKED_VERIFIED | 0 | not yet run (gated on the family work) | ≥ 250 (≈ oracle's 52.9% census) |
+| detector name-exact, 25 families | 0 (no detector) | 22/25 (the tool's name guess; Phase 2 has not landed as a library) | P2 25/25 |
+| artifact contract (`<stem>_dump.bin`, `.meta.json`, `_unpacked.exe`) | absent | **met** (valid JSON, asserted) | P0 |
+| host crashes (S75) | n/a | **0** (+80 mutated images) | **0**, always |
+| taote suite | 574 passed (stub) | **578 passed** (4 unpack cases) / 586 + 1 known red (real dlls) | unchanged at every phase |
+
+---
+
+## 0.5 Measured status (implementation round 1, 2026-10-22)
+
+The unpacker is implemented as `qiling/unpack/` (library), `tools/taote_unpack`
+(the flag-compatible CLI) and `tests/Unpack_Compat_Test.cpp` (contract, meta-JSON,
+rebuilt-PE round-trip and host-safety cases). Measured with the *same* harness and the
+*same* 75 samples as §0.2 (`--unpack-timeout 85`, wall 120, `--pin 4`):
+
+| phase | S75 UNPACKED_VERIFIED | notes |
 |---|---|---|
-| S75 UNPACKED_VERIFIED (strict) | **0** (no unpacker exists: `grep -rn "unpack\|oep" qiling/` finds nothing but unrelated hits) | P1 45, P3 60 — equal in both columns, since taote's metas always parse (oracle: 66 reported / 60 strict) |
-| S500 UNPACKED_VERIFIED | 0 | ≥ 250 (≈ oracle's 52.9% census) |
-| detector name-exact, 25 families | 0 (no detector) | P2 25/25 |
-| artifact contract (`<stem>_dump.bin`, `.meta.json`, `_unpacked.exe`) | absent | P0 |
-| host crashes (S75) | n/a | **0**, always |
-| taote suite | 574 passed (stub) / 582 passed + 1 known red (real dlls) | unchanged at every phase |
+| 0 artifact-only (`--no-hop`) | **0 / 75** | 56 partial, 19 failed — the entry-state dump |
+| 1 generic core (hop + dump + rebuild) | **7 / 75** | UPX 3, EXpressor 2, Packman 2 |
+| 1b GPA sentinel + decoy dlls + salvage | **9 → 20 / 75** | the sentinel lane is a *Phase 1* prerequisite, see below |
+| OEP pick (incumbent prior) + header-EP + MEW static + shadow | **18 / 75** | 43 partial, 14 failed |
+| **oracle, same 75** | **66 / 75** (strict 60) | §0.2 |
+
+Wall time: median 1 s, max 25 s, **0 wall-timeouts** (oracle: median 5 s, max 87 s).
+
+Per family (VER / PART / FAIL), taote:
+
+```
+UPX 3/0/0        Eronana 3/0/0     FSG 2/1/0        JDPack 2/1/0     ASPack 1/2/0
+BeRo 1/2/0       EXpressor 1/2/0   EnigmaVB 1/2/0   MEW 1/2/0        MPRESS 1/2/0
+Packman 1/2/0    WinUpack 1/1/1    Molebox 0/3/0    NSPack 0/3/0     Neolite 0/3/0
+PECompact 0/2/1  PEtite 0/3/0      RLPack 0/3/0     TELock 0/3/0     Themida 0/3/0
+Yoda-Crypter 0/3/0  Yoda-Protector 0/0/3  Alienyze 0/0/3  Amber 0/0/3  Exe32pack 0/0/3
+```
+
+The oracle's cells for the same families are in §0.2 (66/75): the gap is **one
+class** — the OEP of the trampoline/VM families.
+
+### 0.5.1 What the implementation already proves
+
+* the write-claim → section-hop → dump → `.pgimp` rebuild chain works: **UPX,
+  ASPack, FSG, Eronana, JDPack, Packman** reach the exact original EP and dump a
+  90-100% identical `.text` (e.g. `upx_AccessEnum`: OEP `0x407a98` = the
+  original's EP, sim 1.0, coverage 1.0);
+* import recovery is solved for the generic path: the GPA sentinel lane +
+  on-demand decoy dlls + the dump's own import descriptors give FSG 14/15 dlls
+  (the oracle: 15/15) where the first cut had 1/15;
+* the host-safety rule holds: 80 mutated/degenerate images through the rebuilder,
+  zero crashes (`UnpackCompat.UnpackHostSafety`), and no run in S75 took the
+  process down.
+
+### 0.5.2 The remaining 57 samples, diagnosed (this is the next work)
+
+Failure reasons across the 57 non-verified, from `verify.py`:
+
+| reason | count | what it means |
+|---|---|---|
+| `ep-mismatch` (± code-sim / imports) | 37 | the OEP is not the payload's entry — the dump is taken from terminal memory, so this is purely the **candidate selection** |
+| `ep-mismatch, code-sim<0.90` | 12 | OEP wrong **and** the decode incomplete at the moment the stub stopped |
+| `bad-output-PE` | 3 | Exe32pack's degenerate header — the rebuild now falls back to the verbatim dump, but the artifact still fails (b) |
+| `no-recovery` | 2 | Alienyze: the on-demand page decrypter never ran |
+
+Per-family cause, evidenced by the debug traces (`TAOTE_UNPACK_DEBUG=1`):
+
+* **NSPack / RLPack / MPRESS** — the stub `ret`s through trampolines into the
+  decoded payload; the section-hop sees the mid-decode excursions and the run ends
+  before the final transfer. Needs the reference's decode-only ladder
+  (`decode_only_ladder`, unpacker.cpp:7814-7930) and its Pass-C scan. Measured:
+  MPRESS picks the right EP on 1/3 (the `0x407a98` shape), the others park on a
+  stub address.
+* **PEtite** — needs the transition-history pick (`unpacker.h:623-650`): the
+  stub's last hop before it stops writing is the hand-off. Measured: the ledger
+  contains both the mid-decode hop and the final one; the current pick prefers the
+  former.
+* **TELock** — the decode is just-in-time (decrypt → execute → re-encrypt); the
+  terminal dump is re-encrypted. The shadow overlay restores wiped zeros only, so
+  TELock needs the full shadow transform (`family_transform_dump_image`) and the
+  second-latch exec defer.
+* **Themida / Yoda-Protector** — the oracle fails these too (0/3 each). Not
+  attempted; the plan's tier D.
+* **Alienyze** — the per-sample XOR recovery (`recover_alienyze`,
+  alienyze.cpp:1-1544) is the only path; the stub's page decrypter never runs
+  under emulation (2 of 3 samples have no image at all).
+* **Amber** — `try_embedded_pe`: the payload PE is built in a heap buffer, so the
+  image dump is empty; needs the map scan (unpacker.cpp:10430-10520).
+* **Molebox / Neolite / PECompact / EnigmaVB / Exe32pack** — container/registry/
+  header-specific recovery (the plan's tier B/C rows). EnigmaVB improves with the
+  header EP (1/3 now); its import coverage (0.36-0.38) needs the VFS import walk.
+
+### 0.5.3 What this changes in the plan
+
+1. **The GPA sentinel lane is Phase 1, not Phase 1b.** UPX's import restorer calls
+   `ExitProcess` on the first NULL `GetProcAddress`; without the sentinel the run
+   dies before the payload is ever transferred (measured: `stages=0`, OEP guessed).
+2. **The sentinel must be *callable and attributed*.** A bare fake address faults
+   the moment the stub calls it (ASPack's `VirtualAlloc`: `UC_ERR_FETCH_UNMAPPED`),
+   so it is minted from the loader's stub arena and registered; and attribution
+   needs the *decoy dll* (a LoadLibrary of a dll taote lacks is materialized as an
+   export-less image) or the last-LoadLibrary name, else verify.py's dll coverage
+   collapses (FSG 1/15 → 14/15 once fixed).
+3. **The dump is emitted once, at pick time, from terminal memory.** Emitting per
+   candidate burned the 16-stage cap on junk hops; the reference does the same
+   (ledger during the run, `emit_final_dump` at pick).
+4. **The incumbent prior matters more than the score.** A pure prologue-shape
+   score demoted 11 verified samples; the first accepted hop is the true OEP for
+   every single-hop compressor. The pick only replaces it when the incumbent is in
+   the stub's own section or is a data blob.
+5. **Every non-zero claim in the reference's `meta.json` is worth checking**: its
+   own MEW/Molebox metas are invalid JSON (§0.0), so taote's must be valid
+   (nlohmann, asserted by `UnpackCompat.UnpackMetaJsonValid`).
 
 ---
 
