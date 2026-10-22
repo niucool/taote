@@ -148,6 +148,11 @@ private:
     // trampolines and never hand off under emulation (NSPack, RLPack, MPRESS).
     // Returns 0 when nothing matches.
     std::uint64_t ladder_oep(const std::vector<std::uint8_t>& image) const;
+    // The reference's try_embedded_pe (unpacker.cpp:10430-10520): Amber-class
+    // stubs build the payload PE in a heap buffer and never touch the original
+    // sections, so the image dump is the stub. Scan every mapped region for a
+    // second PE image and adopt it.
+    bool adopt_embedded_pe(Qiling& ql, std::vector<std::uint8_t>& image);
 
     UnpackOptions opts_;
     std::vector<PackSection> sections_;

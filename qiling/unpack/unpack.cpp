@@ -972,6 +972,113 @@ std::uint64_t Unpacker::ladder_oep(const std::vector<std::uint8_t>& image) const
     return 0;
 }
 
+bool Unpacker::adopt_embedded_pe(Qiling& ql, std::vector<std::uint8_t>& image) {
+    std::uint64_t best = 0;
+    std::uint64_t best_size = 0;
+    try {
+        for (const auto& mi : ql.mem().get_mapinfo()) {
+            const auto lo = std::get<0>(mi);
+            const auto hi = std::get<1>(mi);
+            if (hi <= lo || lo == base_ || hi - lo < 0x1000 || hi - lo > 0x8000000) {
+                continue;
+            }
+            if (lo >= 0x10000000) {
+                continue;  // the loaded dll tree
+            }
+            std::vector<std::uint8_t> head;
+            try {
+                head = ql.mem().read(lo, std::min<std::uint64_t>(hi - lo, 0x1000));
+            } catch (...) {
+                continue;
+            }
+            if (head.size() < 0x200 || head[0] != 'M' || head[1] != 'Z') {
+                continue;
+            }
+            const auto lfanew = static_cast<std::size_t>(head[0x3c]) | (static_cast<std::size_t>(head[0x3d]) << 8) |
+                                (static_cast<std::size_t>(head[0x3e]) << 16) |
+                                (static_cast<std::size_t>(head[0x3f]) << 24);
+            if (lfanew + 0x40 > head.size() || head[lfanew] != 'P' || head[lfanew + 1] != 'E') {
+                continue;
+            }
+            const auto opt = lfanew + 24;
+            const auto magic = static_cast<std::uint32_t>(head[opt]) | (static_cast<std::uint32_t>(head[opt + 1]) << 8);
+            if (magic != 0x10b && magic != 0x20b) {
+                continue;
+            }
+            const auto soi = static_cast<std::uint64_t>(head[opt + 0x38]) |
+                             (static_cast<std::uint64_t>(head[opt + 0x39]) << 8) |
+                             (static_cast<std::uint64_t>(head[opt + 0x3a]) << 16) |
+                             (static_cast<std::uint64_t>(head[opt + 0x3b]) << 24);
+            if (soi < 0x1000 || soi > hi - lo) {
+                continue;
+            }
+            if (soi > best_size) {
+                best = lo;
+                best_size = soi;
+            }
+        }
+    } catch (...) {
+        return false;
+    }
+    if (best == 0) {
+        return false;
+    }
+    std::vector<std::uint8_t> embedded;
+    try {
+        embedded = ql.mem().read(best, best_size);
+    } catch (...) {
+        return false;
+    }
+    if (embedded.size() < 0x200) {
+        return false;
+    }
+    // adopt: the payload image replaces the stub's
+    const auto old_base = base_;
+    base_ = best;
+    image_size_ = best_size;
+    image = embedded;
+    // re-point the section table at the payload's own sections
+    sections_.clear();
+    watched_.clear();
+    const auto rd = [&embedded](std::size_t o) -> std::uint32_t {
+        if (o + 4 > embedded.size()) {
+            return 0;
+        }
+        return static_cast<std::uint32_t>(embedded[o]) | (static_cast<std::uint32_t>(embedded[o + 1]) << 8) |
+               (static_cast<std::uint32_t>(embedded[o + 2]) << 16) |
+               (static_cast<std::uint32_t>(embedded[o + 3]) << 24);
+    };
+    const auto rd16 = [&embedded](std::size_t o) -> std::uint32_t {
+        if (o + 2 > embedded.size()) {
+            return 0;
+        }
+        return static_cast<std::uint32_t>(embedded[o]) | (static_cast<std::uint32_t>(embedded[o + 1]) << 8);
+    };
+    const auto e_lfanew = static_cast<std::size_t>(rd(0x3c));
+    const auto n_sec = rd16(e_lfanew + 6);
+    const auto opt_size = rd16(e_lfanew + 20);
+    const auto sec_table = e_lfanew + 24 + static_cast<std::size_t>(opt_size);
+    for (std::size_t i = 0; i < n_sec && i < 96; ++i) {
+        const auto o = sec_table + i * 40;
+        PackSection ps;
+        for (std::size_t k = 0; k < 8 && embedded[o + k] != 0; ++k) {
+            ps.name.push_back(static_cast<char>(embedded[o + k]));
+        }
+        ps.vsize = rd(o + 8);
+        ps.start = base_ + rd(o + 12);
+        ps.end = ps.start + (ps.vsize ? ps.vsize : 1);
+        ps.raw = rd(o + 16);
+        const auto ch = rd(o + 36);
+        ps.is_exec = (ch & 0x20000000u) != 0;
+        sections_.push_back(ps);
+    }
+    if (opts_.debug) {
+        std::fprintf(stderr, "[unpack] embedded PE at %s size %s (stub at %s)\n", hex(best).c_str(),
+                     hex(best_size).c_str(), hex(old_base).c_str());
+    }
+    return true;
+}
+
 void Unpacker::harvest_image_imports(const std::vector<std::uint8_t>& image) {
     const auto at = [&image](std::size_t o, int n) -> std::uint64_t {
         std::uint64_t v = 0;
@@ -1479,6 +1586,32 @@ UnpackResult Unpacker::finalize(Qiling& ql) {
         if (image.empty()) {
             res.error = "image read failed";
             return res;
+        }
+        // Amber-class: the payload PE is assembled in a heap buffer and the
+        // original sections are never written, so there is no hop to find — adopt
+        // the embedded image (the reference's try_embedded_pe)
+        if (hop_ledger_.empty() &&
+            (opts_.family == "Amber" || opts_.family == "Alienyze")) {
+            std::vector<std::uint8_t> adopted = image;
+            if (adopt_embedded_pe(ql, adopted)) {
+                image = std::move(adopted);
+                const auto ep_rva = [&image]() -> std::uint64_t {
+                    const auto lfanew = static_cast<std::size_t>(image[0x3c]) |
+                                        (static_cast<std::size_t>(image[0x3d]) << 8) |
+                                        (static_cast<std::size_t>(image[0x3e]) << 16) |
+                                        (static_cast<std::size_t>(image[0x3f]) << 24);
+                    const auto o = lfanew + 24 + 16;
+                    return static_cast<std::uint64_t>(image[o]) | (static_cast<std::uint64_t>(image[o + 1]) << 8) |
+                           (static_cast<std::uint64_t>(image[o + 2]) << 16) |
+                           (static_cast<std::uint64_t>(image[o + 3]) << 24);
+                }();
+                const auto ep_va = base_ + ep_rva;
+                if (ep_rva != 0 && ep_va < base_ + image_size_) {
+                    meta_oep_ = ep_va;
+                    reason_ = "embedded_pe";
+                    stages_ = 1;
+                }
+            }
         }
         // the OEP pick over the hop ledger (terminal image in hand)
         if (opts_.debug) {
