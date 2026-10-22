@@ -763,6 +763,212 @@ void Unpacker::detach_hooks() {
 // export address, then scans the dump (unpacker.cpp:8652-9560). Slot coherence is
 // the noise filter: a same-dll run of adjacent slots, or a singleton anchored
 // within two slots of a kept one.
+std::uint64_t Unpacker::ladder_oep(const std::vector<std::uint8_t>& image) const {
+    if (image.size() < 0x200 || sections_.empty()) {
+        return 0;
+    }
+    const auto body_of = [&](const PackSection& ps) {
+        std::vector<std::uint8_t> b;
+        if (ps.start < base_) {
+            return b;
+        }
+        const auto off = static_cast<std::size_t>(ps.start - base_);
+        if (off >= image.size()) {
+            return b;
+        }
+        const auto span = std::min<std::size_t>(
+            {static_cast<std::size_t>(ps.end - ps.start), 4u * 1024 * 1024, image.size() - off});
+        b.assign(image.begin() + static_cast<std::ptrdiff_t>(off),
+                 image.begin() + static_cast<std::ptrdiff_t>(off + span));
+        return b;
+    };
+    const bool mpress = opts_.family == "MPRESS";
+    // The decode target: the largest section. Its degenerate head holds the packed
+    // EP too, so neither the exec flag nor the watch state is a filter.
+    const PackSection* tgt = nullptr;
+    for (const auto& ps : sections_) {
+        if (!tgt || (ps.end - ps.start) > (tgt->end - tgt->start)) {
+            tgt = &ps;
+        }
+    }
+    // Borland/Delphi pre-check: a UNIQUE `6a ?? 68 <image-addr> e8` (push/push/call
+    // entry) in the largest section is the entry — it also suppresses the Pass-C
+    // override, which would otherwise fire on a false-positive CFG thunk.
+    if (tgt != nullptr) {
+        const auto b = body_of(*tgt);
+        std::size_t count = 0;
+        std::size_t off = 0;
+        for (std::size_t i = 0; i + 8 < b.size(); ++i) {
+            if (b[i] == 0x6a && b[i + 2] == 0x68 && b[i + 7] == 0xe8) {
+                const auto pv = static_cast<std::uint64_t>(
+                    static_cast<std::uint32_t>(b[i + 3]) | (static_cast<std::uint32_t>(b[i + 4]) << 8) |
+                    (static_cast<std::uint32_t>(b[i + 5]) << 16) | (static_cast<std::uint32_t>(b[i + 6]) << 24));
+                if (pv > base_ && pv < base_ + image_size_) {
+                    ++count;
+                    off = i;
+                }
+            }
+        }
+        if (count == 1) {
+            if (opts_.debug) {
+                std::fprintf(stderr, "[unpack] ladder: unique Borland entry in %s\n", tgt->name.c_str());
+            }
+            return tgt->start + off;
+        }
+    }
+    // Pass C: a CFG thunk `cc|c3 e8 <rel32> e9 <rel32>`. Every section is scanned
+    // (NSPack decodes .text into nsp0 while the OEP lives in nsp1).
+    for (const auto& ps : sections_) {
+        const auto b = body_of(ps);
+        if (b.size() < 12) {
+            continue;
+        }
+        std::size_t c_count = 0;
+        std::size_t c_off = 0;
+        std::size_t c3_count = 0;
+        std::size_t c3_off = 0;
+        std::size_t c3_last_off = 0;
+        std::size_t c3_valid_off = 0;
+        bool c3_prologue_valid = false;
+        for (std::size_t i = 0; i + 11 < b.size(); ++i) {
+            if ((b[i] == 0xcc || b[i] == 0xc3) && b[i + 1] == 0xe8 && b[i + 6] == 0xe9) {
+                ++c_count;
+                c_off = i + 1;
+                if (b[i] == 0xc3) {
+                    ++c3_count;
+                    c3_off = i + 1;
+                    c3_last_off = i + 1;
+                    const auto rel = static_cast<std::int32_t>(
+                        static_cast<std::uint32_t>(b[i + 7]) | (static_cast<std::uint32_t>(b[i + 8]) << 8) |
+                        (static_cast<std::uint32_t>(b[i + 9]) << 16) |
+                        (static_cast<std::uint32_t>(b[i + 10]) << 24));
+                    const auto jmp_tgt = static_cast<std::uint64_t>(
+                        static_cast<std::int64_t>(ps.start + i + 6 + 5) + rel);
+                    if (jmp_tgt >= base_ && jmp_tgt < base_ + image_size_) {
+                        c3_valid_off = i + 1;
+                        // the e9 target of a real thunk is the CRT entry: it starts
+                        // with a recognizable prologue (a false hit inside the
+                        // decompressor jumps to arbitrary code)
+                        const auto boff = static_cast<std::int64_t>(i + 11) + rel;
+                        if (boff >= 0 && static_cast<std::size_t>(boff) + 8 <= b.size()) {
+                            const auto* q = b.data() + boff;
+                            if ((q[0] == 0x6a && q[2] == 0x68 && q[7] == 0xe8) ||
+                                (q[0] == 0x55 && q[1] == 0x8b && q[2] == 0xec) ||
+                                (q[0] == 0xe8 && q[5] == 0xe9)) {
+                                c3_prologue_valid = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (opts_.debug) {
+            std::fprintf(stderr, "[unpack] ladder %s: C=%zu C3=%zu valid=%zu\n", ps.name.c_str(), c_count,
+                         c3_count, c3_valid_off);
+        }
+        // MPRESS's c3 hits often land on a wrong function, so the reference skips
+        // them — unless the validation passed (the e9 target is in-image AND starts
+        // with a recognizable prologue), in which case it is the CFG thunk that
+        // leads to the entry, exactly as for the other two families
+        if (c3_count >= 1 && (!mpress || c3_prologue_valid || c3_valid_off != 0)) {
+            // a validated hit wins; otherwise the LAST c3 hit (the main entry runs
+            // after all CRT init — mpress_ADExplorer: the second of two)
+            return ps.start + (c3_valid_off != 0 ? c3_valid_off : c3_last_off);
+        }
+        if (c_count == 1 && !(mpress && c3_count == c_count && !c3_prologue_valid)) {
+            return ps.start + c_off;
+        }
+    }
+    // Pass B: the MSVC entry frame `55 8b ec 6a ff 68 <image-addr> 64 a1` is
+    // unique per image (every other function shares the `55 8b ec` head but not
+    // the SEH push). RLPack AccessEnum's payload has no Pass-C thunk at all.
+    {
+        std::size_t hits = 0;
+        std::uint64_t hit_va = 0;
+        for (const auto& ps : sections_) {
+            const auto body = body_of(ps);
+            for (std::size_t i = 0; i + 11 < body.size(); ++i) {
+                if (body[i] == 0x55 && body[i + 1] == 0x8b && body[i + 2] == 0xec && body[i + 3] == 0x6a &&
+                    body[i + 4] == 0xff && body[i + 5] == 0x68) {
+                    const auto pv = static_cast<std::uint64_t>(
+                        static_cast<std::uint32_t>(body[i + 6]) |
+                        (static_cast<std::uint32_t>(body[i + 7]) << 8) |
+                        (static_cast<std::uint32_t>(body[i + 8]) << 16) |
+                        (static_cast<std::uint32_t>(body[i + 9]) << 24));
+                    if (pv > base_ && pv < base_ + image_size_) {
+                        ++hits;
+                        hit_va = ps.start + i;
+                    }
+                }
+            }
+        }
+        if (hits >= 1 && hits <= 4) {
+            if (opts_.debug) {
+                std::fprintf(stderr, "[unpack] ladder: unique MSVC frame entry %s\n", hex(hit_va).c_str());
+            }
+            return hit_va;
+        }
+    }
+    if (!mpress) {
+        return 0;
+    }
+    // MPRESS: (a) a UNIQUE bare `e8 <rel32> e9 00000000` — the entry calls
+    // __security_init_cookie then nop-jumps to the Borland entry;
+    // (b) otherwise the LAST of the Borland / SEH entry patterns in the decode
+    // target (the main entry runs after all CRT init), SEH winning ties.
+    const auto b = tgt != nullptr ? body_of(*tgt) : std::vector<std::uint8_t>{};
+    {
+        std::size_t zc_count = 0;
+        std::size_t zc_off = 0;
+        for (std::size_t i = 0; i + 11 < b.size(); ++i) {
+            if (b[i] == 0xe8 && b[i + 5] == 0xe9) {
+                const auto rel = static_cast<std::uint32_t>(b[i + 6]) | (static_cast<std::uint32_t>(b[i + 7]) << 8) |
+                                 (static_cast<std::uint32_t>(b[i + 8]) << 16) |
+                                 (static_cast<std::uint32_t>(b[i + 9]) << 24);
+                if (rel == 0) {
+                    ++zc_count;
+                    zc_off = i;
+                }
+            }
+        }
+        if (zc_count == 1) {
+            return tgt->start + zc_off;
+        }
+    }
+    {
+        std::size_t b_count = 0;
+        std::size_t b_last = 0;
+        for (std::size_t i = 0; i + 8 < b.size(); ++i) {
+            if (b[i] == 0x6a && b[i + 2] == 0x68 && b[i + 7] == 0xe8) {
+                const auto pv = static_cast<std::uint64_t>(
+                    static_cast<std::uint32_t>(b[i + 3]) | (static_cast<std::uint32_t>(b[i + 4]) << 8) |
+                    (static_cast<std::uint32_t>(b[i + 5]) << 16) | (static_cast<std::uint32_t>(b[i + 6]) << 24));
+                if (pv > base_ && pv < base_ + image_size_) {
+                    ++b_count;
+                    b_last = i;
+                }
+            }
+        }
+        std::size_t s_count = 0;
+        std::size_t s_last = 0;
+        const auto hw = std::min<std::size_t>(b.size(), 0x40000);
+        for (std::size_t i = 0; i + 6 < hw; ++i) {
+            if (b[i] == 0x55 && b[i + 1] == 0x8b && b[i + 2] == 0xec && b[i + 3] == 0x6a && b[i + 4] == 0xff &&
+                b[i + 5] == 0x68) {
+                ++s_count;
+                s_last = i;
+            }
+        }
+        if (b_count > 0 && b_count > s_count) {
+            return tgt->start + b_last;
+        }
+        if (s_count > 0 && s_count >= b_count) {
+            return tgt->start + s_last;
+        }
+    }
+    return 0;
+}
+
 void Unpacker::harvest_image_imports(const std::vector<std::uint8_t>& image) {
     const auto at = [&image](std::size_t o, int n) -> std::uint64_t {
         std::uint64_t v = 0;
@@ -986,12 +1192,30 @@ std::uint64_t Unpacker::pick_oep(const std::vector<std::uint8_t>& image) const {
     if (const auto hdr = header_ep_candidate(image); hdr != 0) {
         return hdr;
     }
+    const bool decode_only = opts_.family == "NSPack" || opts_.family == "RLPack" || opts_.family == "MPRESS";
+    // The decode-only families: their decode lands in one big section whose head is
+    // also the stub, so the run's own transitions are mostly stub-internal noise.
+    // The static ladder over the decoded body is the authority (the reference's
+    // F41c/F47: only an ACCEPTED, replacement-gated hop outranks it — taote has no
+    // such gate, so the ladder leads and the ledger is the fallback).
+    if (decode_only) {
+        if (const auto ladder = ladder_oep(image); ladder != 0) {
+            return ladder;
+        }
+    }
     if (!hop_ledger_.empty()) {
         const auto first = hop_ledger_.front();
         const int first_sec = section_index_at(first);
         const bool in_stub_section = first_sec >= 0 && first_sec == ep_sec;
         if (!in_stub_section && shape_at(first) >= 2) {
+            // an ACCEPTED hop (a real transfer out of the stub's own section) is
+            // the strongest signal and outranks the static ladder (the reference's
+            // F41c/F47 accepted-hop suppression)
             return first;
+        }
+        // the decode-only ladder's static patterns correct a junk first hop
+        if (const auto ladder = ladder_oep(image); ladder != 0) {
+            return ladder;
         }
         // the incumbent is junk: prefer a real prologue outside the stub section,
         // then the ladder's landing in the decoded section
@@ -1184,6 +1408,21 @@ UnpackResult Unpacker::finalize(Qiling& ql) {
             is_64_ = ql.arch().bits() == 64;
         }
         harvest_loader_imports(ql);
+        if (opts_.debug) {
+            std::fprintf(stderr, "[unpack] final pc=%s writes=%llu\n",
+                         hex(ql.arch().regs().arch_pc()).c_str(),
+                         static_cast<unsigned long long>(write_seq_));
+        }
+        if (opts_.debug) {
+            for (const auto& mi : ql.mem().get_mapinfo()) {
+                const auto lo = std::get<0>(mi);
+                const auto hi = std::get<1>(mi);
+                if (hi > lo) {
+                    std::fprintf(stderr, "[unpack] map %s-%s %s %s\n", hex(lo).c_str(), hex(hi).c_str(),
+                                 std::get<2>(mi).c_str(), std::get<3>(mi).c_str());
+                }
+            }
+        }
 
         std::vector<std::uint8_t> image;
         if (base_ != 0 && image_size_ != 0) {
@@ -1215,9 +1454,11 @@ UnpackResult Unpacker::finalize(Qiling& ql) {
                 meta_oep_ = hdr;
                 reason_ = "header_ep";
                 stages_ = 1;
-            } else if (const auto ladder = pick_oep(image); ladder != 0) {
+            } else if (const auto ladder = ladder_oep(image); ladder != 0) {
                 meta_oep_ = ladder;
-                reason_ = "ladder_scan";
+                reason_ = (opts_.family == "NSPack" || opts_.family == "RLPack" || opts_.family == "MPRESS")
+                              ? "ladder_passc"
+                              : "ladder_scan";
                 stages_ = 1;
             }
         }

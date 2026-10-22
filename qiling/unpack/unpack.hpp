@@ -143,6 +143,11 @@ private:
     // — EnigmaVB, Molebox, Neolite, PECompact — leave it intact, so this recovers
     // their import set without any emulation evidence.
     void harvest_image_imports(const std::vector<std::uint8_t>& image);
+    // The reference's decode-only ladder (unpacker.cpp:7099-7470): the static
+    // byte-pattern ladder over the DECODED body, for the stubs that ret through
+    // trampolines and never hand off under emulation (NSPack, RLPack, MPRESS).
+    // Returns 0 when nothing matches.
+    std::uint64_t ladder_oep(const std::vector<std::uint8_t>& image) const;
 
     UnpackOptions opts_;
     std::vector<PackSection> sections_;
