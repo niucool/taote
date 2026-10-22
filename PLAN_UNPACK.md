@@ -445,6 +445,22 @@ and what they actually measured:
    oracle's mapping of nsp0's raw head (or its register setup) must differ
    further. NSPack stays 0/3.
 
+7. **Neolite (and PEtite's probe) share one root cause: the whole image is
+   mapped RWX.** taote's PE loader maps the image `UC_PROT_ALL`, so the
+   packed `.text` (`0x401000-0x40fe00`, exec=0 in the PE header) is
+   executable and the PEtite header page is writable. Neolite's demand-paged
+   decryption drives on an *execute-on-non-exec-page* fault (the stub installs
+   a handler that decrypts `.text` pages on first fetch), and PEtite's second
+   stage drives on a *write-to-read-only-header* fault — both are permission
+   probes taote's RWX map silently survives, so the stub takes the wrong path:
+   Neolite ends at `kernel32!ExitProcess` (`pc 0x10021240`) with `.text`
+   never written and picks the false hop `0x4246bb` inside `.neolit`;
+   PEtite's probe survives and it dies on a read from `0x1`. The fix is real
+   section permissions + the already-built write-prot/`seh_on_fault` dispatch,
+   but the PEtite header-RO alone was measured worse (the stub diverges
+   before the probe, §0.5.3e entry 3), so it must land together with the
+   register-state parity fixes. Neolite stays 0/3.
+
 ### 0.5.4 What this changes in the plan
 
 1. **The GPA sentinel lane is Phase 1, not Phase 1b.** UPX's import restorer calls
