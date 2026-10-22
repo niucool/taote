@@ -173,7 +173,8 @@ class** — the OEP of the trampoline/VM families.
 | round 2d: MEW full shadow overlay, exec-page view, NSPack start override | **36 / 75** (all three measured inert) |
 | round 2e: the marker-tolerant blob walk + per-dll union | **36 / 75** (coverage moves: BeRo imp 2 -> 80, WinUpack 2 -> 122, MEW 0.786/0.769) |
 | round 2f: ordinal-flag (0x80) skipping + single-import dll blocks | **37 / 75** (FSG 2/3 -> 3/3) |
-| **round 2 final** | **37 / 75 VERIFIED, 28 PARTIAL, 10 FAILED** |
+| round 2g: Pass B ahead of Borland, static entry over a distant hop | **39 / 75** (JDPack 1/3 -> 3/3) |
+| **round 2 final** | **39 / 75 VERIFIED, 26 PARTIAL, 10 FAILED** |
 | oracle, same 75 | 66 / 75 (strict 60) |
 
 Per family (VER / PART / FAIL), round 2:
@@ -181,9 +182,13 @@ Per family (VER / PART / FAIL), round 2:
 ```
 UPX 3/0/0        ASPack 3/0/0       Eronana 3/0/0     MPRESS 3/0/0      Packman 3/0/0
 RLPack 3/0/0     Exe32pack 3/0/0    Yoda-Crypter 3/0/0  EnigmaVB 3/0/0   FSG 3/0/0
-EXpressor 2/1/0  BeRo 1/2/0         JDPack 1/2/0      MEW 1/2/0         Molebox 1/2/0
+JDPack 3/0/0     EXpressor 2/1/0    BeRo 1/2/0        MEW 1/2/0         Molebox 1/2/0
 WinUpack 1/1/1   NSPack 0/3/0       Neolite 0/3/0     PECompact 0/2/1   PEtite 0/3/0
 TELock 0/3/0     Themida 0/3/0      Alienyze 0/1/2    Amber 0/0/3       Yoda-Protector 0/0/3
+
+Eleven families are fully verified; the residual is dominated by payloads that are
+never decoded (`code-sim<0.90`: PEtite 3 with the exact EP but 0.80 similarity, MEW 2,
+and the NSPack/Neolite/PECompact/TELock group at 0.004-0.19).
 
 Wall time at S75: median 1 s, max 25 s, 0 wall-timeouts (oracle median 5 s, max 87 s).
 ```
