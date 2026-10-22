@@ -816,6 +816,39 @@ std::uint64_t Unpacker::ladder_oep(const std::vector<std::uint8_t>& image) const
             return tgt->start + off;
         }
     }
+    // Pass B: the MSVC entry frame `55 8b ec 6a ff 68 <image-addr> 64 a1` is
+    // unique per image (every other function shares the `55 8b ec` head but not
+    // the SEH push). RLPack AccessEnum's payload has no Pass-C thunk at all.
+    {
+        std::size_t hits = 0;
+        std::uint64_t hit_va = 0;
+        for (const auto& ps : sections_) {
+            const auto body = body_of(ps);
+            for (std::size_t i = 0; i + 11 < body.size(); ++i) {
+                if (body[i] == 0x55 && body[i + 1] == 0x8b && body[i + 2] == 0xec && body[i + 3] == 0x6a &&
+                    body[i + 4] == 0xff && body[i + 5] == 0x68) {
+                    const auto pv = static_cast<std::uint64_t>(
+                        static_cast<std::uint32_t>(body[i + 6]) |
+                        (static_cast<std::uint32_t>(body[i + 7]) << 8) |
+                        (static_cast<std::uint32_t>(body[i + 8]) << 16) |
+                        (static_cast<std::uint32_t>(body[i + 9]) << 24));
+                    if (pv > base_ && pv < base_ + image_size_) {
+                        ++hits;
+                        hit_va = ps.start + i;
+                    }
+                }
+            }
+        }
+        if (opts_.debug) {
+            std::fprintf(stderr, "[unpack] ladder passB hits=%zu last=%s\n", hits, hex(hit_va).c_str());
+        }
+        if (!mpress && hits >= 1 && hits <= 4) {
+            if (opts_.debug) {
+                std::fprintf(stderr, "[unpack] ladder: unique MSVC frame entry %s\n", hex(hit_va).c_str());
+            }
+            return hit_va;
+        }
+    }
     // Pass C: a CFG thunk `cc|c3 e8 <rel32> e9 <rel32>`. Every section is scanned
     // (NSPack decodes .text into nsp0 while the OEP lives in nsp1).
     for (const auto& ps : sections_) {
@@ -877,36 +910,6 @@ std::uint64_t Unpacker::ladder_oep(const std::vector<std::uint8_t>& image) const
         }
         if (c_count == 1 && !(mpress && c3_count == c_count && !c3_prologue_valid)) {
             return ps.start + c_off;
-        }
-    }
-    // Pass B: the MSVC entry frame `55 8b ec 6a ff 68 <image-addr> 64 a1` is
-    // unique per image (every other function shares the `55 8b ec` head but not
-    // the SEH push). RLPack AccessEnum's payload has no Pass-C thunk at all.
-    {
-        std::size_t hits = 0;
-        std::uint64_t hit_va = 0;
-        for (const auto& ps : sections_) {
-            const auto body = body_of(ps);
-            for (std::size_t i = 0; i + 11 < body.size(); ++i) {
-                if (body[i] == 0x55 && body[i + 1] == 0x8b && body[i + 2] == 0xec && body[i + 3] == 0x6a &&
-                    body[i + 4] == 0xff && body[i + 5] == 0x68) {
-                    const auto pv = static_cast<std::uint64_t>(
-                        static_cast<std::uint32_t>(body[i + 6]) |
-                        (static_cast<std::uint32_t>(body[i + 7]) << 8) |
-                        (static_cast<std::uint32_t>(body[i + 8]) << 16) |
-                        (static_cast<std::uint32_t>(body[i + 9]) << 24));
-                    if (pv > base_ && pv < base_ + image_size_) {
-                        ++hits;
-                        hit_va = ps.start + i;
-                    }
-                }
-            }
-        }
-        if (hits >= 1 && hits <= 4) {
-            if (opts_.debug) {
-                std::fprintf(stderr, "[unpack] ladder: unique MSVC frame entry %s\n", hex(hit_va).c_str());
-            }
-            return hit_va;
         }
     }
     if (!mpress) {
@@ -1089,24 +1092,65 @@ void Unpacker::salvage_iat(Qiling& ql, const std::vector<std::uint8_t>& image) {
         std::string name;
     };
     std::vector<Hit> hits;
-    for (std::size_t o = 0; o + ptr <= image.size(); o += ptr) {
-        std::uint64_t v = 0;
-        for (std::size_t k = 0; k < ptr; ++k) {
-            v |= static_cast<std::uint64_t>(image[o + k]) << (8 * k);
+    const auto scan_bytes = [&](const std::vector<std::uint8_t>& bytes) {
+        for (std::size_t o = 0; o + ptr <= bytes.size(); o += ptr) {
+            std::uint64_t v = 0;
+            for (std::size_t k = 0; k < ptr; ++k) {
+                v |= static_cast<std::uint64_t>(bytes[o + k]) << (8 * k);
+            }
+            if (v < 0x10000) {
+                continue;
+            }
+            const auto it = stub_map.find(v);
+            if (it == stub_map.end()) {
+                continue;
+            }
+            hits.push_back(Hit{static_cast<std::uint32_t>(o), it->second.first, it->second.second});
         }
-        if (v < 0x10000) {
-            continue;
+    };
+    scan_bytes(image);
+    // the reference's salvage_iat_write scans EVERY mapped region, not just the
+    // image: the stubs that rebuild the IAT themselves (FSG, BeRo, WinUpack, MEW)
+    // keep the table in a private buffer (unpacker.cpp:9480-9620)
+    try {
+        for (const auto& mi : ql.mem().get_mapinfo()) {
+            const auto lo = std::get<0>(mi);
+            const auto hi = std::get<1>(mi);
+            if (hi <= lo || lo == base_ || hi - lo > 0x400000) {
+                continue;
+            }
+            if (lo < 0x10000) {
+                continue;  // the FS/GDT scratch
+            }
+            std::vector<std::uint8_t> bytes;
+            try {
+                bytes = ql.mem().read(lo, hi - lo);
+            } catch (...) {
+                continue;
+            }
+            scan_bytes(bytes);
         }
-        const auto it = stub_map.find(v);
-        if (it == stub_map.end()) {
-            continue;
-        }
-        hits.push_back(Hit{static_cast<std::uint32_t>(o), it->second.first, it->second.second});
+    } catch (...) {
     }
     if (hits.empty()) {
         return;
     }
     std::sort(hits.begin(), hits.end(), [](const Hit& a, const Hit& b) { return a.off < b.off; });
+
+    // pass 0 (the reference's slot probe, unpacker.cpp:9480-9560): when the whole
+    // image holds only a handful of live import pointers, the stub rebuilt the IAT
+    // itself and the slots are scattered — adjacency cannot be required. The values
+    // come from the loader's own export map, so they are authoritative.
+    if (hits.size() <= 64) {
+        for (const auto& h : hits) {
+            note_import(h.dll, h.name);
+            ++salvaged_slots_;
+        }
+        if (opts_.debug) {
+            std::fprintf(stderr, "[unpack] salvage: %zu scattered hits -> all kept\n", hits.size());
+        }
+        return;
+    }
 
     // pass 1: runs of >= 2 adjacent pointer-spaced slots of the same dll
     std::set<std::size_t> kept;
@@ -1439,8 +1483,14 @@ UnpackResult Unpacker::finalize(Qiling& ql) {
         // the OEP pick over the hop ledger (terminal image in hand)
         if (opts_.debug) {
             std::fprintf(stderr, "[unpack] hop ledger (%zu):", hop_ledger_.size());
-            for (auto va : hop_ledger_) {
-                std::fprintf(stderr, " %s", hex(va).c_str());
+            for (std::size_t i = 0; i < hop_ledger_.size(); ++i) {
+                std::fprintf(stderr, " %s@%llu", hex(hop_ledger_[i]).c_str(),
+                             static_cast<unsigned long long>(i < hop_write_seq_.size() ? hop_write_seq_[i] : 0));
+            }
+            std::fprintf(stderr, "\n[unpack] write ordinals:");
+            for (const auto& kv : last_write_seq_) {
+                std::fprintf(stderr, " sec=%s:%llu", hex(kv.first).c_str(),
+                             static_cast<unsigned long long>(kv.second));
             }
             std::fprintf(stderr, "\n");
         }
@@ -1474,6 +1524,11 @@ UnpackResult Unpacker::finalize(Qiling& ql) {
             reason_ = "section_hop";
             stages_ = 1;  // one dump, at the picked OEP (the reference's semantics)
         }
+        // Measured: a FULL first-write overlay HURTS the JIT families (JDPack .text
+        // similarity 0.93 -> 0.47, PEtite 0.80 -> 0.69) because their stubs write
+        // transient ciphertext/decoy pages before the real decode; only the
+        // zeros-restore below is safe generically (the reference keeps the full
+        // overlay for MEW alone, behind its family seam).
         // the shadow overlay: restore bytes the stub decoded and then wiped
         if (shadow_seen_.size() == image.size()) {
             std::size_t restored = 0;
@@ -1680,6 +1735,10 @@ std::vector<std::uint8_t> rebuild_pe(const RebuildInput& in) {
     if (mem.size() <= 0x400) {
         return {};
     }
+    // A degenerate section table (Exe32pack: every raw size 0 and a header that
+    // cannot be laid out) leaves the dump as the only faithful artifact — the
+    // reference's RECON_STAGE_EXE32_DEGENERATE path. Detected after the layout
+    // below by `degenerate`, which returns the image verbatim.
     // anti-emu stubs zero the in-memory MZ: restore the packed file's header
     if (!(mem[0] == 'M' && mem[1] == 'Z')) {
         if (in.header_snapshot.size() >= 2 && in.header_snapshot[0] == 'M' && in.header_snapshot[1] == 'Z') {
@@ -1936,6 +1995,14 @@ std::vector<std::uint8_t> rebuild_pe(const RebuildInput& in) {
     if (iat_rva != 0) {
         wr32(out, dd_base + 12 * 8, iat_rva);
         wr32(out, dd_base + 12 * 8 + 4, iat_size);
+    }
+    // The degenerate-path contract (the reference's RECON_STAGE_EXE32_DEGENERATE):
+    // when the section table carried no bytes (Exe32pack — every VirtualSize/raw
+    // pair is inconsistent), the laid-out file holds nothing but headers and the
+    // faithful artifact is the image dump itself, whose own section table still
+    // points into it and parses as a file-layout PE.
+    if (out.size() < in.image.size() / 4) {
+        return in.image;
     }
     return out;
 }
