@@ -172,6 +172,7 @@ class** — the OEP of the trampoline/VM families.
 | round 2c: orphan import-list mining (the FSG string-blob reconstruction) | **36 / 75** |
 | round 2d: MEW full shadow overlay, exec-page view, NSPack start override | **36 / 75** (all three measured inert) |
 | round 2e: the marker-tolerant blob walk + per-dll union | **36 / 75** (coverage moves: BeRo imp 2 -> 80, WinUpack 2 -> 122, MEW 0.786/0.769) |
+| round 2f: ordinal-flag (0x80) skipping + single-import dll blocks | **37 / 75** (FSG 2/3 -> 3/3) |
 | oracle, same 75 | 66 / 75 (strict 60) |
 
 Per family (VER / PART / FAIL), round 2:

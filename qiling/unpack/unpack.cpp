@@ -1196,7 +1196,11 @@ std::size_t Unpacker::mine_orphan_descriptors(const std::vector<std::uint8_t>& i
         while (p + 6 < image.size()) {
             const auto piece = cstr(p, 96);
             if (piece.empty()) {
-                if (++separators > 3) {
+                // a NUL starts the next block; any other single non-printable byte is
+                // the ordinal-flag marker these tables put before a name (0x80 in
+                // MEW's oleaut32/shlwapi blocks), so it is skipped without ending the
+                // block
+                if (p < image.size() && image[p] == 0 && ++separators > 3) {
                     flush();
                 }
                 ++p;
@@ -1251,7 +1255,7 @@ std::size_t Unpacker::mine_orphan_descriptors(const std::vector<std::uint8_t>& i
             for (int guard = 0; guard < 512; ++guard) {
                 const auto piece = cstr(p, 96);
                 if (piece.empty()) {
-                    if (++separators > 3) {
+                    if (p < image.size() && image[p] == 0 && ++separators > 3) {
                         break;
                     }
                     ++p;
@@ -1278,7 +1282,10 @@ std::size_t Unpacker::mine_orphan_descriptors(const std::vector<std::uint8_t>& i
                 names.push_back(piece);
                 separators = 0;
             }
-            if (names.size() >= 2) {
+            // a dll with a single import is legitimate (MEW's shlwapi block holds
+            // exactly SHDeleteKeyW); the >= 3 blocks gate below carries the noise
+            // control instead of a per-block minimum
+            if (!names.empty()) {
                 per_dll.emplace_back(dll, std::move(names));
                 o = p;
             }
