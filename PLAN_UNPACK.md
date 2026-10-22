@@ -630,6 +630,56 @@ qiling/unpack/packers/family_packers.cpp    the still-generic families (one clas
 `packer_->…` call per seam. Behaviour-preserving: S75 stays 50/75 and the suite
 stays at 0 failed.
 
+### 0.8 The full corpus (2678 samples), graded on the three things that matter
+
+S75 (3 per family) and S200 (8 per family) are samples of the corpus; the whole
+`packed/` tree has **2678 files that have a not-packed original to grade
+against** (323 more have no ground truth and are excluded). `tools/unpack_report.py`
+grades every run on exactly the three properties an unpacked file needs:
+
+1. **a valid PE** - parses, sane optional header, `SizeOfImage >= 0x1000`, entry
+   point inside the image AND mapped by a section, section table inside the file;
+2. **the OEP** - `AddressOfEntryPoint` equals the ORIGINAL binary's EP RVA
+   (managed/.NET originals are excluded from the denominator, 67 of them);
+3. **the import table** - function level: the rebuilt table is walked
+   (descriptor -> INT -> hint/name or ordinal) and compared as a set with the
+   original's; "correct" is >= 95% of the original's `(dll, function)` pairs.
+
+The measured state after the ordinal-import fix (`a21e6d4`):
+
+| criterion | pass | rate |
+|---|---|---|
+| valid PE | 2568 / 2678 | **95.9%** |
+| OEP correct | 1153 / 2563 | **45.0%** |
+| imports correct | 1556 / 2568 | **60.6%** |
+| **all three** | **1076 / 2678** | **40.2%** |
+
+For comparison, the harness rubric (`verify.py`: exact EP + code similarity >=
+0.90 + DLL coverage >= 0.80) says 1126/2678 = 42.0%, so the strict function-level
+reading is now essentially the same bar - and the two remaining criteria are
+ordered by size:
+
+* **the OEP pick is the biggest single defect**: 1348 samples have a wrong entry,
+  907 of them *inside the original's entry section*, while the payload is
+  recovered (code sim median 1.000 for ASPack/Eronana/Packman/JDPack/MPRESS/
+  Molebox). 485 of the near misses are MSVC CRT-init thunks
+  (`e8 <call __security_init_cookie>; e9 <body>`), where the packer preserves the
+  *thunk* as the entry and any pick of the body/another prologue is wrong.
+* **the IAT source choice** is the second: RLPack decodes at sim 0.978 with the
+  exact EP but reproduces 17 of 314 imports because it keeps the stub's own
+  table (16 descriptors, wldap32/mspdb80/hhctrl.ocx) instead of the payload's.
+
+Per family (all three criteria, same run): EnigmaVB 100%, UPX 92%, MEW 92%,
+BeRo 84%, FSG 76%, Eronana 47%, JDPack 71%, Molebox 72%, Packman 60%, ASPack 60%,
+EXpressor 59%, MPRESS 60%, PECompact 42%, Yoda-Crypter 57%, WinUpack 37%,
+PEtite 22%, Neolite 1%, NSPack 0%, Alienyze 0%, Amber 0%, TELock 0%,
+Themida 0%, Yoda-Protector 0%, Exe32pack 0% (its artifacts are raw dumps whose
+entry is not mapped by any section: 107 samples fail criterion 1).
+
+Artifacts: `/home/jim/runs/full/{manifest.json,results.json,verify_results.json}`
+and the report at `UNPACK_REPORT.md` (regenerate with
+`tools/unpack_report.py --manifest ... --results ... --harness-results ...`).
+
 ## 1. How pegasus unpacks, end to end
 
 ### 1.1 Lifecycle and where it hooks in
