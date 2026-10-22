@@ -30,6 +30,10 @@
 namespace qiling {
 namespace unpack {
 
+namespace packers {
+class Packer;
+}
+
 // One image section, with both virtual placement and on-disk layout (the
 // reference's PackSection, unpacker.h:41-49).
 struct PackSection {
@@ -143,16 +147,6 @@ private:
     // — EnigmaVB, Molebox, Neolite, PECompact — leave it intact, so this recovers
     // their import set without any emulation evidence.
     void harvest_image_imports(const std::vector<std::uint8_t>& image);
-    // The reference's decode-only ladder (unpacker.cpp:7099-7470): the static
-    // byte-pattern ladder over the DECODED body, for the stubs that ret through
-    // trampolines and never hand off under emulation (NSPack, RLPack, MPRESS).
-    // Returns 0 when nothing matches.
-    std::uint64_t ladder_oep(const std::vector<std::uint8_t>& image) const;
-    // The reference's try_embedded_pe (unpacker.cpp:10430-10520): Amber-class
-    // stubs build the payload PE in a heap buffer and never touch the original
-    // sections, so the image dump is the stub. Scan every mapped region for a
-    // second PE image and adopt it.
-    bool adopt_embedded_pe(Qiling& ql, std::vector<std::uint8_t>& image);
     // The reference's family_reconstruct_orphans (unpacker.cpp:13500-13560): the
     // stubs that rebuild the IAT themselves (FSG, BeRo, WinUpack, MEW) leave the
     // payload's import DESCRIPTORS in the image while the header's import directory
@@ -160,6 +154,9 @@ private:
     std::size_t mine_orphan_descriptors(const std::vector<std::uint8_t>& image);
 
     UnpackOptions opts_;
+    // the family seam (packers/packer.hpp): only the family-specific policy lives
+    // there, the generic engine below is family-agnostic
+    std::unique_ptr<packers::Packer> packer_;
     std::vector<PackSection> sections_;
     std::vector<PackSection> watched_;
     std::set<std::pair<std::uint64_t, std::uint64_t>> inplace_ranges_;
@@ -209,8 +206,8 @@ private:
     // decrypt tracking needs (PETITE_INT_RUNS).
     std::vector<std::uint8_t> exec_view_;
     std::vector<bool> exec_page_seen_;
-    // MEW's statically parsed OEP (install time, when the family is MEW)
-    std::uint64_t mew_oep_candidate_ = 0;
+    // the packer's install-time static OEP (the MEW header table and friends)
+    std::uint64_t static_oep_ = 0;
     // the light pick (the reference's V1 prologue-shape vote, :8060-8110)
     std::uint64_t pick_oep(const std::vector<std::uint8_t>& image) const;
     // A stub that patches the in-memory PE header's AddressOfEntryPoint (the
@@ -218,7 +215,8 @@ private:
     // the payload entry statically. Both are read here and join the pick as
     // strong candidates.
     std::uint64_t header_ep_candidate(const std::vector<std::uint8_t>& image) const;
-    std::uint64_t mew_static_oep() const;
+    // the packer's decode-only ladder over the decoded body
+    std::uint64_t static_oep_from_image(const std::vector<std::uint8_t>& image) const;
     std::uint64_t meta_oep_ = 0;
     std::uint64_t last_oep_ = 0;
     std::string reason_;

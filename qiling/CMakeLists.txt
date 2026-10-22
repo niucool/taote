@@ -121,6 +121,15 @@ add_library(qiling::qiling ALIAS qiling)
 # and the unpack tests link it.
 add_library(qiling_unpack STATIC
     unpack/unpack.cpp
+    unpack/packer_detector.cpp
+    unpack/iat/iat_search.cpp
+    unpack/iat/import_rebuilder.cpp
+    unpack/packers/generic_packer.cpp
+    unpack/packers/family_packers.cpp
+    unpack/packers/decode_only_packer.cpp
+    unpack/packers/mew_packer.cpp
+    unpack/packers/pecompact_packer.cpp
+    unpack/packers/embedded_pe.cpp
 )
 target_include_directories(qiling_unpack PUBLIC ${CMAKE_SOURCE_DIR})
 target_link_libraries(qiling_unpack PUBLIC qiling LIEF::LIEF nlohmann_json::nlohmann_json)

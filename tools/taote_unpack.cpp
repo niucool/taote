@@ -33,10 +33,12 @@
 
 #include "../tests/Pe_Sample_Runner.hpp"
 #include "qiling/const.hpp"
+#include "qiling/unpack/packer_detector.hpp"
 #include "qiling/unpack/unpack.hpp"
 
 namespace fs = std::filesystem;
 using qiling::testing::SampleOptions;
+using qiling::unpack::detect_from_file;
 using qiling::testing::pe_sample_detail::plan_for;
 using qiling::testing::pe_sample_detail::write_stub_dll;
 
@@ -81,106 +83,16 @@ std::string json_escape(const std::string& in) {
     return out;
 }
 
-// The family label the detector would produce; the Phase 2 detector replaces
-// this. Kept in the tool so --family can override it for experiments.
+// The family label routes the run to a packer seam (qiling/unpack/packers). The
+// detector lives in the library so the tests can assert on it and so the tool has
+// no unpacking logic of its own.
 std::string guess_family(const fs::path& sample) {
-    auto parsed = LIEF::PE::Parser::parse(sample.string());
-    if (parsed == nullptr) {
-        return "unknown";
+    const auto det = detect_from_file(sample.string());
+    if (std::getenv("TAOTE_DEBUG_DETECTOR") != nullptr) {
+        std::fprintf(stderr, "[detector] %s -> %s (%s%s%s)\n", sample.filename().c_str(), det.name.c_str(),
+                     det.sig_kind.c_str(), det.detail.empty() ? "" : ": ", det.detail.c_str());
     }
-    std::vector<std::string> names;
-    for (const auto& s : parsed->sections()) {
-        std::string n = s.name();
-        for (auto& c : n) {
-            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        }
-        names.push_back(n);
-    }
-    const auto has = [&names](const char* want) {
-        for (const auto& n : names) {
-            if (n.find(want) != std::string::npos) {
-                return true;
-            }
-        }
-        return false;
-    };
-    if (has("upx0") && has("upx1")) return "UPX";
-    if (has(".aspack") || has(".adata")) return "ASPack";
-    if (has(".mpress1")) return "MPRESS";
-    if (has("mew")) return "MEW";
-    if (has("nsp0") || has("nsp1")) return "NSPack";
-    if (has("petite")) return "PEtite";
-    if (has(".packed") || has(".rlpack")) return "RLPack";
-    if (has(".neolit")) return "Neolite";
-    if (has(".alien")) return "Alienyze";
-    if (has(".yp")) return "YodaProtector";
-    if (has("$win8")) return "Exe32pack";
-    if (has("fsg")) return "FSG";
-    if (has(".upack")) return "WinUpack";
-    if (has(".enigma1") || has(".enigma2")) return "EnigmaVB";
-    if (has(".themida")) return "Themida";
-    if (has(".jdpack")) return "JDPack";
-    if (has(".packman")) return "Packman";
-    if (has(".bero")) return "BeRoEXEPacker";
-    if (has(".eronana")) return "Eronana";
-    if (has(".ex_cod") || has(".ex_dat")) return "EXpressor";
-    // PECompact compresses in place and keeps the original section names, so the
-    // only signature is the stub's entry: `b8 <imm32> 50 64 ff 35` (mov eax,
-    // imm32; push eax; push dword ptr fs:[0]). Measured over the whole packed
-    // corpus: it hits 118/118 PECompact samples and nothing else (PEtite's entry
-    // shares the `b8 <imm32> 50` head but continues `6a 00 68`, not `64 ff 35`).
-    {
-        try {
-            std::ifstream ef(sample, std::ios::binary);
-            std::vector<std::uint8_t> hdr(0x1000);
-            ef.read(reinterpret_cast<char*>(hdr.data()), static_cast<std::streamsize>(hdr.size()));
-            hdr.resize(static_cast<std::size_t>(ef.gcount()));
-            if (hdr.size() > 0x40) {
-                const auto lfanew = static_cast<std::size_t>(hdr[0x3c]) |
-                                    (static_cast<std::size_t>(hdr[0x3d]) << 8) |
-                                    (static_cast<std::size_t>(hdr[0x3e]) << 16) |
-                                    (static_cast<std::size_t>(hdr[0x3f]) << 24);
-                if (lfanew + 0x100 < hdr.size()) {
-                    const auto ep = static_cast<std::uint32_t>(hdr[lfanew + 24 + 16]) |
-                                    (static_cast<std::uint32_t>(hdr[lfanew + 24 + 17]) << 8) |
-                                    (static_cast<std::uint32_t>(hdr[lfanew + 24 + 18]) << 16) |
-                                    (static_cast<std::uint32_t>(hdr[lfanew + 24 + 19]) << 24);
-                    const auto nsec = static_cast<std::size_t>(hdr[lfanew + 6]) |
-                                      (static_cast<std::size_t>(hdr[lfanew + 7]) << 8);
-                    const auto optsz = static_cast<std::size_t>(hdr[lfanew + 20]) |
-                                       (static_cast<std::size_t>(hdr[lfanew + 21]) << 8);
-                    const std::size_t secoff = lfanew + 24 + optsz;
-                    for (std::size_t i = 0; i < nsec && secoff + 40 * (i + 1) <= hdr.size(); ++i) {
-                        const std::size_t e = secoff + 40 * i;
-                        const auto rd32 = [&hdr](std::size_t o) {
-                            return static_cast<std::uint32_t>(hdr[o]) | (static_cast<std::uint32_t>(hdr[o + 1]) << 8) |
-                                   (static_cast<std::uint32_t>(hdr[o + 2]) << 16) |
-                                   (static_cast<std::uint32_t>(hdr[o + 3]) << 24);
-                        };
-                        const auto vs = rd32(e + 8);
-                        const auto va = rd32(e + 12);
-                        const auto rs = rd32(e + 16);
-                        const auto rp = rd32(e + 20);
-                        if (rs == 0 || ep < va || ep >= va + std::max(vs, rs)) {
-                            continue;
-                        }
-                        const std::uint64_t off = static_cast<std::uint64_t>(rp) + (ep - va);
-                        std::ifstream f2(sample, std::ios::binary);
-                        f2.seekg(static_cast<std::streamoff>(off));
-                        std::uint8_t b[10] = {0};
-                        f2.read(reinterpret_cast<char*>(b), 10);
-                        if (f2.gcount() == 10 && b[0] == 0xb8 && b[5] == 0x50 && b[6] == 0x64 && b[7] == 0xff &&
-                            b[8] == 0x35) {
-                            return "PECompact";
-                        }
-                        break;
-                    }
-                }
-            }
-        } catch (...) {
-        }
-    }
-    return "unknown";
+    return det.name;
 }
 
 }  // namespace

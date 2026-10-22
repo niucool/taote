@@ -7,6 +7,11 @@
 // .pgimp import section.
 #include "qiling/unpack/unpack.hpp"
 
+#include "qiling/unpack/iat/iat_search.hpp"
+#include "qiling/unpack/iat/import_rebuilder.hpp"
+#include "qiling/unpack/packers/factories.hpp"
+#include "qiling/unpack/packers/packer.hpp"
+
 #include <LIEF/PE.hpp>
 
 #include <algorithm>
@@ -64,7 +69,8 @@ std::uint32_t align_up(std::uint32_t v, std::uint32_t a) {
 
 }  // namespace
 
-Unpacker::Unpacker(UnpackOptions opts) : opts_(std::move(opts)) {}
+Unpacker::Unpacker(UnpackOptions opts)
+    : opts_(std::move(opts)), packer_(packers::make_packer(opts_.family)) {}
 
 // hooks_ is cleared by finalize()/detach_hooks() while the engine is alive; a
 // HookRet destructor after that would call uc_hook_del on a dead engine
@@ -464,37 +470,22 @@ void Unpacker::install(Qiling& ql) {
         return;
     }
 
-    // MEW static OEP parse: packed EP `e9 rel32` -> stub `be imm32`; the dword at
-    // imm32+4 is the original OEP (mew_unpacker.cpp:28-64)
-    if (opts_.family == "MEW") {
-        try {
-            const auto ep = ql.mem().read(packed_ep_va_, 5);
-            if (ep.size() == 5 && ep[0] == 0xe9) {
-                const auto rel = static_cast<std::int32_t>(
-                    static_cast<std::uint32_t>(ep[1]) | (static_cast<std::uint32_t>(ep[2]) << 8) |
-                    (static_cast<std::uint32_t>(ep[3]) << 16) | (static_cast<std::uint32_t>(ep[4]) << 24));
-                const auto stub_va = static_cast<std::uint64_t>(static_cast<std::int64_t>(packed_ep_va_ + 5) + rel);
-                const auto st = ql.mem().read(stub_va, 5);
-                if (st.size() == 5 && st[0] == 0xbe) {
-                    const auto table = static_cast<std::uint64_t>(
-                        static_cast<std::uint32_t>(st[1]) | (static_cast<std::uint32_t>(st[2]) << 8) |
-                        (static_cast<std::uint32_t>(st[3]) << 16) | (static_cast<std::uint32_t>(st[4]) << 24));
-                    const auto ov = ql.mem().read(table + 4, 4);
-                    if (ov.size() == 4) {
-                        const auto va = static_cast<std::uint64_t>(
-                            static_cast<std::uint32_t>(ov[0]) | (static_cast<std::uint32_t>(ov[1]) << 8) |
-                            (static_cast<std::uint32_t>(ov[2]) << 16) | (static_cast<std::uint32_t>(ov[3]) << 24));
-                        if (va >= base_ && va < base_ + image_size_) {
-                            mew_oep_candidate_ = va;
-                            if (opts_.debug) {
-                                std::fprintf(stderr, "[unpack] mew static OEP %s\n", hex(va).c_str());
-                            }
-                        }
-                    }
-                }
-            }
-        } catch (...) {
-            mew_oep_candidate_ = 0;
+    // the packer's install-time static OEP (the reference's SLOT_MEW_OEP_PARSE and
+    // friends): a family that records the payload entry in its own header table
+    // hands it over here, before the stub runs
+    {
+        packers::PackerContext ctx;
+        ctx.ql = &ql;
+        ctx.base = base_;
+        ctx.image_size = image_size_;
+        ctx.packed_ep_va = packed_ep_va_;
+        ctx.is_64 = is_64_;
+        ctx.debug = opts_.debug;
+        ctx.family = opts_.family;
+        ctx.sections = sections_;
+        const auto static_ep = packer_->static_oep(ctx);
+        if (static_ep != 0) {
+            static_oep_ = static_ep;
         }
     }
 
@@ -837,255 +828,6 @@ void Unpacker::detach_hooks() {
 // export address, then scans the dump (unpacker.cpp:8652-9560). Slot coherence is
 // the noise filter: a same-dll run of adjacent slots, or a singleton anchored
 // within two slots of a kept one.
-std::uint64_t Unpacker::ladder_oep(const std::vector<std::uint8_t>& image) const {
-    if (image.size() < 0x200 || sections_.empty()) {
-        return 0;
-    }
-    const auto body_of = [&](const PackSection& ps) {
-        std::vector<std::uint8_t> b;
-        if (ps.start < base_) {
-            return b;
-        }
-        const auto off = static_cast<std::size_t>(ps.start - base_);
-        if (off >= image.size()) {
-            return b;
-        }
-        const auto span = std::min<std::size_t>(
-            {static_cast<std::size_t>(ps.end - ps.start), 4u * 1024 * 1024, image.size() - off});
-        b.assign(image.begin() + static_cast<std::ptrdiff_t>(off),
-                 image.begin() + static_cast<std::ptrdiff_t>(off + span));
-        return b;
-    };
-    const bool mpress = opts_.family == "MPRESS";
-    // The decode target: the largest section. Its degenerate head holds the packed
-    // EP too, so neither the exec flag nor the watch state is a filter.
-    const PackSection* tgt = nullptr;
-    for (const auto& ps : sections_) {
-        if (!tgt || (ps.end - ps.start) > (tgt->end - tgt->start)) {
-            tgt = &ps;
-        }
-    }
-    // Pass B: the MSVC entry frame `55 8b ec 6a ff 68 <image-addr> 64 a1` is
-    // unique per image (every other function shares the `55 8b ec` head but not
-    // the SEH push). RLPack AccessEnum's payload has no Pass-C thunk at all.
-    {
-        std::size_t hits = 0;
-        std::uint64_t hit_va = 0;
-        for (const auto& ps : sections_) {
-            const auto body = body_of(ps);
-            for (std::size_t i = 0; i + 11 < body.size(); ++i) {
-                if (body[i] == 0x55 && body[i + 1] == 0x8b && body[i + 2] == 0xec && body[i + 3] == 0x6a &&
-                    body[i + 4] == 0xff && body[i + 5] == 0x68) {
-                    const auto pv = static_cast<std::uint64_t>(
-                        static_cast<std::uint32_t>(body[i + 6]) |
-                        (static_cast<std::uint32_t>(body[i + 7]) << 8) |
-                        (static_cast<std::uint32_t>(body[i + 8]) << 16) |
-                        (static_cast<std::uint32_t>(body[i + 9]) << 24));
-                    if (pv > base_ && pv < base_ + image_size_) {
-                        ++hits;
-                        hit_va = ps.start + i;
-                    }
-                }
-            }
-        }
-        if (opts_.debug) {
-            std::fprintf(stderr, "[unpack] ladder passB hits=%zu last=%s\n", hits, hex(hit_va).c_str());
-        }
-        if (!mpress && hits >= 1 && hits <= 8) {
-            if (opts_.debug) {
-                std::fprintf(stderr, "[unpack] ladder: unique MSVC frame entry %s\n", hex(hit_va).c_str());
-            }
-            return hit_va;
-        }
-    }
-    // Borland/Delphi pre-check: a UNIQUE `6a ?? 68 <image-addr> e8` (push/push/call
-    // entry) in the largest section is the entry — it also suppresses the Pass-C
-    // override, which would otherwise fire on a false-positive CFG thunk. It is
-    // scoped to the decode-only families like the rest of the ladder: 7z's MSVC
-    // payload happens to hold exactly one such sequence and the pre-check then
-    // shadowed the Pass-B entry that the four-frame cluster identifies (measured:
-    // jdpack_7zFM picked 0x405723 instead of its true 0x422ce2).
-    if (tgt != nullptr) {
-        const auto b = body_of(*tgt);
-        std::size_t count = 0;
-        std::size_t off = 0;
-        for (std::size_t i = 0; i + 8 < b.size(); ++i) {
-            if (b[i] == 0x6a && b[i + 2] == 0x68 && b[i + 7] == 0xe8) {
-                const auto pv = static_cast<std::uint64_t>(
-                    static_cast<std::uint32_t>(b[i + 3]) | (static_cast<std::uint32_t>(b[i + 4]) << 8) |
-                    (static_cast<std::uint32_t>(b[i + 5]) << 16) | (static_cast<std::uint32_t>(b[i + 6]) << 24));
-                if (pv > base_ && pv < base_ + image_size_) {
-                    ++count;
-                    off = i;
-                }
-            }
-        }
-        if (count == 1) {
-            if (opts_.debug) {
-                std::fprintf(stderr, "[unpack] ladder: unique Borland entry in %s\n", tgt->name.c_str());
-            }
-            return tgt->start + off;
-        }
-    }
-    // A function-boundary thunk: `ret|int3|nop <e8 rel32> <e9 rel32> <prologue>`.
-    // The original entry of the ADInsight-class payloads is
-    //   5d c3 | e8 <call __security_init_cookie> e9 <rel32> | 6a 14 68 <imm32> e8
-    // i.e. a CRT-init thunk sitting on a function boundary, followed by the real
-    // body. The MPRESS packer's runtime fixups rewrite the two rel32 operands, so
-    // the reference's `e9 00000000` test does not survive the decode — the
-    // boundary prefix does. Requiring the set to be corpus-unique (exactly one)
-    // keeps it inert for the samples whose entry is a plain MSVC/Borland frame
-    // (ADExplorer/AccessEnum have zero hits).
-    if (tgt != nullptr) {
-        const auto tb = body_of(*tgt);
-        std::size_t bc_count = 0;
-        std::size_t bc_off = 0;
-        for (std::size_t i = 1; i + 18 < tb.size(); ++i) {
-            if (tb[i] != 0xe8 || tb[i + 5] != 0xe9) {
-                continue;
-            }
-            const auto* q = tb.data() + i + 10;
-            const bool prologue = (q[0] == 0x6a && q[2] == 0x68 && q[7] == 0xe8) ||
-                                  (q[0] == 0x55 && q[1] == 0x8b && q[2] == 0xec);
-            if (!prologue) {
-                continue;
-            }
-            const auto prev = tb[i - 1];
-            if (prev == 0xc3 || prev == 0xcc || prev == 0x90 || prev == 0xc2) {
-                ++bc_count;
-                bc_off = i;
-            }
-        }
-        if (opts_.debug) {
-            std::fprintf(stderr, "[unpack] ladder boundary-thunks in %s: %zu\n", tgt->name.c_str(), bc_count);
-        }
-        if (bc_count == 1) {
-            return tgt->start + bc_off;
-        }
-    }
-    // Pass C: a CFG thunk `cc|c3 e8 <rel32> e9 <rel32>`. Every section is scanned
-    // (NSPack decodes .text into nsp0 while the OEP lives in nsp1).
-    for (const auto& ps : sections_) {
-        const auto b = body_of(ps);
-        if (b.size() < 12) {
-            continue;
-        }
-        std::size_t c_count = 0;
-        std::size_t c_off = 0;
-        std::size_t c3_count = 0;
-        std::size_t c3_off = 0;
-        std::size_t c3_last_off = 0;
-        std::size_t c3_valid_off = 0;
-        bool c3_prologue_valid = false;
-        for (std::size_t i = 0; i + 11 < b.size(); ++i) {
-            if ((b[i] == 0xcc || b[i] == 0xc3) && b[i + 1] == 0xe8 && b[i + 6] == 0xe9) {
-                ++c_count;
-                c_off = i + 1;
-                if (b[i] == 0xc3) {
-                    ++c3_count;
-                    c3_off = i + 1;
-                    c3_last_off = i + 1;
-                    const auto rel = static_cast<std::int32_t>(
-                        static_cast<std::uint32_t>(b[i + 7]) | (static_cast<std::uint32_t>(b[i + 8]) << 8) |
-                        (static_cast<std::uint32_t>(b[i + 9]) << 16) |
-                        (static_cast<std::uint32_t>(b[i + 10]) << 24));
-                    const auto jmp_tgt = static_cast<std::uint64_t>(
-                        static_cast<std::int64_t>(ps.start + i + 6 + 5) + rel);
-                    if (jmp_tgt >= base_ && jmp_tgt < base_ + image_size_) {
-                        c3_valid_off = i + 1;
-                        // the e9 target of a real thunk is the CRT entry: it starts
-                        // with a recognizable prologue (a false hit inside the
-                        // decompressor jumps to arbitrary code)
-                        const auto boff = static_cast<std::int64_t>(i + 11) + rel;
-                        if (boff >= 0 && static_cast<std::size_t>(boff) + 8 <= b.size()) {
-                            const auto* q = b.data() + boff;
-                            if ((q[0] == 0x6a && q[2] == 0x68 && q[7] == 0xe8) ||
-                                (q[0] == 0x55 && q[1] == 0x8b && q[2] == 0xec) ||
-                                (q[0] == 0xe8 && q[5] == 0xe9)) {
-                                c3_prologue_valid = true;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        if (opts_.debug) {
-            std::fprintf(stderr, "[unpack] ladder %s: C=%zu C3=%zu valid=%zu\n", ps.name.c_str(), c_count,
-                         c3_count, c3_valid_off);
-        }
-        // MPRESS's c3 hits often land on a wrong function, so the reference skips
-        // them — unless the validation passed (the e9 target is in-image AND starts
-        // with a recognizable prologue), in which case it is the CFG thunk that
-        // leads to the entry, exactly as for the other two families
-        if (c3_count >= 1 && (!mpress || c3_prologue_valid || c3_valid_off != 0)) {
-            // a validated hit wins; otherwise the LAST c3 hit (the main entry runs
-            // after all CRT init — mpress_ADExplorer: the second of two)
-            return ps.start + (c3_valid_off != 0 ? c3_valid_off : c3_last_off);
-        }
-        if (c_count == 1 && !(mpress && c3_count == c_count && !c3_prologue_valid)) {
-            return ps.start + c_off;
-        }
-    }
-    if (!mpress) {
-        return 0;
-    }
-    // MPRESS: (a) a UNIQUE bare `e8 <rel32> e9 00000000` — the entry calls
-    // __security_init_cookie then nop-jumps to the Borland entry;
-    // (b) otherwise the LAST of the Borland / SEH entry patterns in the decode
-    // target (the main entry runs after all CRT init), SEH winning ties.
-    const auto b = tgt != nullptr ? body_of(*tgt) : std::vector<std::uint8_t>{};
-    {
-        std::size_t zc_count = 0;
-        std::size_t zc_off = 0;
-        for (std::size_t i = 0; i + 11 < b.size(); ++i) {
-            if (b[i] == 0xe8 && b[i + 5] == 0xe9) {
-                const auto rel = static_cast<std::uint32_t>(b[i + 6]) | (static_cast<std::uint32_t>(b[i + 7]) << 8) |
-                                 (static_cast<std::uint32_t>(b[i + 8]) << 16) |
-                                 (static_cast<std::uint32_t>(b[i + 9]) << 24);
-                if (rel == 0) {
-                    ++zc_count;
-                    zc_off = i;
-                }
-            }
-        }
-        if (zc_count == 1) {
-            return tgt->start + zc_off;
-        }
-    }
-    {
-        std::size_t b_count = 0;
-        std::size_t b_last = 0;
-        for (std::size_t i = 0; i + 8 < b.size(); ++i) {
-            if (b[i] == 0x6a && b[i + 2] == 0x68 && b[i + 7] == 0xe8) {
-                const auto pv = static_cast<std::uint64_t>(
-                    static_cast<std::uint32_t>(b[i + 3]) | (static_cast<std::uint32_t>(b[i + 4]) << 8) |
-                    (static_cast<std::uint32_t>(b[i + 5]) << 16) | (static_cast<std::uint32_t>(b[i + 6]) << 24));
-                if (pv > base_ && pv < base_ + image_size_) {
-                    ++b_count;
-                    b_last = i;
-                }
-            }
-        }
-        std::size_t s_count = 0;
-        std::size_t s_last = 0;
-        const auto hw = std::min<std::size_t>(b.size(), 0x40000);
-        for (std::size_t i = 0; i + 6 < hw; ++i) {
-            if (b[i] == 0x55 && b[i + 1] == 0x8b && b[i + 2] == 0xec && b[i + 3] == 0x6a && b[i + 4] == 0xff &&
-                b[i + 5] == 0x68) {
-                ++s_count;
-                s_last = i;
-            }
-        }
-        if (b_count > 0 && b_count > s_count) {
-            return tgt->start + b_last;
-        }
-        if (s_count > 0 && s_count >= b_count) {
-            return tgt->start + s_last;
-        }
-    }
-    return 0;
-}
-
 std::size_t Unpacker::mine_orphan_descriptors(const std::vector<std::uint8_t>& image) {
     if (image.size() < 0x400) {
         return 0;
@@ -1425,196 +1167,18 @@ std::size_t Unpacker::mine_orphan_descriptors(const std::vector<std::uint8_t>& i
     return pairs + blob_pairs;
 }
 
-bool Unpacker::adopt_embedded_pe(Qiling& ql, std::vector<std::uint8_t>& image) {
-    std::uint64_t best = 0;
-    std::uint64_t best_size = 0;
-    try {
-        for (const auto& mi : ql.mem().get_mapinfo()) {
-            const auto lo = std::get<0>(mi);
-            const auto hi = std::get<1>(mi);
-            if (hi <= lo || lo == base_ || hi - lo < 0x1000 || hi - lo > 0x8000000) {
-                continue;
-            }
-            if (lo >= 0x10000000) {
-                continue;  // the loaded dll tree
-            }
-            std::vector<std::uint8_t> head;
-            try {
-                head = ql.mem().read(lo, std::min<std::uint64_t>(hi - lo, 0x1000));
-            } catch (...) {
-                continue;
-            }
-            if (head.size() < 0x200 || head[0] != 'M' || head[1] != 'Z') {
-                continue;
-            }
-            const auto lfanew = static_cast<std::size_t>(head[0x3c]) | (static_cast<std::size_t>(head[0x3d]) << 8) |
-                                (static_cast<std::size_t>(head[0x3e]) << 16) |
-                                (static_cast<std::size_t>(head[0x3f]) << 24);
-            if (lfanew + 0x40 > head.size() || head[lfanew] != 'P' || head[lfanew + 1] != 'E') {
-                continue;
-            }
-            const auto opt = lfanew + 24;
-            const auto magic = static_cast<std::uint32_t>(head[opt]) | (static_cast<std::uint32_t>(head[opt + 1]) << 8);
-            if (magic != 0x10b && magic != 0x20b) {
-                continue;
-            }
-            const auto soi = static_cast<std::uint64_t>(head[opt + 0x38]) |
-                             (static_cast<std::uint64_t>(head[opt + 0x39]) << 8) |
-                             (static_cast<std::uint64_t>(head[opt + 0x3a]) << 16) |
-                             (static_cast<std::uint64_t>(head[opt + 0x3b]) << 24);
-            if (soi < 0x1000 || soi > hi - lo) {
-                continue;
-            }
-            if (soi > best_size) {
-                best = lo;
-                best_size = soi;
-            }
-        }
-    } catch (...) {
-        return false;
-    }
-    if (best == 0) {
-        return false;
-    }
-    std::vector<std::uint8_t> embedded;
-    try {
-        embedded = ql.mem().read(best, best_size);
-    } catch (...) {
-        return false;
-    }
-    if (embedded.size() < 0x200) {
-        return false;
-    }
-    // adopt: the payload image replaces the stub's
-    const auto old_base = base_;
-    base_ = best;
-    image_size_ = best_size;
-    image = embedded;
-    // re-point the section table at the payload's own sections
-    sections_.clear();
-    watched_.clear();
-    const auto rd = [&embedded](std::size_t o) -> std::uint32_t {
-        if (o + 4 > embedded.size()) {
-            return 0;
-        }
-        return static_cast<std::uint32_t>(embedded[o]) | (static_cast<std::uint32_t>(embedded[o + 1]) << 8) |
-               (static_cast<std::uint32_t>(embedded[o + 2]) << 16) |
-               (static_cast<std::uint32_t>(embedded[o + 3]) << 24);
-    };
-    const auto rd16 = [&embedded](std::size_t o) -> std::uint32_t {
-        if (o + 2 > embedded.size()) {
-            return 0;
-        }
-        return static_cast<std::uint32_t>(embedded[o]) | (static_cast<std::uint32_t>(embedded[o + 1]) << 8);
-    };
-    const auto e_lfanew = static_cast<std::size_t>(rd(0x3c));
-    const auto n_sec = rd16(e_lfanew + 6);
-    const auto opt_size = rd16(e_lfanew + 20);
-    const auto sec_table = e_lfanew + 24 + static_cast<std::size_t>(opt_size);
-    for (std::size_t i = 0; i < n_sec && i < 96; ++i) {
-        const auto o = sec_table + i * 40;
-        PackSection ps;
-        for (std::size_t k = 0; k < 8 && embedded[o + k] != 0; ++k) {
-            ps.name.push_back(static_cast<char>(embedded[o + k]));
-        }
-        ps.vsize = rd(o + 8);
-        ps.start = base_ + rd(o + 12);
-        ps.end = ps.start + (ps.vsize ? ps.vsize : 1);
-        ps.raw = rd(o + 16);
-        const auto ch = rd(o + 36);
-        ps.is_exec = (ch & 0x20000000u) != 0;
-        sections_.push_back(ps);
-    }
-    if (opts_.debug) {
-        std::fprintf(stderr, "[unpack] embedded PE at %s size %s (stub at %s)\n", hex(best).c_str(),
-                     hex(best_size).c_str(), hex(old_base).c_str());
-    }
-    return true;
-}
-
 void Unpacker::harvest_image_imports(const std::vector<std::uint8_t>& image) {
-    const auto at = [&image](std::size_t o, int n) -> std::uint64_t {
-        std::uint64_t v = 0;
-        for (int i = n - 1; i >= 0; --i) {
-            if (o + static_cast<std::size_t>(i) >= image.size()) {
-                return 0;
-            }
-            v = (v << 8) | image[o + static_cast<std::size_t>(i)];
-        }
-        return v;
-    };
-    const auto cstr = [&image](std::size_t o) -> std::string {
-        std::string s;
-        while (o < image.size() && image[o] != 0 && s.size() < 128) {
-            const auto ch = image[o++];
-            s.push_back((ch >= 0x20 && ch <= 0x7E) ? static_cast<char>(ch) : '.');
-        }
-        return s;
-    };
-    if (image.size() < 0x200) {
-        return;
-    }
-    const auto lfanew = static_cast<std::size_t>(at(0x3c, 4));
-    if (lfanew + 0x40 > image.size() || image[lfanew] != 'P' || image[lfanew + 1] != 'E') {
-        return;
-    }
-    const auto opt = lfanew + 24;
-    const auto magic = at(opt, 2);
-    const bool is64 = magic == 0x20b;
-    if (!(magic == 0x10b || magic == 0x20b)) {
-        return;
-    }
-    const auto n_rva = at(opt + (is64 ? 0x6c : 0x5c), 4);
-    std::size_t dd = 0;
-    const auto opt_size = at(lfanew + 20, 2);
-    if (n_rva != 16 || opt_size < (is64 ? 0xF0u : 0xE0u)) {
-        dd = opt + (is64 ? 0x70 : 0x60);
-    } else {
-        dd = opt + static_cast<std::size_t>(opt_size) - 8 * static_cast<std::size_t>(n_rva);
-    }
-    const auto imp_rva = at(dd + 8, 4);
-    if (imp_rva == 0) {
-        return;
-    }
-    const auto ptr = is64 ? 8 : 4;
-    for (std::size_t i = 0; i < 512; ++i) {
-        const auto off = static_cast<std::size_t>(imp_rva) + i * 20;
-        if (off + 20 > image.size()) {
-            break;
-        }
-        const auto oft = at(off, 4);
-        const auto name_rva = at(off + 12, 4);
-        const auto ft = at(off + 16, 4);
-        if (name_rva == 0 || (oft == 0 && ft == 0)) {
-            break;  // the null descriptor (or a malformed one)
-        }
-        std::string dll = cstr(static_cast<std::size_t>(name_rva));
-        if (dll.empty()) {
-            continue;
-        }
-        const auto thunk_rva = oft != 0 ? oft : ft;
-        for (std::size_t k = 0; k < 4096; ++k) {
-            const auto toff = static_cast<std::size_t>(thunk_rva) + k * static_cast<std::size_t>(ptr);
-            if (toff + static_cast<std::size_t>(ptr) > image.size()) {
-                break;
-            }
-            const auto thunk = at(toff, ptr);
-            if (thunk == 0) {
-                break;
-            }
-            const auto flag = is64 ? 0x8000000000000000ull : 0x80000000ull;
-            if ((thunk & flag) != 0) {
-                note_import(sanitize_ascii(dll), "ordinal_" + std::to_string(thunk & 0xffff));
-                continue;
-            }
-            const auto fn = cstr(static_cast<std::size_t>(thunk) + 2);  // skip the hint
-            if (!fn.empty()) {
-                note_import(sanitize_ascii(dll), fn);
-            }
-        }
+    // Scylla's getImports: walk the payload's own descriptor chain in the dump.
+    // The packers that restore the original table leave it intact (EnigmaVB,
+    // Molebox, Neolite, PECompact), so this recovers their import set without
+    // any emulation evidence.
+    const auto walk = iat::walk_import_descriptors(image, base_);
+    for (const auto& pr : walk.imports) {
+        note_import(pr.first, pr.second);
     }
     if (opts_.debug) {
-        std::fprintf(stderr, "[unpack] image import table harvest: %zu imports\n", imports_.size());
+        std::fprintf(stderr, "[unpack] image import table harvest: %zu descriptors -> %zu imports\n",
+                     walk.descriptors, imports_.size());
     }
 }
 
@@ -1624,63 +1188,37 @@ void Unpacker::salvage_iat(Qiling& ql, const std::vector<std::uint8_t>& image) {
     if (image.size() < 8) {
         return;
     }
-    // addr -> (dll, name)
-    std::map<std::uint64_t, std::pair<std::string, std::string>> stub_map;
+    // Scylla's ApiReader: the loader's resolved-export table is the symbol map
+    iat::SymbolMap symbols;
     try {
         const auto& pe_loader = static_cast<const loader::QlLoaderPE&>(ql.loader());
         for (const auto& [addr, entry] : pe_loader.import_symbols()) {
             if (addr == 0 || entry.name.empty()) {
                 continue;
             }
-            std::string dll = lower_ascii(fs::path(entry.dll).filename().string());
+            const auto dll = lower_ascii(fs::path(entry.dll).filename().string());
             if (dll.empty()) {
                 continue;
             }
-            stub_map.emplace(addr, std::make_pair(sanitize_ascii(dll), sanitize_ascii(entry.name)));
+            symbols.add(addr, dll, entry.name);
         }
     } catch (...) {
         return;
     }
-    if (stub_map.empty()) {
+    if (symbols.empty()) {
         return;
     }
 
-    const std::size_t ptr = is_64_ ? 8 : 4;
-    struct Hit {
-        std::uint32_t off;
-        std::string dll;
-        std::string name;
-    };
-    std::vector<Hit> hits;
-    const auto scan_bytes = [&](const std::vector<std::uint8_t>& bytes) {
-        for (std::size_t o = 0; o + ptr <= bytes.size(); o += ptr) {
-            std::uint64_t v = 0;
-            for (std::size_t k = 0; k < ptr; ++k) {
-                v |= static_cast<std::uint64_t>(bytes[o + k]) << (8 * k);
-            }
-            if (v < 0x10000) {
-                continue;
-            }
-            const auto it = stub_map.find(v);
-            if (it == stub_map.end()) {
-                continue;
-            }
-            hits.push_back(Hit{static_cast<std::uint32_t>(o), it->second.first, it->second.second});
-        }
-    };
-    scan_bytes(image);
-    // the reference's salvage_iat_write scans EVERY mapped region, not just the
-    // image: the stubs that rebuild the IAT themselves (FSG, BeRo, WinUpack, MEW)
-    // keep the table in a private buffer (unpacker.cpp:9480-9620)
+    // Scylla's IATSearch: scan the image, then every other mapped region (the
+    // stubs that rebuild the IAT themselves keep the table in a private buffer)
+    iat::IatScanner scanner(symbols, is_64_ ? 8u : 4u);
+    scanner.scan(image, base_);
     try {
         for (const auto& mi : ql.mem().get_mapinfo()) {
             const auto lo = std::get<0>(mi);
             const auto hi = std::get<1>(mi);
-            if (hi <= lo || lo == base_ || hi - lo > 0x400000) {
-                continue;
-            }
-            if (lo < 0x10000) {
-                continue;  // the FS/GDT scratch
+            if (hi <= lo || lo == base_ || hi - lo > 0x400000 || lo < 0x10000) {
+                continue;  // the FS/GDT scratch and the engine's own maps
             }
             std::vector<std::uint8_t> bytes;
             try {
@@ -1688,72 +1226,25 @@ void Unpacker::salvage_iat(Qiling& ql, const std::vector<std::uint8_t>& image) {
             } catch (...) {
                 continue;
             }
-            scan_bytes(bytes);
+            scanner.scan(bytes, lo);
         }
     } catch (...) {
     }
-    if (hits.empty()) {
+    const auto kept = scanner.coherent();
+    if (kept.empty()) {
         return;
     }
-    std::sort(hits.begin(), hits.end(), [](const Hit& a, const Hit& b) { return a.off < b.off; });
-
-    // pass 0 (the reference's slot probe, unpacker.cpp:9480-9560): when the whole
-    // image holds only a handful of live import pointers, the stub rebuilt the IAT
-    // itself and the slots are scattered — adjacency cannot be required. The values
-    // come from the loader's own export map, so they are authoritative.
-    if (hits.size() <= 64) {
-        for (const auto& h : hits) {
-            note_import(h.dll, h.name);
-            ++salvaged_slots_;
-        }
-        if (opts_.debug) {
-            std::fprintf(stderr, "[unpack] salvage: %zu scattered hits -> all kept\n", hits.size());
-        }
-        return;
-    }
-
-    // pass 1: runs of >= 2 adjacent pointer-spaced slots of the same dll
-    std::set<std::size_t> kept;
-    for (std::size_t i = 0; i < hits.size();) {
-        std::size_t j = i + 1;
-        while (j < hits.size() && hits[j].off == hits[j - 1].off + ptr && hits[j].dll == hits[j - 1].dll) {
-            ++j;
-        }
-        if (j - i >= 2) {
-            for (std::size_t k = i; k < j; ++k) {
-                kept.insert(k);
-            }
-        }
-        i = j;
-    }
-    // pass 2: singletons anchored within two slots of a kept neighbour
-    for (std::size_t i = 0; i < hits.size(); ++i) {
-        if (kept.count(i) != 0) {
-            continue;
-        }
-        bool anchor = false;
-        for (std::size_t k = 0; k < hits.size() && !anchor; ++k) {
-            if (kept.count(k) == 0) {
-                continue;
-            }
-            const auto d = hits[i].off > hits[k].off ? hits[i].off - hits[k].off : hits[k].off - hits[i].off;
-            anchor = d <= 2 * ptr && hits[i].dll == hits[k].dll;
-        }
-        if (anchor) {
-            kept.insert(i);
-        }
-    }
-    for (const auto idx : kept) {
-        note_import(hits[idx].dll, hits[idx].name);
-        ++salvaged_pairs_;
+    for (const auto& hit : kept) {
+        note_import(hit.dll, hit.name);
     }
     salvaged_slots_ = kept.size();
+    salvaged_pairs_ = kept.size();
     if (opts_.debug) {
-        std::fprintf(stderr, "[unpack] salvage: %zu hits -> %zu slots, %zu pairs\n", hits.size(), kept.size(),
-                     salvaged_pairs_);
-        for (std::size_t i = 0; i < hits.size() && i < 4; ++i) {
-            std::fprintf(stderr, "[unpack]   hit off=0x%x dll=<%s> name=<%s>\n", hits[i].off,
-                         hits[i].dll.c_str(), hits[i].name.c_str());
+        std::fprintf(stderr, "[unpack] salvage: %zu hits -> %zu slots\n", scanner.hits().size(), kept.size());
+        for (std::size_t i = 0; i < scanner.hits().size() && i < 4; ++i) {
+            std::fprintf(stderr, "[unpack]   hit at 0x%llx dll=<%s> name=<%s>\n",
+                         static_cast<unsigned long long>(scanner.hits()[i].va),
+                         scanner.hits()[i].dll.c_str(), scanner.hits()[i].name.c_str());
         }
     }
 }
@@ -1790,20 +1281,20 @@ std::uint64_t Unpacker::pick_oep(const std::vector<std::uint8_t>& image) const {
         return 0;
     };
     // the statically known entries win outright: the packer itself recorded them
-    if (const auto mew = mew_static_oep(); mew != 0) {
+    if (const auto mew = static_oep_; mew != 0) {
         return mew;
     }
     if (const auto hdr = header_ep_candidate(image); hdr != 0) {
         return hdr;
     }
-    const bool decode_only = opts_.family == "NSPack" || opts_.family == "RLPack" || opts_.family == "MPRESS";
+    const bool decode_only = packer_ != nullptr && packer_->decode_only();
     // The decode-only families: their decode lands in one big section whose head is
     // also the stub, so the run's own transitions are mostly stub-internal noise.
     // The static ladder over the decoded body is the authority (the reference's
     // F41c/F47: only an ACCEPTED, replacement-gated hop outranks it — taote has no
     // such gate, so the ladder leads and the ledger is the fallback).
     if (decode_only) {
-        if (const auto ladder = ladder_oep(image); ladder != 0) {
+        if (const auto ladder = static_oep_from_image(image); ladder != 0) {
             return ladder;
         }
     }
@@ -1818,7 +1309,7 @@ std::uint64_t Unpacker::pick_oep(const std::vector<std::uint8_t>& image) const {
             return first;
         }
         // the decode-only ladder's static patterns correct a junk first hop
-        if (const auto ladder = ladder_oep(image); ladder != 0) {
+        if (const auto ladder = static_oep_from_image(image); ladder != 0) {
             return ladder;
         }
         // the incumbent is junk: prefer a real prologue outside the stub section,
@@ -1983,14 +1474,23 @@ std::uint64_t Unpacker::header_ep_candidate(const std::vector<std::uint8_t>& ima
     return 0;
 }
 
-// MEW's header table (the reference's SLOT_MEW_OEP_PARSE, mew_unpacker.cpp:28-64):
-// the packed EP is `e9 rel32` to a stub starting `be imm32`, and the dword at
-// imm32+4 is the original OEP.
-std::uint64_t Unpacker::mew_static_oep() const {
-    if (base_ == 0) {
+// The packer's static ladder over the DECODED body (the reference's
+// decode_only_ladder): only the families that hand off through the decoded
+// body's own trampolines implement it.
+std::uint64_t Unpacker::static_oep_from_image(const std::vector<std::uint8_t>& image) const {
+    if (packer_ == nullptr || image.empty()) {
         return 0;
     }
-    return mew_oep_candidate_;
+    packers::PackerContext ctx;
+    ctx.image_ptr = &image;
+    ctx.base = base_;
+    ctx.image_size = image_size_;
+    ctx.packed_ep_va = packed_ep_va_;
+    ctx.is_64 = is_64_;
+    ctx.debug = opts_.debug;
+    ctx.family = opts_.family;
+    ctx.sections = sections_;
+    return packer_->static_oep_from_image(ctx);
 }
 
 UnpackResult Unpacker::finalize(Qiling& ql) {
@@ -2056,11 +1556,27 @@ UnpackResult Unpacker::finalize(Qiling& ql) {
         // Amber-class: the payload PE is assembled in a heap buffer and the
         // original sections are never written, so there is no hop to find — adopt
         // the embedded image (the reference's try_embedded_pe)
-        if (hop_ledger_.empty() &&
-            (opts_.family == "Amber" || opts_.family == "Alienyze")) {
-            std::vector<std::uint8_t> adopted = image;
-            if (adopt_embedded_pe(ql, adopted)) {
-                image = std::move(adopted);
+        if (hop_ledger_.empty() && packer_ != nullptr) {
+            packers::PackerContext actx;
+            actx.ql = &ql;
+            actx.image_ptr = &image;
+            actx.base = base_;
+            actx.image_size = image_size_;
+            actx.packed_ep_va = packed_ep_va_;
+            actx.is_64 = is_64_;
+            actx.debug = opts_.debug;
+            actx.family = opts_.family;
+            actx.sections = sections_;
+            if (packer_->adopt_embedded_pe(actx) && !actx.adopted.empty()) {
+                image = std::move(actx.adopted);
+                // the payload replaced the stub: re-point the engine at it (the
+                // hooks are already armed, so only the geometry changes)
+                if (actx.adopted_base != 0) {
+                    base_ = actx.adopted_base;
+                    image_size_ = actx.adopted_size;
+                    sections_ = actx.adopted_sections;
+                    watched_.clear();
+                }
                 const auto ep_rva = [&image]() -> std::uint64_t {
                     const auto lfanew = static_cast<std::size_t>(image[0x3c]) |
                                         (static_cast<std::size_t>(image[0x3d]) << 8) |
@@ -2095,7 +1611,7 @@ UnpackResult Unpacker::finalize(Qiling& ql) {
         }
         if (hop_ledger_.empty()) {
             // no hop: the static entries, then the decoded-section ladder scan
-            if (const auto mew = mew_static_oep(); mew != 0) {
+            if (const auto mew = static_oep_; mew != 0) {
                 meta_oep_ = mew;
                 reason_ = "mew_static_oep";
                 stages_ = 1;
@@ -2103,7 +1619,7 @@ UnpackResult Unpacker::finalize(Qiling& ql) {
                 meta_oep_ = hdr;
                 reason_ = "header_ep";
                 stages_ = 1;
-            } else if (const auto ladder = ladder_oep(image); ladder != 0) {
+            } else if (const auto ladder = static_oep_from_image(image); ladder != 0) {
                 meta_oep_ = ladder;
                 reason_ = (opts_.family == "NSPack" || opts_.family == "RLPack" || opts_.family == "MPRESS")
                               ? "ladder_passc"
@@ -2150,7 +1666,8 @@ UnpackResult Unpacker::finalize(Qiling& ql) {
         // executing it (MEW memsets the image; PECompact re-encrypts), and wrong
         // for the JIT families that write transient ciphertext pages first
         // (JDPack .text 0.93 -> 0.47, PEtite 0.80 -> 0.69, measured §0.5.3b)
-        const bool shadow_family = opts_.family == "MEW" || opts_.family == "PECompact";
+        const bool shadow_family =
+            packer_ != nullptr && packer_->shadow_policy() == packers::ShadowPolicy::first_write;
         const bool shadow_all = std::getenv("TAOTE_UNPACK_SHADOW_ALL") != nullptr;
         if ((shadow_family || shadow_all) && shadow_seen_.size() == image.size()) {
             std::size_t restored = 0;
@@ -2472,103 +1989,16 @@ std::vector<std::uint8_t> rebuild_pe(const RebuildInput& in) {
         }
     }
 
-    // ---- the .pgimp blob (the reference's build_import_section, :10031-10420)
-    struct Group {
-        std::string dll;
-        std::vector<std::string> names;
-    };
-    std::vector<Group> groups;
-    for (const auto& pr : in.imports) {
-        auto dll = pr.first;
-        std::transform(dll.begin(), dll.end(), dll.begin(),
-                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        auto it = std::find_if(groups.begin(), groups.end(), [&](const Group& g) { return g.dll == dll; });
-        if (it == groups.end()) {
-            groups.push_back(Group{dll, {}});
-            it = std::prev(groups.end());
-        }
-        if (std::find(it->names.begin(), it->names.end(), pr.second) == it->names.end()) {
-            it->names.push_back(pr.second);
-        }
-    }
-
+    // ---- the .pgimp blob (Scylla's ImportRebuilder: iat/import_rebuilder)
+    const auto groups = iat::group_imports(in.imports);
     const std::uint32_t new_va = align_up(max_va_end, sec_align);
-    std::vector<std::uint8_t> blob;
-    const auto put = [&blob](const void* p, std::size_t n) {
-        const auto* b = static_cast<const std::uint8_t*>(p);
-        blob.insert(blob.end(), b, b + n);
-    };
-    // descriptor array first (dd[1]) then, per group, INT + IAT + names
-    const std::size_t desc_off = blob.size();
-    const std::size_t desc_size = (groups.size() + 1) * 20;
-    blob.resize(desc_off + desc_size, 0);
-
-    std::vector<std::size_t> desc_slot(groups.size());
-    for (std::size_t g = 0; g < groups.size(); ++g) {
-        desc_slot[g] = desc_off + g * 20;
-    }
-
-    std::uint32_t iat_rva = 0;
-    std::uint32_t iat_size = 0;
-    for (std::size_t g = 0; g < groups.size(); ++g) {
-        const auto& grp = groups[g];
-        const std::size_t n = grp.names.size();
-        const std::size_t int_off = blob.size();
-        blob.resize(int_off + (n + 1) * 4, 0);
-        const std::size_t iat_off = blob.size();
-        blob.resize(iat_off + (n + 1) * 4, 0);
-        // names
-        std::vector<std::uint32_t> name_rvas;
-        name_rvas.reserve(n);
-        for (const auto& fn : grp.names) {
-            if (blob.size() % 2 != 0) {
-                blob.push_back(0);
-            }
-            name_rvas.push_back(new_va + static_cast<std::uint32_t>(blob.size()));
-            const std::uint16_t hint = 0;
-            put(&hint, 2);
-            put(fn.data(), fn.size());
-            const char nul = '\0';
-            put(&nul, 1);
-        }
-        const std::size_t name_off = blob.size();
-        (void)name_off;
-        const std::uint32_t dll_name_rva = [&] {
-            if (blob.size() % 2 != 0) {
-                blob.push_back(0);
-            }
-            const auto rva = new_va + static_cast<std::uint32_t>(blob.size());
-            put(grp.dll.data(), grp.dll.size());
-            const char nul = '\0';
-            put(&nul, 1);
-            return rva;
-        }();
-
-        // the INT + IAT thunk arrays (hint/name RVAs, both arrays identical: the
-        // loader writes the resolved addresses into the IAT)
-        for (std::size_t i = 0; i < n; ++i) {
-            const std::uint32_t thunk = name_rvas[i];
-            std::memcpy(&blob[int_off + i * 4], &thunk, 4);
-            std::memcpy(&blob[iat_off + i * 4], &thunk, 4);
-        }
-
-        const std::uint32_t int_rva = new_va + static_cast<std::uint32_t>(int_off);
-        const std::uint32_t this_iat_rva = new_va + static_cast<std::uint32_t>(iat_off);
-        if (iat_rva == 0) {
-            iat_rva = this_iat_rva;
-        }
-        iat_size += static_cast<std::uint32_t>((n + 1) * 4);
-
-        wr32(blob, desc_slot[g], int_rva);        // OriginalFirstThunk
-        wr32(blob, desc_slot[g] + 4, 0);          // TimeDateStamp
-        wr32(blob, desc_slot[g] + 8, 0);          // ForwarderChain
-        wr32(blob, desc_slot[g] + 12, dll_name_rva);
-        wr32(blob, desc_slot[g] + 16, this_iat_rva);  // FirstThunk
-    }
-    const std::uint32_t new_vsize = static_cast<std::uint32_t>(blob.size());
-    if (new_vsize == 0) {
+    const auto section = iat::build_import_section(groups, new_va);
+    if (section.blob.empty()) {
         return {};
     }
+    const std::uint32_t iat_rva = section.iat_rva;
+    const std::uint32_t iat_size = section.iat_size;
+    const std::uint32_t new_vsize = static_cast<std::uint32_t>(section.blob.size());
 
     // ---- file layout (unpacker.cpp:13630-13680)
     const std::uint32_t n_sec_total = static_cast<std::uint32_t>(secs.size()) + 1;
@@ -2621,7 +2051,8 @@ std::vector<std::uint8_t> rebuild_pe(const RebuildInput& in) {
             wr32(out, e + 20, pgimp_raw_ptr);            // PointerToRawData
             wr32(out, e + 36, 0x40000040);               // INITIALIZED_DATA | READ
         }
-        std::copy(blob.begin(), blob.end(), out.begin() + static_cast<std::ptrdiff_t>(pgimp_raw_ptr));
+        std::copy(section.blob.begin(), section.blob.end(),
+                  out.begin() + static_cast<std::ptrdiff_t>(pgimp_raw_ptr));
     }
 
     // the optional header fields the loader reads
@@ -2632,8 +2063,8 @@ std::vector<std::uint8_t> rebuild_pe(const RebuildInput& in) {
     wr32(out, opt_off + 0x40, 0);                    // CheckSum
     wr16(out, coff + 2, static_cast<std::uint16_t>(secs.size() + 1));
     // data directories: import = .pgimp descriptors, IAT = the first thunk array
-    wr32(out, dd_base + 1 * 8, new_va + static_cast<std::uint32_t>(desc_off));
-    wr32(out, dd_base + 1 * 8 + 4, static_cast<std::uint32_t>(desc_size));
+    wr32(out, dd_base + 1 * 8, new_va + static_cast<std::uint32_t>(section.descriptors_off));
+    wr32(out, dd_base + 1 * 8 + 4, static_cast<std::uint32_t>(section.descriptors_size));
     if (iat_rva != 0) {
         wr32(out, dd_base + 12 * 8, iat_rva);
         wr32(out, dd_base + 12 * 8 + 4, iat_size);
