@@ -123,16 +123,16 @@ Running pegasus's detector over 3 samples/family (`SE_DEBUG_DETECTOR=1`):
 
 | metric | at plan time | after round 1 (§0.5) | target |
 |---|---|---|---|
-| S75 UNPACKED_VERIFIED | 0 | **18 / 75** | P1 45, P3 60 |
+| S75 UNPACKED_VERIFIED | 0 | **33 / 75** (round 2) | P1 45, P3 60 |
 | S500 UNPACKED_VERIFIED | 0 | not yet run (gated on the family work) | ≥ 250 (≈ oracle's 52.9% census) |
 | detector name-exact, 25 families | 0 (no detector) | 22/25 (the tool's name guess; Phase 2 has not landed as a library) | P2 25/25 |
 | artifact contract (`<stem>_dump.bin`, `.meta.json`, `_unpacked.exe`) | absent | **met** (valid JSON, asserted) | P0 |
-| host crashes (S75) | n/a | **0** (+80 mutated images) | **0**, always |
+| host crashes (S75) | n/a | **0** across all rounds (+80 mutated images) | **0**, always |
 | taote suite | 574 passed (stub) | **578 passed** (4 unpack cases) / 586 + 1 known red (real dlls) | unchanged at every phase |
 
 ---
 
-## 0.5 Measured status (implementation round 1, 2026-10-22)
+## 0.5r1 Measured status (implementation round 1, 2026-10-22)
 
 The unpacker is implemented as `qiling/unpack/` (library), `tools/taote_unpack`
 (the flag-compatible CLI) and `tests/Unpack_Compat_Test.cpp` (contract, meta-JSON,
@@ -162,7 +162,32 @@ Yoda-Crypter 0/3/0  Yoda-Protector 0/0/3  Alienyze 0/0/3  Amber 0/0/3  Exe32pack
 The oracle's cells for the same families are in §0.2 (66/75): the gap is **one
 class** — the OEP of the trampoline/VM families.
 
-### 0.5.1 What the implementation already proves
+## 0.5 Measured status (implementation round 2, 2026-10-22)
+
+| phase | S75 UNPACKED_VERIFIED |
+|---|---|
+| round 1 (generic core + pick + salvage) | **18 / 75** |
+| round 2a: the decode-only ladder (Pass-C / Borland / MSVC frame) | **30 / 75** |
+| round 2b: Pass-B ordering, degenerate-layout fallback, inter-map salvage | **33 / 75** |
+| oracle, same 75 | 66 / 75 (strict 60) |
+
+Per family (VER / PART / FAIL), round 2:
+
+```
+UPX 3/0/0        ASPack 3/0/0       Eronana 3/0/0     MPRESS 3/0/0      Packman 3/0/0
+RLPack 3/0/0     Exe32pack 3/0/0    Yoda-Crypter 3/0/0                 FSG 2/1/0
+EXpressor 2/1/0  BeRo 1/2/0         EnigmaVB 1/2/0    MEW 1/2/0         Molebox 1/2/0
+WinUpack 1/1/1   JDPack 0/3/0       NSPack 0/3/0      Neolite 0/3/0     PECompact 0/2/1
+PEtite 0/3/0     TELock 0/3/0       Themida 0/3/0     Alienyze 0/0/3    Amber 0/0/3
+Yoda-Protector 0/0/3
+```
+
+Everything the ladder touched is now green in the families where the payload decodes:
+the six compressor families (UPX, ASPack, Eronana, MPRESS, Packman, RLPack) are 3/3,
+Yoda-Crypter went 0/3 -> 3/3 on the Borland pre-check, and Exe32pack 0/3 -> 3/3 on
+the degenerate-layout fallback.
+
+### 0.5.1a What round 1 already proved
 
 * the write-claim → section-hop → dump → `.pgimp` rebuild chain works: **UPX,
   ASPack, FSG, Eronana, JDPack, Packman** reach the exact original EP and dump a
@@ -175,7 +200,53 @@ class** — the OEP of the trampoline/VM families.
   zero crashes (`UnpackCompat.UnpackHostSafety`), and no run in S75 took the
   process down.
 
-### 0.5.2 The remaining 57 samples, diagnosed (this is the next work)
+### 0.5.2 The remaining 42 samples, diagnosed (round 2)
+
+Failure reasons across the 42 non-verified (verify.py):
+
+| reason | count | what it means |
+|---|---|---|
+| `ep-mismatch(near), code-sim<0.90` | 11 | the decode is incomplete (NSPack 3, Neolite 3, PECompact 2, TELock 2, …) |
+| `imp-cov<0.80` | 6 | EP and code are right, the import table is not recoverable from memory (EnigmaVB 2, BeRo 2, FSG 1, WinUpack 1) |
+| `ep-mismatch, code-sim<0.90, imp-cov<0.80` | 4 | undecoded + no imports (TELock) |
+| `code-sim<0.90, imp-cov<0.80` | 3 | MEW 2 + JDPack 1 |
+| `code-sim<0.90` | 2 | PEtite 7zFM/7zFMn: EP exact, .text only ~0.80 decoded |
+| `ep-mismatch(near)` | 2 | JDPack 7zFM/7zFMn |
+| `no-recovery` | 2 | Alienyze (the page decrypter never runs) |
+
+Per-family causes with evidence:
+
+* **NSPack (3)** — the packed header EP (0x101b) points at ZERO bytes: nsp0's raw
+  head is 0xe9 bytes of zeros, so the first instruction is `add [eax],al`, the write
+  to 0 faults and the run ends before any decode. The oracle reports stages=2 plus a
+  *dynamic-region* dump at 0x8000, so its flow maps/executes something taote does
+  not. This is the only family where the failure is *before* the OEP pick.
+* **Neolite / PECompact / TELock** — the payload is never decoded into the image
+  (`.text` similarity 0.03-0.19). Neolite needs its registry IAT build, PECompact
+  its `family_capture_hop_`/`family_post_terminal` seam, TELock the JIT shadow
+  transform + second-latch exec defer.
+* **PEtite / JDPack (6)** — the *decoded* body is close but not whole: PEtite's 7z
+  payloads sit at 0.80 similarity with the exact EP found (Pass B), JDPack's at
+  0.46-0.93. A full first-write shadow overlay was implemented and measured to make
+  this WORSE (0.93 -> 0.47): their stubs write transient ciphertext pages before
+  the real decode, so the first-write capture is not the decoded view. What is
+  needed is the reference's per-page decrypt tracking (PETITE_INT_RUNS), not an
+  overlay.
+* **EnigmaVB (2)** — EP exact, similarity 1.0, coverage 0.36: the payload's import
+  descriptors are rebuilt by EVB's VFS at runtime and the slots hold EVB
+  trampolines, so neither the dump's IDir nor the loader's export map finds them.
+  Needs the VFS import walk (`family_reconstruct_orphans`).
+* **BeRo / FSG / WinUpack / MEW (6)** — the stub restores the IAT itself and the
+  payload's descriptors are overwritten; scanning the image AND every other mapped
+  region for loader-known addresses finds nothing (measured: FSG AccessEnum's whole
+  image holds 20 dll-region dwords, none of them an export cell). Needs the
+  reference's orphan-name + INT-chain mining.
+* **Alienyze / Amber (6)** — the decrypter never runs; Amber allocates nothing at
+  all (its only non-image map is one heap page), so the embedded-PE scan is inert
+  (implemented and measured — see the round-2 commit).
+* **Themida / Yoda-Protector (6)** — the oracle is 0/3 on both.
+
+### 0.5.3 The original (round 1) diagnosis
 
 Failure reasons across the 57 non-verified, from `verify.py`:
 
@@ -213,7 +284,7 @@ Per-family cause, evidenced by the debug traces (`TAOTE_UNPACK_DEBUG=1`):
   header-specific recovery (the plan's tier B/C rows). EnigmaVB improves with the
   header EP (1/3 now); its import coverage (0.36-0.38) needs the VFS import walk.
 
-### 0.5.3 What this changes in the plan
+### 0.5.4 What this changes in the plan
 
 1. **The GPA sentinel lane is Phase 1, not Phase 1b.** UPX's import restorer calls
    `ExitProcess` on the first NULL `GetProcAddress`; without the sentinel the run
