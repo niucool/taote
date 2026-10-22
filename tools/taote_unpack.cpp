@@ -152,7 +152,13 @@ int main(int argc, char** argv) {
     std::string family;
     std::string argv_tail;
     std::uint64_t timeout = 120;
-    std::uint64_t count = 40000000;
+    // The instruction budget is a safety net, not the primary limiter (the
+    // simulated-time budget is). The reference has no instruction cap at all
+    // (max_instructions_ = -1); 40M was cutting slow decoders short — measured:
+    // aspack/upx/mpress/packman/mew/jdpack AccessEnum and the EXpressor/MEW/
+    // Molebox/BeRo/WinUpack AD* samples all reach the exact OEP and a correct
+    // dump only when the budget is raised (they now grade UNPACKED_VERIFIED).
+    std::uint64_t count = 200000000;
     bool json = false;
     // TAOTE_UNPACK_NO_HOP: the Phase 0 artifact-only mode, settable by env so the
     // reference harness (which only passes the pegasus flags) can drive it
