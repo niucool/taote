@@ -395,11 +395,13 @@ and what they actually measured:
    `QlOsWindows::seh_on_write_prot` + the `UC_HOOK_MEM_WRITE_PROT` trampoline
    now deliver a write-protection fault as `STATUS_ACCESS_VIOLATION` (with the
    reference's survive fallback); it is inert because nothing is mapped RO.
-   Mapping the header page RO for PEtite and letting it fire was measured and
-   **left out**: the stub's first header store lands at pc `0x418179` addr
-   `0x400780`, where the oracle stores at pc `0x418217` addr `0x400000` — the
-   flow diverges before the probe, so the AV fires on the wrong store and the
-   run dies on a read from `0x1`. PEtite stays 0/3.
+   Mapping the header page RO and seeding fs:[0] with the reference's
+   synthetic SEH frame (win32.cpp SE_SEH_SEED) was measured and **left out**:
+   the stub's first header store lands at pc `0x418179` addr `0x400780`, where
+   the oracle stores at pc `0x418217` addr `0x400000` — the flow diverges
+   before the probe, so the AV fires on the wrong store (survives after the
+   repeat guard) and the decryptor walker dies on a read from `0x1`
+   (`sim 0.80 -> 0.07`, exact OEP lost). PEtite stays 0/3.
 
 ### 0.5.4 What this changes in the plan
 
