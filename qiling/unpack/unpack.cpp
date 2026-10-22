@@ -23,6 +23,7 @@
 #include "qiling/os/memory.hpp"
 #include "qiling/os/os.hpp"
 #include "qiling/os/utils.hpp"
+#include "qiling/os/windows/windows.hpp"
 
 namespace qiling {
 namespace unpack {
@@ -498,6 +499,52 @@ void Unpacker::install(Qiling& ql) {
     }
 
     install_gpa_sentinel(ql);
+
+    // The invalid-instruction dispatch (the reference's install_invalid_insn_,
+    // unpacker.cpp:4773-4811): TELock's self-modifying ladder executes 0xf1
+    // (ICEBP) and the undefined `lea reg,reg` (ModRM mod==3) form as exception
+    // triggers, and unicorn reports both as UC_ERR_INSN_INVALID before any other
+    // hook sees them. Deliver the matching CPU exception into the guest's fs:[0]
+    // chain: 0xf1 is a trap (Eip = next instruction first), everything else is
+    // STATUS_ILLEGAL_INSTRUCTION at the same Eip. An unhandled #UD stops the run
+    // instead of re-faulting forever.
+    if (!is_64_) {
+        auto invalid_hook = std::make_shared<HookRet>(
+            ql.hook_insn_invalid([this]() -> int {
+                auto& regs = ql_->arch().regs();
+                const auto pc = regs.arch_pc();
+                std::uint8_t b = 0;
+                try {
+                    const auto bytes = ql_->mem().read(pc, 1);
+                    if (!bytes.empty()) {
+                        b = bytes[0];
+                    }
+                } catch (...) {
+                    b = 0;
+                }
+                auto& os = ql_->os<os::windows::QlOsWindows>();
+                if (opts_.debug) {
+                    std::fprintf(stderr, "[unpack] insn_invalid pc=%s b=0x%02x\n", hex(pc).c_str(),
+                                 static_cast<unsigned>(b));
+                }
+                if (b == 0xf1) {
+                    // #DB (ICEBP) is a trap: Eip advances to the next
+                    // instruction before the handler runs, exactly like real
+                    // x86 (the reference's dispatch_seh(0x80000004, eip+1))
+                    regs.set_arch_pc(pc + 1);
+                    (void)os.seh_dispatch_cpu(0x80000004u);
+                    return QL_HOOK_BLOCK;
+                }
+                if (!os.seh_dispatch_cpu(0xC000001Du)) {
+                    // nothing handled the #UD: surface the original stop
+                    ql_->emu_stop();
+                }
+                return QL_HOOK_BLOCK;
+            }, 1, 0));
+        if (invalid_hook->obj() != nullptr) {
+            hooks_.push_back(std::move(invalid_hook));
+        }
+    }
 
     for (const auto& ps : watched_) {
         const std::uint64_t start = ps.start;
@@ -1923,6 +1970,19 @@ UnpackResult Unpacker::finalize(Qiling& ql) {
             std::fprintf(stderr, "[unpack] final pc=%s writes=%llu\n",
                          hex(ql.arch().regs().arch_pc()).c_str(),
                          static_cast<unsigned long long>(write_seq_));
+            // TELock SEH-chain probe: dump the fs:[0] chain the stub installed
+            try {
+                const auto chain = ql.mem().read_ptr(0x6000, 4);
+                std::fprintf(stderr, "[unpack] fs:[0] chain=%s\n", hex(chain).c_str());
+                if (chain != 0 && chain != 0xffffffffull && chain > 0x1000) {
+                    const auto next = ql.mem().read_ptr(chain, 4);
+                    const auto handler = ql.mem().read_ptr(chain + 4, 4);
+                    std::fprintf(stderr, "[unpack] seh frame @%s next=%s handler=%s\n", hex(chain).c_str(),
+                                 hex(next).c_str(), hex(handler).c_str());
+                }
+            } catch (...) {
+                std::fprintf(stderr, "[unpack] fs:[0] read failed\n");
+            }
         }
         if (opts_.debug) {
             for (const auto& mi : ql.mem().get_mapinfo()) {

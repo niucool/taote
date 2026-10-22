@@ -397,15 +397,71 @@ void QlOsWindows::seh_intr_trampoline(uc_engine* /*uc*/, std::uint32_t intno, vo
 }
 
 bool QlOsWindows::seh_on_interrupt(std::uint32_t intno) {
-    if (bits_ != 32 || !seh_dispatch_enabled_ || seh_sentinel_ == 0 || seh_retarget_ != 0) {
+    if (std::getenv("TAOTE_SEHDBG") != nullptr) {
+        auto& dbg_regs = ql_->arch().regs();
+        std::fprintf(stderr, "[intr] intno=0x%x pc=0x%llx esi=0x%llx edx=0x%llx esp=0x%llx\n", intno,
+                     static_cast<unsigned long long>(dbg_regs.arch_pc()),
+                     static_cast<unsigned long long>(dbg_regs.read("esi")),
+                     static_cast<unsigned long long>(dbg_regs.read("edx")),
+                     static_cast<unsigned long long>(dbg_regs.arch_sp()));
+        if (intno == 0xd) {
+            try {
+                const auto esi = dbg_regs.read("esi");
+                auto fp = ql_->mem().read(esi, 8);
+                std::fprintf(stderr, "[intr]   [esi]=%02x %02x %02x %02x %02x %02x %02x %02x\n",
+                             fp[0], fp[1], fp[2], fp[3], fp[4], fp[5], fp[6], fp[7]);
+            } catch (...) {
+                std::fprintf(stderr, "[intr]   [esi] unreadable\n");
+            }
+        }
+    }
+    if (bits_ != 32 || !seh_dispatch_enabled_ || seh_retarget_ != 0) {
         return false;
     }
-    // int3 is a breakpoint, any other software interrupt is the illegal
-    // instruction class (an `int 0x2d`/`int 0x29` kernel-door probe lands here)
-    const auto code = intno == 3 ? 0x80000003u : 0xC000001Du;
+    // map the sentinel on demand (the TF single-step trap can be the run's
+    // first fault, before any memory fault has created the page)
+    if (seh_sentinel_ == 0 && !seh_map_sentinel()) {
+        return false;
+    }
+    // int3 = breakpoint, int1 = the TF/ICEBP single-step trap, any other
+    // software interrupt is the illegal-instruction class (an `int 0x2d` /
+    // `int 0x29` kernel-door probe lands there)
+    const auto code = intno == 3 ? 0x80000003u : (intno == 1 ? 0x80000004u : 0xC000001Du);
     const auto pc = ql_->arch().regs().arch_pc();
     if (!seh_dispatch(pc, 0u, code)) {
         return false;
+    }
+    // On real x86 the single-step trap CLEARS TF in the live EFLAGS before the
+    // handler runs (the saved CONTEXT keeps TF=1 for NtContinue to restore).
+    // Clearing it here (after the CONTEXT was built) keeps the handler from
+    // re-trapping on its own instructions, which the reference records as an
+    // infinite dispatch loop.
+    if (code == 0x80000004u) {
+        auto& regs = ql_->arch().regs();
+        regs.write("eflags", regs.read("eflags") & ~0x100ull);
+    }
+    ql_->emu_stop();
+    return true;
+}
+
+bool QlOsWindows::seh_dispatch_cpu(std::uint32_t exception_code) {
+    if (bits_ != 32 || !seh_dispatch_enabled_ || seh_retarget_ != 0) {
+        return false;
+    }
+    // the ICEBP is the run's first fault: no memory fault has mapped the
+    // sentinel yet, so it is created on demand here (same rule as seh_on_fault)
+    if (seh_sentinel_ == 0 && !seh_map_sentinel()) {
+        return false;
+    }
+    const auto pc = ql_->arch().regs().arch_pc();
+    if (!seh_dispatch(pc, 0u, exception_code)) {
+        return false;
+    }
+    // clear TF in the live EFLAGS after the CONTEXT snapshot, so the handler
+    // runs untrapped (mirrors seh_on_interrupt's single-step path)
+    if (exception_code == 0x80000004u) {
+        auto& regs = ql_->arch().regs();
+        regs.write("eflags", regs.read("eflags") & ~0x100ull);
     }
     ql_->emu_stop();
     return true;

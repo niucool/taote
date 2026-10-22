@@ -216,6 +216,13 @@ public:
     // leaves every guest fault on the ordinary failure path
     // the guest software-interrupt delivery (public so a test can drive it)
     bool seh_on_interrupt(std::uint32_t intno);
+    // the invalid-instruction delivery (TELock's 0xf1 ICEBP ladder + the #UD
+    // `lea reg,reg` trap): stages the given CPU exception into the fs:[0]
+    // chain like seh_on_fault/seh_on_interrupt, then stops the run so it
+    // restarts at the staged handler. Maps the sentinel on demand (the ICEBP
+    // is the first fault of the run, before any memory fault has mapped it).
+    // Returns false when nothing handled the exception.
+    bool seh_dispatch_cpu(std::uint32_t exception_code);
 
     void set_seh_dispatch(bool enabled) noexcept { seh_dispatch_enabled_ = enabled; }
     // the PE loader finished its load walk (DllMain drives included). The
