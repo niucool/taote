@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstring>
+#include <string>
 
 namespace qiling {
 namespace unpack {
@@ -15,6 +16,37 @@ void put_u32(std::vector<std::uint8_t>& v, std::size_t o, std::uint32_t x) {
         v.resize(o + 4, 0);
     }
     std::memcpy(v.data() + o, &x, 4);
+}
+
+// Scylla's cutImport/ordinal case: a thunk that imports by ordinal carries the
+// ordinal in its low 16 bits with the high bit set, and there is no hint/name
+// entry behind it. An ordinal recorded as the name "ordinal_<N>" therefore has to
+// be emitted in that form - writing it out as a hint/name string (which is what
+// the rebuilder used to do) produces an entry the loader cannot resolve.
+bool ordinal_of(const std::string& name, std::uint32_t& ordinal) {
+    static const char* kPrefix = "ordinal_";
+    const std::size_t plen = 8;
+    if (name.size() <= plen) {
+        return false;
+    }
+    for (std::size_t i = 0; i < plen; ++i) {
+        if (std::tolower(static_cast<unsigned char>(name[i])) != kPrefix[i]) {
+            return false;
+        }
+    }
+    std::uint32_t v = 0;
+    for (std::size_t i = plen; i < name.size(); ++i) {
+        const char c = name[i];
+        if (c < '0' || c > '9') {
+            return false;
+        }
+        v = v * 10 + static_cast<std::uint32_t>(c - '0');
+        if (v > 0xffff) {
+            return false;
+        }
+    }
+    ordinal = v;
+    return v != 0;
 }
 
 }  // namespace
@@ -63,13 +95,18 @@ ImportSection build_import_section(const std::vector<ImportGroup>& groups, std::
         const std::size_t iat_off = blob.size();
         blob.resize(iat_off + (n + 1) * 4, 0);
 
-        std::vector<std::uint32_t> name_rvas;
-        name_rvas.reserve(n);
+        std::vector<std::uint32_t> thunks;
+        thunks.reserve(n);
         for (const auto& fn : grp.names) {
+            std::uint32_t ord = 0;
+            if (ordinal_of(fn, ord)) {
+                thunks.push_back(0x80000000u | ord);
+                continue;
+            }
             if (blob.size() % 2 != 0) {
                 blob.push_back(0);
             }
-            name_rvas.push_back(section_rva + static_cast<std::uint32_t>(blob.size()));
+            thunks.push_back(section_rva + static_cast<std::uint32_t>(blob.size()));
             const std::uint16_t hint = 0;
             put(&hint, 2);
             put(fn.data(), fn.size());
@@ -87,8 +124,8 @@ ImportSection build_import_section(const std::vector<ImportGroup>& groups, std::
         // the INT and the IAT hold the same hint/name RVAs: the loader resolves
         // them and writes the addresses back into the IAT
         for (std::size_t i = 0; i < n; ++i) {
-            put_u32(blob, int_off + i * 4, name_rvas[i]);
-            put_u32(blob, iat_off + i * 4, name_rvas[i]);
+            put_u32(blob, int_off + i * 4, thunks[i]);
+            put_u32(blob, iat_off + i * 4, thunks[i]);
         }
 
         const std::uint32_t int_rva = section_rva + static_cast<std::uint32_t>(int_off);
