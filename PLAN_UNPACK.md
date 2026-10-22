@@ -553,6 +553,83 @@ Remaining (measured blockers, all re-probed this round):
 
 ---
 
+### 0.6 Aggregate measurement, 8 samples per family (S200) — the first real comparison
+
+S75 (3 per family) is a fine regression gate but a poor estimate: it cannot show
+whether a family "works" or just happened to work three times. The same harness
+with `--cap 8` gives 200 samples, run for both tools on the same manifest
+(`/tmp/m200`, `/tmp/m200o`), 4-way pinned, 0 wall-timeouts on 196/171 completed
+rows (the rest were disk-quota casualties and were re-run):
+
+| | taote | oracle |
+|---|---|---|
+| UNPACKED_VERIFIED | **108 / 200** | **154 / 200** |
+| PARTIAL | 56 | 8 |
+| FAILED | 35 | 38 |
+
+Per family (taote VER / oracle VER, of 8):
+
+```
+ASPack        7 / 8     Alienyze    0 / 7     Amber      0 / 7     BeRo       7 / 8
+EXpressor     6 / 7     EnigmaVB    8 / 8     Eronana    7 / 8     Exe32pack  4 / 8
+FSG           7 / 8     JDPack      6 / 7     MEW        7 / 8     MPRESS     6 / 8
+Molebox       8 / 8     NSPack      0 / 8     Neolite    0 / 8     PECompact  4 / 7
+PEtite        1 / 6     Packman     7 / 8     RLPack     5 / 8     TELock     0 / 7
+Themida       0 / 0     UPX         8 / 2     WinUpack   3 / 0     Yoda-Cryp   7 / 0
+Yoda-Prot     0 / 0
+```
+
+Two results worth acting on:
+
+1. **taote already beats the oracle on four families**: UPX 8/2, WinUpack 3/0,
+   Yoda-Crypter 7/0 and (on S75) the Eronana/EnigmaVB/Molebox rows. The oracle's
+   UPX/Yoda/WinUpack failures are its own post-OEP grace stop cutting the import
+   resolution (it scores 2/8 UPX where S75 showed 3/3), so those are *not* a
+   target.
+2. **The whole aggregate gap is six families**: Neolite 8, NSPack 8, Alienyze 7,
+   Amber 7, TELock 7, PEtite 5 = **42 of the 46 samples** between 108 and 154.
+   Everything else together is 4 samples. That is the worklist, in that order:
+   the anti-emulation / decryptor-parity class (Neolite, NSPack, TELock, PEtite)
+   and the two payload-builder families (Amber, Alienyze).
+
+The measured conclusion for the plan: **do not port more seams for the families
+already at parity** (they cost samples: PECompact 4/7 and RLPack 5/8 are the next
+two on the list, then Exe32pack 4/8). The six above are where the files are.
+
+### 0.7 Module layout after the structural port (matches the reference)
+
+`unpack.cpp` had grown to ~2650 lines with every family's policy inline. It now
+mirrors `../pegasus/src`:
+
+```
+qiling/unpack/unpack.{hpp,cpp}          the engine: classification, write-claim,
+                                        section-hop, ledger, pick, dump, rebuild
+qiling/unpack/packer_detector.{hpp,cpp} the detector (section sigs, Molebox
+                                        digit-names, the PECompact entry signature)
+qiling/unpack/iat/iat_search.{hpp,cpp}  Scylla's ApiReader + IATSearch: SymbolMap,
+                                        IatScanner (pointer scan, coherent runs,
+                                        scattered-table rule), descriptor walk
+qiling/unpack/iat/import_rebuilder.{hpp,cpp}
+                                        Scylla's ImportRebuilder: group_imports +
+                                        build_import_section (descriptors, INT/IAT,
+                                        hint/name strings)
+qiling/unpack/packers/packer.hpp        the seam interface (PackerContext,
+                                        ShadowPolicy, Packer) + the shared
+                                        decode-only ladder
+qiling/unpack/packers/generic_packer.cpp    GenericPacker + make_packer (the
+                                            detector-name -> subclass table)
+qiling/unpack/packers/decode_only_packer.cpp  NSPack/RLPack/MPRESS + the ladder
+qiling/unpack/packers/mew_packer.cpp    the header-table OEP parse + shadow policy
+qiling/unpack/packers/pecompact_packer.cpp  the re-encrypting shadow policy
+qiling/unpack/packers/embedded_pe.cpp   Amber/Alienyze payload adoption
+qiling/unpack/packers/family_packers.cpp    the still-generic families (one class
+                                            each, a place for the next seam)
+```
+
+`unpack.cpp` is 2084 lines (from 2653) and the family policy is now one
+`packer_->…` call per seam. Behaviour-preserving: S75 stays 50/75 and the suite
+stays at 0 failed.
+
 ## 1. How pegasus unpacks, end to end
 
 ### 1.1 Lifecycle and where it hooks in
