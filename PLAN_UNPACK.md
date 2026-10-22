@@ -461,6 +461,18 @@ and what they actually measured:
    before the probe, §0.5.3e entry 3), so it must land together with the
    register-state parity fixes. Neolite stays 0/3.
 
+   *Measured follow-on (this round):* a gated `TAOTE_UNPACK_REALPERM` loader
+   path (map `.text` read+write-no-exec, header page RO, `.rdata`/`.rsrc`/
+   `.reloc` RO) plus `UC_MEM_FETCH_PROT` dispatch into `seh_on_fault` (access
+   type 8) was built and measured on `neolite_Autologon.exe`: **no change** —
+   the run still ends at `kernel32!ExitProcess` with 2110 writes and 0 faults,
+   so the stub's exit is an *anti-emulation branch independent of the section
+   permissions*, not the execute-on-noexec probe. The permission infra
+   (`change_mapinfo` fix, write-prot dispatch, fetch-prot dispatch) is correct
+   and landed, but it is necessary-not-sufficient; the real Neolite/PEtite
+   blocker is the anti-emulation/register-state divergence upstream of the
+   probe.
+
 ### 0.5.4 What this changes in the plan
 
 1. **The GPA sentinel lane is Phase 1, not Phase 1b.** UPX's import restorer calls

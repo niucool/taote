@@ -287,13 +287,22 @@ bool QlOsWindows::seh_on_fault(int access, std::uint64_t address) {
         return seh_continue();
     }
 
-    // only the data faults dispatch (a read/write against unmapped memory);
-    // the fetch faults elsewhere stay on the existing failure path
-    if (access != UC_MEM_WRITE_UNMAPPED && access != UC_MEM_READ_UNMAPPED) {
-        return false;
+    // data faults (read/write against unmapped memory) and an execute on a
+    // no-exec page (UC_MEM_FETCH_PROT, a #PF on instruction fetch) dispatch;
+    // the execute AV records access type 8 (the EXCEPTION_RECORD's
+    // ExceptionInformation[0] convention), which is what permission-driven
+    // decryption (Neolite's demand-paged .text) selects on.
+    if (access == UC_MEM_WRITE_UNMAPPED) {
+        return seh_dispatch(address, 1u);
     }
-
-    return seh_dispatch(address, access == UC_MEM_WRITE_UNMAPPED ? 1u : 0u);
+    if (access == UC_MEM_READ_UNMAPPED) {
+        return seh_dispatch(address, 0u);
+    }
+    if (access == UC_MEM_FETCH_PROT) {
+        return seh_dispatch(address, 8u);
+    }
+    // the remaining fetch faults stay on the existing failure path
+    return false;
 }
 
 // iretq: unicorn raises UC_ERR_EXCEPTION for it (a privileged instruction in
