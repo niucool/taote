@@ -1174,28 +1174,40 @@ std::size_t Unpacker::mine_orphan_descriptors(const std::vector<std::uint8_t>& i
     // blob in order: a dll-like string starts a group, the strings after it name that
     // dll, until the next dll-like string (the reference's orphan-name mining).
     std::size_t blob_pairs = 0;
-    // Each dll's group is a *separate* string run (the blob breaks on a non-printable
-    // byte between groups — measured: KERNEL32's 28 names, then 0x01, then USER32's),
-    // so collect every group, then accept them only when the image yields a real
-    // import list's worth (a cross-check against a lone coincidental dll string).
+    // FSG/BeRo/MEW/WinUpack store the payload's import list as a bare string run:
+    // [dll][name][name]…[marker][dll][name]… with one- or two-character separator
+    // pieces ('D', 'r') between the blocks and no pointer table at all. Walk the run
+    // once, switching the attributed dll whenever a dll-like piece appears and
+    // tolerating a few short separator pieces inside a block (measured on MEW, whose
+    // groups are separated by exactly such markers).
     std::vector<std::pair<std::string, std::vector<std::string>>> groups;
-    for (std::size_t start = 0x200; start + 8 < image.size(); ++start) {
-        auto first = cstr(start, 48);
-        if (first.empty() || !dll_like(first)) {
-            continue;
-        }
+    {
+        std::string cur_dll;
         std::vector<std::string> names;
-        auto p = start + first.size() + 1;
-        for (int guard = 0; guard < 512; ++guard) {
+        auto p = std::size_t{0x200};
+        int separators = 0;
+        const auto flush = [&]() {
+            if (!cur_dll.empty() && names.size() >= 2) {
+                groups.emplace_back(cur_dll, names);
+            }
+            names.clear();
+            separators = 0;
+        };
+        while (p + 6 < image.size()) {
             const auto piece = cstr(p, 96);
             if (piece.empty()) {
-                break;
+                if (++separators > 3) {
+                    flush();
+                }
+                ++p;
+                continue;
             }
             p += piece.size() + 1;
             if (dll_like(piece)) {
-                break;
+                flush();
+                cur_dll = piece;
+                continue;
             }
-            // an identifier: letters/digits/underscore, at least four characters
             bool ident = piece.size() >= 4;
             for (const auto c : piece) {
                 if (!(std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '_' || c == '@' || c == '?')) {
@@ -1204,18 +1216,87 @@ std::size_t Unpacker::mine_orphan_descriptors(const std::vector<std::uint8_t>& i
                 }
             }
             if (!ident) {
-                break;
+                if (++separators > 3) {
+                    flush();
+                }
+                continue;
             }
+            // the stored name is reported verbatim: FSG shifts the first character
+            // of its blob names (+3: 'JetModuleHandleA') while MEW stores them
+            // unshifted, and no generic rule separates the two — an unconditional
+            // undo corrupts the honest names and vice versa. The dll stems (which is
+            // what coverage measures) are identical either way.
             auto fn = piece;
-            const auto unshifted = static_cast<unsigned char>(fn[0] - 3);
-            if (std::isalpha(unshifted) != 0) {
-                fn[0] = static_cast<char>(unshifted);
+            if (!cur_dll.empty()) {
+                names.push_back(std::move(fn));
+                separators = 0;
             }
-            names.push_back(fn);
         }
-        if (names.size() >= 2) {
-            groups.emplace_back(first, std::move(names));
-            start = p;
+        flush();
+    }
+    // Second, per-dll pass: the single walk above flushes on separators and so can
+    // merge or drop the blocks that sit between two markers. Walk from EVERY dll-like
+    // string instead and collect what follows it, then union the results (measured:
+    // MEW realises 11 of its 14 dlls with the single walk, FSG 9 of 12).
+    {
+        std::vector<std::pair<std::string, std::vector<std::string>>> per_dll;
+        for (std::size_t o = 0x200; o + 6 < image.size(); ++o) {
+            const auto dll = cstr(o, 48);
+            if (dll.empty() || !dll_like(dll)) {
+                continue;
+            }
+            std::vector<std::string> names;
+            auto p = o + dll.size() + 1;
+            int separators = 0;
+            for (int guard = 0; guard < 512; ++guard) {
+                const auto piece = cstr(p, 96);
+                if (piece.empty()) {
+                    if (++separators > 3) {
+                        break;
+                    }
+                    ++p;
+                    continue;
+                }
+                p += piece.size() + 1;
+                if (dll_like(piece)) {
+                    break;
+                }
+                bool ident = piece.size() >= 4;
+                for (const auto c : piece) {
+                    if (!(std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '_' || c == '@' ||
+                          c == '?')) {
+                        ident = false;
+                        break;
+                    }
+                }
+                if (!ident) {
+                    if (++separators > 3) {
+                        break;
+                    }
+                    continue;
+                }
+                names.push_back(piece);
+                separators = 0;
+            }
+            if (names.size() >= 2) {
+                per_dll.emplace_back(dll, std::move(names));
+                o = p;
+            }
+        }
+        std::set<std::string> seen_dlls;
+        for (const auto& [dll, names] : per_dll) {
+            seen_dlls.insert(dll);
+        }
+        if (per_dll.size() >= 3) {
+            for (const auto& [dll, names] : per_dll) {
+                for (const auto& fn : names) {
+                    note_import(sanitize_ascii(dll), sanitize_ascii(fn));
+                }
+            }
+            if (opts_.debug) {
+                std::fprintf(stderr, "[unpack] per-dll blob pass: %zu blocks, %zu dlls\n", per_dll.size(),
+                             seen_dlls.size());
+            }
         }
     }
     std::size_t total_names = 0;
@@ -1224,13 +1305,6 @@ std::size_t Unpacker::mine_orphan_descriptors(const std::vector<std::uint8_t>& i
         total_names += names.size();
         unique_dlls.insert(dll);
     }
-    // Measured and NOT accepted: FSG's dll-name list is a separate standalone run
-    // (`KERNEL32.dll\0USER32.dll\0...` at 0xa64e-0xa7a0, four of them after the
-    // groups my walk already pairs), so an ordinal pairing of dll list to name group
-    // is what recovers comctl32/ole32/oleaut32/mpr (coverage 0.667 -> 1.0). A first
-    // attempt keyed on equal list lengths did not fire on the real layout — the dll
-    // strings appear twice (once in the list, once as a group head) — so it stays
-    // unshipped rather than misfiring on the working families.
     if (groups.size() >= 2 && total_names >= 6) {
         for (const auto& [dll, names] : groups) {
             for (const auto& fn : names) {

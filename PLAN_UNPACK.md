@@ -171,6 +171,7 @@ class** — the OEP of the trampoline/VM families.
 | round 2b: Pass-B ordering, degenerate-layout fallback, inter-map salvage | **33 / 75** |
 | round 2c: orphan import-list mining (the FSG string-blob reconstruction) | **36 / 75** |
 | round 2d: MEW full shadow overlay, exec-page view, NSPack start override | **36 / 75** (all three measured inert) |
+| round 2e: the marker-tolerant blob walk + per-dll union | **36 / 75** (coverage moves: BeRo imp 2 -> 80, WinUpack 2 -> 122, MEW 0.786/0.769) |
 | oracle, same 75 | 66 / 75 (strict 60) |
 
 Per family (VER / PART / FAIL), round 2:
@@ -246,8 +247,13 @@ Per-family causes with evidence:
   KERNEL32.dll!GetModuleHandleA after undoing FSG's +3 first-character shift) and
   that is what took EnigmaVB to 3/3. BeRo, MEW and WinUpack store the list
   differently (no blob found), and fsg_AccessEnum's coverage reaches 0.667 — one dll
-  short of the 0.80 bar, because FSG shifts the dll-name strings' first character
-  too, which `dll_like` still rejects.
+  short of the 0.80 bar. The blob walk is now marker-tolerant (MEW separates its
+  blocks with one-character pieces, so the first version dropped all but one group)
+  and it unions a per-dll pass; that took MEW to 11/14 dlls (0.786) and BeRo's
+  ADInsight from 2 pairs to 80, and WinUpack's from 2 to 122 — but the last two or
+  three dlls of each remain: their name blocks are not adjacent to their dll string,
+  and pairing them needs the reference's ordinal dll-list-to-group join (attempted,
+  did not fire on the real layout, not shipped).
 * **Alienyze / Amber (6)** — the decrypter never runs; Amber allocates nothing at
   all (its only non-image map is one heap page), so the embedded-PE scan is inert
   (implemented and measured — see the round-2 commit).
