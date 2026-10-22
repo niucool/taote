@@ -317,6 +317,17 @@ Per-family cause, evidenced by the debug traces (`TAOTE_UNPACK_DEBUG=1`):
 | NSPack: force the emulation start (`TAOTE_UNPACK_START`, tool flag) | both 0x42a000 (nsp1 start) and 0x401047 still end at pc 0x40101b with 0 writes | the stub itself jumps to the zero-filled head; needs the oracle's flow, not a different start |
 | inter-map IAT salvage + all-scattered-slots rule | adds only MEW's two known pairs; FSG/BeRo/WinUpack hold no loader-known addresses at all | those families need name mining, not pointer mining |
 
+### 0.5.3c TELock: why it is undecoded (probed, not guessed)
+
+`telock_AkelAdmin.exe`: the stub claims its own section (`claim [0x407000,0x40b000)`,
+6481 writes) and then dies with **`UC_ERR_INSN_INVALID` at pc 0x408a08** — an opcode
+unicorn's CPU model cannot decode (the same limitation already recorded for AVX/XSAVE
+in the corpus sweep). The payload is therefore never decompressed, which is why its
+similarity is 0.19 and the pick's candidates sit at `…0x3c` offsets inside the stub.
+Nothing about the OEP or the shadow transform can change that: the first work item for
+TELock in round 3 is the faulting opcode (bytes at the fault: recorded in this round's
+commit), not the dump transform.
+
 ### 0.5.4 What this changes in the plan
 
 1. **The GPA sentinel lane is Phase 1, not Phase 1b.** UPX's import restorer calls
