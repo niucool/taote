@@ -953,9 +953,6 @@ void Unpacker::salvage_iat(Qiling& ql, const std::vector<std::uint8_t>& image) {
 // later candidate, and a candidate inside the packed EP's own section is penalised
 // (the stub keeps executing there after the payload has been decoded).
 std::uint64_t Unpacker::pick_oep(const std::vector<std::uint8_t>& image) const {
-    if (hop_ledger_.empty()) {
-        return meta_oep_;
-    }
     const int ep_sec = section_index_at(packed_ep_va_);
     float best_score = -1e9f;
     std::uint64_t best = meta_oep_;
@@ -989,22 +986,61 @@ std::uint64_t Unpacker::pick_oep(const std::vector<std::uint8_t>& image) const {
     if (const auto hdr = header_ep_candidate(image); hdr != 0) {
         return hdr;
     }
-    {
+    if (!hop_ledger_.empty()) {
         const auto first = hop_ledger_.front();
         const int first_sec = section_index_at(first);
         const bool in_stub_section = first_sec >= 0 && first_sec == ep_sec;
         if (!in_stub_section && shape_at(first) >= 2) {
             return first;
         }
-    }
-    // the incumbent is junk: take the first real prologue outside the stub section
-    for (const auto va : hop_ledger_) {
-        const int sec = section_index_at(va);
-        if (sec >= 0 && sec == ep_sec) {
-            continue;
+        // the incumbent is junk: prefer a real prologue outside the stub section,
+        // then the ladder's landing in the decoded section
+        for (const auto va : hop_ledger_) {
+            const int sec = section_index_at(va);
+            if (sec >= 0 && sec == ep_sec) {
+                continue;
+            }
+            if (shape_at(va) >= 3) {
+                return va;
+            }
         }
-        if (shape_at(va) >= 3) {
-            return va;
+    }
+    // The decode-only ladder's landing (the reference's guess_oep over the decoded
+    // section, unpacker.cpp:6920-6981 + ladder_fill_dump_): when every candidate so
+    // far is junk, the payload entry is the first prologue in the largest section
+    // the stub wrote. NSPack/RLPack/MPRESS never hand off explicitly under
+    // emulation; this is the artifact their stubs leave behind.
+    {
+        std::vector<std::pair<std::uint64_t, std::uint64_t>> ranges(ever_written_.begin(), ever_written_.end());
+        std::sort(ranges.begin(), ranges.end(), [](const auto& a, const auto& b) {
+            return (a.second - a.first) > (b.second - b.first);
+        });
+        for (const auto& r : ranges) {
+            if (r.first < base_ || r.second <= r.first) {
+                continue;
+            }
+            const auto start = static_cast<std::size_t>(r.first - base_);
+            const auto span = std::min<std::size_t>(static_cast<std::size_t>(r.second - r.first), 0x20000);
+            if (start + span > image.size()) {
+                continue;
+            }
+            for (std::size_t i = 0; i + 16 <= span; ++i) {
+                const auto* p = image.data() + start + i;
+                const bool prologue = (p[0] == 0x6a && p[2] == 0x68 && p[7] == 0xe8) ||
+                                      (p[0] == 0x55 && p[1] == 0x8b && p[2] == 0xec);
+                if (!prologue) {
+                    continue;
+                }
+                int printable = 0;
+                for (int k = 0; k < 16; ++k) {
+                    if (p[k] >= 0x20 && p[k] <= 0x7E) {
+                        ++printable;
+                    }
+                }
+                if (printable <= 12) {
+                    return r.first + i;
+                }
+            }
         }
     }
     for (std::size_t i = 0; i < hop_ledger_.size(); ++i) {
@@ -1170,7 +1206,7 @@ UnpackResult Unpacker::finalize(Qiling& ql) {
             std::fprintf(stderr, "\n");
         }
         if (hop_ledger_.empty()) {
-            // no hop: the static entries still identify the payload
+            // no hop: the static entries, then the decoded-section ladder scan
             if (const auto mew = mew_static_oep(); mew != 0) {
                 meta_oep_ = mew;
                 reason_ = "mew_static_oep";
@@ -1178,6 +1214,10 @@ UnpackResult Unpacker::finalize(Qiling& ql) {
             } else if (const auto hdr = header_ep_candidate(image); hdr != 0) {
                 meta_oep_ = hdr;
                 reason_ = "header_ep";
+                stages_ = 1;
+            } else if (const auto ladder = pick_oep(image); ladder != 0) {
+                meta_oep_ = ladder;
+                reason_ = "ladder_scan";
                 stages_ = 1;
             }
         }
