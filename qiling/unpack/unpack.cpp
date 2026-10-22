@@ -108,6 +108,8 @@ void Unpacker::classify_sections(Qiling& ql) {
 
     shadow_image_.assign(static_cast<std::size_t>(image_size_), 0);
     shadow_seen_.assign(static_cast<std::size_t>(image_size_), false);
+    exec_view_.assign(static_cast<std::size_t>(image_size_), 0);
+    exec_page_seen_.assign(static_cast<std::size_t>(image_size_) / 0x1000 + 1, false);
 
     auto parsed = LIEF::PE::Parser::parse(opts_.sample_path);
     if (parsed == nullptr) {
@@ -642,6 +644,21 @@ int Unpacker::on_section_exec(std::uint64_t addr) {
     if (!in_written) {
         return 0;
     }
+    // the executed-page view (see Unpacker::exec_view_)
+    if (addr >= base_ && addr - base_ < image_size_) {
+        const auto page = static_cast<std::size_t>((addr - base_) / 0x1000);
+        if (page < exec_page_seen_.size() && !exec_page_seen_[page] && ql_ != nullptr) {
+            exec_page_seen_[page] = true;
+            const auto off = page * 0x1000;
+            const auto n = std::min<std::size_t>(0x1000, image_size_ - off);
+            try {
+                const auto bytes = ql_->mem().read(base_ + off, n);
+                std::copy(bytes.begin(), bytes.end(),
+                          exec_view_.begin() + static_cast<std::ptrdiff_t>(off));
+            } catch (...) {
+            }
+        }
+    }
     for (const auto& r : ever_written_) {
         if (addr >= r.first && addr <= r.second) {
             // the reference's CF-hop observer: every first-exec of an address in a
@@ -970,6 +987,257 @@ std::uint64_t Unpacker::ladder_oep(const std::vector<std::uint8_t>& image) const
         }
     }
     return 0;
+}
+
+std::size_t Unpacker::mine_orphan_descriptors(const std::vector<std::uint8_t>& image) {
+    if (image.size() < 0x400) {
+        return 0;
+    }
+    const auto at32 = [&image](std::size_t o) -> std::uint32_t {
+        if (o + 4 > image.size()) {
+            return 0;
+        }
+        return static_cast<std::uint32_t>(image[o]) | (static_cast<std::uint32_t>(image[o + 1]) << 8) |
+               (static_cast<std::uint32_t>(image[o + 2]) << 16) |
+               (static_cast<std::uint32_t>(image[o + 3]) << 24);
+    };
+    const auto cstr = [&image](std::size_t o, std::size_t max) {
+        std::string out;
+        while (o < image.size() && image[o] != 0 && out.size() < max) {
+            const auto c = image[o++];
+            if (c < 0x20 || c > 0x7E) {
+                return std::string{};  // not a printable string
+            }
+            out.push_back(static_cast<char>(c));
+        }
+        return out;
+    };
+    const auto dll_like = [](const std::string& s) {
+        if (s.size() < 4 || s.size() > 40) {
+            return false;
+        }
+        std::string low = s;
+        for (auto& c : low) {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+        return low.size() > 4 && (low.compare(low.size() - 4, 4, ".dll") == 0 ||
+                                  low.compare(low.size() - 4, 4, ".drv") == 0 ||
+                                  low.compare(low.size() - 4, 4, ".ocx") == 0 ||
+                                  low.compare(low.size() - 4, 4, ".sys") == 0);
+    };
+    const auto in_image = [&image](std::uint32_t rva) {
+        return rva >= 0x200 && static_cast<std::size_t>(rva) + 2 < image.size();
+    };
+    const std::size_t ptr = is_64_ ? 8 : 4;
+    std::size_t pairs = 0;
+    for (std::size_t o = 0; o + 20 <= image.size(); o += 4) {
+        const auto name_rva = at32(o + 12);
+        if (!in_image(name_rva)) {
+            continue;
+        }
+        const auto dll = cstr(name_rva, 48);
+        if (!dll_like(dll)) {
+            continue;
+        }
+        const auto oft = at32(o);
+        const auto ft = at32(o + 16);
+        if ((oft != 0 && !in_image(oft)) || (ft != 0 && !in_image(ft))) {
+            continue;
+        }
+        const auto thunk_rva = oft != 0 ? oft : ft;
+        if (!in_image(thunk_rva)) {
+            continue;
+        }
+        std::size_t named = 0;
+        for (std::size_t k = 0; k < 4096; ++k) {
+            const auto toff = static_cast<std::size_t>(thunk_rva) + k * ptr;
+            const auto thunk = ptr == 8 ? static_cast<std::uint64_t>(at32(toff)) |
+                                              (static_cast<std::uint64_t>(at32(toff + 4)) << 32)
+                                        : static_cast<std::uint64_t>(at32(toff));
+            if (thunk == 0) {
+                break;
+            }
+            const auto flag = ptr == 8 ? 0x8000000000000000ull : 0x80000000ull;
+            if ((thunk & flag) != 0) {
+                note_import(sanitize_ascii(dll), "ordinal_" + std::to_string(thunk & 0xffff));
+                ++named;
+                continue;
+            }
+            if (!in_image(static_cast<std::uint32_t>(thunk))) {
+                continue;
+            }
+            const auto fn = cstr(static_cast<std::size_t>(thunk) + 2, 96);
+            if (fn.size() < 2) {
+                continue;
+            }
+            note_import(sanitize_ascii(dll), sanitize_ascii(fn));
+            ++named;
+            ++pairs;
+        }
+        if (opts_.debug && named != 0) {
+            std::fprintf(stderr, "[unpack] orphan descriptor at 0x%zx: %s (%zu)\n", o, dll.c_str(), named);
+        }
+    }
+
+    // The stubs obfuscate the descriptor fields too (FSG shifts the FIRST character
+    // of every stored name by -3: 'JetModuleHandleA' -> 'GetModuleHandleA'), so the
+    // descriptor walk above finds only the stub's own chain. Mine the tables
+    // structurally instead: a run of pointer-spaced RVAs that all point at stored
+    // name strings is an INT array, and the nearest preceding dll-name string names
+    // it (the reference's family_reconstruct_orphans).
+    std::vector<std::uint32_t> name_offsets;
+    for (std::size_t o = 0x200; o + 5 < image.size(); ++o) {
+        if (image[o] < 0x21 || image[o] > 0x7E) {
+            continue;
+        }
+        const auto sname = cstr(o, 96);
+        if (sname.size() >= 4 && (o == 0 || image[o - 1] == 0)) {
+            name_offsets.push_back(static_cast<std::uint32_t>(o));
+        }
+    }
+    const auto points_at_name = [&name_offsets](std::uint32_t v) {
+        return std::binary_search(name_offsets.begin(), name_offsets.end(), v + 2) ||
+               std::binary_search(name_offsets.begin(), name_offsets.end(), v);
+    };
+    std::vector<std::pair<std::size_t, std::vector<std::string>>> tables;
+    for (std::size_t o = 0; o + ptr * 2 <= image.size(); o += 4) {
+        std::vector<std::string> members;
+        std::size_t k = 0;
+        for (; k < 512; ++k) {
+            const auto off = o + k * ptr;
+            const auto v = at32(off);
+            if (v == 0) {
+                break;
+            }
+            if (!points_at_name(v)) {
+                members.clear();
+                break;
+            }
+            auto fn = cstr(static_cast<std::size_t>(v) + 2, 96);
+            if (fn.size() < 3) {
+                fn = cstr(v, 96);
+            }
+            if (fn.size() < 3) {
+                members.clear();
+                break;
+            }
+            // undo FSG's -3 first-character shift when it lands on a letter
+            const auto shifted = static_cast<unsigned char>(fn[0] - 3);
+            if (std::isalpha(shifted) != 0) {
+                fn[0] = static_cast<char>(shifted);
+            }
+            members.push_back(fn);
+        }
+        if (members.size() >= 2) {
+            tables.emplace_back(o, std::move(members));
+            o += k * ptr;  // skip the table body
+        }
+    }
+    for (const auto& [off, members] : tables) {
+        // the dll string nearest before the table (the descriptor name)
+        std::string dll;
+        for (std::size_t back = 0; back < 0x800 && back <= off; back += 4) {
+            const auto cand = at32(off - back);
+            if (cand < 0x200 || static_cast<std::size_t>(cand) + 4 >= image.size()) {
+                continue;
+            }
+            auto text = cstr(cand, 48);
+            if (!text.empty()) {
+                std::string low = text;
+                for (auto& c : low) {
+                    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                }
+                if (low.size() > 4 && low.compare(low.size() - 4, 4, ".dll") == 0) {
+                    dll = text;
+                    break;
+                }
+            }
+        }
+        if (dll.empty()) {
+            continue;
+        }
+        for (const auto& fn : members) {
+            note_import(sanitize_ascii(dll), sanitize_ascii(fn));
+        }
+        pairs += members.size();
+        if (opts_.debug) {
+            std::fprintf(stderr, "[unpack] orphan INT table at 0x%zx: %s (%zu names, first %s)\n", off,
+                         dll.c_str(), members.size(), members.front().c_str());
+        }
+    }
+
+    // FSG/BeRo/MEW/WinUpack store the payload's import LIST as a bare string blob —
+    // `KERNEL32.dll\0JetModuleHandleA\0JetStartupInfoA\0...` with no pointer table
+    // and no descriptors (measured: not one dword in the image points at the dll
+    // name), and they shift the FIRST character of every stored name by +3
+    // ('JetModuleHandleA' is GetModuleHandleA, 'OocalAlloc' is LocalAlloc). Walk the
+    // blob in order: a dll-like string starts a group, the strings after it name that
+    // dll, until the next dll-like string (the reference's orphan-name mining).
+    std::size_t blob_pairs = 0;
+    // Each dll's group is a *separate* string run (the blob breaks on a non-printable
+    // byte between groups — measured: KERNEL32's 28 names, then 0x01, then USER32's),
+    // so collect every group, then accept them only when the image yields a real
+    // import list's worth (a cross-check against a lone coincidental dll string).
+    std::vector<std::pair<std::string, std::vector<std::string>>> groups;
+    for (std::size_t start = 0x200; start + 8 < image.size(); ++start) {
+        auto first = cstr(start, 48);
+        if (first.empty() || !dll_like(first)) {
+            continue;
+        }
+        std::vector<std::string> names;
+        auto p = start + first.size() + 1;
+        for (int guard = 0; guard < 512; ++guard) {
+            const auto piece = cstr(p, 96);
+            if (piece.empty()) {
+                break;
+            }
+            p += piece.size() + 1;
+            if (dll_like(piece)) {
+                break;
+            }
+            // an identifier: letters/digits/underscore, at least four characters
+            bool ident = piece.size() >= 4;
+            for (const auto c : piece) {
+                if (!(std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '_' || c == '@' || c == '?')) {
+                    ident = false;
+                    break;
+                }
+            }
+            if (!ident) {
+                break;
+            }
+            auto fn = piece;
+            const auto unshifted = static_cast<unsigned char>(fn[0] - 3);
+            if (std::isalpha(unshifted) != 0) {
+                fn[0] = static_cast<char>(unshifted);
+            }
+            names.push_back(fn);
+        }
+        if (names.size() >= 2) {
+            groups.emplace_back(first, std::move(names));
+            start = p;
+        }
+    }
+    std::size_t total_names = 0;
+    std::set<std::string> unique_dlls;
+    for (const auto& [dll, names] : groups) {
+        total_names += names.size();
+        unique_dlls.insert(dll);
+    }
+    if (groups.size() >= 2 && total_names >= 6) {
+        for (const auto& [dll, names] : groups) {
+            for (const auto& fn : names) {
+                note_import(sanitize_ascii(dll), sanitize_ascii(fn));
+                ++blob_pairs;
+            }
+        }
+        if (opts_.debug) {
+            std::fprintf(stderr, "[unpack] import-string groups: %zu groups, %zu dlls, %zu names (first %s!%s)\n",
+                         groups.size(), unique_dlls.size(), total_names,
+                         groups.front().first.c_str(), groups.front().second.front().c_str());
+        }
+    }
+    return pairs + blob_pairs;
 }
 
 bool Unpacker::adopt_embedded_pe(Qiling& ql, std::vector<std::uint8_t>& image) {
@@ -1657,6 +1925,25 @@ UnpackResult Unpacker::finalize(Qiling& ql) {
             reason_ = "section_hop";
             stages_ = 1;  // one dump, at the picked OEP (the reference's semantics)
         }
+        // the executed-page view: for the JIT-decrypting stubs this is the decoded
+        // code; it overlays only pages that were actually executed
+        if (exec_view_.size() == image.size()) {
+            std::size_t restored = 0;
+            for (std::size_t page = 0; page < exec_page_seen_.size(); ++page) {
+                if (!exec_page_seen_[page]) {
+                    continue;
+                }
+                const auto off = page * 0x1000;
+                const auto n = std::min<std::size_t>(0x1000, image.size() - off);
+                if (std::memcmp(image.data() + off, exec_view_.data() + off, n) != 0) {
+                    std::memcpy(image.data() + off, exec_view_.data() + off, n);
+                    ++restored;
+                }
+            }
+            if (opts_.debug && restored != 0) {
+                std::fprintf(stderr, "[unpack] exec-page overlay: %zu pages\n", restored);
+            }
+        }
         // Measured: a FULL first-write overlay HURTS the JIT families (JDPack .text
         // similarity 0.93 -> 0.47, PEtite 0.80 -> 0.69) because their stubs write
         // transient ciphertext/decoy pages before the real decode; only the
@@ -1675,8 +1962,10 @@ UnpackResult Unpacker::finalize(Qiling& ql) {
                 std::fprintf(stderr, "[unpack] shadow restored %zu bytes\n", restored);
             }
         }
-        // Phase 1b: the payload's own import descriptors, then the salvage scan
+        // Phase 1b: the payload's own import descriptors (the header's directory,
+        // then every orphaned chain the stub left behind), then the salvage scan
         harvest_image_imports(image);
+        mine_orphan_descriptors(image);
         salvage_iat(ql, image);
 
         // no hop fired: park the OEP on a plausible payload prologue so the

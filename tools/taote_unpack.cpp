@@ -276,6 +276,17 @@ int main(int argc, char** argv) {
         ql->os().set_stdout(captured);
         unpacker.install(*ql);
         try {
+            // TAOTE_UNPACK_START=<hex>: start the emulation somewhere other than the
+            // header EP (a dev switch for the samples whose packed EP is bogus —
+            // NSPack writes 0x101b into a zero-filled section head)
+            if (const char* start_env = std::getenv("TAOTE_UNPACK_START")) {
+                const auto start_va = std::strtoull(start_env, nullptr, 0);
+                if (start_va != 0) {
+                    ql->set_entry_point(start_va);
+                    std::fprintf(stderr, "[unpack] start forced to 0x%llx\n",
+                                 static_cast<unsigned long long>(start_va));
+                }
+            }
             ql->run();
         } catch (const qiling::QlErrorBase& e) {
             // the guest faulted: the artifact is still produced from whatever

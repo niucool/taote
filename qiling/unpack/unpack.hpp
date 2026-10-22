@@ -153,6 +153,11 @@ private:
     // sections, so the image dump is the stub. Scan every mapped region for a
     // second PE image and adopt it.
     bool adopt_embedded_pe(Qiling& ql, std::vector<std::uint8_t>& image);
+    // The reference's family_reconstruct_orphans (unpacker.cpp:13500-13560): the
+    // stubs that rebuild the IAT themselves (FSG, BeRo, WinUpack, MEW) leave the
+    // payload's import DESCRIPTORS in the image while the header's import directory
+    // points at the stub's own table. Mine every orphaned descriptor chain.
+    std::size_t mine_orphan_descriptors(const std::vector<std::uint8_t>& image);
 
     UnpackOptions opts_;
     std::vector<PackSection> sections_;
@@ -196,6 +201,14 @@ private:
     // the terminal dump alone loses bytes the stub had already decoded
     std::vector<std::uint8_t> shadow_image_;
     std::vector<bool> shadow_seen_;
+    // The page view at FIRST EXECUTION (the decoded state a just-in-time decrypting
+    // stub needs): PEtite/JDPack decrypt a page, run it, then re-encrypt it, and
+    // their first *writes* are transient ciphertext — so neither the terminal dump
+    // nor the first-write shadow carries the decoded code. Snapshotting the page
+    // when it is first executed captures exactly the view the reference's per-page
+    // decrypt tracking needs (PETITE_INT_RUNS).
+    std::vector<std::uint8_t> exec_view_;
+    std::vector<bool> exec_page_seen_;
     // MEW's statically parsed OEP (install time, when the family is MEW)
     std::uint64_t mew_oep_candidate_ = 0;
     // the light pick (the reference's V1 prologue-shape vote, :8060-8110)
