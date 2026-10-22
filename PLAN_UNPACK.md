@@ -360,6 +360,47 @@ path or the dump transform.
 | Molebox / WinUpack / BeRo | 6 | container prepass; table merge; one more import-blob shape (2 dlls short) | tiers B/C of §3 |
 | Themida / Yoda-Protector | 6 | oracle 0/3 on both | deferred |
 
+### 0.5.3e Round 3 measured so far (three commits, one +1)
+
+S75 stands at **40 / 75** (25 PARTIAL, 10 FAILED). The three round-3 commits
+and what they actually measured:
+
+1. **The exception dispatch is now real** (`cd1761b`). TELock's ladder rides
+   `0xf1` (ICEBP), the `#UD` `lea reg,reg` form and the TF single-step trap.
+   Unicorn reports the first two as `UC_ERR_INSN_INVALID` and the third as
+   `int 1` (`UC_HOOK_INTR`); none were delivered before. Now: an
+   `insn_invalid` hook advances Eip past `0xf1` and dispatches
+   `STATUS_SINGLE_STEP`; `int 1` maps to `STATUS_SINGLE_STEP` (not the
+   illegal-instruction class) and clears TF after the CONTEXT snapshot; and a
+   shared `seh_dispatch_cpu` maps the sentinel on demand. **The §0.5.3c
+   hypothesis is wrong in one detail**: the fs:[0] handler *is* installed
+   (frame at `0xffffcfb0`, handler `0x4089fa`) — the stub never skipped the
+   installer. The measured divergence is later: after the first single-step
+   ladder stage the stub's `les edi,[esi]` (pc `0x408a92`) loads selector
+   `0xc1eb` from `[esi+4]` and faults `#GP`, where the oracle's flow instead
+   re-enters the main decrypt loop at `0x40708d` (`int 3`). That is a
+   register-state divergence inside the ladder, not a missing handler and not
+   the dump transform. TELock stays 0/3.
+2. **The candidate-ledger cap was the Molebox bug** (`e324cbf`). The SFX stub
+   executes >4096 distinct addresses in its own sections before transferring
+   to the embedded PE's entry, so the 4096-entry hop ledger filled on
+   stub-section addresses and the true section-hop (`0x407a98`) was never
+   ledgered; the pick fell back to the container's `.text` head `0x42a000`.
+   Raising the cap to 65536 fixes it: Molebox AccessEnum now picks the
+   original EP (sim 0.93, cov 1.0). **S75 39 → 40; Molebox 1/3 → 2/3**
+   (ADExplorer still fails with sim 0.05 — the embedded PE never decodes,
+   a different variant).
+3. **PEtite's writability probe needs a read-only header page, but that is
+   downstream of an earlier divergence** (`282f93d`).
+   `QlOsWindows::seh_on_write_prot` + the `UC_HOOK_MEM_WRITE_PROT` trampoline
+   now deliver a write-protection fault as `STATUS_ACCESS_VIOLATION` (with the
+   reference's survive fallback); it is inert because nothing is mapped RO.
+   Mapping the header page RO for PEtite and letting it fire was measured and
+   **left out**: the stub's first header store lands at pc `0x418179` addr
+   `0x400780`, where the oracle stores at pc `0x418217` addr `0x400000` — the
+   flow diverges before the probe, so the AV fires on the wrong store and the
+   run dies on a read from `0x1`. PEtite stays 0/3.
+
 ### 0.5.4 What this changes in the plan
 
 1. **The GPA sentinel lane is Phase 1, not Phase 1b.** UPX's import restorer calls
