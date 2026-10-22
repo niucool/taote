@@ -325,8 +325,27 @@ unicorn's CPU model cannot decode (the same limitation already recorded for AVX/
 in the corpus sweep). The payload is therefore never decompressed, which is why its
 similarity is 0.19 and the pick's candidates sit at `…0x3c` offsets inside the stub.
 Nothing about the OEP or the shadow transform can change that: the first work item for
-TELock in round 3 is the faulting opcode (bytes at the fault: recorded in this round's
-commit), not the dump transform.
+TELock in round 3 is the faulting opcode, not the dump transform.
+
+Round-3 probes on that opcode (both measured, both reverted):
+
+* **a bare skip** (`pc + 1`) makes the stub loop forever — the unpack call hits the
+  wall timeout (`rc=124`, no artifacts). Reverted.
+* **real #DB delivery** — a public `QlOsWindows::deliver_cpu_exception(pc)` calling the
+  same `seh_check_cpu_exception` path the trace hook uses, invoked from an
+  `insn_invalid` hook when the byte at pc is `0xf1` — fires at exactly the right
+  address (0x408a08 / 0x419a08) but **re-fires at the same pc**: no handler consumes
+  it, no `seh_retarget`, no progress (capped at 256 deliveries). Reverted.
+
+The bytes at the fault say why: `f1 ff 02 eb e8 eb 02 cd 20 98 2b c1 e8 0a 00 00` —
+ICEBP, then `inc [edx]`, a short jump, `int 0x20`, `cwde`, `sub eax,ecx`, `call`. That
+is a self-modifying marker sequence whose trap handler does the work, i.e. TELock's
+handler (or the VEH that installs it) must already exist when it executes. Since
+delivery finds no handler, our stub reached this point having **skipped whatever
+installs it** — the divergence is in an earlier anti-emulation branch, not at `f1`.
+Round 3's TELock step therefore starts by tracing the branch that leads here (compare
+the API sequence up to the fault against the oracle's), not by touching the exception
+path or the dump transform.
 
 ### 0.5.3d Round 3 entry points (measured state, exact first move per class)
 
