@@ -613,6 +613,13 @@ void QlOsWindows::hook_winapi(std::uint64_t address, std::uint32_t size) {
         return;
     }
 
+    if (std::getenv("TAOTE_APIDBG") != nullptr) {
+        std::fprintf(stderr, "[api] %s!%s pc=0x%llx eax=0x%llx esp=0x%llx\n",
+                     imported->dll.c_str(), imported->name.c_str(),
+                     static_cast<unsigned long long>(address),
+                     static_cast<unsigned long long>(ql_->arch().regs().read("eax")),
+                     static_cast<unsigned long long>(ql_->arch().regs().arch_sp()));
+    }
     const auto* api = ApiRegistry::instance().find(imported->name);
 
     // windows.py hook_winapi: a user CALL-intercept *replaces* the implementation
@@ -840,6 +847,12 @@ void QlOsWindows::run() {
         try {
             ql_->emu_start(begin, exit_point, ql_->timeout(), ql_->count());
             if (seh_retarget_ == 0) {
+                if (std::getenv("TAOTE_RUNDBG") != nullptr) {
+                    std::fprintf(stderr, "[rundbg] emu_start returned cleanly pc=0x%llx esp=0x%llx insns=%llu\n",
+                                 static_cast<unsigned long long>(ql_->arch().regs().arch_pc()),
+                                 static_cast<unsigned long long>(ql_->arch().regs().arch_sp()),
+                                 static_cast<unsigned long long>(instructions_));
+                }
                 break;
             }
             // a CPU-exception dispatch stopped the emulation cleanly (no
@@ -868,6 +881,10 @@ void QlOsWindows::run() {
                 // - the same reading pegasus's harness takes (PMA sweep:
                 // kernel32_file_find_test_api_x86.exe)
                 if (ql_->arch().regs().arch_pc() == 0) {
+                    if (std::getenv("TAOTE_RUNDBG") != nullptr) {
+                        std::fprintf(stderr, "[rundbg] pc==0 after error '%s' esp=0x%llx\n",
+                                     e.what(), static_cast<unsigned long long>(ql_->arch().regs().arch_sp()));
+                    }
                     break;
                 }
                 // an unhandled access violation ends the guest the way Windows

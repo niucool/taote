@@ -473,6 +473,62 @@ and what they actually measured:
    blocker is the anti-emulation/register-state divergence upstream of the
    probe.
 
+### 0.5.3f Round 3 late: S75 40 -> 50 (four measured fixes)
+
+The budget/dispatch work found four general fixes, none of them family-specific
+guesses:
+
+8. **The 40M instruction budget truncated the slow decoders** (`faf40c3`).
+   The reference has no instruction cap at all (`max_instructions_ = -1`); with
+   the budget at 200M, nine families moved to 3/3 in one run: **S75 40 -> 45**.
+   ASPack 2->3, BeRo 2->3, EXpressor 2->3, Eronana 1->3, JDPack 1->3, MEW 2->3,
+   Molebox 2->3, Packman 2->3, UPX 2->3 (all exact EP, sim >= 0.93).
+   The per-sample `--count` flag remains for experiments.
+9. **A function-boundary CRT-init thunk is a decode-only OEP candidate**
+   (`3681466`). The ADInsight payload's original entry is
+   `ret | e8 <__security_init_cookie> e9 <rel32> | 6a 14 68 <imm32> e8`;
+   MPRESS's runtime fixups rewrite both rel32 operands, so the reference's
+   `e9 00000000` test does not survive the decode — the *boundary prefix* does.
+   Corpus-unique (exactly one hit) so it is inert on ADExplorer/AccessEnum:
+   **MPRESS 2->3, RLPack 2->3** (ep_delta 2714454 -> 0). S75 45 -> 47.
+10. **The unpack-mode raw-chain continue** (`d39d36e`). A guest handler that
+    answers `EXCEPTION_CONTINUE_SEARCH` with no outer `fs:[0]` frame used to end
+    the run; the reference restores the saved CONTEXT and resumes at its Eip
+    (winemu.cpp:4859-4920), because the handler has usually patched the trapping
+    instruction. Bounded by `seh_dispatch`'s identical-fault repeat guard.
+    **PECompact 0/2/1 -> 2/1/0** (AccessEnum sim 0.0039 -> 0.8411, exact EP).
+    S75 47 -> 49.
+11. **PECompact's family signature + first-write overlay** (`45d402b`).
+    PECompact compresses in place and keeps the original section names; the only
+    signature is the stub entry `b8 <imm32> 50 64 ff 35` (measured over the whole
+    packed corpus: **118/118 PECompact, zero false positives**; PEtite shares the
+    `b8 <imm32> 50` head but continues `6a 00 68`). With the family labelled the
+    full first-write overlay applies (PECompact re-encrypts each page after
+    executing it): **PECompact 2/1/0 -> 3/3** (sim 0.906/0.939/0.921).
+    S75 49 -> 50.
+
+Also landed this round: the exception-vector map (`#GP/#PF` ->
+`STATUS_ACCESS_VIOLATION`, non-table `int` probes ignored, `a8f7e4d`), the
+`change_mapinfo` sub-range fix (`ed4c2a7`, the prerequisite for real section
+permissions), and the execute-on-noexec dispatch **gated off**
+(`c0c841d`: it SIGSEGV'd `aspack_AccessEnum` at the 960th dispatch — the host
+safety rule outranks the feature; opt in with `TAOTE_SEH_FETCHPROT`).
+
+Measured status after these: **S75 = 50/75 UNPACKED_VERIFIED**, 16 PARTIAL,
+9 FAILED, 0 wall-timeouts, 593 tests green.
+
+Remaining (measured blockers, all re-probed this round):
+
+| family | S75 | measured blocker |
+|---|---|---|
+| TELock | 0/3 | decodes nothing: bit-exact register parity through the self-modifying ladder (§0.5.3e 5); the first-write overlay changes nothing |
+| PEtite | 0/3 | the stub's own integrity check fires: `MessageBoxA("ERROR!", "Corrupt Data!")` then `ExitProcess`, so ~12% of the decoded bytes are wrong (scattered single bytes, not shifts) and only a third of `.text` is ever written |
+| Neolite | 0/3 | the stub resolves its IAT (CreateFileMapping/MapViewOfFile/GlobalAlloc) and then calls `ExitProcess` with `.text` never written — an anti-emulation branch, not the section-permission probe (§0.5.3e 7) |
+| NSPack | 0/3 | the packed EP points into nsp0's zero head; the oracle walks those zeros (its loader leaves EAX = an import sentinel) into nsp1's stub, taote faults on the first non-zero byte (EAX is not an image-relative base) |
+| Alienyze | 0/3 | the decrypter never runs; not a whole-image single-byte XOR (all 256 keys measured: best is the identity, 0.145) |
+| Amber | 0/3 | the stub allocates nothing and exits at the first API; the embedded PE is never built |
+| WinUpack | 2/3 | ADExplorer's section names are deliberately mangled (`PS\xff\xd5...`), so detection fails and the stub's decoder never writes |
+
 ### 0.5.4 What this changes in the plan
 
 1. **The GPA sentinel lane is Phase 1, not Phase 1b.** UPX's import restorer calls
