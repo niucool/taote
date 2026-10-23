@@ -777,6 +777,34 @@ therefore need the reference's **dyn-region candidate** path
 scanning. That is the next structural port, and it is worth ~370 samples
 (Amber 152 + Alienyze 126 + Neolite 93).
 
+### 0.11 Round 4, second half: what did NOT land, and why it matters for the next round
+
+Three attempts this round, one landed:
+
+* **WinUpack parked-stack OEP** (the reference's `wu_oep_cand8_`,
+  `winupack_unpacker.cpp:651-690`): the dword at `[esp+8]` when the engine's
+  import loop executes its `call ecx`. taote has no hook at that instruction, so
+  the frame was harvested from the section-exec hook instead (4096 snapshots of
+  `esp` inside the stub section) and yielded **one** candidate in 4096 harvests;
+  the shape-validated pick it produced cost one sample (`winupack_disk2vhd`
+  0x2bf34 -> 0x179d48). Removed. To port it, the loop anchor must come first -
+  the reference finds the loop by scanning back from a GPA caller for
+  `5e 5d 59 46 ad 85 c0 74` and only then computes `callmod = loop + m2 + 3`.
+* **Amber**: the payload is not a file image in a heap buffer (what
+  `try_embedded_pe` looks for) but raw code + hand-built import descriptors
+  inside the low `0x6000` map - `TAOTE_EMBEDDBG` shows every map head as
+  00/90/00/00, so the scan finds nothing. taote's Amber run also stops at
+  `pc = 0x10051030`, i.e. inside the *msvcrt stub DLL*, right after the
+  `msvcrt!__p__acmdln` hook fires: the guest's CRT init calls a return path the
+  stub cannot complete. Amber needs both the dyn-region candidate path
+  (`on_dyn_code`) and that stub-return fix before its 152 samples move.
+* **WinUpack detection** (mangled section names) landed: first section with a
+  non-printable name byte, `raw < 0x1000`, `vsize >= 0x10000` - all 97 samples
+  label correctly now, measured neutral on the family score.
+
+Status: corpus **1414/2678** all-three (52.8%), OEP exact 59.6%, imports 65.4%,
+valid PE 95.9%, 0 wall-timeouts, 593/593 tests.
+
 ## 1. How pegasus unpacks, end to end
 
 ### 1.1 Lifecycle and where it hooks in
