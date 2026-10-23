@@ -707,6 +707,33 @@ int Unpacker::on_section_exec(std::uint64_t addr) {
             }
         }
     }
+    // Hop detection over the LIVE CLAIMS (the reference's written_ranges_, not
+    // its never-erased ever_written_): a section that has already handed off is
+    // consumed, exactly like the reference. This is what keeps the candidate
+    // ledger at a handful of entries - the reference ledgers 2 candidates on
+    // aspack_Cacheset where taote ledgers 2695, and its picker then keeps the
+    // true OEP trivially. TAOTE_CLAIM_LEDGER=0 restores the old ever_written_
+    // behaviour for A/B measurement.
+    static const bool claim_ledger = std::getenv("TAOTE_CLAIM_LEDGER") == nullptr ||
+                                     std::string(std::getenv("TAOTE_CLAIM_LEDGER")) != "0";
+    if (claim_ledger) {
+        for (const auto& r : written_ranges_) {
+            if (addr >= r.first && addr <= r.second) {
+                if (dumped_addrs_.insert(addr).second && stages_ < opts_.max_stages) {
+                    dump_module(*ql_, addr, "section_hop");
+                    // consume the claim (the reference erases written_ranges_
+                    // here) except for the lazy-decompressor families, whose
+                    // payload enters the section mid-decode first and hands off
+                    // again from inside it (MPRESS's trampoline back-hop)
+                    if (opts_.family != "MPRESS") {
+                        written_ranges_.erase(r);
+                    }
+                }
+                break;
+            }
+        }
+        return 0;
+    }
     for (const auto& r : ever_written_) {
         if (addr >= r.first && addr <= r.second) {
             // the reference's CF-hop observer: every first-exec of an address in a
@@ -1293,9 +1320,96 @@ std::uint64_t Unpacker::pick_oep(const std::vector<std::uint8_t>& image) const {
     // The static ladder over the decoded body is the authority (the reference's
     // F41c/F47: only an ACCEPTED, replacement-gated hop outranks it — taote has no
     // such gate, so the ladder leads and the ledger is the fallback).
+    // F41c/F47 precedence: for NSPack and RLPack an ACCEPTED section hop (a real
+    // transfer out of the stub's own section) outranks the static ladder - the
+    // reference measures exactly this (nspack_portmon: the accepted hop's true
+    // OEP 0x413b0e was being replaced by a wrong passc CFG-thunk; rlpack_mtinst:
+    // the accepted hop is already the true 0x1003866). taote's ladder led
+    // unconditionally, which is why NSPack sits at 0% exact OEP. MPRESS keeps the
+    // ladder first: its ledger holds only stub-internal entries (the trampoline),
+    // and the real OEP comes from the decoded body's thunk.
+    if (decode_only && opts_.family != "MPRESS" && !hop_ledger_.empty()) {
+        const int ep_sec_local = section_index_at(packed_ep_va_);
+        for (const auto va : hop_ledger_) {
+            const auto seq = write_seq_;
+            (void)seq;
+            const int sec = section_index_at(va);
+            if (sec < 0 || sec == ep_sec_local) {
+                continue;
+            }
+            if (opts_.debug) {
+                std::fprintf(stderr, "[unpack] pick OEP %s (accepted hop outranks the ladder)\n",
+                             hex(va).c_str());
+            }
+            return va;
+        }
+    }
     if (decode_only) {
         if (const auto ladder = static_oep_from_image(image); ladder != 0) {
             return ladder;
+        }
+    }
+    // The INCUMBENT STRENGTH rule (the reference's pick_and_emit_oep prior,
+    // unpacker.cpp:8156-8260): a candidate that the run itself accepted is
+    // STRONG (+1e6, unpickable-against) unless it is a JUNK LATCH - a hop taken
+    // almost immediately at run start (the reference's kJunkLatchMaxInstrs=32,
+    // here the write ordinal, which counts the same thing: how much the stub had
+    // written when the hop fired). The static ladder may only override a WEAK
+    // incumbent. Measured on aspack_Cacheset: the ledger holds exactly the two
+    // candidates the reference holds (0x42602f@1 junk latch, 0x4024a2@35973 the
+    // real OEP), and letting the ladder override the strong one picked a
+    // look-alike prologue at 0x406c29 instead.
+    static const bool incumbent_rule =
+        std::getenv("TAOTE_OEP_INCUMBENT") == nullptr ||
+        std::string(std::getenv("TAOTE_OEP_INCUMBENT")) != "0";
+    if (!incumbent_rule || hop_ledger_.empty()) {
+        // no ledger: nothing is strong
+    } else {
+        // The incumbent (the reference's pick_and_emit_oep: score the candidates,
+        // keep the best; V1 is the shape vote and it is what separates a payload
+        // entry from a relay point). With the claim ledger on the ledger holds a
+        // handful of hops, so the vote is: the LAST candidate whose bytes start
+        // like a function (the payload's entry is the final hand-off), else the
+        // FIRST candidate that is not a junk latch (the reference's
+        // kJunkLatchMaxInstrs=32, here the write ordinal), else nothing.
+        // Measured: aspack_Cacheset 0x4024a2 (55 8b ec) over the latch 0x42602f;
+        // molebox_AccessEnum 0x407a98 over the container relay 0x42b5a4;
+        // bero_Autologon 0x403980 over the post-payload write hop 0x439000.
+        std::uint64_t lead = 0;
+        std::uint64_t lead_seq = 0;
+        for (std::size_t i = hop_ledger_.size(); i-- > 0;) {
+            const auto seq = i < hop_write_seq_.size() ? hop_write_seq_[i] : 0;
+            if (seq >= 32 && shape_at(hop_ledger_[i]) >= 2) {
+                lead = hop_ledger_[i];
+                lead_seq = seq;
+                break;
+            }
+        }
+        if (lead == 0) {
+            for (std::size_t i = 0; i < hop_ledger_.size(); ++i) {
+                const auto seq = i < hop_write_seq_.size() ? hop_write_seq_[i] : 0;
+                if (seq >= 32) {
+                    lead = hop_ledger_[i];
+                    lead_seq = seq;
+                    break;
+                }
+            }
+        }
+        if (lead == 0) {
+            lead = hop_ledger_.front();
+            lead_seq = hop_write_seq_.size() == hop_ledger_.size() ? hop_write_seq_.front() : 0;
+        }
+        const int lead_sec = section_index_at(lead);
+        const bool lead_is_latch = lead_seq != 0 && lead_seq < 32;
+        const bool lead_strong = lead != 0 && !lead_is_latch;
+        if (lead_strong) {
+            const bool ladder_says_same = [&] {
+                const auto l = static_oep_from_image(image);
+                return l == lead;
+            }();
+            (void)ladder_says_same;
+            (void)lead_sec;
+            return lead;
         }
     }
     if (!hop_ledger_.empty()) {

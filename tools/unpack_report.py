@@ -454,13 +454,12 @@ def build_report(runs, results, skipped, title, harness=None):
         A("reported entry is off.")
         A("")
 
-    # harness rubric comparison (when the established rubric was also run)
-    if harness:
-        hv = sum(1 for h in harness if h.get("grade") == "UNPACKED_VERIFIED")
     A("## The two systemic defects behind the remaining gap")
     A("")
-    A("**1. The OEP pick, not the decode.** 1348 samples have a wrong entry")
-    A("(907 of them inside the original's entry section, i.e. the right code region")
+    wrong_ep = sum(1 for r in results if r.get("oep_exact") is False)
+    wrong_near = sum(1 for r in results if r.get("oep_exact") is False and r.get("oep_near"))
+    A("**1. The OEP pick, not the decode.** %d samples have a wrong entry" % wrong_ep)
+    A("(%d of them inside the original's entry section, i.e. the right code region" % wrong_near)
     A("and the wrong address) while the payload itself is recovered: the code")
     A("similarity medians at 1.000 for ASPack, Eronana, Packman, JDPack, MPRESS and")
     A("Molebox. The dominant shape is the MSVC CRT-init thunk")
@@ -483,20 +482,22 @@ def build_report(runs, results, skipped, title, harness=None):
     A("whole corpus from 853 to 1076 samples passing all three criteria (criterion")
     A("3: 48.9% -> 60.6%), with the decode untouched.")
     A("")
-    A("## Compared with the harness rubric")
-    A("")
-    A("`pegasus/tools/unpack_eval/verify.py` grades the same artifacts on a")
-    A("different bar: exact EP + code similarity >= 0.90 + **DLL** coverage >= 0.80")
-    A("(a rebuilt table that keeps every DLL but only part of each DLL's function")
-    A("list passes there and fails criterion 3 here).")
-    A("")
-    A("| rubric | pass | rate |")
-    A("|---|---|---|")
-    A("| harness (EP + sim>=0.90 + dll-cov>=0.80) | %d / %d | **%.1f%%** |"
-      % (hv, len(harness), pct(hv, len(harness))))
-    A("| this report (valid PE + exact EP + function-level imports) | %d / %d | **%.1f%%** |"
-      % (len(full), n, pct(len(full), n)))
-    A("")
+    if harness:
+        hv = sum(1 for h in harness if h.get("grade") == "UNPACKED_VERIFIED")
+        A("## Compared with the harness rubric")
+        A("")
+        A("`pegasus/tools/unpack_eval/verify.py` grades the same artifacts on a")
+        A("different bar: exact EP + code similarity >= 0.90 + **DLL** coverage >= 0.80")
+        A("(a rebuilt table that keeps every DLL but only part of each DLL's function")
+        A("list passes there and fails criterion 3 here).")
+        A("")
+        A("| rubric | pass | rate |")
+        A("|---|---|---|")
+        A("| harness (EP + sim>=0.90 + dll-cov>=0.80) | %d / %d | **%.1f%%** |"
+          % (hv, len(harness), pct(hv, len(harness))))
+        A("| this report (valid PE + exact EP + function-level imports) | %d / %d | **%.1f%%** |"
+          % (len(full), n, pct(len(full), n)))
+        A("")
 
     # examples
     A("## Appendix: examples of each family's first failing criterion")
