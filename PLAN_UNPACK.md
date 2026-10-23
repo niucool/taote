@@ -805,6 +805,34 @@ Three attempts this round, one landed:
 Status: corpus **1414/2678** all-three (52.8%), OEP exact 59.6%, imports 65.4%,
 valid PE 95.9%, 0 wall-timeouts, 593/593 tests.
 
+### 0.12 Round 5, first probe: the Amber CRT wall (and why the fix was reverted)
+
+Amber's run stopped after **10 API calls**, the last being `msvcrt!__p__acmdln`.
+Root cause found: the synthesized stub msvcrt has no `_acmdln` slot, so taote's
+`__p__acmdln` **throws** (`msvcrt.cpp:247-262`), which ends the run. Returning a
+heap-allocated NULL `char**` instead gets the stub past CRT init - measured on
+`amber_ADInsight`: the run then calls VirtualAlloc, `memcpy`s the payload into
+the `0x5000000` heap map and executes it there, ending at `pc=0x5426b80` (a
+computed jump into unmapped space, i.e. the next blocker is the payload's own
+entry computation, not the CRT).
+
+Full corpus with the fix: **1411** all-three vs 1414 without - it costs three
+samples (`bero_md5summer` 0x9ec68->0x933ad, `molebox_Hasher`
+0x82628->0xa85a4, `winupack_disk2vhd` 0x2bf34->0x179d48, all OEP/dump trajectory
+flips after the run continues past the API). So the fix alone is a net loss and
+stays reverted until the Amber chain is finished; re-measured explicitly: with
+the old code those three return to their correct OEPs.
+
+Two other measurements worth keeping:
+
+* Amber is gradeable and pegasus really does nail it - `amber_ADInsight` and
+  `amber_ShareEnum` oracle artifacts have sim 1.000, ep == the original's, and
+  the full import list (328/328, 237/237). So the family is not a ground-truth
+  mismatch; taote is simply not reaching the in-place decode.
+* `amber_AddInProcess32` is an outlier in the other direction: the oracle's own
+  artifact there is the packer's image (ep 0xe000, sim 0.06) - that sample's
+  payload is not the paired original, so it should not drive the design.
+
 ## 1. How pegasus unpacks, end to end
 
 ### 1.1 Lifecycle and where it hooks in
