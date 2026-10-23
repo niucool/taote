@@ -38,6 +38,13 @@ bool adopt_embedded_pe(Qiling& ql, PackerContext& ctx, std::vector<std::uint8_t>
             } catch (...) {
                 continue;
             }
+            static const bool dbg = std::getenv("TAOTE_EMBEDDBG") != nullptr;
+            if (dbg) {
+                std::fprintf(stderr, "[embed] map 0x%llx-0x%llx head=%02x%02x%02x%02x\n",
+                             static_cast<unsigned long long>(lo), static_cast<unsigned long long>(hi),
+                             head.empty() ? 0 : head[0], head.size() < 2 ? 0 : head[1],
+                             head.size() < 3 ? 0 : head[2], head.size() < 4 ? 0 : head[3]);
+            }
             if (head.size() < 0x200 || head[0] != 'M' || head[1] != 'Z') {
                 continue;
             }
@@ -127,6 +134,19 @@ bool adopt_embedded_pe(Qiling& ql, PackerContext& ctx, std::vector<std::uint8_t>
     return true;
 }
 
+
+// The base class default: the reference's packer-agnostic try_embedded_pe. Any
+// family can build its payload in a heap buffer, so the recovery must not be
+// gated on the label.
+bool Packer::adopt_embedded_pe(PackerContext& ctx) {
+    if (ctx.ql == nullptr || ctx.image_ptr == nullptr) {
+        return false;
+    }
+    // adopt_embedded_pe fills ctx.adopted; the scan itself works on a copy so the
+    // caller's image is untouched until it accepts the payload
+    std::vector<std::uint8_t> probe = *ctx.image_ptr;
+    return packers::adopt_embedded_pe(*ctx.ql, ctx, probe);
+}
 
 class AmberPacker : public Packer {
 public:

@@ -94,7 +94,10 @@ public:
 
     // Adopt a payload PE that the stub built outside the image (Amber/Alienyze).
     // A true return means `ctx.adopted` holds the replacement image.
-    virtual bool adopt_embedded_pe(PackerContext& /*ctx*/) { return false; }
+    // The reference's try_embedded_pe is PACKER-AGNOSTIC (it lives in the base
+    // class: a payload built in a heap buffer is recovered the same way whatever
+    // the label). Families with their own recovery override this.
+    virtual bool adopt_embedded_pe(PackerContext& ctx);
 };
 
 // The family factory: `family` is the detector's label (see packer_detector.hpp).

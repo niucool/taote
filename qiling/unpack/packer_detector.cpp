@@ -114,6 +114,28 @@ Detection detect_from_file(const std::string& path) {
             return set("Molebox", "molebox", "digit-only section names");
         }
 
+        // 4. Amber: nine or more sections whose LAST name is '.' + 7 randomized
+        // mixed-case alnum chars ('.cCrWi9w', '.SYPnE8j', ...). The first ones
+        // keep the conventional set (.text/.data/.rdata/.bss/.idata/.CRT/.rsrc),
+        // so no fixed name can identify it. The reference's rule
+        // (packer_detector.cpp:208-226) requires at least 2 of {lower, upper,
+        // digit} in the tail so an ordinary '.text123'-style name cannot match.
+        if (pe.section_names.size() >= 9 && pe.section_names.back().size() == 8 &&
+            pe.section_names.back()[0] == '.') {
+            const std::string& tail = pe.section_names.back();
+            bool lower = false, upper = false, digit = false;
+            for (std::size_t i = 1; i < tail.size(); ++i) {
+                const char c = tail[i];
+                if (c >= 'a' && c <= 'z') lower = true;
+                if (c >= 'A' && c <= 'Z') upper = true;
+                if (c >= '0' && c <= '9') digit = true;
+            }
+            const int klass = static_cast<int>(lower) + static_cast<int>(upper) + static_cast<int>(digit);
+            if (klass >= 2) {
+                return set("Amber", "section", "randomized 9th section name");
+            }
+        }
+
         // 5. EP-prefix signatures. PECompact keeps the original section names, so
         // the stub's entry is its only signature: `b8 <imm32> 50 64 ff 35`
         // (mov eax,imm32; push eax; push fs:[0]) — measured over the packed
