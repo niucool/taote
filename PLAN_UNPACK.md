@@ -737,6 +737,46 @@ What is left, in the order the reference's own code says to take it:
 * **Exe32pack (124)**: the artifact is the raw dump with a degenerate section
   table, so its entry is unmapped - 107 samples fail criterion 1 only.
 
+### 0.10 Round 4 so far: the loader's FileAlignment rule, and what it unlocked
+
+**The finding that mattered was not in the unpacker.** NSPack sat at 0/97 with
+`stages=0`: the run executed the header EP and stopped, with zero writes, zero
+hops and no ladder hits. The stub's real entry is not where the header says -
+`nspack_AccessEnum` has `PointerToRawData = 0x1a9` with `FileAlignment = 0x200`,
+and Windows maps a section at FileAlignment granularity, i.e. from the page
+boundary BELOW the raw pointer. So RVA 0x101b reads **file 0x1b** (a
+`e9 rel32` relay into the nsp1 stub), while taote read at the declared pointer
+(zeros). The loader now maps misaligned sections from the aligned offset -
+inert for well-formed images (all 593 tests unchanged), decisive here:
+
+| | before | after |
+|---|---|---|
+| NSPack all-three | 0 | **49** (OEP 53, imports 83) |
+| WinUpack imports | 39 | **78** |
+| corpus all-three | 1365 (51.0%) | **1414 (52.8%)** |
+| corpus OEP exact | 57.7% | **59.6%** |
+| corpus imports | 60.6% | **65.4%** |
+
+49 gains / 0 losses. Same mechanism explains winupack_ADExplorer's mangled
+layout (`sim 0.001` before).
+
+Also landed: Amber detection (the reference's randomized-9th-section-name rule -
+all 152 samples now carry the right label instead of "unknown"), the
+embedded-payload recovery moved to the Packer base class (packer-agnostic, as in
+the reference), a startup sweep of stale temp rootfs trees (a host abort skipped
+the RAII guard; 11k dirs / 5.3 GB had accumulated), and an unparsable input now
+reports a per-sample error instead of `std::terminate` (two FSG samples).
+
+**What this says about the remaining families.** Amber's payload is built inside
+the low `0x6000` map as raw code plus hand-built import descriptors - the harvest
+already sees those "orphan descriptors at 0x6000" - but *not* as an MZ+PE file
+image, so the embedded-file recovery finds nothing (verified with
+`TAOTE_EMBEDDBG`: every map head is 00/90/00/00). Amber, Alienyze and Neolite
+therefore need the reference's **dyn-region candidate** path
+(`on_dyn_code` :6096 -> `SCF_DYN_REGION` ledger entry -> pick), not more dump
+scanning. That is the next structural port, and it is worth ~370 samples
+(Amber 152 + Alienyze 126 + Neolite 93).
+
 ## 1. How pegasus unpacks, end to end
 
 ### 1.1 Lifecycle and where it hooks in
