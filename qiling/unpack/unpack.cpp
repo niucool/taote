@@ -490,6 +490,17 @@ void Unpacker::install(Qiling& ql) {
     }
 
     install_gpa_sentinel(ql);
+    // let the unpacker notice guest-allocated regions at allocation time
+    try {
+        for (const auto& mi : ql.mem().get_mapinfo()) {
+            if (std::get<1>(mi) > std::get<0>(mi)) {
+                initial_maps_.insert(std::get<0>(mi));
+            }
+        }
+        ql.os<os::windows::QlOsWindows>().set_api_observer(
+            [this](const std::string& /*api*/) { poll_dyn_maps(); });
+    } catch (...) {
+    }
 
     // unpack mode: an unhandled access violation whose guest handler answered
     // EXCEPTION_CONTINUE_SEARCH resumes at the saved CONTEXT (the reference's
@@ -653,6 +664,65 @@ int Unpacker::on_section_write(std::uint64_t /*pc*/, std::uint64_t addr, std::ui
     return 0;
 }
 
+
+// The reference's on_dyn_code (:6096): put a code hook on every guest-allocated
+// region that appears after install and remember the first address executed in
+// it. Amber/Alienyze/Neolite map or copy their payload into a heap buffer and run
+// it there, so no image section is ever written and the section-hop hook cannot
+// see the hand-off.
+void Unpacker::poll_dyn_maps() {
+    if (ql_ == nullptr) {
+        return;
+    }
+    try {
+        for (const auto& mi : ql_->mem().get_mapinfo()) {
+            const auto lo = std::get<0>(mi);
+            const auto hi = std::get<1>(mi);
+            if (hi <= lo || lo == base_ || lo >= 0x10000000 || hi - lo < 0x1000 ||
+                hi - lo > 0x4000000) {
+                continue;  // image, dll tree, or an engine scratch segment
+            }
+            if (initial_maps_.count(lo) != 0) {
+                continue;  // pre-existing region, not a guest allocation
+            }
+            bool known = false;
+            for (const auto& m : dyn_maps_) {
+                if (m.first == lo) {
+                    known = true;
+                    break;
+                }
+            }
+            if (known) {
+                continue;
+            }
+            dyn_maps_.emplace_back(lo, hi);
+            auto hook = std::make_shared<HookRet>(
+                ql_->hook_code([this, lo](std::uint64_t addr, std::uint32_t) -> int {
+                    if (std::find(dyn_exec_.begin(), dyn_exec_.end(), addr) == dyn_exec_.end()) {
+                        if (dyn_exec_.size() < 64) {
+                            dyn_exec_.push_back(addr);
+                        }
+                        if (opts_.debug) {
+                            std::fprintf(stderr, "[unpack] dyn exec 0x%llx (region 0x%llx)\n",
+                                         static_cast<unsigned long long>(addr),
+                                         static_cast<unsigned long long>(lo));
+                        }
+                    }
+                    return 0;
+                }, lo, hi));
+            if (hook->obj() != nullptr) {
+                dyn_hooks_.push_back(std::move(hook));
+            }
+            if (opts_.debug) {
+                std::fprintf(stderr, "[unpack] dyn map 0x%llx-0x%llx %s\n",
+                             static_cast<unsigned long long>(lo), static_cast<unsigned long long>(hi),
+                             std::get<2>(mi).c_str());
+            }
+        }
+    } catch (...) {
+    }
+}
+
 // The reference's on_section_exec (unpacker.cpp:5520-5810): a written section
 // that starts executing is the payload hand-off.
 int Unpacker::on_section_exec(std::uint64_t addr) {
@@ -675,6 +745,13 @@ int Unpacker::on_section_exec(std::uint64_t addr) {
     // winupack_unpacker.cpp:651-690, because esp has drifted by finalize time).
     // Harvest once, from the first frame seen inside the stub section, and keep
     // every in-image dword: the pick validates them by prologue shape.
+    // The reference's on_dyn_code (:6096): a guest-allocated region that starts
+    // executing is an OEP candidate. The map list is polled from the winapi
+    // observer (VirtualAlloc is when such a region appears) and occasionally from
+    // here, so a region created without an API call is still seen.
+    if (ql_ != nullptr && (++exec_fires_ % 65536) == 0) {
+        poll_dyn_maps();
+    }
     const bool in_written = [&] {
         for (const auto& r : written_ranges_) {
             if (addr >= r.first && addr <= r.second) {

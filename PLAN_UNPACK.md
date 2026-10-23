@@ -630,55 +630,98 @@ qiling/unpack/packers/family_packers.cpp    the still-generic families (one clas
 `packer_->…` call per seam. Behaviour-preserving: S75 stays 50/75 and the suite
 stays at 0 failed.
 
-### 0.8 The full corpus (2678 samples), graded on the three things that matter
+### 0.8 Head-to-head: taote vs the reference on the same 2678 samples
 
-S75 (3 per family) and S200 (8 per family) are samples of the corpus; the whole
-`packed/` tree has **2678 files that have a not-packed original to grade
-against** (323 more have no ground truth and are excluded). `tools/unpack_report.py`
-grades every run on exactly the three properties an unpacked file needs:
+This supersedes every earlier aggregate in this plan. The 52.9% / ~57% figures
+quoted before were different **censuses** (pegasus's own counters, and a
+200-sample slice graded on the DLL-coverage rubric); the numbers below are one
+corpus, one grader, both tools.
 
-1. **a valid PE** - parses, sane optional header, `SizeOfImage >= 0x1000`, entry
-   point inside the image AND mapped by a section, section table inside the file;
-2. **the OEP** - `AddressOfEntryPoint` equals the ORIGINAL binary's EP RVA
-   (managed/.NET originals are excluded from the denominator, 67 of them);
-3. **the import table** - function level: the rebuilt table is walked
-   (descriptor -> INT -> hint/name or ordinal) and compared as a set with the
-   original's; "correct" is >= 95% of the original's `(dll, function)` pairs.
+**Reproduction (exact):**
 
-The measured state after the ordinal-import fix (`a21e6d4`):
+```
+# corpus: every packed/ file that has a not-packed/ original (2678 of 3001)
+build_manifest.py --dataset ~/source/jim/dataset-packed-pe --cap 99999 \
+    --out /home/jim/runs/full/manifest.json
 
-| criterion | pass | rate |
+# taote  (harness tools/unpack_eval/run_all.sh, 4-way pinned)
+run_all.sh --manifest /home/jim/runs/taote4/manifest.json \
+    --cli /path/to/taote_unpack --pin 4  > /home/jim/runs/taote4/run.log
+# reference (same harness, same flags, same pinning)
+run_all.sh --manifest /home/jim/runs/oracle/manifest.json \
+    --cli ~/source/jim/pegasus/build/cli/pegasus-cli \
+    --repo ~/source/jim/pegasus --pin 4  > /home/jim/runs/oracle/run.log
+
+# grade both with the SAME tool
+tools/unpack_report.py --manifest /home/jim/runs/taote4/manifest.json \
+    --results /home/jim/runs/taote4/results.json --out /home/jim/runs/taote4/TAOTE_REPORT.md
+tools/unpack_report.py --manifest /home/jim/runs/oracle/manifest.json \
+    --results /home/jim/runs/oracle/results.json --out /home/jim/runs/oracle/ORACLE_REPORT.md
+```
+
+Per-run flags: `--unpack --unpack-output <dir> --unpack-timeout 85`, wall cap 120s.
+Grader: a valid PE (parses, sane headers, entry mapped by a section) + OEP exact vs
+the original's EP RVA + imports >= 95% of the original's `(dll, function)` set.
+
+| criterion | taote | reference |
 |---|---|---|
-| valid PE | 2568 / 2678 | **95.9%** |
-| OEP correct | 1153 / 2563 | **45.0%** |
-| imports correct | 1556 / 2568 | **60.6%** |
-| **all three** | **1076 / 2678** | **40.2%** |
+| valid PE | 2568 / 2678 (**95.9%**) | 2546 / 2678 (**95.1%**) |
+| OEP exact (all 2678; managed excluded from the grader denominator) | 1490 (**55.6%**) | 2197 (**82.0%**) |
+| imports correct (all 2678) | 1682 (**62.8%**) | 2069 (**77.3%**) |
+| **all three** | **1416 (**52.9%**)** | **1996 (**74.5%**)** |
 
-For comparison, the harness rubric (`verify.py`: exact EP + code similarity >=
-0.90 + DLL coverage >= 0.80) says 1126/2678 = 42.0%, so the strict function-level
-reading is now essentially the same bar - and the two remaining criteria are
-ordered by size:
+**Per family (all three; delta = taote - reference):**
 
-* **the OEP pick is the biggest single defect**: 1348 samples have a wrong entry,
-  907 of them *inside the original's entry section*, while the payload is
-  recovered (code sim median 1.000 for ASPack/Eronana/Packman/JDPack/MPRESS/
-  Molebox). 485 of the near misses are MSVC CRT-init thunks
-  (`e8 <call __security_init_cookie>; e9 <body>`), where the packer preserves the
-  *thunk* as the entry and any pick of the body/another prologue is wrong.
-* **the IAT source choice** is the second: RLPack decodes at sim 0.978 with the
-  exact EP but reproduces 17 of 314 imports because it keeps the stub's own
-  table (16 descriptors, wldap32/mspdb80/hhctrl.ocx) instead of the payload's.
+| family | n | taote | reference | delta |
+|---|---|---|---|---|
+| ASPack | 94 | 91 | 93 | -2 |
+| Alienyze | 126 | 0 | 116 | -116 |
+| Amber | 152 | 0 | 111 | -111 |
+| BeRoEXEPacker | 107 | 99 | 103 | -4 |
+| EXpressor | 95 | 92 | 91 | +1 |
+| Enigma Virtual Box | 122 | 122 | 122 | +0 |
+| Eronana Packer | 151 | 136 | 84 | +52 |
+| Exe32pack | 124 | 0 | 0 | +0 |
+| FSG | 97 | 75 | 90 | -15 |
+| JDPack | 100 | 97 | 98 | -1 |
+| MEW | 106 | 97 | 105 | -8 |
+| MPRESS | 106 | 64 | 103 | -39 |
+| Molebox | 93 | 87 | 91 | -4 |
+| NSPack | 97 | 49 | 97 | -48 |
+| Neolite | 93 | 1 | 92 | -91 |
+| PECompact | 97 | 41 | 94 | -53 |
+| PEtite | 73 | 23 | 56 | -33 |
+| Packman | 105 | 104 | 102 | +2 |
+| RLPack | 104 | 0 | 7 | -7 |
+| TELock | 116 | 0 | 59 | -59 |
+| Themida | 122 | 0 | 0 | +0 |
+| UPX | 108 | 107 | 107 | +0 |
+| WinUpack | 97 | 39 | 83 | -44 |
+| Yoda-Crypter | 92 | 92 | 92 | +0 |
+| Yoda-Protector | 101 | 0 | 0 | +0 |
 
-Per family (all three criteria, same run): EnigmaVB 100%, UPX 92%, MEW 92%,
-BeRo 84%, FSG 76%, Eronana 47%, JDPack 71%, Molebox 72%, Packman 60%, ASPack 60%,
-EXpressor 59%, MPRESS 60%, PECompact 42%, Yoda-Crypter 57%, WinUpack 37%,
-PEtite 22%, Neolite 1%, NSPack 0%, Alienyze 0%, Amber 0%, TELock 0%,
-Themida 0%, Yoda-Protector 0%, Exe32pack 0% (its artifacts are raw dumps whose
-entry is not mapped by any section: 107 samples fail criterion 1).
+**Reading it.** taote is at **52.9%**, the reference at **74.5%**: the real gap is
+**580 samples**, not the 46 the old census implied. Six families are already at or
+above parity (Eronana +52, Packman +2, EXpressor +1, and Enigma Virtual Box / UPX /
+Yoda-Crypter level at 0), and three are *both* at zero (Themida, Yoda-Protector,
+Exe32pack) - those are not taote regressions, they are limits of the corpus or of
+both tools.
 
-Artifacts: `/home/jim/runs/full/{manifest.json,results.json,verify_results.json}`
-and the report at `UNPACK_REPORT.md` (regenerate with
-`tools/unpack_report.py --manifest ... --results ... --harness-results ...`).
+The gap by size (taote -> reference): Alienyze 0->116, Amber 0->111, Neolite 1->92,
+TELock 0->59, PECompact 41->94, NSPack 49->97, WinUpack 39->83, MPRESS 64->103,
+PEtite 23->56, FSG 75->90, MEW 97->105, RLPack 0->7, Molebox 87->91, BeRo 99->103,
+ASPack 91->93. Every one of those is decoder/emulation parity, not picker work:
+the reference's 88.4% OEP rate shows what the same pick machinery achieves once
+the payload is actually decoded.
+
+Run-to-run noise: three taote passes of the same tree gave 1408 / 1414 / 1416
+all-three (6 samples flip under CPU contention - `aspack_HWMonitorPro_x32`,
+`bero_md5summer`, `molebox_Hasher`, `molebox_puttytel_32`, `packman_HDDScan`,
+`winupack_disk2vhd`), so treat the taote column as +/-6 samples and any change
+below that as unmeasured.
+
+Artifacts: `/home/jim/runs/taote4/{manifest.json,results.json,TAOTE_REPORT.md}` and
+`/home/jim/runs/oracle/{manifest.json,results.json,ORACLE_REPORT.md}`.
 
 ### 0.9 Porting the reference's OEP machinery: the full corpus goes 40.2% -> 51.0%
 

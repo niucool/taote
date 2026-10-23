@@ -185,6 +185,20 @@ private:
     // sections already claimed: the write hook stays armed for the sequence
     // stamps but never re-claims
     std::set<std::uint64_t> claimed_;
+    // The reference's on_dyn_code (:6096): guest-allocated regions that start
+    // executing are OEP candidates (Amber/Alienyze/Neolite build or map their
+    // payload in a heap buffer and run it there, so nothing lands in an image
+    // section and the section-hop hook never fires).
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> dyn_maps_;
+    std::vector<std::uint64_t> dyn_exec_;
+    std::vector<std::shared_ptr<HookRet>> dyn_hooks_;
+    void poll_dyn_maps();
+    // regions that already existed at install (stack/GS/FS/segments): the
+    // reference's dyn_code hook only fires for maps created during the run, and
+    // hooking the pre-existing multi-MB regions costs a per-instruction callback
+    // in every guest execution there.
+    std::set<std::uint64_t> initial_maps_;
+    unsigned exec_fires_ = 0;
     // addresses already offered to the accept gate (the reference's CF-hop
     // ledger dedup): the exec gate reads ever_written_ (never erased), so a
     // section that was decoded once keeps producing candidates — that is how the

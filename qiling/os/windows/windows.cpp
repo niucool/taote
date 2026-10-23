@@ -613,6 +613,21 @@ void QlOsWindows::hook_winapi(std::uint64_t address, std::uint32_t size) {
         return;
     }
 
+    // unpack-mode observer: the allocation APIs are where a guest-allocated
+    // region becomes visible, and polling the map list per API call is far too
+    // expensive (measured: 3-20x slower runs), so it sees only these.
+    if (api_observer_) {
+        const auto& nm = imported->name;
+        if (nm.find("VirtualAlloc") != std::string::npos ||
+            nm.find("VirtualProtect") != std::string::npos ||
+            nm.find("MapViewOfFile") != std::string::npos ||
+            nm.find("VirtualAllocEx") != std::string::npos) {
+            try {
+                api_observer_(nm);
+            } catch (...) {
+            }
+        }
+    }
     if (std::getenv("TAOTE_APIDBG") != nullptr) {
         std::fprintf(stderr, "[api] %s!%s pc=0x%llx eax=0x%llx esp=0x%llx\n",
                      imported->dll.c_str(), imported->name.c_str(),

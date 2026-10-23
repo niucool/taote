@@ -237,6 +237,13 @@ public:
     // handler has usually patched the trapping instruction, so the retry
     // progresses. Bounded by seh_dispatch's identical-fault repeat guard.
     void set_seh_continue_on_exhausted(bool enabled) noexcept { seh_continue_on_exhausted_ = enabled; }
+
+    // An unpack-mode observer that runs before every winapi dispatch. The
+    // unpacker uses it to notice guest-allocated regions appearing (VirtualAlloc
+    // is the only reliable moment: the payload then runs inside the new map, so
+    // no image-section hook ever fires for it).
+    void set_api_observer(std::function<void(const std::string&)> fn) { api_observer_ = std::move(fn); }
+    const std::function<void(const std::string&)>& api_observer() const noexcept { return api_observer_; }
     // the PE loader finished its load walk (DllMain drives included). The
     // program's own execution is what follows, so the synthetic SEH dispatch
     // only serves faults from here on (see seh_on_fault).
@@ -371,7 +378,8 @@ private:
     std::uint64_t seh_fault_addr_ = 0;      // the repeat-guard key (fault address)
     int seh_repeat_count_ = 0;
     bool seh_dispatch_enabled_ = true;   // the set_seh_dispatch switch
-    bool seh_continue_on_exhausted_ = false;  // the unpack-mode raw-chain continue
+    bool seh_continue_on_exhausted_ = false;
+    std::function<void(const std::string&)> api_observer_;  // the unpack-mode raw-chain continue
     bool loader_done_ = false;           // the PE load walk finished
     std::optional<std::uint64_t> ucrt_locale_cells_[6];  // see ucrt_locale_cell
     // cached: does the rootfs carry a real _except_handler4_common? (seh.cpp)

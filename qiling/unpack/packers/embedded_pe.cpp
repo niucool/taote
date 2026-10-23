@@ -32,9 +32,29 @@ bool adopt_embedded_pe(Qiling& ql, PackerContext& ctx, std::vector<std::uint8_t>
             if (lo >= 0x10000000) {
                 continue;  // the loaded dll tree
             }
+            // The payload is not always at the region base: Amber copies its
+            // image into a heap buffer and runs it at a nonzero offset inside the
+            // allocation (measured: exec at 0x5426bfc inside a 0x5001000-0x5428000
+            // region whose head is zeros), so look for the MZ signature at every
+            // 0x1000 step as well.
+            std::vector<std::uint64_t> bases{lo};
+            {
+                std::vector<std::uint8_t> whole;
+                try {
+                    whole = ql.mem().read(lo, std::min<std::uint64_t>(hi - lo, 0x2000000));
+                } catch (...) {
+                    whole.clear();
+                }
+                for (std::uint64_t o = 0x1000; o + 0x200 <= whole.size(); o += 0x1000) {
+                    if (whole[o] == 'M' && whole[o + 1] == 'Z') {
+                        bases.push_back(lo + o);
+                    }
+                }
+            }
+            for (const auto cand_base : bases) {
             std::vector<std::uint8_t> head;
             try {
-                head = ql.mem().read(lo, std::min<std::uint64_t>(hi - lo, 0x1000));
+                head = ql.mem().read(cand_base, std::min<std::uint64_t>(hi - cand_base, 0x1000));
             } catch (...) {
                 continue;
             }
@@ -63,12 +83,33 @@ bool adopt_embedded_pe(Qiling& ql, PackerContext& ctx, std::vector<std::uint8_t>
                              (static_cast<std::uint64_t>(head[opt + 0x39]) << 8) |
                              (static_cast<std::uint64_t>(head[opt + 0x3a]) << 16) |
                              (static_cast<std::uint64_t>(head[opt + 0x3b]) << 24);
-            if (soi < 0x1000 || soi > hi - lo) {
+            if (soi < 0x1000 || soi > hi - cand_base) {
                 continue;
             }
+            // Stricter acceptance (the reference requires EXECUTABLE_IMAGE and a
+            // real section layout): scanning every 0x1000 step finds heap garbage
+            // that merely starts with MZ, and adopting it replaces the image
+            // (measured: Molebox Hasher/puttytel lost their decode this way).
+            const auto chars = static_cast<std::uint32_t>(head[opt + 0x46]) |
+                               (static_cast<std::uint32_t>(head[opt + 0x47]) << 8);
+            const auto ep_rva = static_cast<std::uint64_t>(head[opt + 0x10]) |
+                                (static_cast<std::uint64_t>(head[opt + 0x11]) << 8) |
+                                (static_cast<std::uint64_t>(head[opt + 0x12]) << 16) |
+                                (static_cast<std::uint64_t>(head[opt + 0x13]) << 24);
+            if ((chars & 0x0002) == 0 || ep_rva == 0 || ep_rva >= soi) {
+                continue;
+            }
+            const auto use_base = cand_base;
+            if (dbg) {
+                std::fprintf(stderr, "[embed] candidate MZ+PE at 0x%llx sizeimg 0x%llx (map 0x%llx)\n",
+                             static_cast<unsigned long long>(use_base),
+                             static_cast<unsigned long long>(soi),
+                             static_cast<unsigned long long>(lo));
+            }
             if (soi > best_size) {
-                best = lo;
+                best = use_base;
                 best_size = soi;
+            }
             }
         }
     } catch (...) {
