@@ -680,6 +680,63 @@ Artifacts: `/home/jim/runs/full/{manifest.json,results.json,verify_results.json}
 and the report at `UNPACK_REPORT.md` (regenerate with
 `tools/unpack_report.py --manifest ... --results ... --harness-results ...`).
 
+### 0.9 Porting the reference's OEP machinery: the full corpus goes 40.2% -> 51.0%
+
+The full-corpus report (§0.8) said the biggest defect was the OEP *pick*, not the
+decode, so the next step was to port the reference's pick machinery rather than
+write new heuristics. Three pieces, all from `src/unpacker/unpacker.cpp`:
+
+1. **The claim ledger** (`on_section_exec`, :5710-5810). The reference detects a
+   hop only while a *claim* (`written_ranges_`) is live and consumes the claim
+   when the hop is accepted; taote walked `ever_written_` (never erased) and
+   ledgered every distinct executed address in a decoded section. Measured: the
+   reference ledgers **2 candidates** on `aspack_Cacheset` where taote ledgered
+   **2695**. With the port the ledgers are byte-identical (`0x42602f@1`,
+   `0x4024a2@35973`). MPRESS keeps its range (the lazy trampoline hands off
+   twice, :5770-5800).
+2. **The pick order / incumbent** (`pick_and_emit_oep`, :8156-8360). The
+   incumbent is the last candidate that passes the V1 shape vote (a real entry
+   starts like a function), else the first non-latch candidate (the reference's
+   `kJunkLatchMaxInstrs=32`, here the write ordinal), and the static ladder only
+   answers when nothing in the ledger survives. taote's ladder used to override a
+   correct accepted hop - `aspack_Cacheset` picked the look-alike prologue
+   0x406c29 over the true 0x4024a2.
+3. **F41c/F47 precedence** (`decode_only_ladder`, :7861-7910): for NSPack/RLPack
+   an accepted hop out of the stub's own section outranks the static ladder;
+   MPRESS keeps the ladder first because its ledger is stub-internal.
+
+Measured over the whole corpus (2678 samples, same harness and grader):
+
+| | before | after |
+|---|---|---|
+| OEP exact | 1153 (45.0%) | **1442 (57.7%)** |
+| imports correct | 1556 (60.6%) | 1557 (60.6%) |
+| valid PE | 2568 | 2568 |
+| **all three** | 1076 (40.2%) | **1365 (51.0%)** |
+| harness rubric | 1126 (42.0%) | **1414 (52.8%)** |
+
+**289 samples gained, 0 lost**: Eronana 71->136, Packman 63->104, Yoda-Crypter
+52->92, ASPack 56->91, EXpressor 56->91, JDPack 71->97, Molebox 67->88, BeRo
+90->98, UPX 99->107, PEtite 16->23, WinUpack 36->38, FSG 74->75.
+
+What is left, in the order the reference's own code says to take it:
+
+* **NSPack (97 samples, 0%)**: the stub decrypts into a *VirtualAlloc'd* region
+  (the reference's NSPack profile shows `VirtualAlloc(0, 0x1000, 0x1000, 0x40)`
+  first and 15.9M instructions to the hand-off), so the payload is not in the
+  image at all and the ladder is scanning stub bytes. Needs the dyn-region path
+  (`on_dyn_code` + `meta_.stages > 0` gate, :6096 and :7831).
+* **RLPack imports (104 samples, recall 1/314)**: the OEP is now often right but
+  the rebuilt table is the stub's own (16 descriptors, wldap32/mspdb80/hhctrl)
+  instead of the payload's - the reference's `salvage_iat_scan` (:8670) chooses
+  the table from the code's references, not from coherence alone.
+* **Amber (152), Alienyze (126), TELock (116), Neolite (93)**: per-family modules
+  the reference has and taote does not (`packers/amber_unpacker.cpp`,
+  `alienyze.cpp`, `telock_unpacker.cpp`, `neolite_unpacker.cpp`); taote's
+  family files are still name-only placeholders.
+* **Exe32pack (124)**: the artifact is the raw dump with a degenerate section
+  table, so its entry is unmapped - 107 samples fail criterion 1 only.
+
 ## 1. How pegasus unpacks, end to end
 
 ### 1.1 Lifecycle and where it hooks in
