@@ -9,9 +9,9 @@ original to grade against).
 | # | criterion | graded | pass | rate |
 |---|---|---|---|---|
 | 1 | valid PE (parses, sane headers, entry mapped) | 2678 | 2568 | **95.9%** |
-| 2 | OEP correct (EP RVA == original's) | 2501 | 1442 | **57.7%** |
-| 3 | import table correct (>=95% of the original's imports reproduced, function level) | 2568 | 1557 | **60.6%** |
-| — | **all three** | 2678 | 1365 | **51.0%** |
+| 2 | OEP correct (EP RVA == original's) | 2501 | 1491 | **59.6%** |
+| 3 | import table correct (>=95% of the original's imports reproduced, function level) | 2568 | 1679 | **65.4%** |
+| — | **all three** | 2678 | 1414 | **52.8%** |
 
 2678 samples were run; 323 further packed files were skipped because the
 dataset ships no unpacked original for them (no ground truth to grade).
@@ -28,12 +28,12 @@ dataset ships no unpacked original for them (no ground truth to grade).
 | Enigma Virtual Box | 122 | 100% | 100% | 0% | 100% | 1.00 | **100%** | 1.000 |
 | Eronana Packer | 151 | 100% | 99% | 1% | 99% | 1.00 | **90%** | 1.000 |
 | Exe32pack | 124 | 15% | 0% | 0% | 0% | 0.03 | **0%** | 0.166 |
-| FSG | 97 | 98% | 83% | 14% | 79% | 1.00 | **77%** | 1.000 |
+| FSG | 97 | 98% | 79% | 3% | 79% | 1.00 | **77%** | 1.000 |
 | JDPack | 100 | 100% | 97% | 2% | 100% | 1.00 | **97%** | 0.931 |
 | MEW | 106 | 100% | 100% | 0% | 92% | 1.00 | **92%** | 1.000 |
 | MPRESS | 106 | 100% | 63% | 37% | 95% | 1.00 | **60%** | 0.993 |
 | Molebox | 93 | 100% | 96% | 0% | 98% | 1.00 | **95%** | 0.931 |
-| NSPack | 97 | 100% | 0% | 91% | 0% | 0.06 | **0%** | 0.110 |
+| NSPack | 97 | 100% | 55% | 42% | 86% | 1.00 | **51%** | 0.977 |
 | Neolite | 93 | 100% | 1% | 30% | 86% | 1.00 | **1%** | 0.039 |
 | PECompact | 97 | 99% | 44% | 56% | 96% | 1.00 | **42%** | 0.911 |
 | PEtite | 73 | 100% | 44% | 49% | 32% | 0.08 | **32%** | 0.894 |
@@ -42,32 +42,32 @@ dataset ships no unpacked original for them (no ground truth to grade).
 | TELock | 116 | 100% | 1% | 49% | 0% | 0.01 | **0%** | 0.072 |
 | Themida | 122 | 100% | 0% | 0% | 0% | 0.05 | **0%** | 0.052 |
 | UPX | 108 | 100% | 99% | 1% | 99% | 1.00 | **99%** | 0.970 |
-| WinUpack | 97 | 100% | 43% | 54% | 40% | 0.00 | **39%** | 0.001 |
+| WinUpack | 97 | 100% | 43% | 1% | 80% | 1.00 | **39%** | 0.977 |
 | Yoda-Crypter | 92 | 100% | 100% | 0% | 100% | 1.00 | **100%** | 0.996 |
 | Yoda-Protector | 101 | 100% | 0% | 36% | 0% | 0.01 | **0%** | 0.047 |
 
 ## Why the misses miss
 
-- imports mostly missing (recall <0.5): **764**
-- OEP wrong (near): **636**
-- OEP wrong (far): **423**
-- imports absent (recall 0): **185**
+- imports mostly missing (recall <0.5): **683**
+- OEP wrong (near): **528**
+- OEP wrong (far): **482**
+- imports absent (recall 0): **134**
 - no valid PE: entry-not-mapped: **107**
 - managed (.NET) original: OEP not graded: **67**
-- imports incomplete (recall 0.5-0.95): **12**
+- imports incomplete (recall 0.5-0.95): **22**
 - no valid PE: unparsable: **2**
 - no valid PE: wall-timeout: **1**
 
-Import recall: median 1.00, p10 0.00, p90 1.00 (n=2568). Import precision: median 0.35.
+Import recall: median 1.00, p10 0.01, p90 1.00 (n=2568). Import precision: median 0.36.
 
 ### The OEP misses, by the original entry's shape
 
 | original EP shape | wrong but in the entry section | wrong and elsewhere |
 |---|---|---|
-| crt-thunk | 402 | 213 |
-| msvc-frame | 106 | 72 |
-| borland | 86 | 70 |
-| other | 42 | 68 |
+| crt-thunk | 339 | 235 |
+| msvc-frame | 82 | 96 |
+| borland | 68 | 82 |
+| other | 39 | 69 |
 
 `crt-thunk` is the dominant class and it is a *pick* problem, not a decode
 problem: those binaries' entry point is `e8 <call __security_init_cookie>`
@@ -81,8 +81,8 @@ reported entry is off.
 
 ## The two systemic defects behind the remaining gap
 
-**1. The OEP pick, not the decode.** 1059 samples have a wrong entry
-(636 of them inside the original's entry section, i.e. the right code region
+**1. The OEP pick, not the decode.** 1010 samples have a wrong entry
+(528 of them inside the original's entry section, i.e. the right code region
 and the wrong address) while the payload itself is recovered: the code
 similarity medians at 1.000 for ASPack, Eronana, Packman, JDPack, MPRESS and
 Molebox. The dominant shape is the MSVC CRT-init thunk
@@ -115,7 +115,7 @@ list passes there and fails criterion 3 here).
 | rubric | pass | rate |
 |---|---|---|
 | harness (EP + sim>=0.90 + dll-cov>=0.80) | 1414 / 2678 | **52.8%** |
-| this report (valid PE + exact EP + function-level imports) | 1365 / 2678 | **51.0%** |
+| this report (valid PE + exact EP + function-level imports) | 1414 / 2678 | **52.8%** |
 
 ## Appendix: examples of each family's first failing criterion
 
@@ -135,8 +135,8 @@ list passes there and fails criterion 3 here).
 | Eronana Packer | eronana_adwcleaner_7.2.4.0.exe | OEP 0x10a4070, original 0x8fb5d8 |
 | Exe32pack | exe32pack_AddInProcess.exe | no valid PE (entry-not-mapped) |
 | Exe32pack | exe32pack_AddInProcess32.exe | no valid PE (entry-not-mapped) |
-| FSG | fsg_AccessEnum.exe | imports 0.4% of the original's 232 functions present (emitted 233) |
-| FSG | fsg_Cacheset.exe | OEP 0x6c29, original 0x24a2 |
+| FSG | fsg_AccessEnum.exe | OEP 0x35000, original 0x7a98 |
+| FSG | fsg_Cacheset.exe | OEP 0x2f000, original 0x24a2 |
 | JDPack | jdpack_7za.exe | OEP 0x3f1d9, original 0x55641 |
 | JDPack | jdpack_MxdwGc.exe | OEP 0x10890, original 0x8e08 |
 | MEW | mew_Bginfo.exe | imports 93.7% of the original's 861 functions present (emitted 807) |
@@ -145,8 +145,8 @@ list passes there and fails criterion 3 here).
 | MPRESS | mpress_Cacheset.exe | OEP 0x6c29, original 0x24a2 |
 | Molebox | molebox_PEview.exe | OEP 0x165a4, original 0x1000 |
 | Molebox | molebox_Snap2HTML.exe | imports 0.0% of the original's 1 functions present (emitted 230) |
-| NSPack | nspack_ADExplorer.exe | OEP 0x1068, original 0x149ec |
-| NSPack | nspack_ADInsight.exe | OEP 0x1085, original 0x34dac |
+| NSPack | nspack_ADInsight.exe | imports 5.5% of the original's 328 functions present (emitted 332) |
+| NSPack | nspack_Bginfo.exe | OEP 0x45caf, original 0x1b5d42 |
 | Neolite | neolite_ADInsight.exe | OEP 0x2cb902, original 0x34dac |
 | Neolite | neolite_Autologon.exe | OEP 0x25804, original 0x3980 |
 | PECompact | pecompact_Bginfo.exe | OEP 0x45caf, original 0x1b5d42 |
@@ -155,14 +155,14 @@ list passes there and fails criterion 3 here).
 | PEtite | petite_7zFM.exe | imports 5.5% of the original's 236 functions present (emitted 36) |
 | Packman | packman_adwcleaner_7.2.4.0.exe | OEP 0x34b33b, original 0x8fb5d8 |
 | RLPack | rlpack_ADExplorer.exe | imports 5.4% of the original's 314 functions present (emitted 85) |
-| RLPack | rlpack_ADInsight.exe | imports 5.2% of the original's 328 functions present (emitted 773) |
+| RLPack | rlpack_ADInsight.exe | imports 5.2% of the original's 328 functions present (emitted 676) |
 | TELock | telock_7z.exe | OEP 0x18032, original 0xebc5 |
 | TELock | telock_AkelAdmin.exe | OEP 0x7032, original 0x1860 |
 | Themida | themida_7z.exe | OEP 0xe44bf, original 0xebc5 |
 | Themida | themida_ADExplorer.exe | OEP 0x1d28db, original 0x149ec |
 | UPX | upx_adwcleaner_7.2.4.0.exe | OEP 0x166dbf, original 0x8fb5d8 |
-| WinUpack | winupack_ADExplorer.exe | OEP 0x1018, original 0x149ec |
-| WinUpack | winupack_ADInsight.exe | imports 1.5% of the original's 328 functions present (emitted 647) |
+| WinUpack | winupack_ADExplorer.exe | OEP 0xa31b7, original 0x149ec |
+| WinUpack | winupack_ADInsight.exe | imports 1.5% of the original's 328 functions present (emitted 744) |
 | Yoda-Protector | yoda-protector_ADExplorer.exe | OEP 0x795ce, original 0x149ec |
 | Yoda-Protector | yoda-protector_ADInsight.exe | OEP 0x4225ce, original 0x34dac |
 
@@ -180,5 +180,5 @@ program, so it is one rebuild rule, not per-family decoding: the import
 rebuilder emits hint/name entries only and drops the `0x80000000|ordinal`
 form. A DLL-coverage rubric cannot see this (oleaut32 is still 'covered').
 
-Runtime: median 1s, mean 7s, max 120s (wall cap 120s).
+Runtime: median 1s, mean 8s, max 120s (wall cap 120s).
 

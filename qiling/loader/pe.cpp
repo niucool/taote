@@ -81,9 +81,38 @@ std::uint64_t QlLoaderPE::load_parsed(std::unique_ptr<LIEF::PE::Binary> parsed, 
         std::uint64_t base;
     } writer{ql_, base};
 
+    // Windows maps a section's file data at FileAlignment granularity, so a
+    // section whose PointerToRawData is NOT FileAlignment-aligned is mapped from
+    // the page boundary BELOW its raw pointer: its first bytes come from the
+    // preceding file region (usually the header page). NSPack and WinUpack hide
+    // their real stub in exactly that overlap (nspack_AccessEnum: PointerToRawData
+    // 0x1a9, FileAlignment 0x200, so RVA 0x101b reads file 0x1b, a `e9 rel32`
+    // relay into the nsp1 stub - reading at the declared pointer gives zeros and
+    // the stub never starts). Well-formed images are aligned, so this is inert
+    // for them.
+    const auto file_align = static_cast<std::uint64_t>(parsed->optional_header().file_alignment());
+    std::ifstream align_file(host_path, std::ios::binary);
+    std::vector<std::uint8_t> align_bytes;
+    if (align_file) {
+        align_bytes.assign(std::istreambuf_iterator<char>(align_file), std::istreambuf_iterator<char>());
+    }
     for (const LIEF::PE::Section& section : parsed->sections()) {
         if (section.size() == 0) {
             continue;
+        }
+        const auto raw_ptr = static_cast<std::uint64_t>(section.pointerto_raw_data());
+        const auto raw_size = static_cast<std::uint64_t>(section.sizeof_raw_data());
+        if (file_align != 0 && raw_ptr != 0 && (raw_ptr % file_align) != 0 && raw_size != 0) {
+            const auto aligned = raw_ptr - (raw_ptr % file_align);
+            if (aligned < align_bytes.size()) {
+                const auto n = static_cast<std::size_t>(
+                    std::min<std::uint64_t>(raw_size, align_bytes.size() - aligned));
+                ql_->mem().write(writer.base + section.virtual_address(),
+                                 std::vector<std::uint8_t>(
+                                     align_bytes.begin() + static_cast<std::ptrdiff_t>(aligned),
+                                     align_bytes.begin() + static_cast<std::ptrdiff_t>(aligned + n)));
+                continue;
+            }
         }
         const auto content = section.content();
         if (content.empty()) {

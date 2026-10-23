@@ -23,6 +23,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <chrono>
 #include <filesystem>
 #include <algorithm>
 #include <fstream>
@@ -176,8 +177,18 @@ int main(int argc, char** argv) {
     qiling::os::register_dlls();
 
     // ---- the rootfs: a caller-provided tree, or a synthesized stub one
+    // An input LIEF cannot parse (two FSG samples in the corpus) used to
+    // std::terminate here; report it as an error instead, like every other
+    // per-sample failure.
     fs::path run_rootfs;
-    const auto plan = plan_for(sample);
+    qiling::testing::pe_sample_detail::SamplePlan plan;
+    try {
+        plan = plan_for(sample);
+    } catch (const std::exception& e) {
+        std::printf("[unpack] %s family=unknown base=0x0 oep=0x0 stages=0 reason=input_parse_failed "
+                    "imports=0 error=%s\n", sample.filename().string().c_str(), e.what());
+        return 1;
+    }
     if (!rootfs.empty()) {
         run_rootfs = fs::path(rootfs);
         // the arch subtree, when the caller pointed at a base directory
@@ -191,6 +202,27 @@ int main(int argc, char** argv) {
         fs::copy_file(sample, run_rootfs / "Windows" / sample.filename(),
                       fs::copy_options::overwrite_existing);
     } else {
+        // Sweep temp trees left behind by runs that died before their cleanup
+        // (a host abort or SIGKILL skips the RAII guard, and a long harness run
+        // leaks one copy of the stub tree per crashed sample: 11k dirs / 5.3GB
+        // measured). Only our own prefix, only trees older than an hour.
+        try {
+            const auto tmp = fs::temp_directory_path();
+            const auto now = fs::file_time_type::clock::now();
+            for (const auto& e : fs::directory_iterator(tmp)) {
+                const auto name = e.path().filename().string();
+                if (name.rfind("taote_unpack_", 0) != 0 || !e.is_directory()) {
+                    continue;
+                }
+                std::error_code ec;
+                const auto when = fs::last_write_time(e.path(), ec);
+                if (ec || now - when < std::chrono::hours(1)) {
+                    continue;
+                }
+                fs::remove_all(e.path(), ec);
+            }
+        } catch (...) {
+        }
         run_rootfs = fs::temp_directory_path() /
                      ("taote_unpack_" + std::to_string(::getpid()) + "_" +
                       std::to_string(std::hash<std::string>{}(sample.string()) % 100000));
