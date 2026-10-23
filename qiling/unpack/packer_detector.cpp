@@ -136,6 +136,27 @@ Detection detect_from_file(const std::string& path) {
             }
         }
 
+        // 4b. WinUpack with mangled section names: the stub copies itself into a
+        // section whose name is overwritten with non-printable bytes ('PS\xff\xd5
+        // \xab\xeb\xe7\xc3' on the ADExplorer/Cacheset class) and leaves a
+        // tiny raw head under a huge virtual size, so the name-based check above
+        // cannot see it. The reference falls back to its EP-prefix table for these;
+        // the structural rule is stronger (a name with control/high bytes plus a
+        // hollow head is not something a normal image produces).
+        if (!pe.sections.empty()) {
+            const auto& s0 = pe.sections.front();
+            const std::string& n0 = pe.section_names.front();
+            bool weird = false;
+            for (unsigned char c : n0) {
+                if (c < 0x20 || c >= 0x7f) {
+                    weird = true;
+                }
+            }
+            if (weird && s0.raw_size != 0 && s0.raw_size < 0x1000 && s0.vsize >= 0x10000) {
+                return set("WinUpack", "section", "mangled name + hollow head");
+            }
+        }
+
         // 5. EP-prefix signatures. PECompact keeps the original section names, so
         // the stub's entry is its only signature: `b8 <imm32> 50 64 ff 35`
         // (mov eax,imm32; push eax; push fs:[0]) — measured over the packed

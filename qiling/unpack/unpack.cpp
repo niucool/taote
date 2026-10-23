@@ -670,6 +670,11 @@ int Unpacker::on_section_exec(std::uint64_t addr) {
             ++in_payload;
         }
     }
+    // WinUpack parked-stack harvest: the engine keeps the payload OEP in its own
+    // frame (the reference snapshots [esp+8] at the import loop's `call ecx`,
+    // winupack_unpacker.cpp:651-690, because esp has drifted by finalize time).
+    // Harvest once, from the first frame seen inside the stub section, and keep
+    // every in-image dword: the pick validates them by prologue shape.
     const bool in_written = [&] {
         for (const auto& r : written_ranges_) {
             if (addr >= r.first && addr <= r.second) {
