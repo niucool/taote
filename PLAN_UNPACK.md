@@ -1146,6 +1146,29 @@ emulation loop is worth ~25 corpus samples of this class alone.**
 
 Gap to the reference: 1499 vs 1996 = 497 samples.
 
+### 0.16b Two micro-optimizations that did NOT help (do not repeat)
+
+Both measured at a fixed 200M instruction count on mew_Bginfo, alternating the
+two binaries to cancel load drift:
+
+* **exec hook early return** - every test after the written-range check ends in
+  `return 0` when the address is not in a claim, so the packed-EP proximity probe
+  and `inside_inplace()` were computed for nothing on every stub instruction.
+  Provably equivalent, and measured 37.7-39.3s vs 38.3-39.1s: **neutral**,
+  because the exec hook only fires inside *watched* sections and MEW's
+  decompressor runs in an unwatched map.
+* **write-ordinal map cache** - caching the `last_write_seq_` node for the last
+  section (5.34M stores into one section) measured 40.4-41.5s vs 39.5-40.0s:
+  **neutral to 3% worse**.
+
+So the remaining ~2x is not in the hook bookkeeping: it is in the emulator's
+per-instruction dispatch and the sheer instruction count the payload's own loader
+executes. The measured shape of the problem (fair set, 300s budget) is
+`imports 63/86 vs the reference's 75/86` and `OEP 79/86 vs 83/86` - i.e. taote is
+now within ~10 samples of the reference on OEP and ~12 on imports *when it has
+the time*, and the corpus gap in that same population is entirely the 85s budget
+under 4-way pinning.
+
 ## 1. How pegasus unpacks, end to end
 
 ### 1.1 Lifecycle and where it hooks in
