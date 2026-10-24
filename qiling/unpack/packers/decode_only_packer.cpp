@@ -19,6 +19,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <set>
 
 namespace qiling {
 namespace unpack {
@@ -64,6 +65,67 @@ std::uint64_t ladder_oep(const PackerContext& ctx) {
             tgt = &ps;
         }
     }
+    // Pass A (new): the MSVC6 CRT-init thunk at a function boundary -
+    //     <ret|int3|nop|retn> e8 <call __security_init_cookie> e9 <body>
+    // The reference keys on this in its Amber scan; measured over the 142 corpus
+    // programs whose entry IS this thunk, 140 have the entry among these hits and
+    // 111 programs hold EXACTLY ONE (so the unique-match gate is safe), while the
+    // packer's decoded body also carries the e9-target body and the look-alike
+    // `55 8b ec 6a ff 68` frames that Pass B was matching instead. The e8 operand
+    // is often unrelocated in the dump (winupack_Contig: 0xd62cbd79) and the e9
+    // may point BACKWARDS, so only the e9 target has to be in-image.
+    {
+        std::set<std::uint64_t> a_hits;  // sections may overlap in the dump
+        std::uint64_t a_va = 0;
+        for (const auto& ps : sections) {
+            const auto body = body_of(ps);
+            for (std::size_t i = 1; i + 11 < body.size(); ++i) {
+                if (body[i] != 0xe8 || body[i + 5] != 0xe9) {
+                    continue;
+                }
+                const auto prev = body[i - 1];
+                if (!(prev == 0xc3 || prev == 0xcc || prev == 0x90 || prev == 0xc2)) {
+                    continue;
+                }
+                const auto rel = static_cast<std::int32_t>(
+                    static_cast<std::uint32_t>(body[i + 6]) | (static_cast<std::uint32_t>(body[i + 7]) << 8) |
+                    (static_cast<std::uint32_t>(body[i + 8]) << 16) |
+                    (static_cast<std::uint32_t>(body[i + 9]) << 24));
+                const auto tgt_va = static_cast<std::int64_t>(ps.start + i + 10) + rel;
+                if (tgt_va < static_cast<std::int64_t>(ctx.base) ||
+                    tgt_va >= static_cast<std::int64_t>(ctx.base + ctx.image_size)) {
+                    continue;
+                }
+                // the jump must land on the real BODY: an entry prologue. Without
+                // this the decoded image holds several copies of the thunk shape
+                // (mpress_Dbgview: 4, only 0x415757 lands on `6a 58 68 ... e8`;
+                // the three impostors land on `8b f0 ff 15`, i.e. ordinary code).
+                const auto boff = static_cast<std::size_t>(tgt_va - static_cast<std::int64_t>(ctx.base));
+                if (boff + 9 > image.size()) {
+                    continue;
+                }
+                const auto* q = image.data() + boff;
+                if (!((q[0] == 0x6a && q[2] == 0x68 && q[7] == 0xe8) ||
+                      (q[0] == 0x55 && q[1] == 0x8b && q[2] == 0xec) ||
+                      (q[0] == 0xe8 && q[5] == 0xe9))) {
+                    continue;
+                }
+                a_hits.insert(ps.start + i);
+                a_va = ps.start + i;
+            }
+        }
+        const auto a_count = a_hits.size();
+        if (ctx.debug) {
+            std::fprintf(stderr, "[unpack] ladder passA CRT-thunks: %zu\n", a_count);
+        }
+        if (a_count == 1) {
+            if (ctx.debug) {
+                std::fprintf(stderr, "[unpack] ladder: unique CRT-init thunk 0x%llx\n",
+                             static_cast<unsigned long long>(a_va));
+            }
+            return a_va;
+        }
+    }
     // Pass B: the MSVC entry frame `55 8b ec 6a ff 68 <image-addr> 64 a1` is
     // unique per image (every other function shares the `55 8b ec` head but not
     // the SEH push). RLPack AccessEnum's payload has no Pass-C thunk at all.
@@ -91,8 +153,10 @@ std::uint64_t ladder_oep(const PackerContext& ctx) {
                         // the last picked 0x6c29 in every MPRESS sample.
                         const auto fva = ps.start + i;
                         hit_va = fva;  // default: the LAST frame (see the hint below)
-                        frames.push_back(fva);
-                        ++hits;
+                        if (frames.empty() || frames.back() != fva) {
+                            frames.push_back(fva);  // sections may overlap in the dump
+                        }
+                        hits = frames.size();
                     }
                 }
             }
