@@ -70,6 +70,7 @@ std::uint64_t ladder_oep(const PackerContext& ctx) {
     {
         std::size_t hits = 0;
         std::uint64_t hit_va = 0;
+        std::vector<std::uint64_t> frames;
         for (const auto& ps : sections) {
             const auto body = body_of(ps);
             for (std::size_t i = 0; i + 11 < body.size(); ++i) {
@@ -81,8 +82,17 @@ std::uint64_t ladder_oep(const PackerContext& ctx) {
                         (static_cast<std::uint32_t>(body[i + 8]) << 16) |
                         (static_cast<std::uint32_t>(body[i + 9]) << 24));
                     if (pv > ctx.base && pv < ctx.base + ctx.image_size) {
+                        // The first frame in address order, not the last: a
+                        // program with two identical SEH-prologue frames (the
+                        // compiler emits the same 55 8b ec 6a ff 68 <imm> shape
+                        // for several functions) always has the entry EARLIER
+                        // than its look-alikes. Measured on Cacheset: frames at
+                        // 0x24a2 (the true entry), 0x6c29 and a third; taking
+                        // the last picked 0x6c29 in every MPRESS sample.
+                        const auto fva = ps.start + i;
+                        hit_va = fva;  // default: the LAST frame (see the hint below)
+                        frames.push_back(fva);
                         ++hits;
-                        hit_va = ps.start + i;
                     }
                 }
             }
@@ -90,6 +100,24 @@ std::uint64_t ladder_oep(const PackerContext& ctx) {
         if (ctx.debug) {
             std::fprintf(stderr, "[unpack] ladder passB hits=%zu last=0x%llx\n", hits,
                          static_cast<unsigned long long>(hit_va));
+        }
+        // A program that shares this frame shape across several functions
+        // (Cacheset has 3, AccessEnum 2) makes "unique" false, so the hops we
+        // accepted during the run decide: the hop lands inside the entry, a
+        // few bytes past the frame (both families: +0x16). Prefer the frame
+        // closest below the hop; with no hop, the first (lowest) frame - the
+        // entry sits before its look-alikes. Measured: first-hit alone lost
+        // pecompact_AccessEnum (0x7a98 -> 0x3a53) and pecompact_DarkNamer.
+        if (hits > 1 && ctx.hop_hint != 0) {
+            std::uint64_t best = 0;
+            for (const auto fva : frames) {
+                if (fva <= ctx.hop_hint && ctx.hop_hint - fva <= 0x40) {
+                    best = fva;
+                }
+            }
+            if (best != 0) {
+                hit_va = best;
+            }
         }
         if (!mpress && hits >= 1 && hits <= 8) {
             if (ctx.debug) {

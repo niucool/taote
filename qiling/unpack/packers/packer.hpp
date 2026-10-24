@@ -45,6 +45,12 @@ struct PackerContext {
     std::uint64_t base = 0;
     std::uint64_t image_size = 0;
     std::uint64_t packed_ep_va = 0;
+    // The run's strongest section-hop candidate (the claim ledger's last
+    // non-junk entry). A ladder pass may use it as a hint: the accepted hop
+    // lands a few bytes INSIDE the payload entry (measured: exactly +0x16 on
+    // PECompact/NSPack Cacheset and AccessEnum), so the frame just below the
+    // hop is the entry when one exists.
+    std::uint64_t hop_hint = 0;
     bool is_64 = false;
     bool debug = false;
     std::string family;

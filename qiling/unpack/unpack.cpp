@@ -1410,20 +1410,25 @@ std::uint64_t Unpacker::pick_oep(const std::vector<std::uint8_t>& image) const {
     // unconditionally, which is why NSPack sits at 0% exact OEP. MPRESS keeps the
     // ladder first: its ledger holds only stub-internal entries (the trampoline),
     // and the real OEP comes from the decoded body's thunk.
+    // "Accepted" means the same thing here as in the non-decode path below: the
+    // hop is not a junk latch (write ordinal >= 32) and the bytes at the target
+    // are entry-shaped. The old test required the hop to leave the packed EP's
+    // own section, which is exactly wrong for NSPack: its payload decodes INTO
+    // that section, so the true OEP shares it and the filter discarded the
+    // correct ledger entry (nspack_Cacheset: the ledger holds 0x4024a2@156337 =
+    // the true EP, the filter dropped it and Pass B's 3 MSVC frames then
+    // overrode it with the LAST one, 0x406c29).
     if (decode_only && opts_.family != "MPRESS" && !hop_ledger_.empty()) {
-        const int ep_sec_local = section_index_at(packed_ep_va_);
-        for (const auto va : hop_ledger_) {
-            const auto seq = write_seq_;
-            (void)seq;
-            const int sec = section_index_at(va);
-            if (sec < 0 || sec == ep_sec_local) {
-                continue;
+        for (std::size_t i = hop_ledger_.size(); i-- > 0;) {
+            const auto va = hop_ledger_[i];
+            const auto seq = i < hop_write_seq_.size() ? hop_write_seq_[i] : 0;
+            if (seq >= 32 && shape_at(va) >= 2) {
+                if (opts_.debug) {
+                    std::fprintf(stderr, "[unpack] pick OEP %s (accepted hop outranks the ladder, seq=%llu)\n",
+                                 hex(va).c_str(), static_cast<unsigned long long>(seq));
+                }
+                return va;
             }
-            if (opts_.debug) {
-                std::fprintf(stderr, "[unpack] pick OEP %s (accepted hop outranks the ladder)\n",
-                             hex(va).c_str());
-            }
-            return va;
         }
     }
     if (decode_only) {
@@ -1686,6 +1691,14 @@ std::uint64_t Unpacker::static_oep_from_image(const std::vector<std::uint8_t>& i
     ctx.debug = opts_.debug;
     ctx.family = opts_.family;
     ctx.sections = sections_;
+    // The hint is the LAST hop the run took, ordinal regardless: the ordinal
+    // only says how much the stub had written (strength), while the hint is
+    // pure geometry - the call's return address sits inside the payload entry
+    // (measured +0x16 for both Cacheset and AccessEnum, whose first hop is a
+    // junk latch at ordinal 3).
+    if (!hop_ledger_.empty()) {
+        ctx.hop_hint = hop_ledger_.back();
+    }
     return packer_->static_oep_from_image(ctx);
 }
 
