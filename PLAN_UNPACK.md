@@ -1102,6 +1102,50 @@ a throughput target, not a per-family code defect.
 
 Gap to the reference: 509 samples, unchanged.
 
+### 0.16 Round 10: the fairness measurement, and the instruction cap it found
+
+**The fairness run (both tools, same 86 samples, same pinning, 300s budget,
+420s wall cap, `--unpack-timeout 300`).** The set is the union of the 27
+import-gap samples and the 71 samples that took >= 60s under the corpus harness
+(86 distinct). Runner: `/home/jim/runs/fair/run_big.py` (same policy as
+`run_all.sh`, larger caps), manifests `fair/taote.json` and `fair/oracle.json`.
+
+| 86-sample fair set, 300s | taote | reference |
+|---|---|---|
+| valid PE | 86 | 86 |
+| OEP exact | 63 (73.3%) | 83 (96.5%) |
+| imports | 28 (32.6%) | 75 (87.2%) |
+| **all three** | **23 (26.7%)** | **74 (86.0%)** |
+
+Only 11 samples are beyond BOTH tools (RLPack 9, Eronana 1, WinUpack 1); 52 are
+reference-only, 1 is taote-only. So this class is not a definitional problem.
+
+**What the measurement actually found.** taote's runs were ending at exactly
+200000000 instructions - the CLI default `--count`, which the harness never
+overrides (it passes only `--unpack-timeout`). With `--count 600000000` the same
+`winupack_Procmon` run finishes in 40-46s (well inside the budget) and its import
+recall goes **0.005 -> 1.000**: the payload's own loader (LoadLibrary per DLL,
+GetProcAddress per name) had simply been truncated mid-resolution. That also
+explains the round-9 finding that the reference's dump carries `USER32.dll` and
+taote's did not.
+
+**The change and its two measurements.** Default cap 200M -> 2e9 (the time budget
+stays the real limiter for spinning stubs):
+
+| | fair set (300s) | full corpus (85s harness) |
+|---|---|---|
+| all three | 23 -> **60** (+37, 0 losses) | 1487 -> **1499** (+12, 0 losses) |
+| OEP | 63 -> 79 | 63.1% -> 63.5% |
+| imports | 28 -> 63 | 65.5% -> 66.0% |
+
+The corpus gains less than the fair set because the same samples need 40-90s
+when run alone and roughly twice that under 4-way pinning, so the 85s budget cuts
+most of them anyway. That gap between the two numbers (60/86 at 300s vs 35/86 at
+85s) is the exact size of the throughput work still outstanding: **~2x on the
+emulation loop is worth ~25 corpus samples of this class alone.**
+
+Gap to the reference: 1499 vs 1996 = 497 samples.
+
 ## 1. How pegasus unpacks, end to end
 
 ### 1.1 Lifecycle and where it hooks in
