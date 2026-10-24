@@ -1046,6 +1046,62 @@ the measurement that defines it: the narrow "lead is all-zero or unmapped" test
 keeps winupack_calc/cmd but also keeps the zeros, so the two objectives need a
 better discriminator than either variant has today.
 
+### 0.15 Round 9: both import causes are emulation-depth, and the corpus has a contention-sensitive class
+
+Round 8 named two import causes: GPA attribution (15 catastrophic) and MEW decode
+parity (8 near-misses). Round 9 measured both to their root, and the root is the
+same for both: **taote does not get far enough, and under the harness's 4-way
+pinning it runs out of wall time before it would.**
+
+**Evidence (winupack_Procmon, the catastrophic class).**
+
+* idle, `--unpack-timeout 300`: the run COMPLETES in 40-45s with
+  `imports=715` and the same (wrong) attribution - so it is not a budget cap on
+  the guest, it finishes on its own;
+* under the harness (`--pin 4`, timeout 85): the `.rc` records `dur=86`, i.e. the
+  budget cut it;
+* the reference on the same sample: `dur=46` under the same contention, so it
+  finishes;
+* the mechanism is visible in the dumps: the reference's `winupack_Procmon`
+  dump contains `USER32.dll` at 0x1d2a04 (the payload's own loader resolving its
+  import table); taote's dump does not contain it at all.
+
+So the payload's bootstrap (walk LoadLibrary per DLL, then GetProcAddress per
+name) never runs under taote, which is also why only ntdll/kernelbase/kernel32/
+mscoree/ucrtbase are ever mapped and why a GPA call for a user32 name has no
+exporting module to be attributed to.
+
+**The stub_map port is blocked, measured.** The reference attributes slots by
+walking each loaded module's guest export directory (F52). Ported and measured:
+`ql.loader().save()` holds the five DLL stubs at 0x10000000+, they start with MZ,
+but they carry no usable export directory, so the walk registers 0 modules and
+`symbols=2` - the payload IAT's 791 dll-arena pointers stay unattributable. The
+port is reverted; it needs the loader to synthesize real export directories for
+its stub DLLs first, which is the same "load the payload's DLLs properly" work
+as above.
+
+**What was kept: throughput headroom.** Two hot-path changes (gated shadow
+bookkeeping, cached written-range test) make the heaviest samples 5-8% faster
+(mew_Bginfo 42.7 -> 38.6s, winupack_Procmon 43.3 -> 40.6s) with the corpus
+unchanged at 1487 (0/0). That is not enough to convert the class - the idle run
+needs ~40s and the contended run needs ~86s, so roughly a 2x speedup (or a
+larger effective budget) is what "finish the payload bootstrap" actually costs.
+
+**The contention-sensitive class is 69 samples.** Under 4-way pinning 69 of the
+2678 runs take >= 60s: ASPack 4, BeRo 10, MEW 10, MPRESS 9, RLPack 9, NSPack 7,
+PECompact 5, WinUpack 5, Eronana 3, EXpressor 3, Molebox 3, Packman 3, UPX 1.
+That is the same population that produces the +/-6 sample noise band in §0.8 and
+the source of every "wall-timeout" in the corpus logs - a measurement caveat and
+a throughput target, not a per-family code defect.
+
+| | round 8 close | round 9 close |
+|---|---|---|
+| OEP exact | 63.1% | 63.1% |
+| imports | 65.5% | 65.5% |
+| all three | 1487 (55.5%) | 1487 (55.5%) |
+
+Gap to the reference: 509 samples, unchanged.
+
 ## 1. How pegasus unpacks, end to end
 
 ### 1.1 Lifecycle and where it hooks in
