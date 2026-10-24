@@ -876,6 +876,81 @@ Two other measurements worth keeping:
   artifact there is the packer's image (ep 0xe000, sim 0.06) - that sample's
   payload is not the paired original, so it should not drive the design.
 
+### 0.13 Round 7: OEP first - 612 of the 637 remaining misses are OEP-only
+
+Classifying every sample the reference gets and taote does not, by the FIRST
+failing criterion, reframed the worklist:
+
+| criterion that blocks | samples |
+|---|---|
+| OEP only (valid PE + imports already correct) | 612 |
+| imports only | 24 |
+| valid PE | 1 |
+
+So the picker was not exhausted after all: 612 samples have a decoded payload
+with the right imports and only the entry wrong. (The per-family aggregate in
+§0.8 hid this, because the decode-blocked families dominate the totals.)
+
+**What was wrong (two rules, both in the decode-only path).**
+
+1. The accepted-hop gate required the hop to leave the packed EP's own section.
+   That is exactly wrong for NSPack: its payload decodes INTO that section, so
+   the true OEP shares it. `nspack_Cacheset` already held the true `0x4024a2`
+   in the claim ledger at write ordinal 156337; the section filter discarded it
+   and Pass B's three MSVC frames then overrode it with the LAST one
+   (`0x406c29`). Acceptance now uses the same strength test as the non-decode
+   path (ordinal >= 32 and an entry-shaped target).
+2. Pass B's "unique `55 8b ec 6a ff 68 <imm>` frame" is false for programs that
+   share the shape across several functions (Cacheset 3, AccessEnum 2, DarkNamer
+   4). The run's own last hop lands INSIDE the entry, measured at exactly +0x16
+   on both Cacheset and AccessEnum, so the frame just below the hop wins
+   (`hop_hint` in the packer context); with no such frame the scan keeps the
+   last hit, which is what AccessEnum and DarkNamer need. Taking the first hit
+   instead cost both (0x7a98 -> 0x3a53 and 0xa71e -> 0x4fa0), so the hint is
+   what makes it safe.
+
+**Measured** (full corpus, same pin-4 harness, `tools/unpack_report.py`):
+
+| | before | after |
+|---|---|---|
+| valid PE | 95.9% | 95.9% |
+| OEP exact | 59.6% | **61.1%** |
+| imports | 65.5% | 65.5% |
+| all three | 1416 (52.9%) | **1455 (54.3%)** |
+
+39 gains, 0 losses (NSPack 49 -> 81, PECompact 41 -> 48). Against the reference
+head-to-head of §0.8 that is 1455 vs 1996; the gap is now 541 samples, of which
+573 are still OEP-only.
+
+**The import side (next, per the same data).** The 24 import-only misses split
+into two classes, and neither is a coherence problem:
+
+* 9 near-misses (MEW 8, MPRESS 1) at recall 0.90-0.95 whose *entire* missing set
+  is **ordinal imports** (`oleaut32#12`, `odbc32#24`, `cabinet#20`,
+  `wsock32#2`, ...). The artifact carries no `oleaut32` descriptor at all:
+  ordinal-only blocks have no name strings, so the string/blob lanes cannot see
+  them, and the runtime lane (`GetProcAddress(hmod, ordinal)`) records nothing
+  because the payload resolves those slots itself. The reference reaches
+  105/106 here, so it keeps an ordinal-aware stub map - that is the port.
+* 15 catastrophic misses (recall 0.004-0.12: Procmon/procexp/7zFM/ADInsight/Ps*)
+  where the artifact's table has the right *slot count* but shuffled DLL
+  attribution (`hal`/`hhctrl.ocx`/`fltlib` blocks, shell32 names under
+  advapi32). The cause is visible in the log: the string-group miner fires on
+  the program's own 800-entry API-name table (`import-string groups: 66 groups,
+  14 dlls, 801 names (first hhctrl.ocx!permission_denied)`), and those blocks
+  carry no slot evidence. Gating that lane on evidence, and preferring the
+  runtime table the way the reference does, is the fix.
+
+### REPRO for §0.13
+
+```
+run_all.sh --manifest /home/jim/runs/r7full/manifest.json \
+    --cli /home/jim/runs/bin/taote_unpack_r7c --pin 4 > /home/jim/runs/r7full/run.log
+tools/unpack_report.py --manifest /home/jim/runs/r7full/manifest.json \
+    --results /home/jim/runs/r7full/results.json --out UNPACK_REPORT.md
+```
+Baseline for the diff: /home/jim/runs/taote4/results.json (same harness, pin 4).
+
 ## 1. How pegasus unpacks, end to end
 
 ### 1.1 Lifecycle and where it hooks in
