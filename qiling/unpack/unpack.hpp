@@ -212,6 +212,16 @@ private:
     // the terminal dump alone loses bytes the stub had already decoded
     std::vector<std::uint8_t> shadow_image_;
     std::vector<bool> shadow_seen_;
+    // The shadow image is only consumed by the first-write families (MEW) and by
+    // the TAOTE_UNPACK_SHADOW_ALL A/B switch; recording it for every store of
+    // every family was hot-path cost on the decompressor loops (millions of
+    // writes into the image).
+    bool shadow_wanted_ = false;
+    // Fast path for the per-instruction written-range test: consecutive execs hit
+    // the same claim, and the linear scan over the claim set was the hottest
+    // thing in the exec hook.
+    mutable std::uint64_t wr_cache_lo_ = 0;
+    mutable std::uint64_t wr_cache_hi_ = 0;
     // The page view at FIRST EXECUTION (the decoded state a just-in-time decrypting
     // stub needs): PEtite/JDPack decrypt a page, run it, then re-encrypt it, and
     // their first *writes* are transient ciphertext — so neither the terminal dump

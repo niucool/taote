@@ -113,6 +113,9 @@ void Unpacker::classify_sections(Qiling& ql) {
     const auto raw_ep = pe_loader.entry_point;
     packed_ep_va_ = (raw_ep >= base_ && raw_ep < base_ + image_size_) ? raw_ep : base_ + raw_ep;
 
+    // Only the first-write families read the shadow image (and the A/B switch).
+    shadow_wanted_ = std::getenv("TAOTE_UNPACK_SHADOW_ALL") != nullptr ||
+                     (packer_ != nullptr && packer_->shadow_policy() == packers::ShadowPolicy::first_write);
     shadow_image_.assign(static_cast<std::size_t>(image_size_), 0);
     shadow_seen_.assign(static_cast<std::size_t>(image_size_), false);
     exec_view_.assign(static_cast<std::size_t>(image_size_), 0);
@@ -590,7 +593,7 @@ void Unpacker::install(Qiling& ql) {
 int Unpacker::on_section_write(std::uint64_t /*pc*/, std::uint64_t addr, std::uint32_t size,
                                std::uint64_t value) {
     // shadow the first write per byte: a store of `size` bytes lands little-endian
-    if (addr >= base_ && addr - base_ < image_size_) {
+    if (shadow_wanted_ && addr >= base_ && addr - base_ < image_size_) {
         const auto off = static_cast<std::size_t>(addr - base_);
         const auto n = std::min<std::size_t>({static_cast<std::size_t>(size ? size : 1),
                                               sizeof(std::uint64_t),
@@ -650,6 +653,8 @@ int Unpacker::on_section_write(std::uint64_t /*pc*/, std::uint64_t addr, std::ui
         const auto claim = std::make_pair(claim_start, claim_end);
         ever_written_.insert(claim);
         written_ranges_.insert(claim);
+        wr_cache_lo_ = claim.first;
+        wr_cache_hi_ = claim.second;
         // one claim per section per run (the reference disables the write hook on
         // first fire): the stub's own traffic in a claimed section cannot
         // re-claim it, but the write ordinals keep flowing for the OEP pick
@@ -753,8 +758,13 @@ int Unpacker::on_section_exec(std::uint64_t addr) {
         poll_dyn_maps();
     }
     const bool in_written = [&] {
+        if (wr_cache_hi_ != 0 && addr >= wr_cache_lo_ && addr <= wr_cache_hi_) {
+            return true;
+        }
         for (const auto& r : written_ranges_) {
             if (addr >= r.first && addr <= r.second) {
+                wr_cache_lo_ = r.first;
+                wr_cache_hi_ = r.second;
                 return true;
             }
         }
@@ -809,6 +819,7 @@ int Unpacker::on_section_exec(std::uint64_t addr) {
                     // again from inside it (MPRESS's trampoline back-hop)
                     if (opts_.family != "MPRESS") {
                         written_ranges_.erase(r);
+                        wr_cache_lo_ = wr_cache_hi_ = 0;
                     }
                 }
                 break;
