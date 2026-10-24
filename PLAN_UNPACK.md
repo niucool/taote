@@ -941,6 +941,39 @@ into two classes, and neither is a coherence problem:
   carry no slot evidence. Gating that lane on evidence, and preferring the
   runtime table the way the reference does, is the fix.
 
+### 0.13b passA: the CRT-init thunk at a function boundary
+
+Second picker fix of round 7, measured separately (full corpus, pin 4):
+
+| | r7 (accepted hop + frame hint) | r7d (+ passA) |
+|---|---|---|
+| OEP exact | 61.1% | **62.3%** |
+| all three | 1455 (54.3%) | **1471 (54.9%)** |
+
+Round total: **1416 -> 1471 (+55), 0 losses** (NSPack 49 -> 81, PECompact
+41 -> 60, MPRESS 64 -> 66, ASPack/BeRo +1 each).
+
+The rule: a `<ret|int3|nop|retn> e8 <call __security_init_cookie> e9 <body>` at a
+function boundary, accepted only when it is the image's ONLY such hit. Evidence
+first: of the 142 corpus programs whose entry is that thunk, 140 have the entry
+among these hits and 111 are unique - so the gate is safe and the class is big
+(MPRESS 14, WinUpack 23, PECompact 22 of the round's OEP-only misses).
+
+Two details are load-bearing:
+* the `e8` operand is often unrelocated in the dump (winupack_Contig holds
+  0xd62cbd79) and the `e9` may jump BACKWARDS, so only the `e9` target must be
+  in-image; that target must be a real body prologue (`6a ?? 68 <imm> e8`,
+  `55 8b ec`, or `e8 .. e9`). mpress_Dbgview carries 4 copies of the thunk shape
+  and exactly one lands on the Borland frame - without the prologue test the
+  uniqueness gate never fires.
+* hits must be de-duplicated by VA: the dump's sections OVERLAP, which is why
+  Pass B counted 2 frames on pecompact_AccessEnum where the image holds 1.
+
+Next lever in this same class: when more than one thunk survives the prologue
+test, score the body (Borland/`55 8b ec` = 3, `e8 .. e9` = 2) and take a unique
+maximum - that is what mpress_Dbgview needs (2 hits, the true one is the Borland
+body). Not measured yet.
+
 ### REPRO for §0.13
 
 ```
