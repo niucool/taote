@@ -128,7 +128,15 @@ int main(int argc, char** argv) {
     // aspack/upx/mpress/packman/mew/jdpack AccessEnum and the EXpressor/MEW/
     // Molebox/BeRo/WinUpack AD* samples all reach the exact OEP and a correct
     // dump only when the budget is raised (they now grade UNPACKED_VERIFIED).
-    std::uint64_t count = 200000000;
+    // Instruction cap. The time budget (--unpack-timeout) is the real limiter for
+    // runaway stubs; this is the fallback for a stub that spins without touching
+    // the clock. 200M truncated real payloads before their own import resolver ran:
+    // winupack_Procmon ended at exactly 2e8 instructions with 715 mined pairs at
+    // recall 0.005, and 600M lets the same run FINISH (40-46s, under the budget) at
+    // recall 1.000. Measured with the 86-sample fair set at a 300s budget: taote
+    // 23/86 vs the reference's 74/86, with imports 28 vs 75 - the count, not the
+    // wall clock, was the binding constraint on that whole class.
+    std::uint64_t count = 2000000000;
     bool json = false;
     // TAOTE_UNPACK_NO_HOP: the Phase 0 artifact-only mode, settable by env so the
     // reference harness (which only passes the pegasus flags) can drive it
