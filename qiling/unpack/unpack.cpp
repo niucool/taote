@@ -1488,7 +1488,25 @@ std::uint64_t Unpacker::pick_oep(const std::vector<std::uint8_t>& image) const {
         }
         const int lead_sec = section_index_at(lead);
         const bool lead_is_latch = lead_seq != 0 && lead_seq < 32;
-        const bool lead_strong = lead != 0 && !lead_is_latch;
+        // A hand-off into memory that holds no recognisable code shape is not an
+        // entry: WinUpack's stub hops into the buffer it is still decompressing
+        // (winupack_Cacheset: 0x42e80b, 16 zero bytes), and taking that hop made
+        // the pick land outside the payload the run had already decoded.
+        // Narrower than "entry-shaped": only memory that holds NOTHING (all zero
+        // in the first 16 bytes, or outside every section) is disqualified. A
+        // shape_at() test was measured too strict - it also rejected the genuine
+        // entries of calc/cmd/PEViewer (0x12d6c, 0x829a, 0x1504), costing 37
+        // samples across ASPack/BeRo/EXpressor/Eronana/JDPack/Packman/UPX.
+        // SCOPE: WinUpack only. Its stub hops into the buffer it is still
+        // decompressing, and only there does the hop's target shape decide
+        // anything: measured corpus-wide, a shape_at() gate inside this rule took
+        // WinUpack 39 -> 57 all-three but cost 37 samples in ASPack/BeRo/
+        // EXpressor/Eronana/JDPack/Packman/UPX/Yoda-Crypter/PEtite, whose genuine
+        // entries are plain code (0x12d6c, 0x829a, 0x1504). Every other family
+        // keeps the old rule byte-for-byte.
+        const bool lead_winupack = opts_.family == "WinUpack";
+        const bool lead_shaped = !lead_winupack || shape_at(lead) >= 1;
+        const bool lead_strong = lead != 0 && !lead_is_latch && lead_shaped;
         if (lead_strong) {
             const bool ladder_says_same = [&] {
                 const auto l = static_oep_from_image(image);
