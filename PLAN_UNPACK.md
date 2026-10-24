@@ -984,6 +984,68 @@ tools/unpack_report.py --manifest /home/jim/runs/r7full/manifest.json \
 ```
 Baseline for the diff: /home/jim/runs/taote4/results.json (same harness, pin 4).
 
+### 0.14 Round 8: what the import gap actually is, and +16 on WinUpack
+
+Four experiments, all measured on the full corpus with the same pin-4 harness.
+
+**1. The 9 "ordinal near-misses" are not an attribution problem.** MEW's 8
+samples (recall 0.90-0.95) were the round's first priority, on the theory that
+taote drops ordinal-only DLL blocks (no `oleaut32` descriptor at all). Measured
+diagnosis instead:
+
+* the *packed* file's own import table is just `kernel32!LoadLibraryA` +
+  `kernel32!GetProcAddress` (2 pairs) - there is nothing to inherit, and LIEF
+  cannot parse the packed file at all (`Address of new exe header is
+  corrupted`), so the loader-harvest lane silently contributes nothing;
+* the run never loads `oleaut32`/`odbc32`/`comctl32` (mapped modules: ntdll,
+  kernelbase, kernel32, mscoree, ucrtbase) and ends **inside MEW's LZMA
+  decompressor** (final pc in the 0x6000000-0x7400000 map, 5.34M writes), i.e.
+  the stub's import-resolution loop never runs;
+* the reference reaches the same OEP (0x5b5d42) with `stages=3`,
+  `reason=mew_terminal_full_fill` in 45s and emits all 861 pairs including
+  `oleaut32#6..#185` and `odbc32#136`, i.e. it finishes the decode.
+
+So MEW is a **decode-parity** item (MEW LZMA completion / finalize), not an
+ordinal-naming item; its GPA lane already records `ordinal_<n>`, and the
+emitter already writes `0x80000000|ord`.
+
+**2. The 15 catastrophic import misses are a GPA-attribution problem, not a
+miner problem.** The artifact's *names* are all present; the DLL is shifted by
+whole blocks (`kernel32` holds 139 of the original's USER32 names, `fltlib`
+holds 107 of kernel32's, plus invented stems `hal`/`fltmgr.sys`/`hhctrl.ocx`
+that the program merely mentions in strings). The shift starts at the GPA hook:
+the run binds a name to the handle's module (`last_ll_name_`/`handle_names_`),
+which the code itself calls a decoy ("the handle is often a decoy"). The
+reference never trusts name-time attribution - it builds `stub_map_` from the
+emulated modules' export tables and attributes by SLOT ADDRESS at salvage time.
+That port (address-keyed attribution + the F52 guest-EAT ordinal lane) is the
+import work that remains.
+
+Two miner experiments were measured and are neutral, so neither is in the tree:
+clearing the stale DLL marker on a block flush (397 samples: 0 gains, 0 losses)
+and the passA body-score tie-break (`6a ?? 68 <imm> e8` / `55 8b ec` = 3,
+`e8 .. e9` = 2, unique maximum; 373 samples: 0 gains, 0 losses - several
+programs genuinely carry two such thunk copies).
+
+**3. An unshaped lead hop is not an entry (WinUpack).** Its stub hops into the
+buffer it is still decompressing, so the run's strongest hop can land on zeros
+(winupack_Cacheset 0x42e80b) and the pick ends up outside the payload that was
+already decoded. `shape_at(lead) >= 1` fixes 18 samples. Corpus-wide the gate
+costs 37 (ASPack/BeRo/EXpressor/Eronana/JDPack/Packman/UPX/Yoda-Crypter/PEtite,
+whose entries are plain code: 0x12d6c, 0x829a, 0x1504 all score 0), so it is
+scoped to WinUpack; every other family's path is unchanged.
+
+| | round 7 close | round 8 close |
+|---|---|---|
+| OEP exact | 62.3% | **63.1%** |
+| imports | 65.5% | 65.5% |
+| all three | 1471 (54.9%) | **1487 (55.5%)** |
+
+Gap to the reference (§0.8): 1487 vs 1996 = 509 samples. Open refinement, with
+the measurement that defines it: the narrow "lead is all-zero or unmapped" test
+keeps winupack_calc/cmd but also keeps the zeros, so the two objectives need a
+better discriminator than either variant has today.
+
 ## 1. How pegasus unpacks, end to end
 
 ### 1.1 Lifecycle and where it hooks in
