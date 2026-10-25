@@ -4,8 +4,9 @@
 // Each sample imports the real system dlls (kernel32.dll, ntdll.dll, the
 // api-ms-win-crt-* redirects, msvcrt.dll, ...). The runner LIEF-parses the
 // import table, synthesizes one stub dll per imported module (the
-// tests/Pe_Stub.hpp technique, extended to any arch: a PE32+ image with one
-// 16-byte ret cell per export and image entry 0), stages them into a private
+// tests/Pe_Stub.hpp technique, extended to any arch: a hand-rolled PE32/PE32+
+// image with one 16-byte ret cell per export and image entry 0), stages them
+// into a private
 // rootfs together with the sample, and runs the sample through the real
 // QlOsWindows path. The guest calls landing on the stub cells dispatch into
 // the ApiRegistry handlers exactly like the real-dll hosts do.
@@ -110,68 +111,237 @@ inline SamplePlan plan_for(const fs::path& sample) {
 
 // the minimal stub dll: the correct PE headers/sections/export table, one
 // 0xC3 cell per export, entry point 0 (so the loader's DllMain drive skips).
-// Always PE32+: the vcpkg LIEF cannot round-trip its own PE32 images (the
-// re-parse loses the export table), and a 0xC3 cell is valid in both ISAs.
+// Rendered by hand, mirroring tools/stub_dlls.py (which seeds the reference
+// emulator's rootfs with the same shape): the vcpkg LIEF Builder cannot
+// round-trip PE32 — reproduced with LIEF 0.17.6, where a PE32 build drops the
+// .text section, writes SizeOfOptionalHeader = 0x60 and a section table its own
+// parser cannot read, so the export table is lost on re-parse. The
+// optional-header magic must match the GUEST: a 32-bit reader (the unpacker's
+// F52 guest-EAT walk, PLAN_UNPACK §0.15/§0.17) sees no exports on a PE32+
+// image, so x86 guests get PE32 and x64 guests get PE32+.
 inline void write_stub_dll(const fs::path& rootfs, const std::string& dll_name,
-                           const std::vector<std::string>& exports) {
-    auto factory = LIEF::PE::Factory::create(LIEF::PE::PE_TYPE::PE32_PLUS);
+                           const std::vector<std::string>& exports, bool is64 = false) {
+    const std::size_t cells = std::max<std::size_t>(exports.size(), 1);
+    const std::uint32_t cell_size = 16;
+    const std::uint32_t section_align = 0x1000;
+    const std::uint32_t file_align = 0x200;
 
-    // the content rides the constructor (Section::content(vector) is a no-op
-    // in this LIEF build — the cells would be zero-filled). The default fill
-    // is the plain `ret` cell the API hooks never execute. Two exceptions:
-    //   * _initterm_e — with no handler registered any more (ucrt.cpp: the
-    //     walk must run the real CRT body on a real-dll rootfs) the stub cell
-    //     executes on the stub path, and it has to answer 0 (the success the
-    //     retired no-op hook gave) or the CRT startup bails out.
-    //   * _initterm — void; the plain ret already matches the old no-op.
-    std::vector<std::uint8_t> code(std::max<std::size_t>(exports.size(), 1) * 16, 0xC3);
+    const auto align_up = [](std::uint64_t v, std::uint64_t a) { return (v + a - 1) / a * a; };
+
+    // .text: one cell per export. The default fill is the plain `ret` cell the
+    // API hooks never execute. _initterm_e has to answer 0 (xor eax,eax; ret):
+    // with no handler registered any more (ucrt.cpp) the stub cell executes on
+    // the stub path and must report the success the retired no-op hook gave.
+    std::vector<std::uint8_t> text(cells * cell_size, 0xC3);
     for (std::size_t i = 0; i < exports.size(); ++i) {
         if (exports[i] == "_initterm_e") {
-            code[i * 16 + 0] = 0x31;  // xor eax, eax
-            code[i * 16 + 1] = 0xC0;
-            code[i * 16 + 2] = 0xC3;  // ret
-            for (std::size_t j = 3; j < 16; ++j) {
-                code[i * 16 + j] = 0xCC;
+            text[i * cell_size + 0] = 0x31;  // xor eax, eax
+            text[i * cell_size + 1] = 0xC0;
+            text[i * cell_size + 2] = 0xC3;  // ret
+            for (std::size_t j = 3; j < cell_size; ++j) {
+                text[i * cell_size + j] = 0xCC;
             }
         }
     }
-    LIEF::PE::Section text(".text", code);
-    factory->add_section(text);
 
-    auto bin = factory->get();
+    const std::uint32_t text_rva = section_align;
+    const std::uint32_t text_size = static_cast<std::uint32_t>(text.size());
+    const std::uint32_t edata_rva = static_cast<std::uint32_t>(align_up(text_rva + text_size, section_align));
 
-    std::uint32_t text_rva = 0;
-    for (const auto& sec : bin->sections()) {
-        if (sec.name() == ".text") {
-            text_rva = sec.virtual_address();
-        }
+    // .edata: IMAGE_EXPORT_DIRECTORY, then EAT / name pointers / ordinals,
+    // then the module name and the export names.
+    const std::uint32_t funcs_off = 40;
+    const std::uint32_t name_ptrs_off = funcs_off + static_cast<std::uint32_t>(cells) * 4;
+    const std::uint32_t ordinals_off = name_ptrs_off + static_cast<std::uint32_t>(cells) * 4;
+    const std::uint32_t strings_off = ordinals_off + static_cast<std::uint32_t>(cells) * 2;
+
+    std::vector<std::uint8_t> strings;
+    const auto append_cstr = [&](const std::string& s) {
+        strings.insert(strings.end(), s.begin(), s.end());
+        strings.push_back(0);
+    };
+    append_cstr(dll_name);  // the module name is the first string (offset 0)
+    std::vector<std::uint32_t> name_offsets;
+    name_offsets.reserve(exports.size());
+    for (const auto& name : exports) {
+        name_offsets.push_back(static_cast<std::uint32_t>(strings.size()));
+        append_cstr(name);
+    }
+    while (strings.size() % 4 != 0) {
+        strings.push_back(0);
     }
 
-    std::vector<LIEF::PE::ExportEntry> entries;
-    for (std::size_t i = 0; i < exports.size(); ++i) {
-        entries.emplace_back(exports[i], text_rva + static_cast<std::uint32_t>(i * 16));
+    std::vector<std::uint8_t> edata;
+    const auto e16 = [&](std::uint16_t v) {
+        edata.push_back(static_cast<std::uint8_t>(v & 0xff));
+        edata.push_back(static_cast<std::uint8_t>((v >> 8) & 0xff));
+    };
+    const auto e32 = [&](std::uint32_t v) {
+        e16(static_cast<std::uint16_t>(v & 0xffff));
+        e16(static_cast<std::uint16_t>((v >> 16) & 0xffff));
+    };
+    e32(0);                                   // Characteristics
+    e32(0);                                   // TimeDateStamp
+    e16(0); e16(0);                           // MajorVersion, MinorVersion
+    e32(0);                                   // Name RVA (patched below)
+    e32(1);                                   // Base
+    e32(static_cast<std::uint32_t>(exports.size()));  // NumberOfFunctions
+    e32(static_cast<std::uint32_t>(exports.size()));  // NumberOfNames
+    e32(edata_rva + funcs_off);               // AddressOfFunctions
+    e32(edata_rva + name_ptrs_off);           // AddressOfNames
+    e32(edata_rva + ordinals_off);            // AddressOfNameOrdinals
+    for (std::size_t i = 0; i < cells; ++i) {
+        e32(text_rva + static_cast<std::uint32_t>(i * cell_size));
     }
-    if (!entries.empty()) {
-        bin->set_export(LIEF::PE::Export(dll_name, entries));
+    for (const auto off : name_offsets) {
+        e32(edata_rva + strings_off + off);
+    }
+    for (std::size_t i = 0; i < cells; ++i) {
+        e16(static_cast<std::uint16_t>(i));
+    }
+    const std::uint32_t name_rva = edata_rva + strings_off;  // dll name is the first string
+    edata[12] = static_cast<std::uint8_t>(name_rva & 0xff);
+    edata[13] = static_cast<std::uint8_t>((name_rva >> 8) & 0xff);
+    edata[14] = static_cast<std::uint8_t>((name_rva >> 16) & 0xff);
+    edata[15] = static_cast<std::uint8_t>((name_rva >> 24) & 0xff);
+    edata.insert(edata.end(), strings.begin(), strings.end());
+
+    struct StubSection {
+        std::string name;
+        std::uint32_t rva;
+        std::vector<std::uint8_t> data;
+        std::uint32_t raw_size;
+        std::uint32_t raw_ptr;
+        std::uint32_t characteristics;
+    };
+    std::vector<StubSection> sections;
+    sections.push_back({".text", text_rva, text,
+                        static_cast<std::uint32_t>(align_up(text.size(), file_align)),
+                        0, 0x60000020u});
+    sections.push_back({".edata", edata_rva, edata,
+                        static_cast<std::uint32_t>(align_up(edata.size(), file_align)),
+                        0, 0x40000040u});
+    std::uint32_t raw_cursor = file_align;
+    for (auto& s : sections) {
+        s.raw_ptr = raw_cursor;
+        s.data.resize(s.raw_size, 0);
+        raw_cursor += s.raw_size;
     }
 
-    LIEF::PE::Builder::config_t cfg;
-    cfg.exports = true;
-    cfg.resources = false;
-    cfg.relocations = false;
-    cfg.load_configuration = false;
-    cfg.tls = false;
-    cfg.overlay = false;
-    cfg.debug = false;
-    cfg.dos_stub = false;
-    LIEF::PE::Builder builder(*bin, cfg);
-    builder.build();
+    const std::uint32_t size_of_image =
+        static_cast<std::uint32_t>(align_up(edata_rva + edata.size(), section_align));
+    const std::uint64_t image_base = is64 ? 0x180000000ULL : 0x10000000ULL;
+    const std::uint32_t size_of_code =
+        sections[0].raw_size + sections[1].raw_size;
+
+    std::vector<std::uint8_t> out(raw_cursor, 0);
+    out[0] = 'M'; out[1] = 'Z';
+    out[0x3c] = 0x40; out[0x3d] = 0; out[0x3e] = 0; out[0x3f] = 0;  // e_lfanew
+    out[0x40] = 'P'; out[0x41] = 'E'; out[0x42] = 0; out[0x43] = 0;
+
+    const auto w16 = [&](std::size_t off, std::uint16_t v) {
+        out[off] = static_cast<std::uint8_t>(v & 0xff);
+        out[off + 1] = static_cast<std::uint8_t>((v >> 8) & 0xff);
+    };
+    const auto w32 = [&](std::size_t off, std::uint32_t v) {
+        w16(off, static_cast<std::uint16_t>(v & 0xffff));
+        w16(off + 2, static_cast<std::uint16_t>((v >> 16) & 0xffff));
+    };
+
+    // COFF header
+    w16(0x44, is64 ? 0x8664 : 0x14c);                         // Machine
+    w16(0x46, static_cast<std::uint16_t>(sections.size()));    // NumberOfSections
+    w32(0x48, 0);                                             // TimeDateStamp
+    w32(0x4c, 0);                                             // PointerToSymbolTable
+    w32(0x50, 0);                                             // NumberOfSymbols
+    w16(0x54, is64 ? 0xf0 : 0xe0);                            // SizeOfOptionalHeader
+    w16(0x56, is64 ? 0x2022 : 0x2102);                        // Characteristics
+
+    // optional header
+    const std::size_t opt = 0x58;
+    if (!is64) {
+        w16(opt + 0, 0x10b);                       // Magic (PE32)
+        out[opt + 2] = 0; out[opt + 3] = 0;        // linker versions
+        w32(opt + 4, size_of_code);                // SizeOfCode
+        w32(opt + 8, 0);                           // SizeOfInitializedData
+        w32(opt + 12, 0);                          // SizeOfUninitializedData
+        w32(opt + 16, 0);                          // AddressOfEntryPoint (no DllMain)
+        w32(opt + 20, text_rva);                   // BaseOfCode
+        w32(opt + 24, edata_rva);                  // BaseOfData
+        w32(opt + 28, static_cast<std::uint32_t>(image_base));
+        w32(opt + 32, section_align);              // SectionAlignment
+        w32(opt + 36, file_align);                 // FileAlignment
+        w16(opt + 40, 6); w16(opt + 42, 0);        // OS version
+        w16(opt + 44, 0); w16(opt + 46, 0);        // image version
+        w16(opt + 48, 6); w16(opt + 50, 0);        // subsystem version
+        w32(opt + 52, 0);                          // Win32VersionValue
+        w32(opt + 56, size_of_image);              // SizeOfImage
+        w32(opt + 60, file_align);                 // SizeOfHeaders
+        w32(opt + 64, 0);                          // CheckSum
+        w16(opt + 68, 3);                          // Subsystem (console)
+        w16(opt + 70, 0x400);                      // DllCharacteristics
+        w32(opt + 72, 0x100000);                   // SizeOfStackReserve
+        w32(opt + 76, 0x1000);                     // SizeOfStackCommit
+        w32(opt + 80, 0x100000);                   // SizeOfHeapReserve
+        w32(opt + 84, 0x1000);                     // SizeOfHeapCommit
+        w32(opt + 88, 0);                          // LoaderFlags
+        w32(opt + 92, 16);                         // NumberOfRvaAndSizes
+        w32(opt + 96, edata_rva);                  // data dir[0]: export
+        w32(opt + 100, static_cast<std::uint32_t>(edata.size()));
+    } else {
+        w16(opt + 0, 0x20b);                       // Magic (PE32+)
+        out[opt + 2] = 0; out[opt + 3] = 0;
+        w32(opt + 4, size_of_code);
+        w32(opt + 8, 0);
+        w32(opt + 12, 0);
+        w32(opt + 16, 0);                          // AddressOfEntryPoint
+        w32(opt + 20, text_rva);                   // BaseOfCode
+        w32(opt + 24, static_cast<std::uint32_t>(image_base & 0xffffffffu));
+        w32(opt + 28, static_cast<std::uint32_t>((image_base >> 32) & 0xffffffffu));
+        w32(opt + 32, section_align);
+        w32(opt + 36, file_align);
+        w16(opt + 40, 6); w16(opt + 42, 0);
+        w16(opt + 44, 0); w16(opt + 46, 0);
+        w16(opt + 48, 6); w16(opt + 50, 0);
+        w32(opt + 52, 0);
+        w32(opt + 56, size_of_image);
+        w32(opt + 60, file_align);                 // SizeOfHeaders
+        w32(opt + 64, 0);
+        w16(opt + 68, 3);
+        w16(opt + 70, 0x400);
+        w32(opt + 72, 0x100000); w32(opt + 76, 0);      // SizeOfStackReserve
+        w32(opt + 80, 0x1000);   w32(opt + 84, 0);      // SizeOfStackCommit
+        w32(opt + 88, 0x100000); w32(opt + 92, 0);      // SizeOfHeapReserve
+        w32(opt + 96, 0x1000);   w32(opt + 100, 0);     // SizeOfHeapCommit
+        w32(opt + 104, 0);                             // LoaderFlags
+        w32(opt + 108, 16);                            // NumberOfRvaAndSizes
+        w32(opt + 112, edata_rva);                     // data dir[0]: export
+        w32(opt + 116, static_cast<std::uint32_t>(edata.size()));
+    }
+
+    // section headers (sequentially after the optional header)
+    std::size_t sh = opt + (is64 ? 0xf0 : 0xe0);
+    for (const auto& s : sections) {
+        std::string nm = s.name;
+        nm.resize(8, '\0');
+        std::copy(nm.begin(), nm.end(), out.begin() + sh);
+        w32(sh + 8, static_cast<std::uint32_t>(s.data.size()));  // VirtualSize
+        w32(sh + 12, s.rva);                                     // VirtualAddress
+        w32(sh + 16, s.raw_size);                                // SizeOfRawData
+        w32(sh + 20, s.raw_ptr);                                 // PointerToRawData
+        w32(sh + 24, 0);                                         // PointerToRelocations
+        w32(sh + 28, 0);                                         // PointerToLinenumbers
+        w16(sh + 32, 0);                                         // NumberOfRelocations
+        w16(sh + 34, 0);                                         // NumberOfLinenumbers
+        w32(sh + 36, s.characteristics);                         // Characteristics
+        sh += 40;
+        std::copy(s.data.begin(), s.data.end(), out.begin() + s.raw_ptr);
+    }
 
     const auto dir = rootfs / "Windows" / "System32";
     fs::create_directories(dir);
-    std::ofstream out(dir / dll_name, std::ios::binary);
-    const auto& bytes = builder.get_build();
-    out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    std::ofstream out_file(dir / dll_name, std::ios::binary);
+    out_file.write(reinterpret_cast<const char*>(out.data()), static_cast<std::streamsize>(out.size()));
 }
 
 // The CRT keeps the command line in *data* exports (`_acmdln` is a char*, not
@@ -499,7 +669,7 @@ inline SampleOutcome run_pe_sample(const std::string& bin_name, const SampleOpti
                     }
                 }
             }
-            write_stub_dll(rootfs, dll, names);
+            write_stub_dll(rootfs, dll, names, plan.is64);
         }
         // the same key dlls the reference's harness always seeds
         // (tools/stub_dlls.py): the loader's sys_dlls tuple asks for all of
@@ -518,7 +688,7 @@ inline SampleOutcome run_pe_sample(const std::string& bin_name, const SampleOpti
                         names = exports;
                     }
                 }
-                write_stub_dll(rootfs, key_dll, names);
+                write_stub_dll(rootfs, key_dll, names, plan.is64);
             }
         }
         fs::create_directories(rootfs / "Windows" / "registry");

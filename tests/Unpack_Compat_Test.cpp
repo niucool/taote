@@ -73,7 +73,7 @@ UnpackResult run_unpack(const RunConfig& cfg) {
     fs::create_directories(rootfs / "Windows" / "System32");
     fs::create_directories(rootfs / "Windows" / "registry");
     for (const auto& [dll, exports] : plan.imports) {
-        write_stub_dll(rootfs, dll, exports);
+        write_stub_dll(rootfs, dll, exports, plan.is64);
     }
     for (const char* key_dll : {"ntdll.dll", "kernelbase.dll", "kernel32.dll", "ucrtbase.dll", "mscoree.dll"}) {
         if (!fs::exists(rootfs / "Windows" / "System32" / key_dll)) {
@@ -83,7 +83,7 @@ UnpackResult run_unpack(const RunConfig& cfg) {
                     names = exports;
                 }
             }
-            write_stub_dll(rootfs, key_dll, names);
+            write_stub_dll(rootfs, key_dll, names, plan.is64);
         }
     }
     const auto staged = rootfs / "Windows" / cfg.sample.filename();

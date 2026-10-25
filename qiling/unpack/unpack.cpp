@@ -1325,6 +1325,132 @@ void Unpacker::salvage_iat(Qiling& ql, const std::vector<std::uint8_t>& image) {
     } catch (...) {
         return;
     }
+    // F52 / stub_map_: register every LOADED module's export addresses from its
+    // GUEST export directory, so a slot is attributed by ADDRESS instead of by
+    // whichever GPA handle happened to be current when the name was asked for
+    // (the reference's stub_map_ + guest-EAT ordinal lane. As of §0.17 the stub
+    // DLLs are PE32 for a 32-bit run, which is what makes their export
+    // directories readable here.)
+    {
+        std::size_t mods = 0, named = 0, ords = 0;
+        for (const auto& img : ql.loader().save()) {
+            if (img.base == 0 || img.base == base_ || img.end <= img.base + 0x40) {
+                continue;
+            }
+            const auto dll = lower_ascii(fs::path(img.path).filename().string());
+            if (dll.empty()) {
+                continue;
+            }
+            std::vector<std::uint8_t> hdr;
+            try {
+                hdr = ql.mem().read(img.base, 0x400);
+            } catch (...) {
+                continue;
+            }
+            if (hdr.size() < 0x40 || hdr[0] != 'M' || hdr[1] != 'Z') {
+                continue;
+            }
+            const auto peoff = static_cast<std::size_t>(hdr[0x3c]) |
+                               (static_cast<std::size_t>(hdr[0x3d]) << 8) |
+                               (static_cast<std::size_t>(hdr[0x3e]) << 16) |
+                               (static_cast<std::size_t>(hdr[0x3f]) << 24);
+            if (peoff + 0xc8 > hdr.size() || hdr[peoff] != 'P' || hdr[peoff + 1] != 'E') {
+                continue;
+            }
+            const auto magic = static_cast<std::uint16_t>(hdr[peoff + 24]) |
+                               (static_cast<std::uint16_t>(hdr[peoff + 25]) << 8);
+            if (magic != 0x10b) {
+                continue;  // PE32 only (the corpus is 32-bit)
+            }
+            const auto rd32 = [](const std::uint8_t* p) -> std::uint32_t {
+                return static_cast<std::uint32_t>(p[0]) | (static_cast<std::uint32_t>(p[1]) << 8) |
+                       (static_cast<std::uint32_t>(p[2]) << 16) | (static_cast<std::uint32_t>(p[3]) << 24);
+            };
+            const auto dd = peoff + 24 + 0x60;
+            const auto exp_rva = rd32(hdr.data() + dd);
+            const auto exp_sz = rd32(hdr.data() + dd + 4);
+            if (exp_rva == 0 || exp_sz == 0 || exp_sz > (1u << 20)) {
+                continue;
+            }
+            std::vector<std::uint8_t> exd, eat, ntab, otab;
+            try {
+                exd = ql.mem().read(img.base + exp_rva, 0x28);
+            } catch (...) {
+                continue;
+            }
+            if (exd.size() < 0x28) {
+                continue;
+            }
+            const auto obase = rd32(exd.data() + 0x10);
+            const auto nfuncs = rd32(exd.data() + 0x14);
+            const auto nnames = rd32(exd.data() + 0x18);
+            const auto eat_rva = rd32(exd.data() + 0x1c);
+            const auto ntab_rva = rd32(exd.data() + 0x20);
+            const auto otab_rva = rd32(exd.data() + 0x24);
+            if (nfuncs == 0 || nfuncs > 0x8000 || eat_rva == 0) {
+                continue;
+            }
+            try {
+                eat = ql.mem().read(img.base + eat_rva, static_cast<std::size_t>(nfuncs) * 4);
+                if (nnames != 0 && nnames <= nfuncs && ntab_rva != 0 && otab_rva != 0) {
+                    ntab = ql.mem().read(img.base + ntab_rva, static_cast<std::size_t>(nnames) * 4);
+                    otab = ql.mem().read(img.base + otab_rva, static_cast<std::size_t>(nnames) * 2);
+                }
+            } catch (...) {
+                continue;
+            }
+            if (eat.size() < static_cast<std::size_t>(nfuncs) * 4) {
+                continue;
+            }
+            std::map<std::uint32_t, std::string> name_by_idx;
+            for (std::size_t i = 0; i < nnames && otab.size() >= (i + 1) * 2 && ntab.size() >= (i + 1) * 4; ++i) {
+                const auto namerva = rd32(ntab.data() + i * 4);
+                const auto idx = static_cast<std::uint32_t>(otab[i * 2]) |
+                                 (static_cast<std::uint32_t>(otab[i * 2 + 1]) << 8);
+                if (namerva == 0 || idx >= nfuncs) {
+                    continue;
+                }
+                std::string nm;
+                try {
+                    const auto raw = ql.mem().read(img.base + namerva, 96);
+                    nm.assign(reinterpret_cast<const char*>(raw.data()),
+                              static_cast<std::size_t>(std::find(raw.begin(), raw.end(), 0) - raw.begin()));
+                } catch (...) {
+                    continue;
+                }
+                if (!nm.empty()) {
+                    name_by_idx[idx] = sanitize_ascii(nm);
+                }
+            }
+            const bool ord_dominant = name_by_idx.size() * 2 < nfuncs;
+            for (std::uint32_t i = 0; i < nfuncs; ++i) {
+                const auto rva = rd32(eat.data() + i * 4);
+                if (rva == 0) {
+                    continue;
+                }
+                if (rva >= exp_rva && rva < exp_rva + exp_sz) {
+                    continue;  // forwarded slot
+                }
+                const auto va = img.base + rva;
+                if (va >= 0x77000000ULL && va < 0x77020000ULL) {
+                    continue;  // the engine's fake-GPA decoy range
+                }
+                const auto it = name_by_idx.find(i);
+                if (it != name_by_idx.end()) {
+                    symbols.add(va, dll, it->second);
+                    ++named;
+                } else if (ord_dominant) {
+                    symbols.add(va, dll, "ordinal_" + std::to_string(obase + i));
+                    ++ords;
+                }
+            }
+            ++mods;
+        }
+        if (opts_.debug && std::getenv("TAOTE_SALVDBG") != nullptr) {
+            std::fprintf(stderr, "[salv] module exports: %zu modules, %zu named, %zu ordinals, symbols=%zu\n",
+                         mods, named, ords, symbols.size());
+        }
+    }
     if (symbols.empty()) {
         return;
     }

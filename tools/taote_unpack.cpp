@@ -237,7 +237,7 @@ int main(int argc, char** argv) {
         fs::create_directories(run_rootfs / "Windows" / "System32");
         fs::create_directories(run_rootfs / "Windows" / "registry");
         for (const auto& [dll, exports] : plan.imports) {
-            write_stub_dll(run_rootfs, dll, exports);
+            write_stub_dll(run_rootfs, dll, exports, plan.is64);
         }
         for (const char* key_dll : {"ntdll.dll", "kernelbase.dll", "kernel32.dll", "ucrtbase.dll",
                                     "mscoree.dll"}) {
@@ -248,7 +248,7 @@ int main(int argc, char** argv) {
                         names = exports;
                     }
                 }
-                write_stub_dll(run_rootfs, key_dll, names);
+                write_stub_dll(run_rootfs, key_dll, names, plan.is64);
             }
         }
         fs::copy_file(sample, run_rootfs / "Windows" / sample.filename(),

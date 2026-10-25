@@ -1169,6 +1169,67 @@ now within ~10 samples of the reference on OEP and ~12 on imports *when it has
 the time*, and the corpus gap in that same population is entirely the 85s budget
 under 4-way pinning.
 
+### 0.17 Round 11: PE32 stub DLLs + the F52 guest-EAT walk (measured NEUTRAL)
+
+Round 9/§0.15 measured the stub_map port as blocked: `ql.loader().save()` held
+five stub DLLs at 0x10000000+ that start with MZ but expose no export directory
+a 32-bit walk can read. That blocker is now fixed and the walk landed; the fair
+set says the *scoreboard* effect is nil, and here is why.
+
+1. **The stub DLLs were PE32+ for 32-bit guests.** The loader answered
+   LoadLibrary and the API dispatch covered what it implements, but every
+   32-bit reader of the image — including the unpacker's own F52 walk — saw no
+   exports. `write_stub_dll` now renders PE32 (magic 0x10b) for x86 guests and
+   PE32+ for x64, **by hand** (mirroring `tools/stub_dlls.py`, which already
+   seeds the reference emulator's rootfs). The hand-roll was forced: the vcpkg
+   LIEF 0.17.6 Builder cannot round-trip PE32 — reproduced here, a PE32 build
+   drops the `.text` section, writes `SizeOfOptionalHeader = 0x60` and a section
+   table its own parser cannot read, so the export table is lost on re-parse.
+   (The Python `build_stub_pe` port parses clean: magic 0x10b, exports + base 1
+   ordinals.)
+2. **The F52 walk itself** (`salvage_iat`): for every loaded module, read the
+   guest export directory and register each non-forwarded EAT address as
+   `(dll, name)` in the symbol map, plus the ordinal-dominant lane (`ordinal_N`
+   for name-sparse EATs). This is the reference's `stub_map_` slot-address
+   attribution (§1.7) — attribute a dump slot by the ADDRESS it holds, not by
+   whichever GPA handle happened to be current when the name was asked. Before
+   this fix the walk registered **0 modules**; now it registers every loaded
+   stub DLL (`[salv] module exports: 17 modules` on winupack_Procmon).
+
+**Measured (86-sample fair set, 300s, pin 4, `tools/unpack_report.py`):**
+
+| | round-10 close (taote2) | round 11 |
+|---|---|---|
+| all three | **60 / 86** | **60 / 86** (0 gains, 0 losses) |
+
+A first probe on 7 catastrophic samples looked like +6, but that compared
+against the WRONG baseline (`fair/taote_results.json`, the pre-instruction-cap
+23/86) — against the real round-10 baseline (`fair/taote2_results.json`, 60/86)
+six of the seven were already all-three, and the seventh (aspack_adwcleaner)
+is a 302s budget-bound flake that reverted to its baseline shape in the full run.
+
+**Why the walk is neutral despite working.** The 15 catastrophic import samples
+of §0.14 (winupack_Procmon/procexp, the Ps*/7zFM/ADInsight set) were already
+fixed by round 10's instruction cap (bf49143) — they are inside the 60/86. The
+fair set's remaining `recall < 0.5` population is 21 samples: RLPack (13),
+PEtite (5), and two 302s budget-bound flakes (aspack/eronana adwcleaner). RLPack
+and PEtite are decode-blocked (their `.text` never decodes; §0.5.2), not
+attribution-blocked, so a slot-address map cannot move them. And the F52 walk
+registers only what the stub DLLs actually export — which, for a packed file, is
+the packed file's own minimal import table (2 names for kernel32 on WinUpack),
+so its contribution to the symbol map is ~0. The walk is therefore *mechanically
+unblocked but starved*: the remaining step is to seed the stub DLLs with a full
+per-DLL export surface (the ApiRegistry's implemented names, not the sample's
+import table), which is what would let slot-address attribution beat the GPA
+handle-decoy attribution on the catastrophic class. That is a separate, larger
+change and is NOT in this commit.
+
+Kept (not reverted) because it is the correctness foundation the next step
+needs: 32-bit guests now see PE32 stub images, the hand-rolled writer removes a
+LIEF Builder round-trip footgun, and the F52 walk is a faithful port that
+registers the modules it is given. Suite stays 593/593 green; 0 wall-timeouts,
+0 host crashes across the 86-sample fair run.
+
 ## 1. How pegasus unpacks, end to end
 
 ### 1.1 Lifecycle and where it hooks in
