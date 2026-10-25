@@ -261,17 +261,17 @@ void QlOsWindows::ensure_profile_state() {
         main_thread_handle_appended_ = true;
     }
 
-    // the winapi dispatch hook (windows.py: ql.hook_code(self.hook_winapi))
-    // — the upstream rides it at os-construction time (the windows.py
-    // __init__ calls self.load()); the explicit full-range bounds are the
-    // pinned registration shape (the default begin=1/end=0 never fires)
+    // the winapi dispatch hook (windows.py: ql.hook_code(self.hook_winapi)) is
+    // split in two (round 14, lever 2): the per-*instruction* guard below keeps
+    // only the instruction budget and the SEH pre-checks, while the actual
+    // winapi dispatch rides a per-*block* hook — an import call is a jump to a
+    // one-instruction stub cell, i.e. a basic-block entry, so block granularity
+    // fires the dispatch exactly once per call and removes the symbol-map
+    // pre-check from the per-instruction hot path.
     auto* self = this;
-    hook_handle_ = ql_->hook_code([self](std::uint64_t address, std::uint32_t size) -> int {
-        // the hang guard: the trace hook already runs per instruction, so the
-        // instruction budget is free (pegasus's runaway-loop protection is the
-        // config timeout; a counted budget is deterministic instead of wall
-        // clock)
-        // unicorn's own count limit stops at exactly `count` instructions
+    hook_handle_ = ql_->hook_code([self](std::uint64_t address, std::uint32_t) -> int {
+        // the hang guard: a counted budget is deterministic instead of wall
+        // clock. unicorn's own count limit stops at exactly `count` instructions
         // without reporting an error, so the guard trips on the boundary
         ++self->instructions_;
         const auto budget = self->ql_->count();
@@ -286,9 +286,13 @@ void QlOsWindows::ensure_profile_state() {
         if (self->seh_check_iret(address)) {
             return 1;  // iretq emulated: the run loop restarts at the restored rip
         }
+        return 0;
+    });
+
+    hook_dispatch_ = ql_->hook_block([self](std::uint64_t address, std::uint32_t size) -> int {
         self->hook_winapi(address, size);
         return 0;
-    }, 0, 0xffffffffffffffffull);
+    });
 
     // the SEH dispatch hook (seh.hpp): the x86 exception machinery rides a
     // raw unicorn mem-invalid hook — the ql-layer mem hooks always report

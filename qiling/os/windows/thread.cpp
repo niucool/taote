@@ -135,7 +135,10 @@ void QlWindowsThreadManagement::install_hook() {
     }
 
     auto* self = this;
-    scheduler_hook_ = ql_->hook_code([self](std::uint64_t address, std::uint32_t size) -> int {
+    // per-block, not per-instruction (round 14, lever 2): the thread return
+    // address is reached via a `ret` (a block boundary) and the timeslice
+    // counts blocks, matching the reference's per-block CODE hook
+    scheduler_hook_ = ql_->hook_block([self](std::uint64_t address, std::uint32_t size) -> int {
         return self->on_hook(address, size);
     });
 }

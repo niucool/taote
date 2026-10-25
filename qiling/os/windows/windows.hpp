@@ -340,6 +340,7 @@ private:
     std::unique_ptr<Clipboard> clipboard_;
     std::map<std::string, std::string> services_;
     std::optional<HookRet> hook_handle_;
+    std::optional<HookRet> hook_dispatch_;
     std::vector<HookRet> analysis_hooks_;
     std::uint64_t virtual_time_ms_ = 0;
     std::string windir_;

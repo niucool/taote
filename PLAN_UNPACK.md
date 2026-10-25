@@ -1393,6 +1393,44 @@ watched sections, i.e. the budget-bound samples):
 
 Suite 593/593 green. The 86-sample fair set is running (`fair/r13`).
 
+### 0.17f Round 14: finish lever 2 — winapi dispatch + scheduler to per-block
+
+The round-13 result was neutral on the MEW benchmark by design (MEW's LZMA loop
+sits in an unwatched map, so the section watchers never fire there); the win
+showed only on the fair set (median 71s -> 52s). The remaining per-instruction
+cost was the global winapi dispatch + scheduler code hook, which fires on every
+instruction even in unwatched regions. Round 14 moves those two to per-block:
+
+1. **winapi dispatch split** (windows.cpp): `hook_handle_` is now a per-
+   *instruction* guard that keeps only the instruction budget and the two SEH
+   pre-checks (`seh_check_cpu_exception`/`seh_check_iret`); the actual
+   `hook_winapi` dispatch rides a new per-*block* `hook_dispatch_`. An import
+   call is a jump to a one-instruction stub cell — a basic-block entry — so
+   block granularity fires the dispatch exactly once per call.
+2. **scheduler to per-block** (thread.cpp): `scheduler_hook_` is now
+   `hook_block` — the thread return address is reached via a `ret` (a block
+   boundary) and the timeslice counts blocks, matching the reference's per-block
+   CODE hook.
+
+Measured (MEW --count 50000000, taskset -c 7, clean host): **9.5s -> 7.5s
+(~21% faster, 5.2M -> 6.7M insn/s)**. Suite 593/593 green; correctness
+spot-checks (winupack_Procmon/pecompact_HashCalc/mpress_Bginfo/upx_adwcleaner/
+aspack_ADInsight) all reproduce their oep+imports exactly. The fair set is
+running (`fair/r14`).
+
+**Remaining 2x blocker (documented, not shipped):** the per-instruction guard
+still has to exist because (a) the instruction budget is counted per instruction
+(`++instructions_` + `instruction_budget_hit_`, which feeds the "timeout"
+entry-point error), and (b) `seh_check_cpu_exception` pre-checks div/idiv per
+instruction so a mid-block divide-by-zero is staged before unicorn raises the
+uncatchable `UC_ERR_EXCEPTION` (the reference avoids both: its bundled unicorn
+fires CODE per block and catches #DE via an interrupt hook — `intnum == 0` at
+winemu.cpp:7549). Eliminating the per-instruction hook needs re-homing the
+budget onto unicorn's native `count` (losing the clean timeout record) and
+making the div guard a dynamically-installed hook that exists only while
+`seh_sentinel_ != 0`. Not attempted — it is subtle and the measured stop was
+~1.5x combined, not 2x.
+
 ## 1. How pegasus unpacks, end to end
 
 ### 1.1 Lifecycle and where it hooks in
