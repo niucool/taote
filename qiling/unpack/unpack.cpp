@@ -1534,6 +1534,85 @@ std::uint64_t Unpacker::pick_oep(const std::vector<std::uint8_t>& image) const {
         return hdr;
     }
     const bool decode_only = packer_ != nullptr && packer_->decode_only();
+    // PECompact mini-stub entry fix (reference unpacker.cpp:11936-11958, default
+    // ON there as SE_NO_PECOMPACT_EPFIX): PECompact keeps the ORIGINAL entry in
+    // the packed header and plants a ~0x16-byte mini-stub there that CALLs the
+    // decompressor; when it returns, execution resumes just past the stub, so the
+    // section-hop latch records header EP + 0x16 and every artifact came out with
+    // EP = header EP + 0x16 while the payload was otherwise correct. When a hop
+    // lands within 0x40 bytes past the packed header EP in the same section, the
+    // header EP is the faithful entry. This must outrank the shared ladder, which
+    // otherwise fires its Pass-C CFG-thunk scan on the decoded body and overrides
+    // the correct hop (pecompact_PEViewer: hop 0x40151a = header EP + 0x16, the
+    // ladder replaced it with a 0x4f99f0 look-alike).
+    if (opts_.family == "PECompact") {
+        // A unique CRT-init thunk (the ladder's Pass A shape) outranks the
+        // mini-stub epfix: pecompact_Bginfo/cpuz_x32 have exactly one such
+        // thunk as their real entry (0x5b5d42 / 0x4f7c76) AND a hop latch that
+        // lands near the header mini-stub, and the epfix must not hijack them.
+        // Count the Pass-A shape first (the reference's picker runs it ahead of
+        // the family EP fix).
+        std::uint64_t pass_a = 0;
+        std::size_t pass_a_count = 0;
+        for (const auto& ps : sections_) {
+            const auto start = static_cast<std::size_t>(ps.start - base_);
+            const auto span = std::min<std::size_t>(static_cast<std::size_t>(ps.end - ps.start), image.size() - start);
+            for (std::size_t i = 1; i + 11 < span; ++i) {
+                const auto* b = image.data() + start + i;
+                if (b[0] != 0xe8 || b[5] != 0xe9) {
+                    continue;
+                }
+                const auto prev = b[-1];
+                if (!(prev == 0xc3 || prev == 0xcc || prev == 0x90 || prev == 0xc2)) {
+                    continue;
+                }
+                const auto rel = static_cast<std::int32_t>(static_cast<std::uint32_t>(b[6]) |
+                                                           (static_cast<std::uint32_t>(b[7]) << 8) |
+                                                           (static_cast<std::uint32_t>(b[8]) << 16) |
+                                                           (static_cast<std::uint32_t>(b[9]) << 24));
+                const auto tgt = static_cast<std::int64_t>(ps.start + i + 10) + rel;
+                if (tgt < static_cast<std::int64_t>(base_) ||
+                    tgt >= static_cast<std::int64_t>(base_ + image_size_)) {
+                    continue;
+                }
+                const auto boff = static_cast<std::size_t>(tgt - static_cast<std::int64_t>(base_));
+                if (boff + 9 > image.size()) {
+                    continue;
+                }
+                const auto* q = image.data() + boff;
+                if (!((q[0] == 0x6a && q[2] == 0x68 && q[7] == 0xe8) ||
+                      (q[0] == 0x55 && q[1] == 0x8b && q[2] == 0xec) ||
+                      (q[0] == 0xe8 && q[5] == 0xe9))) {
+                    continue;
+                }
+                pass_a = ps.start + i;
+                ++pass_a_count;
+            }
+        }
+        if (pass_a_count == 1) {
+            if (opts_.debug) {
+                std::fprintf(stderr, "[unpack] pecompact: unique CRT-init thunk %s outranks epfix\n",
+                             hex(pass_a).c_str());
+            }
+            return pass_a;
+        }
+        // mini-stub entry fix (reference unpacker.cpp:11936-11958): PECompact
+        // keeps the ORIGINAL entry in the packed header and plants a ~0x16-byte
+        // mini-stub there that CALLs the decompressor; the section-hop latch
+        // records the resume point (header EP + 0x16). When a hop lands within
+        // 0x40 bytes past the packed header EP in the same section, the header
+        // EP is the faithful entry.
+        const auto pep = packed_ep_va_;
+        for (const auto va : hop_ledger_) {
+            if (va > pep && va - pep <= 0x40 && section_index_at(va) == section_index_at(pep)) {
+                if (opts_.debug) {
+                    std::fprintf(stderr, "[unpack] pecompact epfix: hop %s -> header ep %s\n",
+                                 hex(va).c_str(), hex(pep).c_str());
+                }
+                return pep;
+            }
+        }
+    }
     // The decode-only families: their decode lands in one big section whose head is
     // also the stub, so the run's own transitions are mostly stub-internal noise.
     // The static ladder over the decoded body is the authority (the reference's

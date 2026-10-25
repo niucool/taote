@@ -1230,6 +1230,78 @@ LIEF Builder round-trip footgun, and the F52 walk is a faithful port that
 registers the modules it is given. Suite stays 593/593 green; 0 wall-timeouts,
 0 host crashes across the 86-sample fair run.
 
+### 0.17b Round-11 lever 2 profiled: dispatch_trace is 174 ns/insn, and the micro-opts are neutral
+
+`perf`/`valgrind` are unavailable on this host (kernel.perf_event_paranoid=4,
+no valgrind), so the profile came from a throwaway `rdtsc` probe gated by
+`TAOTE_HOOKPROF` (built, measured, then reverted — the tree is back at 777d5fb).
+
+Measured on mew_Bginfo (50M instructions, taskset -c 0): taote runs at
+**~5.2M insn/s** where bare unicorn runs the same tight loop at ~450M insn/s
+— an ~86x gap, i.e. ~190 ns/insn of overhead. The breakdown:
+
+| path | ns/call | calls (50M run) | share |
+|---|---|---|---|
+| `dispatch_trace` (code-hook dispatch, incl. every callback) | **174** | 50M | ~86% |
+| `dispatch_mem` (write-hook dispatch) | 57 | 10.4M | ~6% |
+| scheduler `on_hook` | 9 | 50M | ~4% |
+| `hook_winapi` early return (2 symbol-map finds) | 34 | 50M | — (inside dispatch_trace) |
+
+So the code-hook dispatch is the cost, and it is spread: the three *global*
+code hooks (winapi dispatch, thread scheduler, stack-pointer guard) fire on
+every instruction, each doing small work, plus the per-section watchers'
+`bound_check` loop. Three micro-optimizations were applied and measured neutral
+(10.16s vs 10.12s baseline at 50M, within noise):
+
+* `hook_`/`insn_hook_`/`addr_hook_` and `import_symbols_`/`stub_addr_names_` as
+  `unordered_map` (O(1) vs O(log n) find);
+* dispatchers iterate the hook list by index instead of `const auto copy =
+  it->second;` (the copy heap-allocated per instruction);
+* `const std::shared_ptr<Hook>&` element reference instead of a per-element
+  shared_ptr copy (avoids the per-instruction atomic refcount bumps).
+
+The rdtsc probe says `dispatch_trace` drops 174 -> 115 ns/call after the
+shared_ptr-reference change, yet the *wall* time is unchanged, so the probe's
+absolute numbers are not actionable and the wall clock is what we trust. The
+remaining ~2x is therefore not in these dispatch micro-ops — it is unicorn's
+own per-instruction dispatch plus the sheer guest instruction count, i.e. the
+reference's family accelerators (UPX NRV/LZMA, MEW LZMA) that replace hot guest
+loops with host code. Do not re-try the hook-bookkeeping angle (§0.16b is now
+confirmed at the rdtsc level). The accelerator work is lever 3 (MEW LZMA) and
+is large; lever 4 (OEP residuals) is the cheaper next move.
+
+### 0.17c Round-11 lever 4: the PECompact mini-stub EP fix (+2 fair set, 0 losses)
+
+Three of the fair set's four OEP-only misses are PECompact/MPRESS and decode
+fully (code_sim 0.88-1.0, imports recall 1.0) — only the entry RVA is wrong.
+`pecompact_PEViewer` showed the bug: the section-hop latch records 0x40151a =
+the header EP 0x401504 + 0x16 (PECompact keeps the original entry in the packed
+header and plants a ~0x16-byte mini-stub there that CALLs the decompressor; the
+latch records the resume point, reference `unpacker.cpp:11936-11958`). taote's
+picker then let the shared decode-only ladder's Pass-C CFG-thunk scan override
+that correct hop with a 0x4f99f0 look-alike.
+
+Ported the reference's `SE_NO_PECOMPACT_EPFIX` fix (default ON): when a hop
+lands within 0x40 bytes past the packed header EP in the same section, the
+header EP is the entry — gated on **no unique CRT-init thunk (Pass A)** in the
+image, because `pecompact_Bginfo`/`cpuz_x32` have exactly one such thunk as
+their real entry (0x5b5d42 / 0x4f7c76) AND a hop latch near the header mini-stub;
+the ungated version hijacked them (Bginfo 0x5b5d42 -> 0x401000, cpuz 0x4f7c76
+-> 0x401000) and was reverted in the same session.
+
+Measured (7-sample probe, 300s, pin 4, `tools/unpack_report.py`):
+
+| sample | before | after |
+|---|---|---|
+| pecompact_HashCalc | OEP wrong | **exact** |
+| pecompact_PEViewer | OEP wrong | **exact** |
+| pecompact_Bginfo / ComIntRep / cpuz_x32 | exact | exact (no regression) |
+
+PECompact goes 3/5 -> 5/5 on the probe. Suite 593/593 green. The full 86-sample
+fair set is running in the background (`fair/r11b`); expected 60/86 -> 62/86.
+`mpress_HDDScan` is a separate MPRESS picker case (still OEP-wrong) and is not
+touched by this fix.
+
 ## 1. How pegasus unpacks, end to end
 
 ### 1.1 Lifecycle and where it hooks in
