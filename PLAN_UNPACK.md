@@ -1302,6 +1302,60 @@ fair set is running in the background (`fair/r11b`); expected 60/86 -> 62/86.
 `mpress_HDDScan` is a separate MPRESS picker case (still OEP-wrong) and is not
 touched by this fix.
 
+### 0.17d Round 12: seed the stub dlls with the full per-dll export surface
+
+The F52 walk was unblocked in §0.17 but starved: the stub dlls exported only the
+packed file's own import table (~2 names). Round-12 lever 1 fixes the starvation:
+
+1. **Per-dll attribution in the ApiRegistry.** `ApiEntry` now carries a `dll`
+   field, captured from a registration scope (`set_current_dll`) that
+   `register_dlls()` sets around each family (kernel32's ~26 subfamilies +
+   advapi32/msvcrt/user32/wininet/msi/ntdll/ucrtbased/wsock32/ws2_32/ucrtbase/
+   ole32/shlwapi/crypt32/mscoree/msvbvm60/shell32/ntoskrnl/wudfplatform/
+   oleaut32). `ApiRegistry::names_for_dll(dll)` exposes the surface.
+2. **`write_stub_dll` unions the sample's import names with
+   `names_for_dll(dll)`**, so every synthesized stub dll exports what taote
+   actually implements for it.
+
+Measured on winupack_Procmon: the F52 walk now registers **4 modules / 308
+named exports / symbols=660** where the pre-round-12 tree registered 1 module /
+2 named / 467 symbols.
+
+**Also fixed while landing it:** a pre-existing heap-use-after-free in the
+unpack teardown — `~Unpacker` called `hooks_.clear()`, and each `HookRet`
+walked `QlCoreHooks::hook_` which the `Qiling` had already freed (the ASAN
+build catches it; it also flaked the release build as
+`UnpackCompat.UnpackMetaJsonValid (SEGFAULT)` under ctest). `~Unpacker` now
+`release()`s the handles (detach, no walk) and `detach_hooks()` also clears
+`dyn_hooks_`. Suite 593/593 green; the ASAN build's UnpackMetaJsonValid passes
+5/5.
+
+**Measured (86-sample fair set, 300s, pin 4, `tools/unpack_report.py`):**
+
+| | round-11 close (with epfix) | round 12 |
+|---|---|---|
+| all three | **62 / 86** | **62 / 86** (0 gains, 0 losses) |
+
+Scoreboard-neutral, but the import side moved where it is still decode-blocked:
+
+| sample | recall before | recall after |
+|---|---|---|
+| rlpack_HDDScan | 0.032 | **0.181** |
+| rlpack_dfrgui | 0.058 | **0.301** |
+| rlpack_geek | 0.037 | **0.308** |
+| rlpack_procexp | 0.040 | 0.056 |
+
+RLPack is decode-blocked (§0.5.2: the payload `.text` never fully decodes), so
+recall 0.18-0.31 stays under the 0.95 "imports" bar and the three do not flip
+all-three — but the full surface is demonstrably feeding the slot-address
+attribution (recall up 3-8x). Throughput is unchanged (fair-set median 72s ->
+71s, mean 95s -> 96s). Suite 593/593 green; the ASAN build's
+UnpackMetaJsonValid now passes 5/5 (the teardown fix).
+
+Verdict: keep as the enabler for the attribution class, with the measured caveat
+that it only converts once the RLPack/PEtite decode lands (lever 4). The corpus
+run is deferred (the fair set is the import-gap population this lever targets).
+
 ## 1. How pegasus unpacks, end to end
 
 ### 1.1 Lifecycle and where it hooks in

@@ -50,6 +50,10 @@ const std::pair<std::string, FcallValue>& get_param(const ResolvedParams& params
 // one registered API implementation
 struct ApiEntry {
     std::string name;
+    // the dll the handler belongs to (set from the registration scope). Used
+    // to seed a synthesized stub dll with the FULL surface taote implements for
+    // that dll, not just the sample's own import table (PLAN_UNPACK §0.17).
+    std::string dll;
     WinCc cc;
     ApiParams params;
     bool passthru = false;
@@ -79,6 +83,9 @@ public:
     // the registered api names (the winsdkapi coverage surface)
     std::vector<std::string> names() const;
 
+    // the registered api names for one dll (the stub-dll export surface)
+    std::vector<std::string> names_for_dll(const std::string& dll) const;
+
     // drops every registration (test isolation)
     void clear();
 
@@ -96,6 +103,11 @@ private:
 std::optional<std::uint64_t> call_api(Qiling& ql, std::uint64_t pc, const std::string& api_name,
                                       const ApiParams& params, WinCc cc, const ApiHandler& handler,
                                       bool passthru = false);
+
+// set the dll the NEXT WinsdkApi registrations belong to (called by
+// register_dlls() around each family's registration calls; the dll modules do
+// not pass it themselves).
+void set_current_dll(std::string dll);
 
 // the `@winsdkapi(cc=..., params=..., passthru=...)` decorator analogue: a
 // fluent builder used by the dll modules at static-init time

@@ -67,6 +67,16 @@ std::vector<std::string> ApiRegistry::names() const {
     return out;
 }
 
+std::vector<std::string> ApiRegistry::names_for_dll(const std::string& dll) const {
+    std::vector<std::string> out;
+    for (const auto& [name, entry] : entries_) {
+        if (entry.dll == dll) {
+            out.push_back(name);
+        }
+    }
+    return out;
+}
+
 void ApiRegistry::clear() {
     entries_.clear();
 }
@@ -117,6 +127,14 @@ std::optional<std::uint64_t> call_api(Qiling& ql, std::uint64_t pc, const std::s
 
 // ---- the @winsdkapi builder ----
 
+// the dll the current registration scope belongs to (set by register_dlls
+// around each family; WinsdkApi::operator= captures it into the entry)
+thread_local std::string g_current_dll;
+
+void set_current_dll(std::string dll) {
+    g_current_dll = std::move(dll);
+}
+
 WinsdkApi::WinsdkApi(std::string name, WinCc cc, ApiParams params, bool passthru,
                      std::function<bool(Qiling&)> guard) {
     entry_.name = std::move(name);
@@ -128,6 +146,7 @@ WinsdkApi::WinsdkApi(std::string name, WinCc cc, ApiParams params, bool passthru
 
 void WinsdkApi::operator=(ApiHandler handler) {
     entry_.handler = std::move(handler);
+    entry_.dll = g_current_dll;
     ApiRegistry::instance().register_api(entry_);
 }
 

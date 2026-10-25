@@ -54,6 +54,10 @@ namespace qiling {
 namespace os {
 
 void register_dlls() {
+    // Each family registers its handlers into the name-keyed ApiRegistry; the
+    // per-dll export surface (used to seed the synthesized stub dlls with what
+    // taote actually implements) comes from the registration scope here.
+    set_current_dll("kernel32.dll");
     win::register_fileapi_family();
     win::register_handleapi_family();
     win::register_processthreadsapi_family();
@@ -75,30 +79,49 @@ void register_dlls() {
     win::register_fibersapi_family();
     win::register_winnls_family();
     win::register_winbase_family();
-    win::register_advapi32_family();
-    win::register_msvcrt_family();
-    win::register_user32_family();
-    win::register_wininet_family();
-    win::register_msi_family();
-    win::register_ntdll_family();
-    win::register_ucrtbased_family();
-    win::register_wsock32_family();
-    win::register_ws2_32_family();
-    win::register_ucrt_family();
-    win::register_ole32_family();
-    win::register_shlwapi_family();
-    win::register_crypt32_family();
-    win::register_mscoree_family();
-    win::register_msvbvm60_family();
-    win::register_shell32_family();
-    win::register_ntoskrnl_family();
-    win::register_wudplatform_family();
-    win::register_oleaut32_family();
     win::register_tlhelp32_family();
     win::register_winnt_family();
     win::register_consoleapi2_family();
     win::register_consoleapi3_family();
-    win::register_psapi_family();
+    win::register_psapi_family();  // K32GetModuleInformation etc. re-export from kernel32
+    set_current_dll("advapi32.dll");
+    win::register_advapi32_family();
+    set_current_dll("msvcrt.dll");
+    win::register_msvcrt_family();
+    set_current_dll("user32.dll");
+    win::register_user32_family();
+    set_current_dll("wininet.dll");
+    win::register_wininet_family();
+    set_current_dll("msi.dll");
+    win::register_msi_family();
+    set_current_dll("ntdll.dll");
+    win::register_ntdll_family();
+    set_current_dll("ucrtbased.dll");
+    win::register_ucrtbased_family();
+    set_current_dll("wsock32.dll");
+    win::register_wsock32_family();
+    set_current_dll("ws2_32.dll");
+    win::register_ws2_32_family();
+    set_current_dll("ucrtbase.dll");
+    win::register_ucrt_family();
+    set_current_dll("ole32.dll");
+    win::register_ole32_family();
+    set_current_dll("shlwapi.dll");
+    win::register_shlwapi_family();
+    set_current_dll("crypt32.dll");
+    win::register_crypt32_family();
+    set_current_dll("mscoree.dll");
+    win::register_mscoree_family();
+    set_current_dll("msvbvm60.dll");
+    win::register_msvbvm60_family();
+    set_current_dll("shell32.dll");
+    win::register_shell32_family();
+    set_current_dll("ntoskrnl.exe");
+    win::register_ntoskrnl_family();
+    set_current_dll("wudfplatform.dll");
+    win::register_wudplatform_family();
+    set_current_dll("oleaut32.dll");
+    win::register_oleaut32_family();
 }
 
 // the static-init registration (the python module-import side effect)

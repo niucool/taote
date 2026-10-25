@@ -73,8 +73,19 @@ Unpacker::Unpacker(UnpackOptions opts)
     : opts_(std::move(opts)), packer_(packers::make_packer(opts_.family)) {}
 
 // hooks_ is cleared by finalize()/detach_hooks() while the engine is alive; a
-// HookRet destructor after that would call uc_hook_del on a dead engine
-Unpacker::~Unpacker() { hooks_.clear(); }
+// HookRet destructor after that would call uc_hook_del on a dead engine. The
+// destructor therefore only detaches (release()) the handles: if the Qiling was
+// destroyed first, hook_del would walk the freed hook registry (a
+// heap-use-after-free the ASAN build catches). detach_hooks() is the
+// live-engine path.
+Unpacker::~Unpacker() {
+    for (auto& h : hooks_) {
+        h->release();
+    }
+    for (auto& h : dyn_hooks_) {
+        h->release();
+    }
+}
 
 
 
@@ -942,6 +953,7 @@ void Unpacker::detach_hooks() {
     // HookRet::~HookRet -> QlCoreHooks::hook_del -> uc_hook_del: only valid while
     // the engine lives. Clearing here is what makes the tool's scope order safe.
     hooks_.clear();
+    dyn_hooks_.clear();
 }
 
 // The reference builds stub_map_ from the GPA sentinels + every emulated module's

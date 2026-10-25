@@ -44,6 +44,7 @@
 #include "qiling/os/memory.hpp"
 #include "qiling/os/os.hpp"
 #include "qiling/os/windows/dlls/dlls.hpp"
+#include "qiling/os/windows/fncc.hpp"
 #include "qiling/os/windows/windows.hpp"
 
 namespace qiling {
@@ -121,7 +122,25 @@ inline SamplePlan plan_for(const fs::path& sample) {
 // image, so x86 guests get PE32 and x64 guests get PE32+.
 inline void write_stub_dll(const fs::path& rootfs, const std::string& dll_name,
                            const std::vector<std::string>& exports, bool is64 = false) {
-    const std::size_t cells = std::max<std::size_t>(exports.size(), 1);
+    // The export surface is the sample's own import names UNION the full
+    // per-dll surface taote implements (the ApiRegistry names keyed by dll).
+    // A packed file's import table is ~2 names (LoadLibraryA/GetProcAddress),
+    // which left the stub dlls starved for the unpacker's F52 guest-EAT walk
+    // (PLAN_UNPACK §0.17): with the full surface, the walk can attribute a
+    // decoded IAT slot by the ADDRESS it holds instead of by the GPA handle
+    // that happened to be current.
+    std::vector<std::string> all_names = exports;
+    try {
+        for (const auto& name : qiling::os::ApiRegistry::instance().names_for_dll(dll_name)) {
+            if (std::find(all_names.begin(), all_names.end(), name) == all_names.end()) {
+                all_names.push_back(name);
+            }
+        }
+    } catch (...) {
+        // the registry is optional here (a bare loader run without the dlls
+        // linked): keep just the caller's names.
+    }
+    const std::size_t cells = std::max<std::size_t>(all_names.size(), 1);
     const std::uint32_t cell_size = 16;
     const std::uint32_t section_align = 0x1000;
     const std::uint32_t file_align = 0x200;
@@ -133,8 +152,8 @@ inline void write_stub_dll(const fs::path& rootfs, const std::string& dll_name,
     // with no handler registered any more (ucrt.cpp) the stub cell executes on
     // the stub path and must report the success the retired no-op hook gave.
     std::vector<std::uint8_t> text(cells * cell_size, 0xC3);
-    for (std::size_t i = 0; i < exports.size(); ++i) {
-        if (exports[i] == "_initterm_e") {
+    for (std::size_t i = 0; i < all_names.size(); ++i) {
+        if (all_names[i] == "_initterm_e") {
             text[i * cell_size + 0] = 0x31;  // xor eax, eax
             text[i * cell_size + 1] = 0xC0;
             text[i * cell_size + 2] = 0xC3;  // ret
@@ -162,8 +181,8 @@ inline void write_stub_dll(const fs::path& rootfs, const std::string& dll_name,
     };
     append_cstr(dll_name);  // the module name is the first string (offset 0)
     std::vector<std::uint32_t> name_offsets;
-    name_offsets.reserve(exports.size());
-    for (const auto& name : exports) {
+    name_offsets.reserve(all_names.size());
+    for (const auto& name : all_names) {
         name_offsets.push_back(static_cast<std::uint32_t>(strings.size()));
         append_cstr(name);
     }
@@ -185,8 +204,8 @@ inline void write_stub_dll(const fs::path& rootfs, const std::string& dll_name,
     e16(0); e16(0);                           // MajorVersion, MinorVersion
     e32(0);                                   // Name RVA (patched below)
     e32(1);                                   // Base
-    e32(static_cast<std::uint32_t>(exports.size()));  // NumberOfFunctions
-    e32(static_cast<std::uint32_t>(exports.size()));  // NumberOfNames
+    e32(static_cast<std::uint32_t>(all_names.size()));  // NumberOfFunctions
+    e32(static_cast<std::uint32_t>(all_names.size()));  // NumberOfNames
     e32(edata_rva + funcs_off);               // AddressOfFunctions
     e32(edata_rva + name_ptrs_off);           // AddressOfNames
     e32(edata_rva + ordinals_off);            // AddressOfNameOrdinals
