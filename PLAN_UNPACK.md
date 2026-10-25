@@ -1356,6 +1356,43 @@ Verdict: keep as the enabler for the attribution class, with the measured caveat
 that it only converts once the RLPack/PEtite decode lands (lever 4). The corpus
 run is deferred (the fair set is the import-gap population this lever targets).
 
+### 0.17e Round 13: lever 2 — the throughput gap is hook FREQUENCY, not dispatch
+
+The round-13 lever-2 work profiled the per-instruction hot path properly (the
+round-11 rdtsc numbers were noise) and located the real gap:
+
+1. **The herdr's map-find hypothesis is disproven.** With the round-12 full
+   export surface, the per-instruction `import_symbols_at`/`stub_symbol_at`
+   map finds looked like the hot cost — but an instrumented run shows the
+   cheap pre-check skips **100%** of 50M MEW instructions (`skip=49999999
+   find=0`): the hot loop never lands on a dispatch address, so the map finds
+   never even run. The cheap range test (in_dll_range / is_import_stub) and the
+   native-ranged code-hook split are both wall-clock neutral on the MEW
+   benchmark (~9.5s at --count 50000000, unchanged).
+2. **The gap is unicorn's per-instruction CODE hook.** A bare-unicorn loop does
+   450M insn/s; one empty UC_HOOK_CODE drops it to ~58M insn/s; taote's
+   trampoline+map+vector+std::function dispatch is ~39ns/insn (28M insn/s).
+   taote runs 5.2M insn/s because it pays the per-*instruction* hook on the
+   MEW LZMA loop (large working set → the cold-callback cache pollution is the
+   remaining ~150ns/insn, not the dispatch arithmetic).
+3. **The reference pegasus's bundled unicorn fires UC_HOOK_CODE once per basic
+   block** (src/unpacker/unpacker.cpp:509 comment, verbatim), so its whole
+   architecture is per-block, not per-instruction. taote's vcpkg unicorn fires
+   CODE per instruction. That is the 2x lever.
+
+Landed (measured-neutral on MEW by design; the win is for payloads executing in
+watched sections, i.e. the budget-bound samples):
+- bounded-range code/block hooks are now **native uc hooks** (unicorn enforces
+  the range; out-of-range instructions never enter the trampoline), with a
+  `trace_blocked_` flag preserving the QL_HOOK_BLOCK suppression across the
+  global/native split;
+- the unpacker's section-hop and dyn-exec watchers switched from `hook_code` to
+  **`hook_block`** (per basic block, matching the reference);
+- the winapi dispatch gained the cheap `in_dll_range`/`is_import_stub` pre-check
+  before the symbol-map lookups (kernel-mode keeps the full lookup).
+
+Suite 593/593 green. The 86-sample fair set is running (`fair/r13`).
+
 ## 1. How pegasus unpacks, end to end
 
 ### 1.1 Lifecycle and where it hooks in

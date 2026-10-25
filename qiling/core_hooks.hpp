@@ -49,6 +49,17 @@ struct HookCtx {
     QlCoreHooks* self;
     std::uint64_t type;
 };
+
+// the native-ranged code-hook trampoline context: a bounded-range UC_HOOK_CODE
+// is registered as its own uc hook (begin/end enforced by unicorn, not by a
+// per-instruction bound_check loop), so the context carries the hook itself
+// rather than a per-type dispatch argument. The shared_ptr keeps the Hook
+// alive for a callback that removes itself (hook_del drops the registry entry
+// but the trampoline still owns a reference for the duration of the call).
+struct RangedTraceCtx {
+    QlCoreHooks* self;
+    std::shared_ptr<Hook> hook;
+};
 class QlCoreHooks {
 public:
     explicit QlCoreHooks(uc_engine& uc);
@@ -157,6 +168,11 @@ public:
     // QL_STATE on the facade; the engine keeps the raw flag for the plain case)
     bool emu_stop_requested() const noexcept { return emu_stop_requested_; }
 
+    // whether a global code hook returned QL_HOOK_BLOCK for the current
+    // address (the native-ranged trampolines consult it to preserve the
+    // in-list break semantics across the global/native split)
+    bool trace_blocked() const noexcept { return trace_blocked_; }
+
     // ---- engine internals (core_hooks.py underscore-prefixed methods) ----
     // called from the static C trampolines (qiling/core_hooks.cpp)
 
@@ -186,6 +202,14 @@ private:
     // check degrades to "always inside the range" (the default 1..0 range).
     void set_pc_reader(std::function<std::uint64_t()> reader) { pc_reader_ = std::move(reader); }
 
+    // a bounded-range UC_HOOK_CODE is a native uc hook: unicorn enforces the
+    // range so out-of-range instructions never enter the trampoline. The entry
+    // owns the uc handle and its trampoline context (which owns the Hook).
+    struct RangedCodeEntry {
+        uc_hook handle = 0;
+        std::unique_ptr<RangedTraceCtx> ctx;
+    };
+
     uc_engine* h_uc_ = nullptr;
 
     // registries (core_hooks.py _hook / _hook_fuc / _insn_hook / _insn_hook_fuc /
@@ -199,10 +223,13 @@ private:
     std::map<std::uint64_t, std::vector<std::shared_ptr<HookAddr>>> addr_hook_;
     std::map<std::uint64_t, uc_hook> addr_hook_fuc_;
     std::vector<std::unique_ptr<HookCtx>> hook_contexts_;
+    // native-ranged code hooks keyed by the Hook* (for hook_del lookup)
+    std::map<const Hook*, RangedCodeEntry> ranged_code_;
 
     std::exception_ptr internal_exception_;
     std::function<std::uint64_t()> pc_reader_;
     bool emu_stop_requested_ = false;
+    bool trace_blocked_ = false;
 };
 
 }  // namespace qiling

@@ -585,6 +585,18 @@ void QlOsWindows::hook_winapi(std::uint64_t address, std::uint32_t size) {
     // dispatch)
     const auto& pe_loader = static_cast<const loader::QlLoaderPE&>(ql_->loader());
 
+    // cheap pre-check before any symbol-map lookup (round 13, lever 2): a
+    // dispatch target is an export of a loaded dll (in_dll_range) or an
+    // unbound-import stub cell (is_import_stub); the image, heap and stack
+    // never dispatch. With the round-12 full export surface the maps grew, so
+    // the O(log n) finds became the per-instruction hot cost — this skips them
+    // for the ~100% of instructions that are not import calls. Kernel-mode
+    // (is_driver) fabricates dispatch addresses outside any dll image
+    // (MmGetSystemRoutineAddress), so the pre-check stays off there.
+    if (!pe_loader.is_driver() && !pe_loader.is_import_stub(address) && !pe_loader.in_dll_range(address)) {
+        return;
+    }
+
     // an import the rootfs cannot serve is bound to an unbound-import stub cell
     // (the Win7 rootfs exports none of the Universal CRT's api-ms-win-crt-*
     // surface, for instance). Those cells are `xor eax,eax; ret`, and a zero is

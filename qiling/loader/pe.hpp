@@ -16,6 +16,7 @@
 #ifndef QILING_LOADER_PE_HPP
 #define QILING_LOADER_PE_HPP
 
+#include <limits>
 #include <memory>
 #include <map>
 #include <optional>
@@ -234,6 +235,15 @@ public:
     // reported 30+ "unsupported apis" that were simply real CRT/ntdll bodies).
     bool is_import_stub(std::uint64_t addr) const noexcept;
 
+    // whether `addr` lands inside any loaded dll image (the stub-dll tree
+    // 0x10000000+ / 0x180000000+ for the synthesized rootfs, or the real
+    // System32 bases). hook_winapi uses this as the cheap pre-check before the
+    // symbol-map lookup: an address outside every dll and outside the
+    // unbound-import arena cannot be a dispatch target.
+    bool in_dll_range(std::uint64_t addr) const noexcept {
+        return addr >= dll_range_lo_ && addr < dll_range_hi_;
+    }
+
     // the symbol an unbound-import stub cell stands in for (nullptr when the
     // address is not one of the stub page's cells). hook_winapi consults this
     // so an import the rootfs's DLL does not export — the Win7 rootfs exports
@@ -297,6 +307,9 @@ private:
     // how many 4K pages of stub cells the arena currently spans (it grows on
     // demand: see unbound_import_stub)
     std::size_t stub_pages_ = 0;
+    // the inclusive [lo, hi) span of every loaded dll image (grown by load_dll)
+    std::uint64_t dll_range_lo_ = std::numeric_limits<std::uint64_t>::max();
+    std::uint64_t dll_range_hi_ = 0;
     std::map<std::string, std::uint64_t> stub_cells_;
     std::map<std::uint64_t, std::string> stub_addr_names_;
 

@@ -484,6 +484,10 @@ std::uint64_t QlLoaderPE::load_dll(const std::string& name) {
         auto dll_parsed = LIEF::PE::Parser::parse(dll_path_host);
         if (dll_base != 0 && dll_parsed != nullptr) {
             const auto dll_len = static_cast<std::uint64_t>(dll_parsed->virtual_size());
+            // grow the dispatch-range span: hook_winapi's cheap pre-check
+            // consults this before the symbol-map lookup
+            dll_range_lo_ = std::min(dll_range_lo_, dll_base);
+            dll_range_hi_ = std::max(dll_range_hi_, dll_base + dll_len);
             init_imports_for(*dll_parsed, dll_base, dll_name);
 
             // the DllMain ride (the verbatim blacklist + the emu-state gate)

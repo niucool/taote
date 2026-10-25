@@ -99,6 +99,26 @@ void trampoline_insn(uc_engine* uc, void* user_data) {
     }
 }
 
+// native-ranged code hook: unicorn already enforced the begin/end range, so
+// the callback runs directly — no bound_check loop over unrelated hooks
+void trampoline_trace_ranged(uc_engine* uc, std::uint64_t address, std::uint32_t size, void* user_data) {
+    (void)uc;
+    auto* ctx = static_cast<RangedTraceCtx*>(user_data);
+    // a global hook (winapi dispatch / scheduler) that returned QL_HOOK_BLOCK
+    // for this address already fired (the global dispatcher registers first),
+    // so the remaining hooks are suppressed — the same break the in-list loop
+    // would have taken
+    if (ctx->self->trace_blocked()) {
+        return;
+    }
+    try {
+        const int ret = ctx->hook->trace ? ctx->hook->trace(address, size) : 0;
+        (void)ret;  // a native hook has no sibling list to block
+    } catch (...) {
+        ctx->self->internal_exception_from_hook(std::current_exception());
+    }
+}
+
 // address hooks are a special case of UC_HOOK_CODE with the callback bound to
 // a single address (core_hooks.py _ql_hook_addr_internal)
 void trampoline_addr(uc_engine* uc, std::uint64_t address, std::uint32_t size, void* user_data) {
@@ -243,6 +263,7 @@ void QlCoreHooks::dispatch_intr(int intno, std::uint64_t hook_type) {
 }
 
 void QlCoreHooks::dispatch_trace(std::uint64_t hook_type, std::uint64_t address, std::uint32_t size) {
+    trace_blocked_ = false;
     const auto it = hook_.find(hook_type);
     if (it != hook_.end()) {
         const auto hooks_list = it->second;
@@ -252,6 +273,7 @@ void QlCoreHooks::dispatch_trace(std::uint64_t hook_type, std::uint64_t address,
                 const int ret = hook->trace ? hook->trace(address, size) : 0;
 
                 if ((ret & QL_HOOK_BLOCK) != 0) {
+                    trace_blocked_ = true;
                     break;
                 }
             }
@@ -378,6 +400,32 @@ uc_hook QlCoreHooks::hook_internal(std::uint64_t hook_type, void* trampoline, st
 }
 
 void QlCoreHooks::ql_hook_impl(std::uint64_t hook_type, std::shared_ptr<Hook> hook) {
+    // A bounded-range UC_HOOK_CODE becomes its own native uc hook: unicorn
+    // enforces the range, so out-of-range instructions never reach the
+    // trampoline and the per-instruction dispatch loop skips the hook
+    // entirely. The criterion mirrors bound_check's always-fire shape: a hook
+    // with end < begin (the default 1..0, or an explicit begin..0) covers the
+    // whole space and stays in the global list, as does an explicit full range
+    // (0..0xffffffffffffffff).
+    const bool native_ranged =
+        (hook_type == UC_HOOK_CODE || hook_type == UC_HOOK_BLOCK) &&
+        (hook->end >= static_cast<std::int64_t>(hook->begin)) &&
+        (hook->end < static_cast<std::int64_t>(0xffffffffffffffffull));
+    if (native_ranged) {
+        auto ctx = std::make_unique<RangedTraceCtx>();
+        ctx->self = this;
+        ctx->hook = hook;
+        uc_hook handle = 0;
+        const auto err = uc_hook_add(h_uc_, &handle, static_cast<int>(hook_type),
+                                     reinterpret_cast<void*>(trampoline_trace_ranged), ctx.get(),
+                                     hook->begin, static_cast<std::uint64_t>(hook->end));
+        if (err != UC_ERR_OK) {
+            throw QlErrorCoreHook("failed to add ranged code hook (uc_err " + std::to_string(static_cast<int>(err)) + ")");
+        }
+        ranged_code_.emplace(hook.get(), RangedCodeEntry{handle, std::move(ctx)});
+        return;
+    }
+
     // _ql_hook: decompose the hook-type bitmap over the per-type handlers;
     // a compound type (e.g. UC_HOOK_MEM_UNMAPPED) appends the same hook to
     // every matching type list (core_hooks.py processes all matching bits)
@@ -601,6 +649,17 @@ void QlCoreHooks::hook_del(const HookRet& hret) {
         return;
     }
 
+    // a bounded-range code/block hook was registered as its own native uc hook
+    // (ranged_code_), not in hook_[type]
+    if (hook_type == UC_HOOK_CODE || hook_type == UC_HOOK_BLOCK) {
+        const auto rit = ranged_code_.find(h);
+        if (rit != ranged_code_.end()) {
+            uc_hook_del(h_uc_, rit->second.handle);
+            ranged_code_.erase(rit);
+            return;
+        }
+    }
+
     if (hook_type == UC_HOOK_INSN) {
         // the insn registry is keyed by the instruction type, which HookRet
         // does not carry; every insn_type list holding this hook drops it
@@ -649,6 +708,10 @@ void QlCoreHooks::clear_hooks() {
     for (const auto& [address, handle] : addr_hook_fuc_) {
         uc_hook_del(h_uc_, handle);
     }
+    for (const auto& [h, entry] : ranged_code_) {
+        (void)h;
+        uc_hook_del(h_uc_, entry.handle);
+    }
     clear_ql_hooks();
     hook_contexts_.clear();
 }
@@ -662,6 +725,8 @@ void QlCoreHooks::clear_ql_hooks() {
 
     addr_hook_.clear();
     addr_hook_fuc_.clear();
+
+    ranged_code_.clear();
 }
 
 }  // namespace qiling

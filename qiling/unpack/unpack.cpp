@@ -588,9 +588,14 @@ void Unpacker::install(Qiling& ql) {
         }
 
         // the section-hop hook: an exec whose range was claimed is the
-        // write-then-execute hand-off
+        // write-then-execute hand-off. It rides UC_HOOK_BLOCK (per basic
+        // block, like the reference's bundled unicorn whose CODE hook fires
+        // once per block), not per instruction: the hand-off is a jump into
+        // the claimed section — a block entry — and firing per instruction
+        // re-runs the written-range scan on every instruction of the payload's
+        // hot code.
         auto code_hook = std::make_shared<HookRet>(
-            ql.hook_code([this](std::uint64_t addr, std::uint32_t /*size*/) -> int {
+            ql.hook_block([this](std::uint64_t addr, std::uint32_t /*size*/) -> int {
                 return on_section_exec(addr);
             }, start, end));
         if (code_hook->obj() != nullptr) {
@@ -713,7 +718,7 @@ void Unpacker::poll_dyn_maps() {
             }
             dyn_maps_.emplace_back(lo, hi);
             auto hook = std::make_shared<HookRet>(
-                ql_->hook_code([this, lo](std::uint64_t addr, std::uint32_t) -> int {
+                ql_->hook_block([this, lo](std::uint64_t addr, std::uint32_t) -> int {
                     if (std::find(dyn_exec_.begin(), dyn_exec_.end(), addr) == dyn_exec_.end()) {
                         if (dyn_exec_.size() < 64) {
                             dyn_exec_.push_back(addr);
