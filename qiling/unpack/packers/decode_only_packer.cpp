@@ -147,12 +147,20 @@ std::uint64_t ladder_oep(const PackerContext& ctx) {
                         // The first frame in address order, not the last: a
                         // program with two identical SEH-prologue frames (the
                         // compiler emits the same 55 8b ec 6a ff 68 <imm> shape
-                        // for several functions) always has the entry EARLIER
+                        // for several functions) usually has the entry EARLIER
                         // than its look-alikes. Measured on Cacheset: frames at
-                        // 0x24a2 (the true entry), 0x6c29 and a third; taking
-                        // the last picked 0x6c29 in every MPRESS sample.
+                        // 0x24a2 (the true entry), 0x6c29 and a third.
+                        //
+                        // Round 16: this used to default to the LAST frame
+                        // (`hit_va = fva` every iteration) while the comment
+                        // above already documented that the FIRST is right - a
+                        // half-implemented fix. Measured over the corpus's 87
+                        // pure pick failures (payload decoded, code_sim>=0.80,
+                        // imports already correct), 19 have their true EP at
+                        // this frame shape and in 14 of those it is the FIRST
+                        // frame (the six PsTools-family MPRESS/WinUpack images
+                        // that share a 3-frame body are first-frame in all six).
                         const auto fva = ps.start + i;
-                        hit_va = fva;  // default: the LAST frame (see the hint below)
                         if (frames.empty() || frames.back() != fva) {
                             frames.push_back(fva);  // sections may overlap in the dump
                         }
@@ -161,9 +169,41 @@ std::uint64_t ladder_oep(const PackerContext& ctx) {
                 }
             }
         }
+        if (!frames.empty()) {
+            hit_va = frames.front();  // the entry sits before its look-alikes
+        }
+        // The CRT STARTUP frame outranks both the first/last vote and the hop
+        // hint: the real `mainCRTStartup` is
+        //     55 8b ec 6a ff 68 <handler> 68 <scope> 64 a1
+        // (push ebp / mov ebp,esp / push -1 / push handler / push scope /
+        //  mov eax, fs:[0]), i.e. THREE pushes before the fs:0 read, while an
+        // ordinary function carrying an SEH try-block has only two
+        //     55 8b ec 6a ff 68 <handler> 64 a1
+        // Measured: mpress_DarkNamer's four frames are three two-push functions
+        // plus exactly one three-push startup frame (0x40a71e, the true entry);
+        // the first-frame vote alone picked 0x404fa0 and regressed it.
+        if (hits > 1) {
+            std::uint64_t startup = 0;
+            std::size_t startup_count = 0;
+            for (const auto fva : frames) {
+                if (fva < ctx.base || fva - ctx.base + 17 > image.size()) {
+                    continue;
+                }
+                const auto* f = image.data() + (fva - ctx.base);
+                if (f[0] == 0x55 && f[1] == 0x8b && f[2] == 0xec && f[3] == 0x6a && f[4] == 0xff &&
+                    f[5] == 0x68 && f[10] == 0x68 && f[15] == 0x64 && f[16] == 0xa1) {
+                    startup = fva;
+                    ++startup_count;
+                }
+            }
+            if (startup_count == 1) {
+                hit_va = startup;
+            }
+        }
         if (ctx.debug) {
-            std::fprintf(stderr, "[unpack] ladder passB hits=%zu last=0x%llx\n", hits,
-                         static_cast<unsigned long long>(hit_va));
+            std::fprintf(stderr, "[unpack] ladder passB hits=%zu first=0x%llx last=0x%llx\n", hits,
+                         static_cast<unsigned long long>(frames.empty() ? 0 : frames.front()),
+                         static_cast<unsigned long long>(frames.empty() ? 0 : frames.back()));
         }
         // A program that shares this frame shape across several functions
         // (Cacheset has 3, AccessEnum 2) makes "unique" false, so the hops we
@@ -183,7 +223,14 @@ std::uint64_t ladder_oep(const PackerContext& ctx) {
                 hit_va = best;
             }
         }
-        if (!mpress && hits >= 1 && hits <= 8) {
+        // Round 16: MPRESS was excluded here wholesale, which sent its 3-frame
+        // PsTools-family images to the Borland pre-check and the Pass-C scan
+        // (mpress_ldmdump: Pass B holds the true 0x403024 `55 8b ec 6a ff 68`
+        // first frame, but the gate skipped it and the Borland `6a 03 68 .. e8`
+        // helper at 0x402279 won). The `hits <= 8` bound still excludes the
+        // frame-dense images where first-frame is wrong (HashCalc 84 frames,
+        // disk2vhd 194), so the gate only widens where the evidence is clean.
+        if (hits >= 1 && hits <= 8) {
             if (ctx.debug) {
                 std::fprintf(stderr, "[unpack] ladder: unique MSVC frame entry 0x%llx\n",
                              static_cast<unsigned long long>(hit_va));

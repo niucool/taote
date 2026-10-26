@@ -2110,3 +2110,98 @@ grade is 0.
    parse at rebuild (pegasus reads the dump's own header, `unpacker.cpp:11695-11770`).
 4. **Scoreboard file**: `tests/unpack_scoreboard.json` (per-family grades + the
    env + oracle numbers) so every phase's number is a diff, not a claim.
+
+### 0.17h Round 16: OEP pick residuals — the Pass-B "first frame" half-fix
+
+Re-ran the by-first-failing-criterion classification on the round-14/15 corpus
+(2678 samples, 85s):
+
+| class | count |
+|---|---|
+| all three | 1524 |
+| invalid PE | 110 |
+| **OEP wrong** | **892** |
+| imports wrong (OEP ok) | 85 |
+
+Of the 892, 165 are OEP-only (imports already correct). Splitting that by
+`code_sim` separates *pick* failures from *decode* failures:
+
+| class | n | families |
+|---|---|---|
+| **pick** (code_sim >= 0.80: payload decoded, entry address wrong) | **87** | MPRESS 34, WinUpack 23, PECompact 20, JDPack 3, Molebox 3, NSPack 2, BeRo 1, Neolite 1 |
+| decode (code_sim < 0.80) | 78 | Neolite 78 |
+
+81 of the 87 pick failures land in the *same section* as the true entry
+(`oep_near`), median delta 47KB. So this is a picker problem, not a decode one,
+and it is tractable.
+
+**Root cause found (two defects in the shared decode-only ladder, Pass B):**
+
+1. `decode_only_packer.cpp` Pass B documents "the first frame in address order,
+   not the last" in a comment — and then assigned `hit_va = fva` on every
+   iteration, i.e. the **last** frame. A half-implemented fix.
+2. Pass B was gated `if (!mpress && ...)`, so MPRESS never used it at all and
+   fell through to the Borland `6a ?? 68 <image-addr> e8` pre-check, which
+   matches a *helper* (`push 3; push 0x423605; call …; ret`) rather than the
+   CRT startup entry.
+
+Ground truth confirms it: `mpress_ldmdump`'s claimed 0x402279 is
+`6a 03 68 05 36 42 00 e8…c3` (a CRT helper), while the true 0x403024 is
+`55 8b ec 6a ff 68 30 71 40 00 68 64 4d 40 00 64 a1…` — the canonical MSVC
+`mainCRTStartup` SEH frame, which Pass B holds and skips.
+
+Corpus evidence for the "first frame" rule over the 87 pick failures: 19 have
+their true EP at the `55 8b ec 6a ff 68` frame shape, and **14 of those 19 are
+the FIRST frame** (all six PsTools-family MPRESS/WinUpack images that share a
+3-frame body are first-frame, 6/6). `hits <= 8` still excludes the frame-dense
+images where first-frame is wrong (HashCalc 84, disk2vhd 194).
+
+Fix applied: `hit_va = frames.front()`; drop the wholesale `!mpress` gate (the
+`hits <= 8` bound keeps the widening safe).
+
+**Measured (full corpus, 2678 samples, 85s budget, pin 4):**
+
+| | r14 baseline | first-frame + mpress gate |
+|---|---|---|
+| all three | 1524 (56.9%) | **1532 (57.2%)** |
+| OEP exact | 1609 | **1619** |
+
+11 gains / 3 losses:
+- **+11**: mpress_{Cacheset, adrestore, ctrl2cap, efsdump, ldmdump, pagedfrg} and
+  winupack_{Cacheset, ctrl2cap, efsdump, ldmdump, pagedfrg} — all 3-frame
+  PsTools-family bodies where the true EP is frame 0.
+- **-3**: `jdpack_7z`, `mpress_AccessEnum`, `mpress_DarkNamer` — the true EP is
+  the *last* frame there.
+
+**Second fix — the CRT-startup frame discriminator.** The three-push shape
+`55 8b ec 6a ff 68 <handler> 68 <scope> 64 a1` (the real `mainCRTStartup`)
+is distinguishable from a plain function carrying an SEH try-block, which has
+only `55 8b ec 6a ff 68 <handler> 64 a1`. `mpress_DarkNamer`'s four frames are
+three two-push functions plus exactly one three-push startup frame (0x40a71e,
+the true entry). Preferring the unique startup frame recovered it.
+
+`jdpack_7z` and `mpress_AccessEnum` have *several* frames that all carry the
+three-push shape with an identical scope immediate, so no local discriminator
+separates the entry from its look-alikes; they stay wrong. That is the honest
+cost of the change (net expected +9), recorded rather than papered over with a
+rule fitted to two samples.
+
+**Final measured result (both budgets):**
+
+| | r14 baseline | round 16 | delta |
+|---|---|---|---|
+| corpus all three | 1524 (56.9%) | **1533 (57.2%)** | **+9** |
+| corpus OEP exact | 1609 (64.3%) | **1623 (64.9%)** | **+14** |
+| corpus imports | 1706 (66.4%) | 1706 (66.4%) | — |
+| fair set all three (300s) | 63/86 | 63/86 | 0 / 0 |
+
+11 all-three gains, 2 losses (`jdpack_7z`, `mpress_AccessEnum`). OEP-exact gained
+21 and lost 7 — the 5 extra losses are PEtite/RLPack samples whose OEP was exact
+by luck while their imports are decode-blocked, so all-three is unchanged there.
+Suite 593/593 green.
+
+Remaining OEP-pick worklist, from the same classification (the 68 pick failures
+Pass B cannot reach): the dominant class is now **wrong CFG thunk** — true entry
+`e8 .. e9` (or `6a xx 68 .. e8`) but Pass C returns a different thunk (10 MPRESS
++ 3 WinUpack + BeRo + JDPack). The Borland pre-check and the Pass-C selector are
+the next lever there.
