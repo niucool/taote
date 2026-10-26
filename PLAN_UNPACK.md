@@ -1415,8 +1415,21 @@ instruction even in unwatched regions. Round 14 moves those two to per-block:
 Measured (MEW --count 50000000, taskset -c 7, clean host): **9.5s -> 7.5s
 (~21% faster, 5.2M -> 6.7M insn/s)**. Suite 593/593 green; correctness
 spot-checks (winupack_Procmon/pecompact_HashCalc/mpress_Bginfo/upx_adwcleaner/
-aspack_ADInsight) all reproduce their oep+imports exactly. The fair set is
-running (`fair/r14`).
+aspack_ADInsight) all reproduce their oep+imports exactly. Fair set: 62/86 ->
+**63/86** (aspack_adwcleaner OEP False->True).
+
+**Corpus (2678 samples, 85s harness budget, pin 4, round-14 tree):**
+
+| criterion | round-14 | baseline (2b6ba33) | delta | reference |
+|---|---|---|---|---|
+| valid PE | 95.9% | 95.9% | — | — |
+| OEP | **64.3%** (1609) | 63.5% (1587) | **+22** | 82.0% |
+| imports | **66.4%** (1706) | 66.0% (1694) | **+12** | 77.3% |
+| all three | **56.9%** (1524) | 56.0% (1499) | **+25** | 74.5% (1996) |
+
+The round-13/14 speedup converted to +25 all-three corpus samples (and +22 OEP /
++12 imports) at the 85s budget, exactly the contention-sensitive class the
+herdr predicted. Gap to reference: all-three -472, OEP -17.7pp, imports -10.9pp.
 
 **Remaining 2x blocker (documented, not shipped):** the per-instruction guard
 still has to exist because (a) the instruction budget is counted per instruction
