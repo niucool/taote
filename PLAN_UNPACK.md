@@ -2205,3 +2205,79 @@ Pass B cannot reach): the dominant class is now **wrong CFG thunk** — true ent
 `e8 .. e9` (or `6a xx 68 .. e8`) but Pass C returns a different thunk (10 MPRESS
 + 3 WinUpack + BeRo + JDPack). The Borland pre-check and the Pass-C selector are
 the next lever there.
+
+### 0.17i Round 16b: port the reference's MPRESS pass-ladder count heuristics
+
+The remaining 68 pick failures are dominated by Pass C returning a look-alike
+thunk. The reference has two extra passes that run **before** its Pass C, inside
+`oep_pass_ladder_` and gated `packer_name_ == "MPRESS"` (unpacker.cpp:7336-7405):
+
+1. **unique nop-jmp** `e8 <rel32> e9 00000000` — LoadOrd's OEP (call
+   `__security_init_cookie`, then a jmp whose rel32 is zero; only the real entry
+   has it).
+2. **Borland + SEH LAST count table** — `b_count > s_count → Borland LAST`,
+   `s_count >= b_count → SEH LAST`, with the reference's measured table
+   (OpenedFilesView 4/2, DarkNamer 4/4, Hash 0/1, shexview 3/0).
+
+Two gates had to be *measured* rather than copied, because taote's pass order
+differs from the reference's:
+
+- **Placement after Pass B.** Applied any earlier it regresses the round-16
+  Pass-B gain: the six PsTools 3-frame bodies have `b_count 0 / s_count 3`, so
+  the rule returns the SEH LAST (0x406c29) where Pass B's first-frame vote
+  returns the true 0x4024a2.
+- **Cluster-size bound `b_count <= 8`.** A first attempt gated on "Pass C was
+  ambiguous (`c_hits != 1`)" and lost 8 samples (winupack_Bginfo, bero_ADInsight,
+  bero_ComIntRep, bero_procexp, mpress_ADInsight, mpress_ComIntRep, nspack_cmd,
+  mpress_LoadOrd) — `c_hits == 1` does not separate the classes. What does
+  separate them is the size of the CRT-init cluster: **every sample the rule gets
+  right has `b_count == 4`** (the standard 4-entry cluster, matching the
+  reference's "OpenedFilesView: 4 Borland"), while every sample it gets wrong has
+  20-174 hits, i.e. the pattern is matching ordinary code. The bound is the same
+  shape as Pass B's `hits <= 8`.
+
+Spot-check after the fix: all twelve probes exact, including every former
+regression (winupack_Bginfo 0x5b5d42, bero_ADInsight 0x434dac, nspack_cmd,
+mpress_ComIntRep, bero_procexp, mpress_LoadOrd) *and* every round-16 winner
+(mpress_ldmdump 0x403024, mpress_Cacheset 0x4024a2).
+
+**Measured (full corpus, 2678 samples, 85s, pin 4) — MPRESS-only gate:**
+
+| | r16 | r16b |
+|---|---|---|
+| all three | 1533 (57.2%) | **1540 (57.5%)** |
+| OEP exact | 1623 (64.9%) | **1630 (65.2%)** |
+
++7 all-three, **0 losses** — all seven are the MPRESS CRT-cluster bodies
+(ESEDatabaseView, EventLogChannelsView, FolderTimeUpdate, FullEventLogView,
+InstalledPackagesView, LastActivityView, OpenedFilesView). Suite 593/593 green.
+
+**WinUpack widening.** The reference gates this block MPRESS-only, but WinUpack
+shares the same decoder generation in taote (the payloads are the same bodies
+with the same counts). Offline check over the 19 remaining WinUpack pick
+failures: the rule picks **9 correctly and declines the other 10** (every one of
+those has `b_count > 8`), i.e. no false positives — so the gate widens to
+`mpress || WinUpack`. Measured next.
+
+**Measured (full corpus, 2678, 85s, pin 4) — with the WinUpack widening:**
+
+| | r16 baseline | round 16b | delta |
+|---|---|---|---|
+| all three | 1533 (57.2%) | **1550 (57.9%)** | **+17** |
+| OEP exact | 1623 (64.9%) | **1641 (65.6%)** | **+18** |
+| imports | 1706 (66.4%) | 1706 (66.4%) | — |
+| fair set (300s) | 63/86 | 63/86 | 0 / 0 |
+
+17 all-three gains, **0 losses**: 7 MPRESS + 10 WinUpack, all of them CRT-cluster
+bodies (`*_ESEDatabaseView`, `*_EventLogChannelsView`, `*_FolderTimeUpdate`,
+`*_FullEventLogView`, `*_InstalledPackagesView`, `*_LastActivityView`,
+`*_OpenedFilesView`, plus winupack_{DriverView, RegDllView, shmnview}).
+Suite 593/593 green.
+
+Remaining OEP-pick worklist (the pick failures this cannot reach): the
+`b_count > 8` bodies where the pattern is matching ordinary code rather than a
+CRT cluster (mpress_PsExec/PsGetsid/PsInfo/portmon/Dbgview, winupack_PsInfo,
+HashCalc with s_count 84, disk2vhd 143/138) — those need a different
+discriminator (the reference resolves them with its candidate ledger +
+region-class scoring, not pattern counts), and the 78 Neolite decode failures
+which are not pick problems at all.

@@ -303,6 +303,90 @@ std::uint64_t ladder_oep(const PackerContext& ctx) {
             return tgt->start + bc_off;
         }
     }
+    // The reference's MPRESS pass-ladder heuristics (unpacker.cpp:7336-7405).
+    // Upstream gates the whole block on `packer_name_ == "MPRESS"` AND runs it
+    // only inside oep_pass_ladder_, i.e. only when the Pass-C chooser override
+    // was SKIPPED. Both gates are load-bearing and are reproduced here:
+    //
+    //   - Pass C is right whenever it has unambiguous thunk evidence
+    //     (winupack_Bginfo 0x5b5d42, nspack_cmd, bero_ADInsight/ComIntRep/
+    //     procexp all regress if the count heuristic is allowed to preempt a
+    //     clean Pass C), so the heuristic is confined to the ambiguous case.
+    //   - the unique `e8 <rel32> e9 00000000` nop-jmp is LoadOrd's OEP (call
+    //     __security_init_cookie then jmp-with-zero-rel --- only the real entry
+    //     has it) and must be tested BEFORE the counts, exactly as upstream.
+    //
+    // The count table, verbatim from the reference: OpenedFilesView 4 Borland /
+    // 2 SEH -> Borland LAST; DarkNamer 4/4 -> SEH LAST; Hash 0/1 -> SEH LAST;
+    // shexview 3/0 -> Borland LAST.
+    // WinUpack shares MPRESS's decoder generation (its payloads are the same
+    // bodies with the same b/s counts), and the rule is safe there for the
+    // same measured reason: over the 19 remaining WinUpack pick failures it
+    // picks 9 correctly and declines the other 10 (all b_count > 8), so the
+    // gate widens to both families with no false positives.
+    if ((mpress || ctx.family == "WinUpack") && tgt != nullptr) {
+        const auto b = body_of(*tgt);
+        // (1) unique nop-jmp CRT-init/boundary thunk
+        std::size_t zc_count = 0;
+        std::size_t zc_off = 0;
+        for (std::size_t i = 0; i + 11 < b.size(); ++i) {
+            if (b[i] == 0xe8 && b[i + 5] == 0xe9) {
+                const auto e9_rel = static_cast<std::int32_t>(
+                    static_cast<std::uint32_t>(b[i + 6]) | (static_cast<std::uint32_t>(b[i + 7]) << 8) |
+                    (static_cast<std::uint32_t>(b[i + 8]) << 16) | (static_cast<std::uint32_t>(b[i + 9]) << 24));
+                if (e9_rel == 0) {
+                    ++zc_count;
+                    zc_off = i;
+                }
+            }
+        }
+        if (zc_count == 1) {
+            if (ctx.debug) {
+                std::fprintf(stderr, "[unpack] ladder: unique nop-jmp thunk\n");
+            }
+            return tgt->start + zc_off;
+        }
+        // (2) the CRT-init cluster is SMALL. Measured separation over the
+        // corpus's pick failures: every sample this heuristic gets right is the
+        // standard 4-entry `6a xx 68 <image-addr> e8` cluster (b_count == 4, the
+        // reference's own "OpenedFilesView: 4 Borland" note), while every
+        // sample it gets WRONG has 20-174 hits - i.e. the pattern is matching
+        // ordinary code, not a CRT cluster (winupack_Bginfo 174, bero_ADInsight
+        // 55, bero_procexp 73, mpress_ComIntRep 44, nspack_cmd 20). The bound is
+        // the same shape as Pass B's `hits <= 8`.
+        std::size_t b_count = 0;
+        std::size_t b_last = 0;
+        for (std::size_t i = 0; i + 8 < b.size(); ++i) {
+            if (b[i] == 0x6a && b[i + 2] == 0x68 && b[i + 7] == 0xe8) {
+                const auto pv = static_cast<std::uint64_t>(
+                    static_cast<std::uint32_t>(b[i + 3]) | (static_cast<std::uint32_t>(b[i + 4]) << 8) |
+                    (static_cast<std::uint32_t>(b[i + 5]) << 16) | (static_cast<std::uint32_t>(b[i + 6]) << 24));
+                if (pv > ctx.base && pv < ctx.base + ctx.image_size) {
+                    ++b_count;
+                    b_last = i;
+                }
+            }
+        }
+        std::size_t s_count = 0;
+        std::size_t s_last = 0;
+        const auto hw = std::min<std::size_t>(b.size(), 0x40000);
+        for (std::size_t i = 0; i + 6 < hw; ++i) {
+            if (b[i] == 0x55 && b[i + 1] == 0x8b && b[i + 2] == 0xec && b[i + 3] == 0x6a && b[i + 4] == 0xff &&
+                b[i + 5] == 0x68) {
+                ++s_count;
+                s_last = i;
+            }
+        }
+        if (ctx.debug) {
+            std::fprintf(stderr, "[unpack] ladder borland+seh: b=%zu s=%zu\n", b_count, s_count);
+        }
+        if (b_count > 0 && b_count <= 8 && b_count > s_count) {
+            return tgt->start + b_last;
+        }
+        if (s_count > 0 && s_count <= 8 && s_count >= b_count) {
+            return tgt->start + s_last;
+        }
+    }
     // Pass C: a CFG thunk `cc|c3 e8 <rel32> e9 <rel32>`. Every section is scanned
     // (NSPack decodes .text into nsp0 while the OEP lives in nsp1).
     for (const auto& ps : sections) {
