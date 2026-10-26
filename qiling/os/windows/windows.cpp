@@ -262,26 +262,21 @@ void QlOsWindows::ensure_profile_state() {
     }
 
     // the winapi dispatch hook (windows.py: ql.hook_code(self.hook_winapi)) is
-    // split in two (round 14, lever 2): the per-*instruction* guard below keeps
-    // only the instruction budget and the SEH pre-checks, while the actual
-    // winapi dispatch rides a per-*block* hook — an import call is a jump to a
-    // one-instruction stub cell, i.e. a basic-block entry, so block granularity
-    // fires the dispatch exactly once per call and removes the symbol-map
-    // pre-check from the per-instruction hot path.
+    // split in two (round 14): the actual winapi dispatch rides a per-*block*
+    // hook below, and the per-*instruction* guard keeps the instruction budget
+    // (the deterministic hang guard the PMA parity test relies on) plus, on x64,
+    // the iretq pre-check. The divide-by-zero pre-check is GONE (round 15):
+    // unicorn raises a catchable #DE interrupt, and seh_on_interrupt maps
+    // int 0 -> STATUS_INTEGER_DIVIDE_BY_ZERO — the reference's own shape
+    // (winemu.cpp:7549), so the per-instruction div decode is redundant.
     auto* self = this;
     hook_handle_ = ql_->hook_code([self](std::uint64_t address, std::uint32_t) -> int {
-        // the hang guard: a counted budget is deterministic instead of wall
-        // clock. unicorn's own count limit stops at exactly `count` instructions
-        // without reporting an error, so the guard trips on the boundary
         ++self->instructions_;
         const auto budget = self->ql_->count();
         if (budget != 0 && self->instructions_ >= budget) {
             self->instruction_budget_hit_ = true;
             self->ql_->emu_stop();
             return 1;
-        }
-        if (self->seh_check_cpu_exception(address)) {
-            return 1;  // the exception was staged: the run loop restarts there
         }
         if (self->seh_check_iret(address)) {
             return 1;  // iretq emulated: the run loop restarts at the restored rip
