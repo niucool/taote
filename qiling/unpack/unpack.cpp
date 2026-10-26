@@ -1622,6 +1622,38 @@ std::uint64_t Unpacker::pick_oep(const std::vector<std::uint8_t>& image) const {
         const auto pep = packed_ep_va_;
         for (const auto va : hop_ledger_) {
             if (va > pep && va - pep <= 0x40 && section_index_at(va) == section_index_at(pep)) {
+                // The epfix must not preempt a REAL SEH-startup frame. Round
+                // 17 measured this precisely: extending the whole ladder here
+                // regresses pecompact_PEViewer (the ladder's Pass-C look-alike
+                // 0x4f99f0 beat the correct packed EP 0x401504), and extending
+                // the Borland+SEH CLUSTER rule to PECompact would regress 9 of
+                // the samples that currently pass (AccessEnum, Cacheset,
+                // Diskmon, adrestore, ctrl2cap, dfrgui, efsdump, ftp, pagedfrg).
+                // What IS safe is the narrower fact: when the ladder's answer is
+                // itself a `55 8b ec 6a ff 68` startup frame - Pass B's evidence,
+                // not Pass C's - it is a genuine entry and outranks the header EP.
+                // Measured: pecompact_{DarkNamer,Hash,rm} flip to exact and no
+                // currently-passing sample changes.
+                const auto ladder = static_oep_from_image(image);
+                const bool ladder_is_startup_frame = [&] {
+                    if (ladder == 0 || ladder < base_) {
+                        return false;
+                    }
+                    const auto off = static_cast<std::size_t>(ladder - base_);
+                    if (off + 6 > image.size()) {
+                        return false;
+                    }
+                    const auto* q = image.data() + off;
+                    return q[0] == 0x55 && q[1] == 0x8b && q[2] == 0xec && q[3] == 0x6a && q[4] == 0xff &&
+                           q[5] == 0x68;
+                }();
+                if (ladder != 0 && ladder != pep && ladder_is_startup_frame) {
+                    if (opts_.debug) {
+                        std::fprintf(stderr, "[unpack] pecompact epfix: startup frame %s outranks header ep %s (hop %s)\n",
+                                     hex(ladder).c_str(), hex(pep).c_str(), hex(va).c_str());
+                    }
+                    return ladder;
+                }
                 if (opts_.debug) {
                     std::fprintf(stderr, "[unpack] pecompact epfix: hop %s -> header ep %s\n",
                                  hex(va).c_str(), hex(pep).c_str());

@@ -2281,3 +2281,74 @@ HashCalc with s_count 84, disk2vhd 143/138) — those need a different
 discriminator (the reference resolves them with its candidate ledger +
 region-class scoring, not pattern counts), and the 78 Neolite decode failures
 which are not pick problems at all.
+
+### 0.17j Round 17: gap attribution, and the PECompact epfix preemption
+
+Re-ran the by-first-failing-criterion classification on the r19 build, then
+attributed the whole gap family-by-family against the stored oracle run
+(`/home/jim/runs/oracle/results.json`) instead of guessing:
+
+| family | n | ref all-3 | taote all-3 | gap |
+|---|---|---|---|---|
+| Alienyze | 126 | 116 | 0 | **-116** |
+| Amber | 152 | 111 | 0 | **-111** |
+| Neolite | 93 | 92 | 1 | **-91** |
+| TELock | 116 | 59 | 0 | **-59** |
+| PEtite | 73 | 56 | 23 | -33 |
+| MPRESS | 106 | 103 | 80 | -23 |
+| PECompact | 97 | 94 | 74 | -20 |
+| FSG | 97 | 90 | 75 | -15 |
+| NSPack | 97 | 97 | 86 | -11 |
+| WinUpack | 97 | 83 | 74 | -9 |
+| RLPack | 104 | 7 | 0 | -7 |
+
+Total -446. **The top four are 377 of it**, and they are all decode-blocked
+(Alienyze/Amber/Neolite `code_sim` 0.03-0.11, TELock empty chain). Themida (122)
+and Yoda-Protector (101) are **not** in the list because the reference fails them
+too — so the 6 "0% OEP" families in a naive count are really 4 in-scope plus 2
+out-of-scope.
+
+Only **61 pick failures remain** (round 16 took 26 of the original 87), so the
+OEP *picker* well is nearly dry; the remaining OEP gap is decode work.
+
+**Amber/Alienyze are not pick problems at all.** Instrumenting
+amber_nbtstat shows the stub runs, claims `.bss`/`.data`, then ends at a stub-DLL
+cell after 13 writes — `stages=0`, no hop, no heap map. The payload is XOR'd in
+the dump (Alienyze decrypts on demand via guard pages the emulation never trips),
+and the reference's recovery is a 1544-line module (`alienyze.cpp`: key derivation
+by x86-likelihood scoring over candidate XOR keys, body relocation, and a full
+import-table rebuild from the `.alien` store). That is a module port, not a rule.
+
+**PECompact epfix preemption (fixed here).** All 21 PECompact OEP failures claim
+exactly the header EP, 20 of them with imports already correct — one early return
+was the whole PECompact OEP gap. The round-11 mini-stub epfix fires on the hop
+`packed EP + 0x16`, but for the PsTools-family builds the packed EP is only the
+mini-stub and the real entry is tens of KB later (pecompact_RegDllView: hop
+0x401016, true 0x40c80c).
+
+Two wider fixes were measured and **rejected**:
+- "prefer the whole ladder over the epfix" regresses pecompact_PEViewer (Pass-C
+  look-alike 0x4f99f0 beat the correct packed EP 0x401504).
+- "extend the Borland+SEH cluster rule to PECompact" would regress 9 samples that
+  currently pass (AccessEnum, Cacheset, Diskmon, adrestore, ctrl2cap, dfrgui,
+  efsdump, ftp, pagedfrg), unlike MPRESS/WinUpack where it was clean.
+
+What is safe is the narrow fact: when the ladder's answer is itself a
+`55 8b ec 6a ff 68` startup frame (Pass B's evidence, not Pass C's) it outranks
+the header EP. Measured on the probe: pecompact_{DarkNamer, Hash, rm, HashCalc}
+flip to exact and no currently-passing sample changes.
+
+**Measured (full corpus, 2678, 85s, pin 4):**
+
+| | r19 | round 17 |
+|---|---|---|
+| all three | 1550 (57.9%) | **1553 (58.0%)** |
+| OEP exact | 1641 (65.6%) | **1644 (65.7%)** |
+| imports | 1706 | 1706 |
+
++3 all-three (pecompact_{DarkNamer, Hash, rm}), **0 losses**; fair set 63/86
+unchanged (0/0). Suite 593/593 green. pecompact_HashCalc's OEP also became exact
+but its imports are short, so it does not reach all-three.
+
+Next lever is now decode work, in gap order: Alienyze (-116), Amber (-111),
+Neolite (-91), TELock (-59) = 377 of the -446.
