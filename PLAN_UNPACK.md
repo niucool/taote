@@ -1444,6 +1444,33 @@ making the div guard a dynamically-installed hook that exists only while
 `seh_sentinel_ != 0`. Not attempted — it is subtle and the measured stop was
 ~1.5x combined, not 2x.
 
+### 0.17g Round 15: lever 1 — the remaining 2x is blocked at the budget counter
+
+Round 15 attempted the full per-instruction-hook removal. Result, measured:
+
+1. **div pre-check removal — landed (`ebc4d42`).** The bare-unicorn probe proved
+taote's unicorn raises a catchable #DE interrupt (not the `UC_ERR_EXCEPTION` the
+pre-check's comment claimed), and the existing `UC_HOOK_INTR` dispatch already
+maps int 0 -> 0xC0000094 (the reference's winemu.cpp:7549 shape). Removed
+`seh_check_cpu_exception` from the guard; throughput-neutral (MEW ~7.5s), suite
+593/593 green.
+2. **budget removal — blocked.** Moving the budget onto unicorn's native `count`
+and detecting the hit via the `emu_stop_requested` latch regressed the PMA
+parity test: a clean stop that ran off into the thread-return sled
+(pc=0x10021050, no `emu_stop`) was misreported as "timeout". The normal
+thread-return stop is indistinguishable from a count hit without per-instruction
+counting, and taote's `InstructionBudgetStopsRunawayGuest` + the PMA hang guard
+depend on that "timeout" record. The reference has no instruction budget (wall
+timeout only), so there is no reference shape to port. Reverted the budget
+change; the per-instruction counter stays.
+
+Net lever-1 outcome: the per-instruction hook now carries only the instruction
+budget (`++instructions_`) + the x64 iretq check. The remaining ~2x (removing
+the budget counter) needs either a count-hit signal unicorn does not expose or
+a redefinition of the PMA "timeout" contract — both out of scope for a
+throughput-only round. Moving on to the OEP residuals (the largest criterion
+gap, 64.3% vs 82.0%) and the decode-blocked families.
+
 ## 1. How pegasus unpacks, end to end
 
 ### 1.1 Lifecycle and where it hooks in
