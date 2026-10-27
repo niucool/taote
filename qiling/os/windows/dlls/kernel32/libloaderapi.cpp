@@ -290,9 +290,9 @@ void register_libloaderapi_family() {
         }
 
         const auto resolved = by_name ? iat->lookup(procname) : iat->lookup(ordinal);
-        if (resolved == 0 && std::getenv("TAOTE_RUNDBG") != nullptr) {
-            std::fprintf(stderr, "[rundbg] GetProcAddress(%s!%s) -> 0\n", dll_name->c_str(),
-                         procname.c_str());
+        if (std::getenv("TAOTE_RUNDBG") != nullptr) {
+            std::fprintf(stderr, "[rundbg] GetProcAddress(%s!%s) -> 0x%llx\n", dll_name->c_str(),
+                         procname.c_str(), static_cast<unsigned long long>(resolved));
         }
         return resolved;
     };

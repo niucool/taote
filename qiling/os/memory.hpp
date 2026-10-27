@@ -199,6 +199,11 @@ public:
 
     // Allocate heap memory; returns the chunk address, or 0 on failure
     std::uint64_t alloc(std::uint64_t size);
+    // Allocate a chunk whose ADDRESS is alignment-aligned (padding with a
+    // filler chunk when needed, never recycling). VirtualAlloc rides this: the
+    // returned base must be page-aligned, and VirtualQuery reports the chunk
+    // address as BaseAddress/AllocationBase, so the chunk has to START there.
+    std::uint64_t alloc_aligned(std::uint64_t size, std::uint64_t alignment);
     // Free the memory at an address; true iff freed successfully
     bool free(std::uint64_t addr);
     // The size of the used chunk starting at an address (0 when none)
@@ -227,6 +232,8 @@ public:
     const std::vector<Chunk>& chunks() const noexcept { return chunks_; }
 
 private:
+    // append-only bump (the alloc() body without the recycle search)
+    std::uint64_t alloc_append(std::uint64_t size);
     const Chunk* find(std::uint64_t addr, std::optional<bool> inuse = {}) const;
     Chunk* find(std::uint64_t addr, std::optional<bool> inuse = {});
 

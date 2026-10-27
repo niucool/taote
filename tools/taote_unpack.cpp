@@ -239,6 +239,18 @@ int main(int argc, char** argv) {
         for (const auto& [dll, exports] : plan.imports) {
             write_stub_dll(run_rootfs, dll, exports, plan.is64);
         }
+        // The five key DLLs every guest needs. Round 22 measured a WIDER set
+        // here (user32, advapi32, gdi32, shell32, ole32, oleaut32, comctl32,
+        // shlwapi, version, psapi, ws2_32, wininet, crypt32, iphlpapi,
+        // userenv) and it was NOT kept: corpus all-three 1588 -> 1584 (1 gain /
+        // 5 losses) because a sample whose LoadLibraryA used to fail now loads
+        // an export-less stub and keeps working, so borderline runs crossed the
+        // 85s harness budget and their import salvage collapsed
+        // (pecompact_PEViewer import recall 1.0 -> 0.035 at dur 58 -> 85,
+        // pecompact_cpuz_x32 1.0 -> 0.046 at 48 -> 85, pecompact_ComIntRep
+        // 1.0 -> 0.047 at 79 -> 85, mpress_ComIntRep 1.0 -> 0.905 at 79 -> 85).
+        // It also did not convert Amber. A wider rootfs needs to come with a
+        // budget story, not on its own.
         for (const char* key_dll : {"ntdll.dll", "kernelbase.dll", "kernel32.dll", "ucrtbase.dll",
                                     "mscoree.dll"}) {
             if (!fs::exists(run_rootfs / "Windows" / "System32" / key_dll)) {

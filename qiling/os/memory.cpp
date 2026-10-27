@@ -639,6 +639,50 @@ std::uint64_t QlMemoryHeap::alloc(std::uint64_t size) {
     return 0;
 }
 
+std::uint64_t QlMemoryHeap::alloc_append(std::uint64_t size) {
+    // the alloc() body without the recycle search: always bump
+    if (current_use_ + size > current_alloc_) {
+        const std::uint64_t real_size = mem_->align_up(size);
+
+        if (start_address_ + current_use_ + real_size > end_address_) {
+            return 0;
+        }
+
+        mem_->map(start_address_ + current_alloc_, real_size, UC_PROT_ALL, "[heap]");
+        mem_alloc_.emplace_back(start_address_ + current_alloc_, real_size);
+        current_alloc_ += real_size;
+    }
+
+    Chunk chunk;
+    chunk.address = start_address_ + current_use_;
+    chunk.size = size;
+    chunks_.push_back(chunk);
+    current_use_ += size;
+    return chunk.address;
+}
+
+std::uint64_t QlMemoryHeap::alloc_aligned(std::uint64_t size, std::uint64_t alignment) {
+    // Append a chunk whose ADDRESS is alignment-aligned, padding with a filler
+    // chunk when the bump pointer is not already aligned. The chunk must start
+    // at the returned address (not contain it) because VirtualQuery reports the
+    // chunk address as BaseAddress/AllocationBase, and Windows requires those to
+    // equal what VirtualAlloc returned. Recycling is skipped so the address is
+    // predictable.
+    if (alignment == 0) {
+        return alloc(size);
+    }
+
+    const auto addr = start_address_ + current_use_;
+    const auto pad = (alignment - (addr % alignment)) % alignment;
+    if (pad != 0) {
+        if (alloc_append(pad) == 0) {
+            return 0;
+        }
+    }
+
+    return alloc_append(size);
+}
+
 bool QlMemoryHeap::free(std::uint64_t addr) {
     Chunk* chunk = find(addr, true);
     if (chunk == nullptr) {

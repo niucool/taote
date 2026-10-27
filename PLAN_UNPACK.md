@@ -2622,3 +2622,66 @@ TAOTE_RUNDBG `[rundbg] emu error '<text>' pc=...` line in the run loop (unicorn
 otherwise only reports the error class) and a TAOTE_MEMDBG mem-invalid hook in
 taote_unpack that names the faulting address (this is what identified the NULL
 read).
+
+### 0.17o Round 22: the rootfs DLL set and a page-aligned-but-still-heap VirtualAlloc
+
+Two more layers of the Amber blocker, both generic.
+
+**Measured: the rootfs widening alone is NOT kept.** With the wider key-DLL set
+plus the VirtualAlloc change the corpus went all-three 1588 -> 1584 (1 gain /
+5 losses) and imports 1706 -> 1702, OEP unchanged. Four of the five losses are
+budget caps, not logic errors: `pecompact_PEViewer` import recall 1.0 -> 0.035 at
+dur 58 -> 85, `pecompact_cpuz_x32` 1.0 -> 0.046 at 48 -> 85,
+`pecompact_ComIntRep` 1.0 -> 0.047 at 79 -> 85, `mpress_ComIntRep` 1.0 -> 0.905 at
+79 -> 85. A sample whose `LoadLibraryA` used to fail now loads an export-less
+stub and keeps working, so borderline runs cross the 85s budget and their import
+salvage collapses; the fifth (`jdpack_find` vs the gain `jdpack_7za`, both at
+dur 0) is the known flaky picker pair trading places. So the widening is
+reverted: it converts nothing (Amber still fails) and a broader rootfs needs a
+budget story of its own. What stayed is the VirtualAlloc contract fix, because it
+is independent of the rootfs and locally keeps the PECompact salvage intact
+(`pecompact_PEViewer` 1596 imports, `pecompact_ADExplorer` 790).
+
+**1. The staged stub rootfs was too thin (reverted, see above).** With the TLS + `__p__acmdln` fixes in,
+Amber's loader ran and died on `LoadLibraryA(USER32.dll) -> 0x0`: the tool stages
+only `plan.imports` plus five key DLLs (ntdll/kernelbase/kernel32/ucrtbase/
+mscoree), and a *dynamic* loader resolves names the packed image never imported
+statically. The key list now also carries the system DLLs a loader reaches for
+(user32, advapi32, gdi32, shell32, ole32, oleaut32, comctl32, shlwapi, version,
+psapi, ws2_32, wininet, crypt32, iphlpapi, userenv); they export nothing, so
+`GetProcAddress` over them answers 0 exactly as a real DLL missing an export
+would, and a per-sample export-bearing stub always wins (`if (!exists(...))`).
+
+**2. The `VirtualAlloc` page-alignment: built, measured twice, NOT kept.**
+Round 21 proved a dedicated `api.VirtualAlloc` mapping costs 85 PECompact
+all-three because the import salvage reads the heap chunk table. So the heap
+grew `alloc_aligned(size, alignment)` instead: it pads with a filler chunk until
+the bump pointer is aligned and then appends, so the returned address IS the
+chunk address (VirtualQuery keeps reporting BaseAddress == AllocationBase). The
+committed extent also rounds UP to the page size, because Windows commits whole
+pages: Amber asks for 0x11400 with PAGE_EXECUTE_READWRITE and then enters its
+decoded payload at `base + 0x11193`.
+
+Measured with the padding version and the wider rootfs: all-three 1588 -> 1584.
+Measured again with the rootfs widening **reverted** (so the alignment alone):
+still **1588 -> 1584**, 1 gain / 5 losses — `pecompact_PEViewer`,
+`pecompact_cpuz_x32`, `pecompact_ComIntRep` all at dur=85 and
+`winupack_Bginfo` at dur=86 with collapsed import recall, plus the known
+`jdpack_find`/`jdpack_7za` flake pair trading places. The salvage stays intact
+locally (`pecompact_ADExplorer` 790 imports, `pecompact_PEViewer` 1596), so this
+is a **budget** cost: the padding and page-rounded commits push borderline
+PECompact/WinUpack runs over the 85s harness budget. Reverted, keeping
+`QlMemoryHeap::alloc_aligned` in the tree as the tool for the follow-up. Amber now allocates 0x11400 -> 0x5001000 and *executes there*
+(pc=0x5012193, inside the region), so it is past the mapping problem; it still
+ends with a NULL read, one `GetProcAddress` later:
+
+```
+[rundbg] LoadLibraryA(USER32.dll) -> 0x10060000
+[rundbg] GetProcAddress(user32.dll!VirtualAlloc) -> 0x0
+[rundbg] emu error 'Invalid memory read (UC_ERR_READ_UNMAPPED)' pc=0x5012193
+```
+
+That single (user32, VirtualAlloc) probe returning 0 and the guest then reading
+address 0 is the next thread: either the loader iterates modules and treats this
+first miss as fatal, or taote is misreading the name/module pair. Amber does not
+yet convert; user32.dll alone still left it at the same fault.
