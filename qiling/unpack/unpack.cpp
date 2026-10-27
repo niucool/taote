@@ -2070,6 +2070,10 @@ std::uint64_t Unpacker::static_oep_from_image(const std::vector<std::uint8_t>& i
 UnpackResult Unpacker::finalize(Qiling& ql) {
     detach_hooks();
     UnpackResult res;
+    // an embedded-PE adoption replaces the image and moves base_ (Amber-class
+    // payloads run from a heap buffer), so the adopted EP must also suppress the
+    // static ladder below
+    bool adopted_ep = false;
     res.base = base_;
     res.image_size = image_size_;
     res.is_64 = is_64_;
@@ -2166,6 +2170,13 @@ UnpackResult Unpacker::finalize(Qiling& ql) {
                     meta_oep_ = ep_va;
                     reason_ = "embedded_pe";
                     stages_ = 1;
+                    // the adopted image moves the base: the report captured
+                    // res.base from the stub before this block, and the static
+                    // ladder below would otherwise overwrite the exact EP the
+                    // adoption just proved (amber_nbtstat: payload base
+                    // 0x5011dea + ep 0x2a65, which is the reference's answer).
+                    res.base = base_;
+                    adopted_ep = true;
                 }
             }
         }
@@ -2183,7 +2194,7 @@ UnpackResult Unpacker::finalize(Qiling& ql) {
             }
             std::fprintf(stderr, "\n");
         }
-        if (hop_ledger_.empty()) {
+        if (hop_ledger_.empty() && !adopted_ep) {
             // no hop: the static entries, then the decoded-section ladder scan
             if (const auto mew = static_oep_; mew != 0) {
                 meta_oep_ = mew;

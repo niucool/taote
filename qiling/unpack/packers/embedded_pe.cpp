@@ -23,9 +23,32 @@ bool adopt_embedded_pe(Qiling& ql, PackerContext& ctx, std::vector<std::uint8_t>
     std::uint64_t best = 0;
     std::uint64_t best_size = 0;
     try {
-        for (const auto& mi : ql.mem().get_mapinfo()) {
+        // The heap is mapped in page chunks, so a payload written through a
+        // VirtualAlloc buffer straddles several map entries (amber_nbtstat's
+        // 0x11400-byte image starts at 0x50009ea inside a 0x1000-byte map whose
+        // successors are separate entries). Treat a CONTIGUOUS run of maps as
+        // one region, otherwise the `soi <= hi - cand_base` gate below can never
+        // hold for a heap-resident image.
+        const auto maps = ql.mem().get_mapinfo();
+        const auto run_end = [&maps](std::uint64_t start) {
+            std::uint64_t end = start;
+            bool grew = true;
+            while (grew) {
+                grew = false;
+                for (const auto& m : maps) {
+                    const auto m_lo = std::get<0>(m);
+                    const auto m_hi = std::get<1>(m);
+                    if (m_lo == end && m_hi > m_lo) {
+                        end = m_hi;
+                        grew = true;
+                    }
+                }
+            }
+            return end;
+        };
+        for (const auto& mi : maps) {
             const auto lo = std::get<0>(mi);
-            const auto hi = std::get<1>(mi);
+            const auto hi = run_end(lo);
             if (hi <= lo || lo == ctx.base || hi - lo < 0x1000 || hi - lo > 0x8000000) {
                 continue;
             }
@@ -50,6 +73,21 @@ bool adopt_embedded_pe(Qiling& ql, PackerContext& ctx, std::vector<std::uint8_t>
                         bases.push_back(lo + o);
                     }
                 }
+                // ...and at ANY offset, because the buffer VirtualAlloc hands
+                // back is a heap chunk, not a page boundary: the payload image can
+                // start anywhere inside it (amber_nbtstat: 0x9ea past the map
+                // base). Bounded so a garbage-heavy region cannot explode the
+                // candidate list; the PE32 + EXECUTABLE_IMAGE + section-layout
+                // gates below do the real filtering.
+                {
+                    std::size_t seen = 0;
+                    for (std::uint64_t o = 0; o + 0x200 <= whole.size() && seen < 64; ++o) {
+                        if (whole[o] == 'M' && whole[o + 1] == 'Z') {
+                            bases.push_back(lo + o);
+                            ++seen;
+                        }
+                    }
+                }
             }
             for (const auto cand_base : bases) {
             std::vector<std::uint8_t> head;
@@ -72,11 +110,15 @@ bool adopt_embedded_pe(Qiling& ql, PackerContext& ctx, std::vector<std::uint8_t>
                                 (static_cast<std::size_t>(head[0x3e]) << 16) |
                                 (static_cast<std::size_t>(head[0x3f]) << 24);
             if (lfanew + 0x40 > head.size() || head[lfanew] != 'P' || head[lfanew + 1] != 'E') {
+                if (dbg) std::fprintf(stderr, "[embed] reject noPE at 0x%llx lfanew=0x%zx\n",
+                                      (unsigned long long)cand_base, lfanew);
                 continue;
             }
             const auto opt = lfanew + 24;
             const auto magic = static_cast<std::uint32_t>(head[opt]) | (static_cast<std::uint32_t>(head[opt + 1]) << 8);
             if (magic != 0x10b && magic != 0x20b) {
+                if (dbg) std::fprintf(stderr, "[embed] reject magic=0x%x at 0x%llx\n", magic,
+                                      (unsigned long long)cand_base);
                 continue;
             }
             const auto soi = static_cast<std::uint64_t>(head[opt + 0x38]) |
@@ -84,19 +126,32 @@ bool adopt_embedded_pe(Qiling& ql, PackerContext& ctx, std::vector<std::uint8_t>
                              (static_cast<std::uint64_t>(head[opt + 0x3a]) << 16) |
                              (static_cast<std::uint64_t>(head[opt + 0x3b]) << 24);
             if (soi < 0x1000 || soi > hi - cand_base) {
+                if (dbg) std::fprintf(stderr, "[embed] reject soi=0x%llx (room 0x%llx) at 0x%llx\n",
+                                      (unsigned long long)soi, (unsigned long long)(hi - cand_base),
+                                      (unsigned long long)cand_base);
                 continue;
             }
             // Stricter acceptance (the reference requires EXECUTABLE_IMAGE and a
             // real section layout): scanning every 0x1000 step finds heap garbage
             // that merely starts with MZ, and adopting it replaces the image
             // (measured: Molebox Hasher/puttytel lost their decode this way).
-            const auto chars = static_cast<std::uint32_t>(head[opt + 0x46]) |
-                               (static_cast<std::uint32_t>(head[opt + 0x47]) << 8);
+            // Characteristics lives in the COFF header at lfanew+22, NOT in the
+            // optional header: the old `opt + 0x46` read (lfanew+0x5E) is the high
+            // half of NumberOfRvaAndSizes, so the EXECUTABLE_IMAGE gate below was
+            // testing garbage and rejecting real payloads. amber_nbtstat's decoded
+            // image at 0x5011dea reads 0x8140 there (no 0x0002) while its COFF
+            // Characteristics is 0x0102. The reference reads
+            // `rd16(head, coff + 18)` (unpacker.cpp:10583).
+            const auto chars = static_cast<std::uint32_t>(head[lfanew + 22]) |
+                               (static_cast<std::uint32_t>(head[lfanew + 23]) << 8);
             const auto ep_rva = static_cast<std::uint64_t>(head[opt + 0x10]) |
                                 (static_cast<std::uint64_t>(head[opt + 0x11]) << 8) |
                                 (static_cast<std::uint64_t>(head[opt + 0x12]) << 16) |
                                 (static_cast<std::uint64_t>(head[opt + 0x13]) << 24);
             if ((chars & 0x0002) == 0 || ep_rva == 0 || ep_rva >= soi) {
+                if (dbg) std::fprintf(stderr, "[embed] reject chars=0x%x ep=0x%llx soi=0x%llx at 0x%llx\n",
+                                      chars, (unsigned long long)ep_rva, (unsigned long long)soi,
+                                      (unsigned long long)cand_base);
                 continue;
             }
             const auto use_base = cand_base;

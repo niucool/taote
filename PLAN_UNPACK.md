@@ -2755,3 +2755,47 @@ and crash-landed, and a `static HookRet` outlived the Qiling so its destructor
 unregistered into freed memory. The memdbg probe is now a plain print that never
 touches guest memory. Lesson recorded: diagnostic hooks must not throw or
 outlive the engine.
+
+### 0.17q Round 24: the embedded-PE adoption actually adopts (Amber +76)
+
+Amber's payload is not decoded in place: the loader assembles a PE32 image in a
+heap buffer and runs it, so there is no section hop to find and the recovery has
+to *adopt* the embedded image (the reference's `try_embedded_pe`,
+unpacker.cpp:10540, reason `embedded_pe`). taote had that seam but it never
+matched. Three defects, each found by running the sample, not by reading code:
+
+1. **The scan stepped only 0x1000.** The buffer `VirtualAlloc` hands back is a
+   heap chunk, not a page boundary, so the payload's `MZ` sits at an arbitrary
+   offset - `0x9ea` past the map base for amber_nbtstat. The scanner now also
+   searches for `MZ` at **any** offset (bounded to 64 hits per region), with the
+   PE32 + Characteristics + section-layout gates doing the filtering.
+2. **A payload always straddled several map entries.** The heap is mapped in page
+   chunks, so `soi <= hi - cand_base` could never hold for a heap-resident image.
+   A contiguous run of maps is now treated as one region.
+3. **`Characteristics` was read from the wrong field.** `head[opt + 0x46]` is the
+   high half of `NumberOfRvaAndSizes`, not the COFF header's Characteristics
+   (`lfanew + 22`, which is what the reference reads at `coff + 18`). The
+   EXECUTABLE_IMAGE gate was therefore testing garbage and rejected the real
+   payload: amber_nbtstat's image at 0x5011dea reads 0x8140 at `opt+0x46` (no
+   0x0002) while its COFF Characteristics is 0x0102.
+
+With those fixed the payload at 0x5011dea is adopted, whose EP RVA is 0x2a65 -
+exactly the reference's `oep 0x1002a65` at `base 0x1000000`. Two reporting bugs
+surfaced at that point and are fixed too: `res.base` had been captured from the
+stub *before* the adoption moved `base_` (the report claimed base 0x400000 with an
+EP of 0x501484f), and the static ladder then overwrote the exact EP the adoption
+had proved, so an adopted EP now suppresses the ladder.
+
+**Measured (full corpus, 2678, 85s, pin 4):**
+
+| | round 23 | round 24 |
+|---|---|---|
+| corpus all-three | 1595 (59.6%) | **1671 (62.4%)** |
+| corpus OEP exact | 1686 (67.4%) | **1762 (70.5%)** |
+| corpus imports | 1842 (71.7%) | 1843 (71.8%) |
+| valid PE | 2568 | 2568 |
+| 200-set (300s) | 122 | **126 (+4)** |
+
+**76 gains, 0 losses**, every gain Amber; the 200-sample set agrees (+4, 0
+losses). The OEP criterion moved +76 while imports held - exactly the shape an
+OEP-only fix should have.
