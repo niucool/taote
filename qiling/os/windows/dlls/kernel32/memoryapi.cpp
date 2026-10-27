@@ -58,8 +58,16 @@ void register_memoryapi_family() {
         // change - not a mapping tweak. alloc_aligned is kept on QlMemoryHeap
         // because it is the tool for that follow-up.
         const auto dw_size = api_get_int(get_param(params, "dwSize"));
-
-        return w(ql).heap().alloc(dw_size);
+        const auto hint = api_get_int(get_param(params, "lpAddress"));
+        const auto ret = w(ql).heap().alloc(dw_size);
+        if (std::getenv("TAOTE_RUNDBG") != nullptr) {
+            std::fprintf(stderr, "[rundbg] VirtualAlloc(hint=0x%llx size=0x%llx prot=0x%llx) -> 0x%llx\n",
+                         static_cast<unsigned long long>(hint),
+                         static_cast<unsigned long long>(dw_size),
+                         static_cast<unsigned long long>(api_get_int(get_param(params, "flProtect"))),
+                         static_cast<unsigned long long>(ret));
+        }
+        return ret;
     };
 
     // BOOL VirtualFree(

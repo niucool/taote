@@ -2685,3 +2685,73 @@ That single (user32, VirtualAlloc) probe returning 0 and the guest then reading
 address 0 is the next thread: either the loader iterates modules and treats this
 first miss as fatal, or taote is misreading the name/module pair. Amber does not
 yet convert; user32.dll alone still left it at the same fault.
+
+### 0.17p Round 23: PEB->Ldr insert-at-tail (a forward walk previously saw ONE module)
+
+Amber's loader turned out to be a textbook shellcode API-hashing loader: after the
+round-22 fixes it reached this code inside its decoded buffer (dumped at the
+fault and disassembled):
+
+```
+5011b65: 60            pusha
+5011b66: 89 e5         mov  esp, ebp
+5011b68: 31 c0         xor  eax, eax
+5011b6a: 64 8b 50 30   mov  edx, fs:[eax+0x30]     ; PEB
+5011b6e: 8b 52 0c      mov  edx, [edx+0xc]         ; PEB->Ldr
+5011b71: 8b 52 14      mov  edx, [edx+0x14]        ; InMemoryOrderModuleList.Flink
+5011b74: 8b 72 28      mov  esi, [edx+0x28]        ; BaseDllName.Buffer
+5011b77: 0f b7 4a 26   movzx ecx, word [edx+0x26]  ; BaseDllName.MaximumLength
+5011b7d: ac            lodsb                       ; <-- faulted, esi == 0
+5011b84: f2 0f 38 f0 f8 crc32 edi, al
+5011b89: e2 f2         loop 5011b7d
+```
+
+Instrumenting the chain at the fault showed why: the InMemoryOrder list held
+**exactly one entry** (user32.dll), and the hasher walked it and then stepped into
+the list *head*, whose `+0x28` is 0.
+
+Root cause is in `QlLoaderPE::add_ldr_data_table_entry`: for each of the three
+order lists it wrote `head.Flink = head.Blink = new` on **every** insert, so a
+FORWARD walk from the head always saw only the newest module; the older entries
+stayed chained to each other but unreachable from the head. Windows' sentinel
+semantics are insert-at-tail:
+
+```
+new.Flink = head;  new.Blink = head.Blink;  head.Blink.Flink = new;  head.Blink = new
+```
+
+`make_ldr_data` already points every head's Flink and Blink at itself, so the
+"previous last" is the head's Flink cell when the list is empty and the single
+`write_ptr(prev_last, new_link)` covers both cases.
+
+**Measured (full corpus, 2678, 85s, pin 4): +7 all-three, +8 OEP, +136 imports,
+zero losses.**
+
+| | r22 | round 23 |
+|---|---|---|
+| corpus all-three | 1588 (59.3%) | **1595 (59.6%)** |
+| corpus OEP exact | 1678 (67.1%) | **1686 (67.4%)** |
+| corpus imports | 1706 (66.4%) | **1842 (71.7%)** |
+| valid PE | 2568 | 2568 |
+| 200-set (300s) | 122 | 122 (0/0) |
+
+7 gains, 0 losses, every gain Amber: `amber_{DarkNamer, Diskmon, FastHash_kr,
+HashCalc, OpenedFilesView, ShareEnum, shexview}`. The headline number is the
+IMPORT criterion, +136 samples, because a correct PEB->Ldr list is what most
+import-discovery paths walk. The 200-sample set is neutral (0/0) because its
+Amber entries were the ones already converting.
+
+This is not an Amber quirk: every loader that resolves APIs by walking
+PEB->Ldr (Amber, Alienyze, Neolite) was walking a one-entry list. Measured effect
+on amber_nbtstat: imports 122 -> 166, the run goes from 0.11s (dead end) to 0.38s
+(the reference is 0.4s / 4.7M insns), it reaches and executes inside its decoded
+VirtualAlloc buffer (48 dyn-exec events in region 0x5001000) - but it still does
+not convert (no section hop, OEP guessed).
+
+Two host-safety defects in my own debug scaffolding were introduced and removed
+here, both found by running the tool rather than by inspection: a PEB-walk dump
+built on `mem().read` threw from inside a unicorn callback (`hook_mem_invalid`)
+and crash-landed, and a `static HookRet` outlived the Qiling so its destructor
+unregistered into freed memory. The memdbg probe is now a plain print that never
+touches guest memory. Lesson recorded: diagnostic hooks must not throw or
+outlive the engine.

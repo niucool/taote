@@ -1295,30 +1295,33 @@ void QlLoaderPE::add_ldr_data_table_entry(const std::string& dll_name) {
     };
 
     for (const auto& [entry_off, ldr_off] : entry_links) {
-        std::uint64_t flink = 0;
-        std::uint64_t blink = 0;
-        if (!ldr_list_.empty()) {
-            const std::uint64_t last = ldr_list_.back();
-            // the Flink rides the last entry's current head link; the blink
-            // rides the LDR list head's Blink cell
-            flink = ql_->mem().read_ptr(last + entry_off, ptr);
-            blink = ql_->mem().read_ptr(ldr_address_ + ldr_off + ptr, ptr);
-        } else {
-            flink = ql_->mem().read_ptr(ldr_address_ + ldr_off, ptr);
-            blink = ql_->mem().read_ptr(ldr_address_ + ldr_off + ptr, ptr);
-        }
-        // a LIST_ENTRY is two guest pointers: on an x86 guest the Blink sits
-        // right after the 4-byte Flink, not 8 bytes in
-        put_le(entry, entry_off, flink, ptr);              // In*OrderLinks.Flink
-        put_le(entry, entry_off + ptr, blink, ptr);        // In*OrderLinks.Blink
+        // Proper LIST_ENTRY insert-at-TAIL against the self-referential sentinel
+        // in PEB_LDR_DATA (make_ldr_data points every head's Flink and Blink at
+        // itself). Windows semantics:
+        //     new.Flink  = head                      (new entry is now last)
+        //     new.Blink  = head.Blink                (the previous last)
+        //     head.Blink.Flink = new
+        //     head.Blink = new
+        // The previous code instead wrote head.Flink = head.Blink = new on every
+        // insert, so a FORWARD walk from the head saw only the newest module and
+        // then ran back into the head: the earlier entries stayed chained to each
+        // other but unreachable. That silently broke every loader that resolves
+        // APIs by walking PEB->Ldr: amber_nbtstat's hasher walked a list whose
+        // only entry was user32.dll, ran past it into the head, and died on
+        // `lodsb` from [edx+0x28] == 0 (the head has no BaseDllName).
+        const std::uint64_t head_link = ldr_address_ + ldr_off;
+        const std::uint64_t new_link = entry_addr + entry_off;
+        const std::uint64_t prev_last = ql_->mem().read_ptr(head_link + ptr, ptr);
+
+        put_le(entry, entry_off, head_link, ptr);      // new.Flink -> head
+        put_le(entry, entry_off + ptr, prev_last, ptr); // new.Blink -> previous last
         ql_->mem().write(entry_addr + entry_off,
                          std::vector<std::uint8_t>(entry.begin() + entry_off,
                                                    entry.begin() + entry_off + 2 * ptr));
-        ql_->mem().write_ptr(ldr_address_ + ldr_off, entry_addr + entry_off);            // head Flink
-        ql_->mem().write_ptr(ldr_address_ + ldr_off + ptr, entry_addr + entry_off);      // head Blink
-        if (!ldr_list_.empty()) {
-            ql_->mem().write_ptr(ldr_list_.back() + entry_off, entry_addr + entry_off);
-        }
+        // prev_last is the head's Blink cell when the list is empty, which is
+        // exactly head.Flink's cell, so this single write covers both cases
+        ql_->mem().write_ptr(prev_last, new_link);
+        ql_->mem().write_ptr(head_link + ptr, new_link); // head.Blink = new
     }
 
     ldr_list_.push_back(entry_addr);
