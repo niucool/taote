@@ -2964,3 +2964,41 @@ So Alienyze's binding constraint is now the **OEP pick** (17/126), not imports: 
 samples have exact OEP and 17 have satisfying imports, but only 2 overlap. The next
 Alienyze lever is therefore the shared pick machinery over the restored image, not
 more store parsing.
+
+### 0.17v Round 29: TELock detection (neutral) and why Alienyze's OEP is not a pick bug
+
+**TELock was never detected.** All 116 graded TELock samples carried
+`family=unknown`, so the TELock-gated engine paths (the self-modifying ladder at
+unpack.cpp:530, the SEH-chain probe at :2097, the decode-only region-class veto
+exemption) were silently inert. The reference detects TELock by the bare first EP
+byte (`e9`), which is far too generic to claim a family on. The corpus has a much
+stronger signature: the stub entry is **`e9 25 e4 ff ff`** (`jmp -0x1bdb`) on
+every sample. Verified offline over ALL 25 families in the dataset: that exact
+5-byte form matches **118/118 TELock samples and zero samples of any other
+family**, so claiming it cannot mis-route anything.
+
+**Measured: exactly neutral.** TELock family alone (116 samples, 85s): oep_exact 1,
+imports 0, all-three 0 - identical before and after. Detection alone does not
+convert anything, and it cannot change another family (the signature is
+dataset-provably TELock-only), so the corpus was not re-run for a provable-zero
+delta. Kept as correct routing - a truthful label is a prerequisite for the TELock
+seam work, and the plan's own rule against over-claiming is satisfied by the 0/25
+false-positive measurement rather than by keeping the label "unknown".
+
+**TELock's actual blocker** (next thread, not a pick bug): `telock_gzip` jumps to
+0x3c6625d4 - an unmapped, nonsense pc - and dies before decoding anything, so the
+ladder sees `C=0 C3=0` in every section and imports stay at 2. That is the
+documented empty-SEH-chain #GP class, i.e. emulation fidelity in the stub, not the
+OEP picker.
+
+**Alienyze's OEP is not a cheap pick fix** (investigated and closed this round).
+15 samples now have satisfying imports but a wrong OEP, and their *true* EPs do sit
+at recognizable shapes in the restored body (`6a 70 68 <imm32> e8`, `55 8b ec 6a ff
+68`, `e8 .. e9`). The body simply contains many look-alikes: `alienyze_DarkNamer`
+true EP 0xa71e (`55 8b ec 6a ff 68 a8 c9 40 00`) while the "unique MSVC frame"
+rule picks 0x404fa0, and `alienyze_BatteryInfoView` matches nothing
+(`C=0 C3=0`) because its Borland pre-check fails the uniqueness gate. Three
+shortcuts were checked and all are closed: the packed header EP is NOT the original
+(darknamer header 0x237e0 vs true 0xa71e), the `.alien` body carries no MZ/PE
+header under any XOR key, and the graded EP cannot come from the store. Resolving
+these needs the reference's broader evidence chain, not another shape rule.

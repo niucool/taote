@@ -175,6 +175,18 @@ Detection detect_from_file(const std::string& path) {
                 b[8] == 0x35) {
                 return set("PECompact", "ep-prefix", "b8..50 64 ff 35");
             }
+            // TELock: the stub's entry is `e9 25 e4 ff ff` (jmp -0x1bdb) on every
+            // corpus sample, and the reference detects it by the bare first byte
+            // (`e9`), which is far too generic. Measured over the packed corpus
+            // this exact 5-byte form matches 118/118 TELock samples and ZERO of the
+            // other 24 families, so it is safe to claim - which matters because the
+            // TELock label gates real engine behaviour (the self-modifying ladder,
+            // the SEH-chain probe and the region-class veto exemption) that an
+            // "unknown" label silently disables. Before this, all 116 graded TELock
+            // samples were detected as "unknown".
+            if (b[0] == 0xe9 && b[1] == 0x25 && b[2] == 0xe4 && b[3] == 0xff && b[4] == 0xff) {
+                return set("TELock", "ep-prefix", "e9 25 e4 ff ff");
+            }
             break;
         }
     } catch (...) {
