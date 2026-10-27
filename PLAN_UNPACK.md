@@ -2352,3 +2352,67 @@ but its imports are short, so it does not reach all-three.
 
 Next lever is now decode work, in gap order: Alienyze (-116), Amber (-111),
 Neolite (-91), TELock (-59) = 377 of the -446.
+
+### 0.17k Round 18: the PECompact placeholder header EP
+
+Follow-up to §0.17j. The 17 remaining PECompact pick failures all claimed the
+header EP, and the earlier "startup frame" gate did not reach them because their
+true entry is the Borland `6a 70 68 <handler> e8` cluster, not an SEH frame.
+
+The discriminator is the header itself. When the PE header's
+`AddressOfEntryPoint` equals the **first section's VirtualAddress**, the packer
+did not preserve the original entry — the field is a placeholder (0x401000 for
+every PsTools-family build) and the epfix is trusting the stub's own EP.
+Measured over all 96 valid PECompact samples:
+
+| header EP | result |
+|---|---|
+| preserved (≠ first section start) | true EP == header EP in **67 / 67** |
+| == first section start (placeholder) | true EP != header EP in **29 / 29** |
+
+A perfect separation, so the epfix defers to the entry-shaped CRT cluster in the
+placeholder case only. This is also why the two wider fixes of §0.17j regressed:
+those samples are in the *preserved* group where the header EP is genuinely the
+entry.
+
+Probe after the change: 5 gains (RegDllView 0x40c80c, BlueScreenView 0x40e78e,
+shexview 0x40ef60, sysexp 0x40acb2, ESEDatabaseView 0x40feea) and 7 preserved
+(Cacheset, AccessEnum, efsdump, pagedfrg, PEViewer, DarkNamer, Hash).
+
+### 0.18 Measurement infrastructure reset (round 18)
+
+`/home/jim/runs` was deleted externally mid-round-18 (the r21 corpus run and all
+historical reports were lost, along with the stored oracle results). Rebuilt:
+
+- **run root**: `/home/jim/runs` (recorded here as the canonical location).
+- **corpus manifest**: regenerated with the reference harness's own generator,
+  `~/source/jim/pegasus/tools/unpack_eval/build_manifest.py --cap 100000`, which
+  reproduces the graded set exactly: **2678 runs / 323 skipped**, same
+  packed→not-packed mapping. Manifest at `/home/jim/runs/corpus.json`.
+- **reference binary**: `~/source/jim/pegasus/build/cli/pegasus-cli` survived.
+- **second measurement set**: the original 86-sample fair list is unrecoverable,
+  so the surviving stratified set (`/tmp/m200o/manifest.json`, 25 families × 8 =
+  200 samples, with its own `oracle_results.json`) takes its place as the
+  second, reference-comparable measurement. Recorded as a deviation.
+
+**Measured (full corpus, 2678, 85s, pin 4; baseline = d586c2c re-run at 1553 to
+re-establish the reference point after the run-root loss):**
+
+| | baseline | round 18 |
+|---|---|---|
+| all three | 1553 (58.0%) | **1567 (58.5%)** |
+| OEP exact | 1644 (65.7%) | **1658 (66.3%)** |
+| imports | 1706 (66.4%) | 1706 (66.4%) |
+| valid PE | 2568 (95.9%) | 2568 (95.9%) |
+
+**+14 all-three, 0 losses** — exactly the 14 predicted PECompact samples
+(BlueScreenView, DriverView, ESEDatabaseView, EventLogChannelsView, FileTypesMan,
+FolderTimeUpdate, FullEventLogView, InstalledPackagesView, LastActivityView,
+OpenedFilesView, RegDllView, shexview, shmnview, sysexp).
+
+**Second set (200-sample stratified, 300s):** 120 -> **121** all-three (+1: the
+one PECompact sample in that slice), **0 losses**. Reference on the same set
+(verify.py rubric): 154/200 UNPACKED_VERIFIED, 158 c_ep_match — a different
+rubric, so not directly comparable to taote's unpack_report numbers.
+
+Suite 593/593 green.

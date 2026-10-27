@@ -1620,6 +1620,68 @@ std::uint64_t Unpacker::pick_oep(const std::vector<std::uint8_t>& image) const {
         // 0x40 bytes past the packed header EP in the same section, the header
         // EP is the faithful entry.
         const auto pep = packed_ep_va_;
+        // Is the header's AddressOfEntryPoint just the first section's start?
+        // (see the placeholder note below)
+        const bool pep_is_placeholder = [&] {
+            if (image.size() < 0x40) {
+                return false;
+            }
+            const auto rd32 = [&image](std::size_t o) -> std::uint32_t {
+                if (o + 4 > image.size()) {
+                    return 0;
+                }
+                return static_cast<std::uint32_t>(image[o]) | (static_cast<std::uint32_t>(image[o + 1]) << 8) |
+                       (static_cast<std::uint32_t>(image[o + 2]) << 16) |
+                       (static_cast<std::uint32_t>(image[o + 3]) << 24);
+            };
+            const auto lfanew = rd32(0x3c);
+            if (lfanew + 0x40 > image.size()) {
+                return false;
+            }
+            const auto ep_rva = rd32(lfanew + 24 + 0x10);
+            const auto nsec = static_cast<std::uint32_t>(image[lfanew + 6]) |
+                              (static_cast<std::uint32_t>(image[lfanew + 7]) << 8);
+            const auto sopt = static_cast<std::uint32_t>(image[lfanew + 20]) |
+                              (static_cast<std::uint32_t>(image[lfanew + 21]) << 8);
+            if (nsec == 0) {
+                return false;
+            }
+            const auto first_va = rd32(lfanew + 24 + sopt + 12);
+            return ep_rva != 0 && ep_rva == first_va;
+        }();
+        // The entry-shaped CRT cluster inside the decoded body (the reference's
+        // Borland+SEH LAST table, bounded to a real cluster the same way the
+        // decode-only ladder bounds it).
+        const auto borland_seh_cluster = [&](const std::vector<std::uint8_t>& img) -> std::uint64_t {
+            std::size_t b_count = 0, b_last = 0, s_count = 0, s_last = 0;
+            for (std::size_t i = 0; i + 8 < img.size(); ++i) {
+                if (img[i] == 0x6a && img[i + 2] == 0x68 && img[i + 7] == 0xe8) {
+                    const auto pv = static_cast<std::uint64_t>(
+                        static_cast<std::uint32_t>(img[i + 3]) | (static_cast<std::uint32_t>(img[i + 4]) << 8) |
+                        (static_cast<std::uint32_t>(img[i + 5]) << 16) |
+                        (static_cast<std::uint32_t>(img[i + 6]) << 24));
+                    if (pv > base_ && pv < base_ + image_size_) {
+                        ++b_count;
+                        b_last = i;
+                    }
+                }
+            }
+            const auto hw = std::min<std::size_t>(img.size(), 0x40000);
+            for (std::size_t i = 0; i + 6 < hw; ++i) {
+                if (img[i] == 0x55 && img[i + 1] == 0x8b && img[i + 2] == 0xec && img[i + 3] == 0x6a &&
+                    img[i + 4] == 0xff && img[i + 5] == 0x68) {
+                    ++s_count;
+                    s_last = i;
+                }
+            }
+            if (b_count > 0 && b_count <= 8 && b_count > s_count) {
+                return base_ + b_last;
+            }
+            if (s_count > 0 && s_count <= 8 && s_count >= b_count) {
+                return base_ + s_last;
+            }
+            return 0;
+        };
         for (const auto va : hop_ledger_) {
             if (va > pep && va - pep <= 0x40 && section_index_at(va) == section_index_at(pep)) {
                 // The epfix must not preempt a REAL SEH-startup frame. Round
@@ -1653,6 +1715,25 @@ std::uint64_t Unpacker::pick_oep(const std::vector<std::uint8_t>& image) const {
                                      hex(ladder).c_str(), hex(pep).c_str(), hex(va).c_str());
                     }
                     return ladder;
+                }
+                // The PLACEHOLDER header EP (round 18). When the header's
+                // AddressOfEntryPoint equals the FIRST SECTION's VirtualAddress,
+                // the packer did not preserve the original entry - the field is
+                // a placeholder and the epfix is trusting the stub.
+                // Measured over all 96 valid PECompact samples: header EP
+                // preserved -> true EP == header EP in **67/67**; header EP ==
+                // first section start -> true EP != header EP in **29/29**. A
+                // perfect separation, so the epfix defers to the entry-shaped
+                // cluster evidence in the second case only (the PsTools-family
+                // builds: hop 0x401016, true entry tens of KB later).
+                if (pep_is_placeholder) {
+                    if (const auto cluster = borland_seh_cluster(image); cluster != 0) {
+                        if (opts_.debug) {
+                            std::fprintf(stderr, "[unpack] pecompact epfix: placeholder header ep %s -> cluster %s\n",
+                                         hex(pep).c_str(), hex(cluster).c_str());
+                        }
+                        return cluster;
+                    }
                 }
                 if (opts_.debug) {
                     std::fprintf(stderr, "[unpack] pecompact epfix: hop %s -> header ep %s\n",
