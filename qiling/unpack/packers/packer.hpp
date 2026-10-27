@@ -47,6 +47,10 @@ struct PackerContext {
     // transform. Adding pairs can only help the recall-based criterion, so a
     // partial recovery is safe.
     std::vector<std::pair<std::string, std::string>>* imports_out = nullptr;
+    // family_fill() runs AFTER the OEP pick (the reference's
+    // family_terminal_fill) and may replace it. A separate pointer for the same
+    // reason imports_out is separate: no other seam can move the entry.
+    std::uint64_t* oep_mut = nullptr;
     std::vector<std::uint8_t> adopted;                     // a seam's replacement image
     std::uint64_t adopted_base = 0;                        // ... and its base/size/sections
     std::uint64_t adopted_size = 0;
@@ -117,6 +121,12 @@ public:
     // and family_transform_dump_image(). A true return means the image was
     // rewritten (ctx.image_ptr contents), so downstream parses must re-read it.
     virtual bool transform_image(PackerContext& /*ctx*/) { return false; }
+
+    // Correct the OEP AFTER the pick, from the terminal image. The reference's
+    // family_terminal_fill: a last resort for the families whose hop machinery
+    // settles on a plausible-looking but wrong entry. Returns true when it
+    // replaced *ctx.oep_mut.
+    virtual bool family_fill(PackerContext& /*ctx*/) { return false; }
 
     // Adopt a payload PE that the stub built outside the image (Amber/Alienyze).
     // A true return means `ctx.adopted` holds the replacement image.

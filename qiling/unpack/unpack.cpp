@@ -2277,6 +2277,28 @@ UnpackResult Unpacker::finalize(Qiling& ql) {
                 std::fprintf(stderr, "[unpack] exec-page overlay: %zu pages\n", restored);
             }
         }
+        // The family's terminal OEP fill (the reference's family_terminal_fill):
+        // a last-resort correction applied AFTER the pick, because for some
+        // families the hop machinery settles on a plausible-looking but wrong
+        // entry that no earlier seam can tell from the real one. Runs on the
+        // image as it will be dumped (the overlays below only add bytes).
+        if (packer_ != nullptr && image.size() == image_size_) {
+            packers::PackerContext fctx;
+            fctx.ql = &ql;
+            fctx.image_ptr = &image;
+            fctx.base = base_;
+            fctx.image_size = image_size_;
+            fctx.packed_ep_va = packed_ep_va_;
+            fctx.is_64 = is_64_;
+            fctx.debug = opts_.debug;
+            fctx.family = opts_.family;
+            fctx.sections = sections_;
+            fctx.oep_mut = &meta_oep_;
+            if (packer_->family_fill(fctx)) {
+                reason_ = "family_fill";
+                stages_ = 1;
+            }
+        }
         // MEW's stub memsets the decoded image right before handing off, so the
         // terminal dump is zeroed where the payload lives; the reference keeps the
         // full first-write overlay for this family alone (unpacker.cpp:178-200).

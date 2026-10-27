@@ -3137,3 +3137,64 @@ Amber 69, PEtite 38, RLPack 38. The first five alone are 538 of 786, and in each
 of them the failure is that the body is never decoded (or decoded wrongly), not
 that the entry is mis-picked. So the OEP percentage gap versus the reference is
 overwhelmingly a *decode* problem, and per-sample pick tuning cannot move it.
+
+### 0.17z Round 33: Neolite's terminal CRT-entry fill (corpus all-three +1)
+
+Neolite was the largest addressable single-family gap (1 of 93 all-three). The
+reference has a family file for it, and its second half is a portable, bounded
+mechanism: `NeoliteUnpacker::family_terminal_fill`
+(../pegasus/src/unpacker/packers/neolite_unpacker.cpp:501-622).
+
+**The mechanism.** Neolite decodes the payload IN PLACE, so the original
+program's CRT entry frame survives byte-identical in the dump - what fails is the
+PICK. The stub's hand-off has a plausible first byte at a place that is not the
+entry, so neither the accepted-hop rule nor the decode-only ladder can separate
+it from the real one. The reference's answer is a terminal scan for the
+compiler's CRT entry frames, applied AFTER the pick:
+
+| pattern | shape | use |
+|---|---|---|
+| P1e | `e8 ???? 6a ? 68 ???? e8 ???? 33 db 89 5d fc 64 a1 18 00 00 00` | high precision (VS2010 SEH-init) |
+| P2 | `55 8b ec 83 ec ? {53\|56\|57} ff 15` | high precision (VS2005/08) |
+| P3 | `e8 ???? e9 ???? cc cc cc cc` | loose (linker thunk), rescue only |
+
+Gate: override only when the current pick is NOT entry-shaped (first byte outside
+`55 e8 e9 eb 6a 68`), and then only when the high-precision set has exactly one
+member that is not the current pick, or the loose set has exactly one member and
+the pick is 0/implausible. So a genuinely shaped pick is never displaced - the
+reference's own comment records that psping's `e8/e9` trampoline pick must not be
+replaced by a decoy P3 hit elsewhere in its image.
+
+**New seam.** The pick is decided before `transform_image` can matter for these
+samples (their ledger is non-empty), so a post-pick hook was needed:
+`Packer::family_fill(PackerContext&)` with `ctx.oep_mut`, mirroring the reference's
+`family_terminal_fill` ordering. The base class returns false, so every other
+family is unchanged by construction. `NeolitePacker` (new
+qiling/unpack/packers/neolite_packer.cpp) is the only override.
+
+**Measured.** `neolite_cmd` is the sample the shape analysis predicted: the body
+is right (code_sim 0.975) but the pick was `8b ff` junk, and the scan finds
+**one** P1e hit at RVA 0x829a - the true EP.
+
+| scope | before | after |
+|---|---|---|
+| Neolite family (93, uncontended) | all-three 1, oep_exact 1 | **all-three 2, oep_exact 2** |
+| Neolite family, `TAOTE_OEP_INCUMBENT=0` | - | **all-three 2** (same single gain, so the incumbent is not the blocker) |
+| corpus (2678 @85s) | 1674 | 1674 measured = 1 gain / 1 loss |
+| 200-sample set (@300s) | 126 | **126 (0 gains, 0 losses, no timeouts)** |
+
+The single corpus loss is `mpress_ComIntRep` at `dur=85` - the documented
+budget flake (a clean local re-run gives `oep=0x42800a` with 850 imports and
+recall 1.0), so the honest delta is **1674 -> 1675 all-three, OEP 1782 -> 1783,
+imports unchanged at 1860**.
+
+**Process lesson.** The first corpus run of this round was launched CONCURRENTLY
+with the 200-sample set and reported 7 losses (six `bero_*` and one
+`expressor_*`), every one at `dur=85/86`. Running two harnesses at once starves
+both of CPU and manufactures timeouts that look exactly like regressions. Never
+run two measurement harnesses at the same time; the re-run alone was clean.
+
+**What did not work, measured.** Turning the incumbent rule off for Neolite alone
+gives the same single conversion, so Neolite's other 91 samples are not a
+hop-suppression problem. They remain a decode/pick problem of the kind round 32
+proved unreachable by candidate selection.

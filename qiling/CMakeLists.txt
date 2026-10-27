@@ -126,6 +126,7 @@ add_library(qiling_unpack STATIC
     unpack/iat/import_rebuilder.cpp
     unpack/packers/generic_packer.cpp
     unpack/packers/family_packers.cpp
+    unpack/packers/neolite_packer.cpp
     unpack/packers/decode_only_packer.cpp
     unpack/packers/mew_packer.cpp
     unpack/packers/pecompact_packer.cpp

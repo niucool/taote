@@ -31,7 +31,6 @@ private:
 
 std::unique_ptr<Packer> make_petite_packer() { return std::make_unique<FamilyPacker>("PEtite"); }
 std::unique_ptr<Packer> make_telock_packer() { return std::make_unique<FamilyPacker>("TELock"); }
-std::unique_ptr<Packer> make_neolite_packer() { return std::make_unique<FamilyPacker>("Neolite"); }
 std::unique_ptr<Packer> make_molebox_packer() { return std::make_unique<FamilyPacker>("Molebox"); }
 std::unique_ptr<Packer> make_winupack_packer() { return std::make_unique<FamilyPacker>("WinUpack"); }
 std::unique_ptr<Packer> make_enigma_vb_packer() { return std::make_unique<FamilyPacker>("EnigmaVB"); }
