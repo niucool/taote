@@ -2842,3 +2842,41 @@ So this is a genuine OEP advance that does not convert yet: imports are already
 now PICK failures, but their `code_sim` is ~0.00 (0.0015 / 0.0375 / 0.0019), i.e.
 the restored body does not match the original - the per-sample body layout is
 still wrong there. 17 of 126 samples now land exactly, up from 0.
+
+### 0.17s Round 26: Alienyze body-offset scan (measured, rejected) + refreshed classification
+
+**Tried and NOT kept: discover the `.alien` body offset by scoring.** Round 25's
+copy assumes the reference's constant `.alien+0x7e0`, which fails where the import
+store is larger (alienyze_Hasher: the 0x7e0 window scores 4, so the copy was
+skipped and the image stayed encrypted). Two variants were built:
+
+* first window scoring >= 24 while scanning 0x10 steps: that found store bytes a
+  few dozen bytes *before* 0x7e0 (0x6f0, 0x6b0, 0xd00), which shifts every RVA and
+  moved the OEPs of the samples that were already correct (7z 0x40e924 ->
+  0x40ea14, ADExplorer 0x4149ec -> 0x414b1c);
+* keep 0x7e0 when it scores >= 24, else take the best-scoring window: that keeps
+  7z/ADExplorer bit-identical and gives Hasher a 0x1e110 copy (score 160), but the
+  copy still stops at the hollow extent (`[0x1000..0x692dc)`) and never reaches
+  Hasher's original EP 0x82568, so its OEP stays wrong.
+
+Measured on the family alone (126 Alienyze samples, 85s): **16/126 oep_exact with
+the scan vs 17/126 without** - a regression, so it is reverted. The real fix is the
+reference's structural parse (`al_find_idt` + `al_hinted_store` / `al_packed_store`,
+alienyze.cpp:145-429) which locates the store and therefore the body, instead of
+scoring for it.
+
+**Refreshed by-first-failing-criterion classification** (/home/jim/runs/r27_report.json,
+2678 samples): invalid_pe 110, oep_wrong 722, imports_wrong 138; OEP-only failures
+(valid PE, imports already correct) 138, of which **27 are PICK failures**
+(code_sim >= 0.80: WinUpack 8, Amber 4, JDPack 4, Molebox 3, PECompact 3, NSPack 2,
+BeRoEXEPacker 1, MPRESS 1, Neolite 1) and **111 are DECODE failures**
+(Neolite 78, Amber 29, Alienyze 4). The picker is therefore nearly dry - 27 is the
+ceiling for further OEP-heuristic work - and the next lever is Neolite.
+
+Neolite probe (worst-first): it is not one bug. `neolite_cmd` has code_sim 0.975
+with a `e8 .. 6a 10 68 ..` crt-thunk at its original EP (pick-only, in the 27);
+`neolite_disk2vhd` has zeros there (never decoded); `neolite_shmnview` has plausible
+code (`33 db 33 c9 33 d2 42 90 ..`) at code_sim 0.081 (wrong body layout);
+`neolite_HashCalc` has UTF-16 text (`6f 00 20 00 73 00 61 00 76 00 65 00`) at
+0.065 (a body region that is not code at all). Any Neolite work must separate those
+three shapes rather than treat the family as decode-blocked as a whole.
