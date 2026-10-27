@@ -2131,6 +2131,29 @@ UnpackResult Unpacker::finalize(Qiling& ql) {
             res.error = "image read failed";
             return res;
         }
+        // Families whose payload is present but still ENCRYPTED at rest
+        // transform the image in place first (the reference's
+        // recover_alienyze / family_transform_dump_image): Alienyze's stub XORs
+        // with a per-sample single-byte key and only decrypts on demand through
+        // guard pages the emulation never trips, so the dump holds ciphertext and
+        // every downstream parse (OEP pick, import harvest) would see noise.
+        if (packer_ != nullptr) {
+            packers::PackerContext tctx;
+            tctx.ql = &ql;
+            tctx.image_ptr = &image;
+            tctx.image_mut = &image;
+            tctx.base = base_;
+            tctx.image_size = image_size_;
+            tctx.packed_ep_va = packed_ep_va_;
+            tctx.is_64 = is_64_;
+            tctx.debug = opts_.debug;
+            tctx.family = opts_.family;
+            tctx.sections = sections_;
+            tctx.packed_path = &opts_.sample_path;
+            if (packer_->transform_image(tctx)) {
+                sections_ = tctx.adopted_sections;
+            }
+        }
         // Amber-class: the payload PE is assembled in a heap buffer and the
         // original sections are never written, so there is no hop to find — adopt
         // the embedded image (the reference's try_embedded_pe)

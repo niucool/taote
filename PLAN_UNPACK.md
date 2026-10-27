@@ -2799,3 +2799,46 @@ had proved, so an adopted EP now suppresses the ladder.
 **76 gains, 0 losses**, every gain Amber; the 200-sample set agrees (+4, 0
 losses). The OEP criterion moved +76 while imports held - exactly the shape an
 OEP-only fix should have.
+
+### 0.17r Round 25: Alienyze single-byte XOR recovery (OEP +17)
+
+Alienyze was 0/126 on every criterion with `dur=0`: its stub only decrypts on
+demand through guard pages the emulation never trips, so the dump still holds the
+XOR'd body and the stub exits immediately. Ported the static recovery from the
+reference's `src/unpacker/alienyze.cpp` (the one dedicated family module) as a new
+`Packer::transform_image` seam - a family that decrypts the body in place, called
+before the OEP pick and the adoption:
+
+1. `score_window` / `recover_key` - x86-code likelihood over 14 windows spread
+   from the first section VA for all 256 keys (+8 per `55 8b|89 ec|e5` prologue,
+   +4 per `e8/e9` with an in-image 4-aligned target, +5 per `ff 15/25` or
+   `8b|8d modrm==05` absolute reference into the image).
+2. `recover_key_store` - the known-plaintext fallback: every name in the `.alien`
+   store ends in `.dll`, so `'.','d','l','l' ^ k` must appear twice or more.
+3. XOR `mem[first_sec_va..)` with the key.
+4. Restore the original IMAGE BODY, stashed behind the `.alien` import store at
+   `.alien+0x7e0` and XOR'd with the same key, over the hollow (`rsize == 0`)
+   sections' RVAs - gated on the x86-code score (>= 20) and `n > 0x1000` so a
+   layout drift skips the copy instead of corrupting the image.
+
+Measured keys on probes: alienyze_7z 0x6a, ADExplorer 0x72, Cacheset 0x0a (the
+last one is the sample the reference documents as a code-score failure: body copy
+skipped at score 0, which is the intended degradation).
+
+**Measured (full corpus, 2678, 85s, pin 4):**
+
+| | round 24 | round 25 |
+|---|---|---|
+| corpus all-three | 1671 (62.4%) | 1670 (62.4%) |
+| corpus OEP exact | 1762 (70.5%) | **1779 (71.1%)** |
+| corpus imports | 1843 (71.8%) | 1846 (71.9%) |
+| 200-set (300s) | 126 | 126 (0/0) |
+
+**+17 OEP, +3 imports, and all-three -1** - the single loss is
+`mpress_ComIntRep.exe`, the known budget-cap flake (it measured dur=85 and
+recall 0.905; two clean re-runs give oep=0x42800a with 850 imports, recall 1.0).
+So this is a genuine OEP advance that does not convert yet: imports are already
+1.000 on alienyze_{Hasher, KillPot, md5summer} and 0.99 on HDDScan, so those are
+now PICK failures, but their `code_sim` is ~0.00 (0.0015 / 0.0375 / 0.0019), i.e.
+the restored body does not match the original - the per-sample body layout is
+still wrong there. 17 of 126 samples now land exactly, up from 0.

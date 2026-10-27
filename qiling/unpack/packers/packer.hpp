@@ -38,6 +38,10 @@ namespace packers {
 struct PackerContext {
     Qiling* ql = nullptr;            // the run (guest memory, at install time)
     const std::vector<std::uint8_t>* image_ptr = nullptr;  // the dump (read-mostly)
+    // The same image, writable, for transform_image() only (a family that has to
+    // decrypt the body in place). Kept separate so every other seam stays
+    // read-only by construction.
+    std::vector<std::uint8_t>* image_mut = nullptr;
     std::vector<std::uint8_t> adopted;                     // a seam's replacement image
     std::uint64_t adopted_base = 0;                        // ... and its base/size/sections
     std::uint64_t adopted_size = 0;
@@ -101,6 +105,13 @@ public:
     virtual std::uint64_t static_oep_from_image(const PackerContext& ctx) const { return ladder_oep(ctx); }
 
     virtual ShadowPolicy shadow_policy() const { return ShadowPolicy::none; }
+
+    // Transform the terminal image IN PLACE before the OEP pick. Families whose
+    // payload is present but still encrypted at rest use this; the reference
+    // spells the same step out as recover_alienyze() (src/unpacker/alienyze.cpp)
+    // and family_transform_dump_image(). A true return means the image was
+    // rewritten (ctx.image_ptr contents), so downstream parses must re-read it.
+    virtual bool transform_image(PackerContext& /*ctx*/) { return false; }
 
     // Adopt a payload PE that the stub built outside the image (Amber/Alienyze).
     // A true return means `ctx.adopted` holds the replacement image.

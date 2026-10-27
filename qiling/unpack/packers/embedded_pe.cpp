@@ -263,9 +263,317 @@ public:
 // Alienyze is Amber-class: the stub builds the payload elsewhere too, so the same
 // adoption applies (the reference's AlienyzeUnpacker adds the per-sample XOR
 // recovery on top, see PLAN_UNPACK §0.5.3d row 6).
+// ---- Alienyze: single-byte XOR image recovery ---------------------------
+//
+// Ported from the reference's src/unpacker/alienyze.cpp. The stub decrypts the
+// original image on demand through guard pages the emulation never trips, so the
+// dump still holds the XOR'd body and the stub itself exits immediately
+// (measured: alienyze_* finish in dur=0 with stages=0, imports 0/126). The
+// reference therefore recovers statically:
+//
+//   1. al_score_window / al_recover_key: score x86-code likelihood over 14
+//      windows spread from the first section VA for all 256 keys, take the best.
+//   2. al_recover_key_store: fallback when the code score fails - every name in
+//      the `.alien` store ends in ".dll", so the pattern '.','d','l','l' ^ k must
+//      appear at least twice there.
+//   3. XOR mem[first_sec_va..end) with the key.
+//   4. Restore the original IMAGE BODY, which the stub stashes (same key) inside
+//      `.alien` behind its import store at .alien+0x7e0, over the hollow
+//      (rsize == 0) sections' RVAs - gated on the x86-code score so a layout
+//      drift skips the copy instead of corrupting the image, and deferred until
+//      after the import parse in the reference because the packer's FT/INT
+//      tables live inside the hollow region this copy overwrites.
+namespace alienyze {
+
+// the reference's al_score_window: +8 per `55 8b|89 ec|e5` prologue, +4 per
+// e8/e9 call/jmp with an in-image 4-aligned target, +5 per ff 15/25 or
+// `8b|8d modrm==05` absolute reference into the image
+int score_window(const std::uint8_t* p, std::size_t n, std::uint32_t img_off,
+                 std::size_t image_size) {
+    if (p == nullptr) {
+        return 0;
+    }
+    const auto rd32 = [p](std::size_t i) -> std::uint32_t {
+        return static_cast<std::uint32_t>(p[i]) | (static_cast<std::uint32_t>(p[i + 1]) << 8) |
+               (static_cast<std::uint32_t>(p[i + 2]) << 16) |
+               (static_cast<std::uint32_t>(p[i + 3]) << 24);
+    };
+    int s = 0;
+    std::size_t i = 0;
+    while (i + 6 < n) {
+        const std::uint8_t b = p[i];
+        if (b == 0x55 && (p[i + 1] == 0x8B || p[i + 1] == 0x89) &&
+            (p[i + 2] == 0xEC || p[i + 2] == 0xE5)) {
+            s += 8;
+            i += 3;
+            continue;
+        }
+        if (b == 0xE8 || b == 0xE9) {
+            const auto rel = static_cast<std::int32_t>(rd32(i + 1));
+            const std::int64_t addr = static_cast<std::int64_t>(img_off) +
+                                      static_cast<std::int64_t>(i) + 5 + rel;
+            if (addr >= 0x1000 && addr < static_cast<std::int64_t>(image_size) && (addr & 3) == 0) {
+                s += 4;
+                i += 5;
+                continue;
+            }
+        }
+        if (b == 0xFF && (p[i + 1] == 0x15 || p[i + 1] == 0x25)) {
+            const auto v = rd32(i + 2);
+            if (v >= 0x1000 && v < image_size && (v & 3) == 0) {
+                s += 5;
+                i += 6;
+                continue;
+            }
+        }
+        if ((b == 0x8B || b == 0x8D) && (p[i + 1] & 0xC7) == 0x05) {
+            const auto v = rd32(i + 2);
+            if (v >= 0x1000 && v < image_size && (v & 3) == 0) {
+                s += 5;
+                i += 6;
+                continue;
+            }
+        }
+        i++;
+    }
+    return s;
+}
+
+int recover_key(const std::vector<std::uint8_t>& mem, std::uint32_t first_sec_va) {
+    std::vector<std::uint32_t> offs;
+    const std::size_t start = first_sec_va ? first_sec_va : 0x1000;
+    const std::size_t span = mem.size() > start ? mem.size() - start : 0;
+    for (std::size_t f = 0; f < 14; ++f) {
+        const std::size_t o = start + (span * f) / 16;
+        if (o + 0x180 <= mem.size()) {
+            offs.push_back(static_cast<std::uint32_t>(o));
+        }
+    }
+    int best_key = -1;
+    int best_score = -1;
+    std::vector<std::uint8_t> xbuf(0x180);
+    for (int k = 0; k < 256; ++k) {
+        int tot = 0;
+        for (const std::uint32_t o : offs) {
+            for (std::size_t i = 0; i < 0x180; ++i) {
+                xbuf[i] = mem[o + i] ^ static_cast<std::uint8_t>(k);
+            }
+            tot += score_window(xbuf.data(), 0x180, o, mem.size());
+        }
+        if (tot > best_score) {
+            best_score = tot;
+            best_key = k;
+        }
+    }
+    return best_score <= 0 ? -1 : best_key;
+}
+
+// al_recover_key_store: the known-plaintext ".dll" suffix scan in `.alien`
+int recover_key_store(const std::vector<std::uint8_t>& mem, std::size_t a_lo, std::size_t a_hi) {
+    if (a_hi > mem.size()) {
+        a_hi = mem.size();
+    }
+    int best_k = -1;
+    std::size_t best_n = 0;
+    for (int k = 1; k < 256; ++k) {
+        const auto p0 = static_cast<std::uint8_t>('.' ^ k);
+        const auto p1 = static_cast<std::uint8_t>('d' ^ k);
+        const auto p2 = static_cast<std::uint8_t>('l' ^ k);
+        std::size_t n = 0;
+        for (std::size_t i = a_lo; i + 4 <= a_hi; ++i) {
+            if (mem[i] == p0 && mem[i + 1] == p1 && mem[i + 2] == p2 && mem[i + 3] == p2) {
+                ++n;
+            }
+        }
+        if (n > best_n) {
+            best_n = n;
+            best_k = k;
+        }
+    }
+    return best_n >= 2 ? best_k : -1;
+}
+
+struct Sec {
+    std::string name;
+    std::uint32_t vsize = 0, va = 0, rsize = 0;
+};
+
+// al_stub_sections: the packed image's own section table
+std::vector<Sec> stub_sections(const std::vector<std::uint8_t>& raw) {
+    std::vector<Sec> out;
+    const auto rd32 = [&raw](std::size_t o) -> std::uint32_t {
+        if (o + 4 > raw.size()) {
+            return 0;
+        }
+        return static_cast<std::uint32_t>(raw[o]) | (static_cast<std::uint32_t>(raw[o + 1]) << 8) |
+               (static_cast<std::uint32_t>(raw[o + 2]) << 16) |
+               (static_cast<std::uint32_t>(raw[o + 3]) << 24);
+    };
+    const auto rd16 = [&raw](std::size_t o) -> std::uint32_t {
+        if (o + 2 > raw.size()) {
+            return 0;
+        }
+        return static_cast<std::uint32_t>(raw[o]) | (static_cast<std::uint32_t>(raw[o + 1]) << 8);
+    };
+    const std::size_t lfanew = rd32(0x3c);
+    const auto n_sec = rd16(lfanew + 6);
+    const auto opt_size = rd16(lfanew + 20);
+    const std::size_t sec_tab = lfanew + 24 + opt_size;
+    for (std::uint32_t i = 0; i < n_sec && i < 96; ++i) {
+        const std::size_t o = sec_tab + i * 40;
+        if (o + 40 > raw.size()) {
+            break;
+        }
+        Sec s;
+        for (std::size_t k = 0; k < 8 && raw[o + k] != 0; ++k) {
+            s.name.push_back(static_cast<char>(raw[o + k]));
+        }
+        s.vsize = rd32(o + 8);
+        s.va = rd32(o + 12);
+        s.rsize = rd32(o + 16);
+        out.push_back(s);
+    }
+    return out;
+}
+
+}  // namespace alienyze
+
 class AlienyzePacker : public AmberPacker {
 public:
     const char* name() const override { return "Alienyze"; }
+
+    bool transform_image(PackerContext& ctx) override {
+        if (ctx.image_mut == nullptr || ctx.image_mut->empty()) {
+            return false;
+        }
+        auto& mem = *ctx.image_mut;
+        const auto secs = alienyze::stub_sections(mem);
+        if (secs.empty()) {
+            return false;
+        }
+
+        std::uint32_t first_sec_va = 0;
+        std::uint32_t a_lo = 0;
+        std::uint32_t a_hi = 0;
+        for (const auto& s : secs) {
+            if (s.va != 0 && (first_sec_va == 0 || s.va < first_sec_va)) {
+                first_sec_va = s.va;
+            }
+            if (s.name == ".alien") {
+                a_lo = s.va;
+                a_hi = s.va + s.vsize;
+            }
+        }
+        if (a_lo == 0 || a_hi > mem.size()) {
+            return false;
+        }
+
+        int key = alienyze::recover_key(mem, first_sec_va);
+        if (key <= 0) {
+            key = alienyze::recover_key_store(mem, a_lo, a_hi);
+        }
+        if (key <= 0) {
+            if (ctx.debug) {
+                std::fprintf(stderr, "[unpack] alienyze: key solve failed\n");
+            }
+            return false;
+        }
+        for (std::size_t i = first_sec_va; i < mem.size(); ++i) {
+            mem[i] ^= static_cast<std::uint8_t>(key);
+        }
+        if (ctx.debug) {
+            std::fprintf(stderr, "[unpack] alienyze: key=0x%02x decoded [0x%x..0x%zx)\n", key,
+                         first_sec_va, mem.size());
+        }
+
+        // ---- the corpus-variant body relocation ----
+        // The packed section table keeps the ORIGINAL layout but hollows the raw
+        // data (rsize == 0); the original IMAGE BODY (RVA layout, same key) sits
+        // in `.alien` behind the import store at .alien+0x7e0. Restore it over
+        // the hollow RVAs, gated on the x86-code score so a layout drift skips
+        // the copy instead of corrupting the image.
+        const auto rd32 = [&mem](std::size_t o) -> std::uint32_t {
+            if (o + 4 > mem.size()) {
+                return 0;
+            }
+            return static_cast<std::uint32_t>(mem[o]) | (static_cast<std::uint32_t>(mem[o + 1]) << 8) |
+                   (static_cast<std::uint32_t>(mem[o + 2]) << 16) |
+                   (static_cast<std::uint32_t>(mem[o + 3]) << 24);
+        };
+        const std::size_t packed_lfanew = rd32(0x3c);
+        const std::uint32_t packed_ep_rva =
+            packed_lfanew + 24 + 40 <= mem.size() ? rd32(packed_lfanew + 24 + 16) : 0;
+
+        std::uint32_t hollow_start = 0;
+        std::uint32_t hollow_end = 0;
+        bool has_hollow = false;
+        for (const auto& s : secs) {
+            if (s.name == ".alien" || s.va == 0 || s.vsize == 0) {
+                continue;
+            }
+            if (s.rsize == 0) {
+                if (hollow_start == 0) {
+                    hollow_start = s.va;
+                }
+                if (s.va + s.vsize > hollow_end) {
+                    hollow_end = s.va + s.vsize;
+                }
+                has_hollow = true;
+            }
+        }
+
+        constexpr std::uint32_t kPayloadOff = 0x7e0;  // .alien+0x7e0, every corpus sample
+        const std::size_t psrc = static_cast<std::size_t>(a_lo) + kPayloadOff;
+        if (has_hollow && psrc + 0x180 < mem.size() && hollow_end > hollow_start &&
+            hollow_end <= mem.size()) {
+            const int score = alienyze::score_window(mem.data() + psrc, 0x180,
+                                                     static_cast<std::uint32_t>(psrc),
+                                                     static_cast<std::uint32_t>(mem.size()));
+            std::size_t avail = mem.size() - psrc;
+            if (packed_ep_rva > psrc) {
+                avail = std::min<std::size_t>(avail, static_cast<std::size_t>(packed_ep_rva - psrc));
+            }
+            const std::size_t n =
+                std::min<std::size_t>(avail, static_cast<std::size_t>(hollow_end - hollow_start));
+            if (score >= 20 && psrc >= hollow_end && n > 0x1000) {
+                std::copy_n(mem.begin() + static_cast<std::ptrdiff_t>(psrc),
+                            static_cast<std::ptrdiff_t>(n),
+                            mem.begin() + static_cast<std::ptrdiff_t>(hollow_start));
+                if (ctx.debug) {
+                    std::fprintf(stderr,
+                                 "[unpack] alienyze: body copy [0x%x..0x%llx) <- .alien+0x%x "
+                                 "(%zu bytes, score=%d)\n",
+                                 hollow_start,
+                                 static_cast<unsigned long long>(hollow_start + n), kPayloadOff, n,
+                                 score);
+                }
+            } else if (ctx.debug) {
+                std::fprintf(stderr,
+                             "[unpack] alienyze: body copy skipped (score=%d n=%zu psrc=0x%zx "
+                             "hollow_end=0x%x)\n",
+                             score, n, psrc, hollow_end);
+            }
+        }
+
+        // report the geometry from the (now decoded) image; the engine re-derives
+        // its watch set from these
+        ctx.adopted_base = 0;  // same base: the payload was restored in place
+        ctx.adopted_sections.clear();
+        for (const auto& s : secs) {
+            if (s.va == 0 || s.vsize == 0) {
+                continue;
+            }
+            PackSection ps;
+            ps.name = s.name;
+            ps.vsize = s.vsize;
+            ps.start = ctx.base + s.va;
+            ps.end = ps.start + s.vsize;
+            ps.raw = s.rsize;
+            ps.is_exec = (s.name == ".text" || s.name == ".alien");
+            ctx.adopted_sections.push_back(ps);
+        }
+        return true;
+    }
 };
 
 std::unique_ptr<Packer> make_amber_packer() { return std::make_unique<AmberPacker>(); }
