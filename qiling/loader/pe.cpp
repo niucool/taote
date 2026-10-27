@@ -127,6 +127,50 @@ std::uint64_t QlLoaderPE::load_parsed(std::unique_ptr<LIEF::PE::Binary> parsed, 
     // EXPORT address (the load_dll export walk below); the IAT slots get
     // written in init_imports (the OS-layer call, after the sys dlls load)
 
+    // IMAGE_DIRECTORY_ENTRY_TLS: the main image's TLS callbacks. Windows runs
+    // these BEFORE the entry point with (image_base, DLL_PROCESS_ATTACH, 0), and
+    // the packed corpus depends on it: Amber's loader is a TLS callback, so a
+    // port that jumps straight to the entry point never reaches the
+    // decompressor (measured: amber_nbtstat dispatches 9 CRT-init APIs and ends
+    // at a stub-DLL cell, while the reference logs `* exec: tls_callback_0`).
+    // Read from the MAPPED image the same way the reference's
+    // PeFile::get_tls_callbacks does (common.cpp:315): DataDirectory[9] ->
+    // IMAGE_TLS_DIRECTORY, whose AddressOfCallBacks is at 3*ptr_size, then walk
+    // the null-terminated pointer array (capped at 100 entries).
+    if (set_entry_point) {
+        tls_callbacks_.clear();
+        try {
+            const auto* tls_dir = parsed->data_directory(LIEF::PE::DataDirectory::TYPES::TLS_TABLE);
+            const auto tls_rva = tls_dir == nullptr ? 0ull : static_cast<std::uint64_t>(tls_dir->RVA());
+            if (tls_rva != 0) {
+                const auto ptr_size = static_cast<std::uint64_t>(ql_->arch().pointersize());
+                const auto cb_ptr_va = base + tls_rva + 3 * ptr_size;
+                std::uint64_t arr_va = 0;
+                try {
+                    arr_va = ql_->mem().read_ptr(cb_ptr_va, ptr_size);
+                } catch (...) {
+                    arr_va = 0;
+                }
+                if (arr_va != 0) {
+                    for (int i = 0; i < 100; ++i) {
+                        std::uint64_t cb = 0;
+                        try {
+                            cb = ql_->mem().read_ptr(arr_va + static_cast<std::uint64_t>(i) * ptr_size, ptr_size);
+                        } catch (...) {
+                            break;
+                        }
+                        if (cb == 0) {
+                            break;
+                        }
+                        tls_callbacks_.push_back(cb);
+                    }
+                }
+            }
+        } catch (...) {
+            tls_callbacks_.clear();
+        }
+    }
+
     // loader/pe.py load_dll: the export walk fills the import_symbols map
     // keyed by the mapped export address, plus the image's own iat slice and
     // the export_symbols map (the GetProcAddress self branch walks them)

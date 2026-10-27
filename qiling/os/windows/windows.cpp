@@ -868,6 +868,40 @@ void QlOsWindows::run() {
         fcall().call_native(entry_point, args, kDriverReturnSentinel);
     }
 
+    // TLS callbacks run BEFORE the entry point (Windows loader semantics; the
+    // reference's win32.cpp:241 adds them as runs ahead of the entry). Each is a
+    // DllMain-shaped call: (image_base, DLL_PROCESS_ATTACH, 0) through the
+    // guest's own calling convention, returning to a sentinel.
+    if (const auto& pe_loader_tls = static_cast<const loader::QlLoaderPE&>(ql_->loader());
+        !is_driver && !pe_loader_tls.tls_callbacks().empty()) {
+        for (std::size_t i = 0; i < pe_loader_tls.tls_callbacks().size(); ++i) {
+            const auto cb = pe_loader_tls.tls_callbacks()[i];
+            const auto img_base = pe_loader_tls.pe_image_address();
+            if (cb == 0 || cb < img_base || cb >= img_base + pe_loader_tls.pe_image_size()) {
+                continue;
+            }
+            if (std::getenv("TAOTE_RUNDBG") != nullptr) {
+                std::fprintf(stderr, "[rundbg] tls_callback_%zu at 0x%llx\n", i,
+                             static_cast<unsigned long long>(cb));
+            }
+            try {
+                const std::vector<std::pair<int, std::uint64_t>> tls_args = {
+                    {qiling::os::api::LPVOID_, img_base},
+                    {qiling::os::api::UINT_, 1},  // DLL_PROCESS_ATTACH
+                    {qiling::os::api::LPVOID_, 0},
+                };
+                set_fcall_ptr(fcall_select(default_cc_for("DllMain", ql_->arch().bits())));
+                fcall().call_native(cb, tls_args, exit_point);
+            } catch (const QlErrorBase& e) {
+                // a callback that faults is the guest's problem: the reference
+                // still proceeds to the entry point
+                if (std::getenv("TAOTE_RUNDBG") != nullptr) {
+                    std::fprintf(stderr, "[rundbg] tls_callback_%zu raised: %s\n", i, e.what());
+                }
+            }
+        }
+    }
+
     std::uint64_t begin = entry_point;
     while (true) {
         try {

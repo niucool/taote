@@ -2465,3 +2465,79 @@ each. The flake is counted in the committed numbers, not explained away.
 
 **Second set (200-sample stratified, 300s):** 121 -> **122** all-three (+1:
 mpress_AccessEnum), **0 losses**. Suite 593/593 green.
+
+### 0.17m Round 20: TLS callbacks (the Windows loader semantics Amber needs)
+
+Diagnosing Amber: `amber_nbtstat` ends in **0.05s** after 9 CRT-init API
+dispatches, with the payload never decoded (ladder finds 0 hits in every
+section; the encrypted payload sits in a randomized `.0sMJTto` section).
+
+Running the reference on the same sample shows the mechanism immediately:
+
+```
+* exec: tls_callback_0
+[api-dispatch] handling: kernel32.InitializeCriticalSection
+```
+
+**The reference enters the TLS callback, not the entry point.** Amber's unpacking
+stub is an `IMAGE_DIRECTORY_ENTRY_TLS` callback, so a port that jumps straight to
+`AddressOfEntryPoint` never reaches the decompressor. taote had **no TLS-callback
+support at all** (`grep tls_callback qiling/` was empty).
+
+Ported (the reference's `PeFile::get_tls_callbacks`, common.cpp:315, and
+`win32.cpp:241`):
+
+1. `QlLoaderPE::load_parsed` parses the main image's TLS directory:
+   `DataDirectory[9]` → `IMAGE_TLS_DIRECTORY`, whose `AddressOfCallBacks` sits at
+   `3 * ptr_size`, then walks the null-terminated pointer array (cap 100) and
+   stores it in `tls_callbacks_` (read from the *mapped* image, as upstream does).
+2. `QlOsWindows::run()` drives each callback **before** the entry point, as a
+   DllMain-shaped call `(image_base, DLL_PROCESS_ATTACH=1, 0)` through the
+   guest's own calling convention, returning to the exit point — the same shape
+   upstream builds as a `Run` with `type = "tls_callback_<i>"`. A callback that
+   faults is the guest's problem; the reference still proceeds to the entry.
+
+Measured so far: the callbacks are found and entered
+(`[rundbg] tls_callback_0 at 0x4018f0`, `tls_callback_1 at 0x4018a0`). Amber
+still does not decompress — it dispatches only CRT init and returns, so the
+Amber *loader body* itself is still not executing its decompressor (the reference
+also gives Amber a 4x timeout floor, min 360s, for its rc4/aPLib loop, which the
+120s harness wall cap makes irrelevant here — this sample finishes in 0.05s, so
+it is not a time bound). That is the next thread.
+
+**Measured: TLS callbacks are exactly NEUTRAL.**
+
+| set | before | after | delta |
+|---|---|---|---|
+| corpus (2678, 85s) | 1587 (59.3%) | 1587 (59.3%) | **0 gains / 0 losses** |
+| 200-set (300s) | 122 | 122 | **0 / 0** |
+
+Every one of the 2678 samples produced an identical result. Kept anyway, and
+labelled as such: this is missing **Windows loader semantics** (the loader runs
+TLS callbacks before the entry point), the reference relies on it explicitly for
+Amber and EnigmaVB, and it is now a verified-zero-risk prerequisite rather than a
+guess. It converts nothing on its own because the Amber loader body still does
+not reach its decompressor — see below.
+
+**Amber's remaining blocker (evidence, not a guess).** The TLS directory parses
+correctly and both callbacks are genuine:
+
+```
+AddressOfCallBacks = 0x407020 (.CRT) -> cb[0]=0x4018f0, cb[1]=0x4018a0, 0
+0x4018f0: 56 53 83 ec 14 83 3d 14 30 40 00 02   push esi; push ebx; sub esp,0x14;
+                                                cmp dword [0x403014], 2
+0x4018a0: 83 ec 1c 8b 44 24 24 83 f8 03 74 14   sub esp,0x1c; mov eax,[esp+0x24];
+                                                cmp eax, 3; je ...
+```
+
+Both are MSVC TLS-dispatcher shapes. taote enters them (rundbg confirms) but the
+guest then runs only CRT init (9 dispatches: GetSystemTimeAsFileTime,
+GetCurrentProcessId, GetCurrentThreadId, GetTickCount, QueryPerformanceCounter,
+GetStartupInfoA, _initterm x2, SetUnhandledExceptionFilter, __p__acmdln) and
+returns — **no VirtualAlloc/HeapAlloc at all**, finishing in 0.05s, so this is
+not a time bound even though the reference gives Amber a 4x timeout floor for its
+rc4/aPLib loop. The reference's artifacts for the same sample show what should
+happen: `stages=2, reason=embedded_pe, base=0x1000000, oep=0x1002a65`, plus
+`_dyn1_0x13000_dump.bin` (73728 B) and `_payload_0x25000_pe.bin` (15360 B) — i.e.
+the payload does land in a dynamic region and is adopted as an embedded PE. So
+the next thread is why the Amber loader body takes its skip branch in taote.

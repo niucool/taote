@@ -257,6 +257,9 @@ public:
     // loader/pe.py cmdline: `cmdline args...`
     const std::vector<std::uint8_t>& cmdline() const noexcept { return cmdline_; }
 
+    // the main image's TLS callbacks (run before the entry point)
+    const std::vector<std::uint64_t>& tls_callbacks() const noexcept { return tls_callbacks_; }
+
 private:
     // loads one PE image (the main executable or a dll) and returns its base
     std::uint64_t load_image(const std::string& host_path, const std::string& label,
@@ -300,6 +303,10 @@ private:
     std::uint64_t last_image_size_ = 0;
     std::map<std::uint64_t, ImportSymbol> import_symbols_;
     std::map<std::uint64_t, ExportSymbol> export_symbols_;
+    // IMAGE_DIRECTORY_ENTRY_TLS callbacks of the MAIN image (Windows runs them
+    // before the entry point with (image_base, DLL_PROCESS_ATTACH, 0)). The
+    // OS layer drives them; see load_parsed's TLS walk.
+    std::vector<std::uint64_t> tls_callbacks_;
     std::map<std::string, ImportTable> import_address_table_;
     std::vector<std::uint8_t> cmdline_;
     std::vector<ForwardedExport> forwarded_exports_;
