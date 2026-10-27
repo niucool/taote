@@ -2880,3 +2880,39 @@ code (`33 db 33 c9 33 d2 42 90 ..`) at code_sim 0.081 (wrong body layout);
 `neolite_HashCalc` has UTF-16 text (`6f 00 20 00 73 00 61 00 76 00 65 00`) at
 0.065 (a body region that is not code at all). Any Neolite work must separate those
 three shapes rather than treat the family as decode-blocked as a whole.
+
+### 0.17t Round 27: the reference's remaining ladder passes (Pass D + Pass E)
+
+Ported the two ladder passes taote still lacked, in the reference's own order
+(unpacker.cpp:7411-7464):
+
+* **Pass D** - the Borland C++Builder signature `eb ?? 'fb:C++HOOK' 90 e9`. An
+  unambiguous printable literal with at most one occurrence per PE, so it needs no
+  counting or uniqueness guard, and it runs *before* Pass C.
+* **Pass E** - the Borland/Delphi entry `6a <imm8> 68 <imm32> e8 <rel32>` with an
+  in-image push, accepted only when UNIQUE in the section (ordinary code contains
+  that two-push shape by the dozen), after Pass C.
+
+**Measured (full corpus, 2678, 85s, pin 4):**
+
+| | round 26 | round 27 |
+|---|---|---|
+| corpus all-three | 1670 (62.4%) | **1671 (62.4%)** |
+| corpus OEP exact | 1779 (71.1%) | **1782 (71.3%)** |
+| corpus imports | 1846 (71.9%) | 1846 (71.9%) |
+| 200-set (300s) | 126 | 126 (0/0) |
+
++1 all-three (+`nspack_PEViewer`, one of the shared-address pick failures this
+series has been chasing), +3 OEP, **0 losses** - a small, risk-free gain that also
+closes out the ported ladder (A/B/C/D/E are now all present).
+
+Also recorded this round, as evidence for the next lever rather than a guess: the
+`imports_wrong` bucket (138 samples with the OEP already right) is dominated by
+**RLPack 65**, and RLPack's failures are import *attribution*, not decoding -
+`rlpack_grepWin-1.9.0_portable.exe` has code_sim 1.00 and the correct OEP but
+recall 0.006, because its dump contains exactly ONE `*.dll` string
+(`kernel32.dll`, twice) and 1 import descriptor: the payload's import table and its
+DLL names are simply not in the dump, so the group harvester files all 81 function
+names under that one DLL. Recovering it needs the stub's runtime descriptors (or
+the family's own store parse), not a heuristics change. 63 of the 65 are below 0.80
+recall, so there is no threshold story either.

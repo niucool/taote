@@ -536,6 +536,27 @@ std::uint64_t ladder_oep(const PackerContext& ctx) {
             return tgt->start + s_last;
         }
     }
+    // Pass D (before Pass C, as in the reference): the Borland C++Builder
+    // signature `eb ?? 'fb:C++HOOK' 90 e9` - an unambiguous printable literal, at
+    // most one per PE, so it needs no counting or uniqueness guard.
+    // (unpacker.cpp:7411-7424)
+    for (const auto& ps : sections) {
+        const auto b = body_of(ps);
+        if (b.size() < 18) {
+            continue;
+        }
+        for (std::size_t i = 0; i + 18 < b.size(); ++i) {
+            if (b[i] == 0xeb && std::memcmp(b.data() + i + 2, "fb:C++HOOK", 10) == 0 &&
+                b[i + 12] == 0x90 && b[i + 13] == 0xe9) {
+                if (ctx.debug) {
+                    std::fprintf(stderr, "[unpack] ladder %s: Pass D (BCB sig) at +0x%zx\n",
+                                 ps.name.c_str(), i);
+                }
+                return ps.start + i;
+            }
+        }
+    }
+
     // Pass C: a CFG thunk `cc|c3 e8 <rel32> e9 <rel32>`. Every section is scanned
     // (NSPack decodes .text into nsp0 while the OEP lives in nsp1).
     for (const auto& ps : sections) {
@@ -597,6 +618,34 @@ std::uint64_t ladder_oep(const PackerContext& ctx) {
         }
         if (c_count == 1 && !(mpress && c3_count == c_count && !c3_prologue_valid)) {
             return ps.start + c_off;
+        }
+        // Pass E (after Pass C, as in the reference): the Borland/Delphi entry
+        // `6a <imm8> 68 <imm32> e8 <rel32>` with an in-image push - accepted only
+        // when it is UNIQUE in the section, because ordinary code contains the
+        // same two-push shape by the dozen. (unpacker.cpp:7444-7464)
+        {
+            std::size_t e_count = 0;
+            std::size_t e_off = 0;
+            for (std::size_t i = 0; i + 8 < b.size(); ++i) {
+                if (b[i] == 0x6a && b[i + 2] == 0x68 && b[i + 7] == 0xe8) {
+                    const auto pv = static_cast<std::uint64_t>(
+                        static_cast<std::uint32_t>(b[i + 3]) |
+                        (static_cast<std::uint32_t>(b[i + 4]) << 8) |
+                        (static_cast<std::uint32_t>(b[i + 5]) << 16) |
+                        (static_cast<std::uint32_t>(b[i + 6]) << 24));
+                    if (pv > ctx.base && pv < ctx.base + ctx.image_size) {
+                        ++e_count;
+                        e_off = i;
+                    }
+                }
+            }
+            if (e_count == 1) {
+                if (ctx.debug) {
+                    std::fprintf(stderr, "[unpack] ladder %s: Pass E (borland push-imm8) at +0x%zx\n",
+                                 ps.name.c_str(), e_off);
+                }
+                return ps.start + e_off;
+            }
         }
     }
     if (!mpress) {
