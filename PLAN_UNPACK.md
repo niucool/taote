@@ -3040,3 +3040,55 @@ own `.rsrc` for payload PEs. `neolite_disk2vhd` has four unrelated embedded PEs
 there (resource payloads of the original program, not the unpack target) and
 picking the largest would replace the image with the wrong program. That is a
 regression generator, not a fix, and it cannot be validated inside a round.
+
+### 0.17x Round 31: the pick residuals are hop-vs-ladder conflicts, and neither switch fixes them
+
+**The 36 pick failures are not shape ambiguity.** Splitting them by the engine's
+own `reason` field (/home/jim/runs/r29_report.json):
+
+| reason | count |
+|---|---|
+| section_hop | **24** |
+| ladder_scan | 11 |
+| fallback_guess | 1 |
+
+Two thirds are samples where the run's hop ledger produced the answer and the
+static ladder never got a say. The rest of the corpus is the same shape: 2146 of
+2678 answer via `section_hop`, so the incumbent rule is the dominant mechanism and
+any change to it is a corpus-wide risk.
+
+**Measured: the incumbent rule cannot simply be switched off.** taote has
+`TAOTE_OEP_INCUMBENT=0` (the run-accepted hop scores STRONG unless it is a junk
+latch, write ordinal < 32). On a 186-sample subset - all 36 pick failures plus 150
+random samples that currently pass via `section_hop` - turning it off gives
+**2 gains and 12 losses**: it does fix `bero_cpuz_x32` and `mpress_cpuz_x32`
+(the shared `e8 30 c5 0f 00 e9 f9 6a` thunk case) but breaks
+`aspack_pskill`, `eronana_cmd`, `jdpack_notepad`, `jdpack_pskill`,
+`jdpack_pssuspend`, `molebox_Dbgview`, `molebox_FolderTimeUpdate`,
+`packman_LastActivityView` and four `yoda-crypter_*`. So the binary incumbent rule
+is net positive and the fix has to be the reference's *scored* comparison
+(`pick_and_emit_oep`'s V0/V1/V2 evidence weighting), not a flag flip.
+
+**Measured and reverted: the decode-only Pass C "first below 0x8000" rule.**
+12 of the pick failures have a true EP that is a `c3 e8 <rel32> e9 <rel32>` CFG
+thunk, and the reference's decode-only Pass C takes "the first hit when there is
+one hit, or the first below 0x8000" while taote takes the LAST (measured for
+`mpress_ADExplorer`'s second of two). Porting the first-hit rule changed nothing:
+`alienyze_Clockres` has hits at 0x4002 (true) and 0x257e2, and BOTH validate -
+each e9 target is in-image and each target has a recognizable prologue - so the
+validated-hit branch wins first and returns the last validated one. The reference
+would do the same, which means these 12 are ambiguous under the ported machinery
+rather than mis-ported. Reverted (inert).
+
+**TELock's SEH is not empty after all** (corrects round 30): with TAOTE_SEHDBG the
+IBEBP traps do dispatch properly -
+
+```
+[sehd] code=80000004 fault=466a24 pc=466a24 chain=ffffcfb0 next=0 handler=466a15
+[sehd] code=80000004 fault=466a58 pc=466a58 chain=ffffcf90 next=0 handler=466a3c
+```
+
+the stub installs its own fs:[0] frames and two #DB dispatches reach their
+handlers. The run dies at pc=0x3c6625d4 *after* the second handler returns, so the
+open question is SEH resumption fidelity (how the handler's return is applied),
+not chain setup - a materially different and riskier target than round 30 assumed.
