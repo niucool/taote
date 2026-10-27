@@ -2541,3 +2541,84 @@ happen: `stages=2, reason=embedded_pe, base=0x1000000, oep=0x1002a65`, plus
 `_dyn1_0x13000_dump.bin` (73728 B) and `_payload_0x25000_pe.bin` (15360 B) — i.e.
 the payload does land in a dynamic region and is adopted as an embedded PE. So
 the next thread is why the Amber loader body takes its skip branch in taote.
+
+### 0.17n Round 21: the CRT-loader fidelity fixes Amber exposed
+
+Chasing why Amber never reaches its decompressor turned up two Windows-API
+fidelity gaps that are not Amber-specific. Both are uncommitted pending
+measurement.
+
+**1. `__p__acmdln` threw instead of answering.** With TLS callbacks in place the
+guest now runs Amber's full CRT startup and then dies at
+`_acmdln is not in the msvcrt.dll import address table` (msvcrt.cpp:259). A
+packed image whose CRT calls `__p__acmdln` need not import the `_acmdln` DATA
+symbol, and the reference never requires it: `Msvcrt::__p__acmdln`
+(msvcrt.cpp:1448) unconditionally maps a `ptr_sz + 8` "api.msvcrt._acmdln" block
+and returns its address. Ported: keep the IAT answer when the image really
+exports/imports `_acmdln` (more accurate than upstream) and fall back to a fresh
+zeroed cell otherwise. `__p__wcmdln` deliberately keeps its throw — the verbatim
+ladder, and `WinApiMsvcrt.PAcmdlnRidesMsvcrtDllIat` pins it.
+
+**2. `VirtualAlloc` returned an unaligned heap chunk.** It was
+`heap().alloc(dwSize)`, and Amber's loader received `0x50009ea`. Windows'
+contract is a PAGE-ALIGNED, independently committed region, and a reflective
+loader computes `base + section_rva` from the returned pointer — so it ran off
+the end of the mapping and died with `UC_ERR_READ_UNMAPPED`. The reference
+(kernel32.cpp:1854) page-aligns the hint, finds a valid range and `mem_map`s a
+dedicated "api.VirtualAlloc" region. Ported with two deliberate keepings:
+the mapping stays rwx (every corpus loader writes then executes; W^X would break
+them), and `VirtualQuery` gained a fallback that reports an `api.VirtualAlloc`
+region by its mapped extent, because it previously only walked the heap chunk
+table and would go blind to these addresses
+(`WinApiMemoryapi.VirtualAllocFreeProtectQueryVerbatim` pins BaseAddress ==
+AllocationBase).
+
+**Measured (full corpus, 2678, 85s, pin 4) — the VirtualAlloc half was REVERTED.**
+
+| | r20 | round 21 (both fixes) | round 22 (`__p__acmdln` only) |
+|---|---|---|---|
+| corpus all-three | 1587 | 1502 (**-85**) | **1588 (+1)** |
+| corpus OEP exact | 1679 | 1679 (+0) | 1678 (-1) |
+| corpus imports | 1705 | 1619 (-86) | 1706 (+1) |
+| 200-set (300s) | 122 | - | 122 (0/0) |
+
+Page-aligned `VirtualAlloc` alone cost 85 all-three, **every one of them
+PECompact**, and it cost them through the *import* criterion only (OEP stayed
+exact): `pecompact_ADExplorer` import recall 1.0 -> 0.057 with 787 -> 488 output
+imports, `pecompact_BlueScreenView` 1.0 -> 0.292 with 470 -> 309. The import
+salvage finds the loader's rebuilt descriptor/IAT tables through the **heap chunk
+table**, so moving those allocations into a separate mapped region makes them
+invisible to it. Reverted (memoryapi.cpp now carries the measurement in a
+comment): the unaligned base is a genuine Windows-contract gap, but converting it
+is a *salvage* change, not a mapping change, and it must not land before the
+salvage learns to see non-heap regions.
+
+`__p__acmdln` alone is **+1 corpus all-three / +1 imports with 0 all-three
+losses** (1587 -> 1588), and the 200-sample set is neutral (122 -> 122, 0/0). The
+one gain is `nspack_procexp.exe`, which round 19 already identified as a
+budget-bound flake (it hit dur=85 then and recovers on a re-run), so the change
+should be read as **neutral-but-correct**, the shape the round-20 TLS callbacks
+had. The single OEP-exact loss is `mpress_geek.exe`, which was `oep_exact None`
+(ungraded) in *both* reports with code_sim 0.8919 -> 0.9025 and dur 86 (over the
+budget cap) in both — a grading-boundary flake, not a behaviour change.
+
+Measured effect on Amber: the guest now executes *inside* its own decoded region
+(fault pc moved from a stub cell to 0x1d193, inside the 0xc000-0x1e000
+VirtualAlloc buffer) and dispatches its real loader calls
+(LoadLibraryA, GetProcAddress, GetModuleHandleA, VirtualAlloc, memcpy) instead of
+9 CRT-init calls. It is still blocked, one layer further out:
+
+```
+[rundbg] LoadLibraryA(USER32.dll) -> 0x0
+[rundbg] GetProcAddress(user32.dll!VirtualAlloc) -> 0
+[rundbg] emu error 'Invalid memory read (UC_ERR_READ_UNMAPPED)' pc=0x1d193
+```
+
+`user32.dll` is not in the staged stub rootfs (tools/taote_unpack.cpp stages
+`plan.imports` plus the five key DLLs ntdll/kernelbase/kernel32/ucrtbase/mscoree),
+so the loader's `LoadLibraryA` returns NULL and it dereferences it — a
+rootfs-composition question, not an emulation bug. Debug aids added: a
+TAOTE_RUNDBG `[rundbg] emu error '<text>' pc=...` line in the run loop (unicorn
+otherwise only reports the error class) and a TAOTE_MEMDBG mem-invalid hook in
+taote_unpack that names the faulting address (this is what identified the NULL
+read).

@@ -302,6 +302,19 @@ int main(int argc, char** argv) {
                                  static_cast<unsigned long long>(start_va));
                 }
             }
+            if (std::getenv("TAOTE_MEMDBG") != nullptr) {
+                // diagnostic: name the faulting access (unicorn only reports the
+                // class, not the address)
+                static auto memdbg = ql->hook_mem_invalid(
+                    [](int access, std::uint64_t address, std::uint32_t size, std::int64_t value) -> int {
+                        std::fprintf(stderr, "[memdbg] invalid access=%d addr=0x%llx size=%u value=0x%llx\n",
+                                     access, static_cast<unsigned long long>(address),
+                                     static_cast<unsigned>(size),
+                                     static_cast<unsigned long long>(value));
+                        return 0;
+                    });
+                (void)memdbg;
+            }
             ql->run();
         } catch (const qiling::QlErrorBase& e) {
             // the guest faulted: the artifact is still produced from whatever

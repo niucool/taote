@@ -245,20 +245,25 @@ void register_msvcrt_family() {
     };
 
     // char** __p__acmdln();
+    // The IAT lookup answers when the image really imports the _acmdln DATA
+    // symbol; otherwise fall back to a fresh zeroed guest cell, which is what
+    // the reference does unconditionally (msvcrt.cpp:1448 maps a ptr_sz+8
+    // "api.msvcrt._acmdln" block and returns its address). Throwing broke
+    // packed images whose CRT calls __p__acmdln but never imports _acmdln:
+    // Amber's loader ran its whole CRT startup and then died here with
+    // "_acmdln is not in the msvcrt.dll import address table" instead of
+    // reaching its decompressor.
     WinsdkApi("__p__acmdln", WinCc::Cdecl, {}) = [](Qiling& ql, std::uint64_t,
                                                     const ResolvedParams&) -> std::optional<std::uint64_t> {
-        // TODO: use values calculated at __getmainargs  (verbatim)
         const auto* iat = static_cast<loader::QlLoaderPE&>(ql.loader()).import_address_table_at("msvcrt.dll");
-        if (iat == nullptr) {
-            // the verbatim rides the python KeyError (the import_address_table
-            // dict miss); the port raises through the shared error ladder
-            throw QlErrorBase("msvcrt.dll is not in the import address table");
+        if (iat != nullptr) {
+            const auto addr = iat->lookup("_acmdln");
+            if (addr != 0) {
+                return addr;
+            }
         }
-        const auto addr = iat->lookup("_acmdln");
-        if (addr == 0) {
-            throw QlErrorBase("_acmdln is not in the msvcrt.dll import address table");
-        }
-        return addr;
+        auto& heap = w(ql).heap();
+        return heap.alloc(ql.arch().pointersize() + 8);
     };
 
     // wchar_t ** __p__wcmdln();

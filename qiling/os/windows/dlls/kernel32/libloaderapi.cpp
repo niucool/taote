@@ -131,7 +131,12 @@ std::optional<std::uint64_t> load_library_body(Qiling& ql, const ResolvedParams&
         return dll->base;
     }
 
-    return pe_loader(ql).load_dll(lp_lib_file_name);
+    const auto loaded = pe_loader(ql).load_dll(lp_lib_file_name);
+    if (std::getenv("TAOTE_RUNDBG") != nullptr) {
+        std::fprintf(stderr, "[rundbg] LoadLibraryA(%s) -> 0x%llx\n", lp_lib_file_name.c_str(),
+                     static_cast<unsigned long long>(loaded));
+    }
+    return loaded;
 }
 
 // the shared _LoadLibraryEx body
@@ -284,7 +289,12 @@ void register_libloaderapi_family() {
             return 0;
         }
 
-        return by_name ? iat->lookup(procname) : iat->lookup(ordinal);
+        const auto resolved = by_name ? iat->lookup(procname) : iat->lookup(ordinal);
+        if (resolved == 0 && std::getenv("TAOTE_RUNDBG") != nullptr) {
+            std::fprintf(stderr, "[rundbg] GetProcAddress(%s!%s) -> 0\n", dll_name->c_str(),
+                         procname.c_str());
+        }
+        return resolved;
     };
 
     // HMODULE LoadLibraryA(

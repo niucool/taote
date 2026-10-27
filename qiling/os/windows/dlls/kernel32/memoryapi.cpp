@@ -34,6 +34,14 @@ void register_memoryapi_family() {
         {"flAllocationType", DWORD_},
         {"flProtect", DWORD_},
     }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        // The verbatim heap-alloc ride. Measured round 21: replacing it with a
+        // page-aligned dedicated "api.VirtualAlloc" mem_map region (the
+        // reference's kernel32.cpp:1854 shape) fixed the amber_nbtstat loader's
+        // unaligned-base fall-off but cost 85 corpus all-three - every one of
+        // them PECompact, via the import salvage (recall 1.0 -> 0.057), which
+        // finds the loader's rebuilt tables through the heap chunk table. Not
+        // kept: the unaligned base is real, but converting it is a salvage
+        // change, not a mapping change.
         const auto dw_size = api_get_int(get_param(params, "dwSize"));
 
         return w(ql).heap().alloc(dw_size);

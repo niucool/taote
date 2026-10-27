@@ -950,6 +950,10 @@ void QlOsWindows::run() {
                 // an unhandled access violation ends the guest the way Windows
                 // does: the process exit code is STATUS_ACCESS_VIOLATION, and
                 // the entry-point error record carries the class
+                if (std::getenv("TAOTE_RUNDBG") != nullptr) {
+                    std::fprintf(stderr, "[rundbg] emu error '%s' pc=0x%llx\n", e.what(),
+                                 static_cast<unsigned long long>(ql_->arch().regs().arch_pc()));
+                }
                 if (classify_emulation_error(e.what()).rfind("invalid_", 0) == 0) {
                     set_exit_code(static_cast<int>(0xC0000005u));
                 }
