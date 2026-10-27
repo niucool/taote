@@ -33,6 +33,133 @@ std::string hex_str(std::uint64_t v) {
     return b;
 }
 
+std::uint16_t rd16(const std::vector<std::uint8_t>& d, std::size_t o) {
+    if (o + 2 > d.size()) {
+        return 0;
+    }
+    return static_cast<std::uint16_t>(d[o] | (d[o + 1] << 8));
+}
+
+std::uint32_t rd32(const std::vector<std::uint8_t>& d, std::size_t o) {
+    if (o + 4 > d.size()) {
+        return 0;
+    }
+    return static_cast<std::uint32_t>(d[o]) | (static_cast<std::uint32_t>(d[o + 1]) << 8) |
+           (static_cast<std::uint32_t>(d[o + 2]) << 16) | (static_cast<std::uint32_t>(d[o + 3]) << 24);
+}
+
+// F43h-static (the reference's mpress_static_oep_, unpacker.cpp:10876): the
+// retdec-derived static OEP read from the MPRESS fix-imports stub. The stub
+// inside the decoded `.MPRESS1` section carries the ORIGINAL entry point as a
+// rel-offset dword, so this is a signature-level determination with no
+// emulation-timing dependence - which is why the reference applies it FIRST for
+// MPRESS and lets it supersede both the MSVC-prologue scan (which misfires on
+// hand-written assembly startups) and the late API-return hop latch.
+//
+// Inputs: the PACKED file (section table + stub signature) and the DUMP (the
+// fix-stub data at .MPRESS1 + fs_sec). Returns an RVA, or 0.
+std::uint32_t mpress_static_oep_rva(const std::vector<std::uint8_t>& orig,
+                                    const std::vector<std::uint8_t>& dump,
+                                    std::uint64_t image_size) {
+    if (orig.size() <= 0x400 || orig[0] != 'M' || orig[1] != 'Z') {
+        return 0;
+    }
+    const std::size_t oe = rd32(orig, 0x3c);
+    if (oe + 24 + 96 + 40 > orig.size()) {
+        return 0;
+    }
+    const std::size_t oopt = oe + 24;
+    if (rd16(orig, oopt) != 0x10b) {  // 32-bit only
+        return 0;
+    }
+    const std::uint32_t ep_rva = rd32(orig, oopt + 16);
+    if (ep_rva == 0) {
+        return 0;
+    }
+    const std::uint32_t nsec = rd16(orig, oe + 6);
+    const std::size_t soff = oopt + rd16(orig, oe + 20);
+    std::uint32_t mp1_va = 0;
+    for (std::uint32_t i = 0; i < nsec; ++i) {
+        const std::size_t e2 = soff + static_cast<std::size_t>(i) * 40;
+        if (e2 + 40 > orig.size()) {
+            break;
+        }
+        if (orig[e2] == '.' && orig[e2 + 1] == 'M' && orig[e2 + 2] == 'P' && orig[e2 + 3] == 'R' &&
+            orig[e2 + 4] == 'E' && orig[e2 + 5] == 'S' && orig[e2 + 6] == 'S' && orig[e2 + 7] == '1') {
+            mp1_va = rd32(orig, e2 + 12);
+            break;
+        }
+    }
+    if (mp1_va == 0) {
+        return 0;
+    }
+    const auto file_off = [&](std::uint32_t rva) -> std::size_t {
+        for (std::uint32_t i = 0; i < nsec; ++i) {
+            const std::size_t e2 = soff + static_cast<std::size_t>(i) * 40;
+            if (e2 + 40 > orig.size()) {
+                break;
+            }
+            const std::uint32_t vsz = rd32(orig, e2 + 8), va = rd32(orig, e2 + 12);
+            const std::uint32_t rs = rd32(orig, e2 + 16), ptr = rd32(orig, e2 + 20);
+            if (va <= rva && rva < va + std::max(vsz, rs)) {
+                return static_cast<std::size_t>(ptr) + (rva - va);
+            }
+        }
+        return 0;
+    };
+    const std::size_t ep_off = file_off(ep_rva);
+    if (ep_off == 0 || ep_off + 12 > orig.size()) {
+        return 0;
+    }
+    const std::uint32_t sig = rd32(orig, ep_off + 8);
+    // retdec mpressUnpackerStubData {signature, ..., fixStubOffset, ...}
+    static const std::uint32_t kStubTbl[][2] = {
+        {0x2B6, 0x2B8}, {0x29E, 0x2A0}, {0x299, 0x29B}, {0xB57, 0xB59},
+        {0x29C, 0x29E}, {0xB5A, 0xB5C}, {0x29F, 0x2A1}};
+    std::uint32_t fs_off_tbl = 0;
+    for (const auto& t : kStubTbl) {
+        if (t[0] == sig) {
+            fs_off_tbl = t[1];
+            break;
+        }
+    }
+    if (fs_off_tbl == 0) {
+        return 0;
+    }
+    const std::size_t fo = file_off(ep_rva + fs_off_tbl);
+    if (fo == 0 || fo + 4 > orig.size()) {
+        return 0;
+    }
+    const std::uint32_t fs_va = ep_rva + fs_off_tbl + 4 + rd32(orig, fo);  // rva
+    if (fs_va < mp1_va) {
+        return 0;
+    }
+    const std::uint32_t fs_sec = fs_va - mp1_va;
+    const std::size_t fs_dump = static_cast<std::size_t>(mp1_va) + fs_sec;
+    if (fs_dump + 0x140 > dump.size()) {
+        return 0;
+    }
+    // retdec mpressFixStubData {signature, importHintsOffset, oepOffset}
+    static const std::uint32_t kFixTbl[][3] = {
+        {0x8B, 0xC1, 0xBD}, {0x45, 0x138, 0x134}, {0x35, 0x128, 0x124}};
+    const std::uint32_t* ft = nullptr;
+    const std::uint8_t b7 = dump[fs_dump + 7];
+    for (const auto& t : kFixTbl) {
+        if (t[0] == b7) {
+            ft = t;
+            break;
+        }
+    }
+    if (ft == nullptr) {
+        return 0;
+    }
+    const std::uint32_t oep = mp1_va + fs_sec + ft[1] + rd32(dump, fs_dump + ft[2]);
+    if (oep == 0 || oep >= image_size) {
+        return 0;
+    }
+    return oep;
+}
+
 }  // namespace
 
 std::uint64_t ladder_oep(const PackerContext& ctx) {
@@ -40,6 +167,29 @@ std::uint64_t ladder_oep(const PackerContext& ctx) {
     const auto& sections = ctx.sections;
     if (image.size() < 0x200 || sections.empty()) {
         return 0;
+    }
+    // F43h-static, MPRESS only, FIRST (the reference's order): the fix-imports
+    // stub's static OEP supersedes every pattern pass below.
+    const bool mpress = ctx.family == "MPRESS";
+    if (mpress && ctx.packed_path != nullptr) {
+        std::vector<std::uint8_t> orig;
+        if (std::FILE* f = std::fopen(ctx.packed_path->c_str(), "rb")) {
+            std::uint8_t buf[65536];
+            std::size_t n = 0;
+            while ((n = std::fread(buf, 1, sizeof buf, f)) > 0) {
+                orig.insert(orig.end(), buf, buf + n);
+            }
+            std::fclose(f);
+        }
+        if (!orig.empty()) {
+            const auto soep = mpress_static_oep_rva(orig, image, ctx.image_size);
+            if (soep != 0) {
+                if (ctx.debug) {
+                    std::fprintf(stderr, "[unpack] ladder: MPRESS static fix-stub OEP rva=0x%x\n", soep);
+                }
+                return ctx.base + soep;
+            }
+        }
     }
     const auto body_of = [&](const PackSection& ps) {
         std::vector<std::uint8_t> b;
@@ -56,7 +206,6 @@ std::uint64_t ladder_oep(const PackerContext& ctx) {
                  image.begin() + static_cast<std::ptrdiff_t>(off + span));
         return b;
     };
-    const bool mpress = ctx.family == "MPRESS";
     // The decode target: the largest section. Its degenerate head holds the packed
     // EP too, so neither the exec flag nor the watch state is a filter.
     const PackSection* tgt = nullptr;

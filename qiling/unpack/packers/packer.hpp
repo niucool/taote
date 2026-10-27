@@ -54,6 +54,10 @@ struct PackerContext {
     bool is_64 = false;
     bool debug = false;
     std::string family;
+    // the PACKED file on disk: the static OEP readers that work from the
+    // packer's own stub data (the MPRESS fix-imports stub) read it, exactly as
+    // the reference's mpress_static_oep_ opens packed_path_
+    const std::string* packed_path = nullptr;
     std::vector<PackSection> sections;
 
     const std::vector<std::uint8_t>& image() const {

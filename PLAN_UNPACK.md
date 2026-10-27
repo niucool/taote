@@ -2416,3 +2416,52 @@ one PECompact sample in that slice), **0 losses**. Reference on the same set
 rubric, so not directly comparable to taote's unpack_report numbers.
 
 Suite 593/593 green.
+
+### 0.17l Round 19: MPRESS static fix-stub OEP (the reference's F43h-static)
+
+The remaining pick failures are 44, and their true EP is in **neither** the
+Borland `6a ?? 68 <imm> e8` set nor the SEH `55 8b ec 6a ff 68` set for 35 of
+them — so no count/shape rule can reach them. Instrumenting mpress_PsExec shows
+why: the hop ledger holds only stub-internal junk (candidates at 0x47d1d0+,
+true entry 0x409de6).
+
+The reference does not use shape evidence for these at all. It has a dedicated
+**F43h-static** reader (`mpress_static_oep_`, unpacker.cpp:10876, retdec-derived)
+that reads the original EP straight out of the MPRESS fix-imports stub's data
+tables, and it runs it **FIRST** for MPRESS — explicitly because it supersedes
+both the MSVC-prologue scan ("which misfires on hand-written assembly startups")
+and the late API-return hop latch.
+
+Ported faithfully: `.MPRESS1` section lookup, the stub signature at packed EP + 8
+→ `kStubTbl` fix-stub offset, the fix-stub data at `.MPRESS1 + fs_sec` in the
+dump, `kFixTbl` row selected by byte 7, then
+`oep = fs_va + ft[1] + rd32(dump, fs_dump + ft[2])`. It needs the PACKED file as
+well as the dump, so `PackerContext` gained a `packed_path` member (the
+reference's `packed_path_`).
+
+Probe: 8/8 exact, including mpress_AccessEnum 0x407a98 (previously recorded as
+having "no local discriminator" and regressed in round 16) and
+mpress_PEViewer 0x401504.
+
+**Measured (full corpus, 2678, 85s, pin 4):**
+
+| | r18 | round 19 |
+|---|---|---|
+| all three | 1567 (58.5%) | **1587 (59.3%)** |
+| OEP exact | 1658 (66.3%) | **1679 (67.1%)** |
+| imports | 1706 | 1705 |
+| valid PE | 2568 | 2568 |
+
+**21 OEP gains**, all MPRESS (AccessEnum, Dbgview, Diskmon, Everything,
+FastHash_kr, HashCalc, Hasher, PEViewer, PsExec, PsGetsid, PsInfo, ShareEnum,
+calc, cmd, disk2vhd, md5summer, mtinst, portmon, pskill, psshutdown, pssuspend).
+all-three +20.
+
+One apparent loss, `nspack_procexp`, is a **budget-bound flake, not a
+regression**: its OEP stayed exact and its imports collapsed only because the run
+hit the 85s cap (`dur=85`, recall 1.0 -> 0.044); the change is MPRESS-gated so it
+cannot touch NSPack, and two re-runs give `oep=0x49ba18 imports=1501` (recall 1.0)
+each. The flake is counted in the committed numbers, not explained away.
+
+**Second set (200-sample stratified, 300s):** 121 -> **122** all-three (+1:
+mpress_AccessEnum), **0 losses**. Suite 593/593 green.

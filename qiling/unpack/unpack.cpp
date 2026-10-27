@@ -2054,6 +2054,7 @@ std::uint64_t Unpacker::static_oep_from_image(const std::vector<std::uint8_t>& i
     ctx.is_64 = is_64_;
     ctx.debug = opts_.debug;
     ctx.family = opts_.family;
+    ctx.packed_path = &opts_.sample_path;
     ctx.sections = sections_;
     // The hint is the LAST hop the run took, ordinal regardless: the ordinal
     // only says how much the stub had written (strength), while the hint is
