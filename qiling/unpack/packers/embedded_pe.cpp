@@ -436,6 +436,149 @@ std::vector<Sec> stub_sections(const std::vector<std::uint8_t>& raw) {
     return out;
 }
 
+// ---- the import store: al_find_idt / al_hinted_store ---------------------
+// The stub's own import store lives in `.alien` behind the payload body: an IDT
+// block of 20-byte descriptors (OFT, timestamp, forwarder-chain, name RVA, FT)
+// followed by the DLL name markers and the function names. The restored body's
+// own import directory is unreliable (measured: alienyze_Bginfo harvests 0
+// descriptors), so this store is the only place the pairs can come from.
+// Ported from src/unpacker/alienyze.cpp:145-290.
+
+bool valid_name(const std::vector<std::uint8_t>& b, std::size_t o, std::size_t end,
+                std::string& out) {
+    if (o >= end) {
+        return false;
+    }
+    std::size_t j = o;
+    while (j < end && b[j] != 0) {
+        ++j;
+    }
+    if (j == o || j >= end) {
+        return false;
+    }
+    for (std::size_t k = o; k < j; ++k) {
+        if (b[k] < 32 || b[k] >= 127) {
+            return false;
+        }
+    }
+    out.assign(reinterpret_cast<const char*>(&b[o]), j - o);
+    return true;
+}
+
+bool is_dll_name(const std::string& s) {
+    if (s.size() < 4) {
+        return false;
+    }
+    std::string t = s.substr(s.size() - 4);
+    for (auto& c : t) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    return t == ".dll" || t == ".ocx" || t == ".drv";
+}
+
+// al_find_idt: scan `.alien` for a run of >= 3 plausible 20-byte import
+// descriptors and keep the LARGEST run (random data matches the descriptor shape
+// in 3-entry runs, and an early return latches the junk one).
+bool find_idt(const std::vector<std::uint8_t>& dec, std::size_t a_lo, std::size_t a_hi,
+              std::size_t& idt_end) {
+    const auto rva_hi = static_cast<std::uint32_t>(dec.size());
+    const auto u32 = [&dec](std::size_t o) -> std::uint32_t {
+        return static_cast<std::uint32_t>(dec[o]) | (static_cast<std::uint32_t>(dec[o + 1]) << 8) |
+               (static_cast<std::uint32_t>(dec[o + 2]) << 16) |
+               (static_cast<std::uint32_t>(dec[o + 3]) << 24);
+    };
+    std::size_t best_n = 0;
+    std::size_t best_end = 0;
+    for (std::size_t o = a_lo; o + 60 <= a_hi; o += 4) {
+        std::size_t p = o;
+        std::size_t n = 0;
+        while (p + 20 <= a_hi) {
+            const auto oft = u32(p);
+            const auto ts = u32(p + 4);
+            const auto fc = u32(p + 8);
+            const auto nm = u32(p + 12);
+            const auto ft = u32(p + 16);
+            if (!((ts == 0 || ts == 0xffffffffu) && (fc == 0 || fc == 0xffffffffu) &&
+                  (oft == 0 || (oft >= 0x1000 && oft < rva_hi)) && ft >= 0x1000 && ft < rva_hi &&
+                  nm >= 0x1000 && nm < rva_hi)) {
+                break;
+            }
+            ++n;
+            p += 20;
+        }
+        if (n >= 3 && n > best_n) {
+            best_n = n;
+            best_end = p;
+        }
+    }
+    idt_end = best_end;
+    return best_n >= 3;
+}
+
+// al_hinted_store: from idt_end, read the record stream. A name at +0 is a DLL
+// marker that CLOSES its own group; a name at +2 is a function (the store keeps
+// function names word-aligned), and binary gaps between the store's sections are
+// tolerated so one RVA table in the middle does not truncate the walk.
+void hinted_store(const std::vector<std::uint8_t>& dec, std::size_t idt_end, std::size_t a_hi,
+                  std::vector<std::string>& dll_names, std::vector<std::string>& fn_names,
+                  std::vector<std::size_t>& group_ends) {
+    const auto u32 = [&dec](std::size_t o) -> std::uint32_t {
+        return static_cast<std::uint32_t>(dec[o]) | (static_cast<std::uint32_t>(dec[o + 1]) << 8) |
+               (static_cast<std::uint32_t>(dec[o + 2]) << 16) |
+               (static_cast<std::uint32_t>(dec[o + 3]) << 24);
+    };
+    // skip the leading RVA table (dwords that look like in-image addresses)
+    std::size_t p = idt_end;
+    while (p + 4 <= a_hi) {
+        const auto v = u32(p);
+        if (v == 0 || v == 0xffffffffu || (v & 0x80000000u) || (v >= 0x1000 && v < 0x200000)) {
+            p += 4;
+            continue;
+        }
+        break;
+    }
+    int gaps = 0;
+    while (p + 1 < a_hi) {
+        std::string nb;
+        if (valid_name(dec, p, a_hi, nb) && is_dll_name(nb)) {
+            dll_names.push_back(nb);
+            group_ends.push_back(fn_names.size());
+            p = (p + nb.size() + 2) & ~static_cast<std::size_t>(1);
+            continue;
+        }
+        std::string na;
+        if (p + 2 < a_hi && valid_name(dec, p + 2, a_hi, na) && !is_dll_name(na)) {
+            fn_names.push_back(na);
+            p = (p + 2 + na.size() + 2) & ~static_cast<std::size_t>(1);
+            continue;
+        }
+        if (gaps < 64) {
+            ++gaps;
+            std::size_t q = p + 1;
+            bool resumed = false;
+            while (q + 2 < a_hi && q - p < 0x1000) {
+                std::string t1;
+                if (valid_name(dec, q, a_hi, t1) && is_dll_name(t1)) {
+                    p = q;
+                    resumed = true;
+                    break;
+                }
+                std::string t2;
+                if (valid_name(dec, q + 2, a_hi, t2) && t2.size() >= 3 && !is_dll_name(t2)) {
+                    p = q;
+                    resumed = true;
+                    break;
+                }
+                ++q;
+            }
+            if (resumed) {
+                continue;
+            }
+        }
+        break;
+    }
+}
+
 }  // namespace alienyze
 
 class AlienyzePacker : public AmberPacker {
@@ -552,6 +695,41 @@ public:
                              "[unpack] alienyze: body copy skipped (score=%d n=%zu psrc=0x%zx "
                              "hollow_end=0x%x)\n",
                              score, n, psrc, hollow_end);
+            }
+        }
+
+        // ---- the import store ----
+        // The restored body's own import directory is not reliable (Bginfo
+        // harvests 0 descriptors), so recover the pairs from the stub's store in
+        // `.alien`: find the IDT block, then the DLL markers + function names that
+        // follow it. A DLL marker CLOSES its own group, so the pairs are
+        // fn_names[prev_group_end .. group_end) under that DLL.
+        if (ctx.imports_out != nullptr) {
+            std::size_t idt_end = 0;
+            if (alienyze::find_idt(mem, a_lo, std::min<std::size_t>(a_hi, mem.size()), idt_end)) {
+                std::vector<std::string> dll_names;
+                std::vector<std::string> fn_names;
+                std::vector<std::size_t> group_ends;
+                alienyze::hinted_store(mem, idt_end, std::min<std::size_t>(a_hi, mem.size()),
+                                       dll_names, fn_names, group_ends);
+                std::size_t emitted = 0;
+                for (std::size_t g = 0; g < dll_names.size() && g < group_ends.size(); ++g) {
+                    const std::size_t gbegin = g == 0 ? 0 : group_ends[g - 1];
+                    for (std::size_t j = gbegin; j < group_ends[g] && j < fn_names.size(); ++j) {
+                        if (fn_names[j].empty() || fn_names[j].find('?') != std::string::npos) {
+                            continue;
+                        }
+                        ctx.imports_out->emplace_back(dll_names[g], fn_names[j]);
+                        ++emitted;
+                    }
+                }
+                if (ctx.debug) {
+                    std::fprintf(stderr,
+                                 "[unpack] alienyze: store idt_end=0x%zx dlls=%zu fns=%zu -> %zu pairs\n",
+                                 idt_end, dll_names.size(), fn_names.size(), emitted);
+                }
+            } else if (ctx.debug) {
+                std::fprintf(stderr, "[unpack] alienyze: store IDT not found\n");
             }
         }
 

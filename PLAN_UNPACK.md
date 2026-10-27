@@ -2916,3 +2916,51 @@ DLL names are simply not in the dump, so the group harvester files all 81 functi
 names under that one DLL. Recovering it needs the stub's runtime descriptors (or
 the family's own store parse), not a heuristics change. 63 of the 65 are below 0.80
 recall, so there is no threshold story either.
+
+### 0.17u Round 28: Alienyze's import store (al_find_idt + al_hinted_store)
+
+Alienyze is the largest remaining gap against the reference (-116: taote 0, ref
+116 all-three out of 126). Round 25's XOR recovery gave it 17 exact OEPs but the
+import side stayed dead, because the *restored body's own* import directory is not
+usable: `alienyze_Bginfo` harvests **0 descriptors** from it and the orphan walk
+returns truncated junk (`eme.dll`, `LG32.dll`, `OL.DRV` - i.e. `KERNEL32.dll` and
+friends read at a shifted offset). The pairs only exist in the stub's store inside
+`.alien`, which is what the reference's `al_find_idt` / `al_hinted_store`
+(unpacker.cpp:145-290) parse. Ported that core:
+
+* `find_idt` - scan `.alien` for a run of >= 3 plausible 20-byte import descriptors
+  (`timestamp`/`forwarder-chain` zero or -1, OFT zero or an in-image RVA, FT and
+  name RVA in-image) and keep the LARGEST run, because random data matches the
+  descriptor shape in 3-entry runs (`alienyze_geek` has spurious tables below the
+  real 18-descriptor IDT).
+* `hinted_store` - from `idt_end`, skip the leading RVA table, then read the record
+  stream: a name at +0 is a DLL marker that CLOSES its own group, a name at +2 is a
+  function. Binary gaps between the store's sections are tolerated (bounded, 64) so
+  one RVA table in the middle does not truncate the walk.
+* the pairs are `fn_names[prev_group_end .. group_end)` under that DLL marker,
+  emitted through a new `PackerContext::imports_out` channel that the engine notes
+  after the transform. Adding pairs can only help a recall-based criterion, which
+  is why a partial recovery is safe to ship.
+
+Store sizes on probes: Bginfo 23 dlls / 1425 names -> 1045 pairs, memtest 6/43 -> 42,
+ADExplorer 14/401 -> 233.
+
+**Measured.** Family alone (126 samples, 85s): imports 4 -> **17**, all-three 0 ->
+**2**, oep_exact unchanged at 17 - and recall 1.000 on many more
+(`Clockres` 0.708 -> 1.000, `handle` 0.742 -> 1.000, `pythonw` 0.614 -> 1.000).
+
+| | round 27 | round 28 |
+|---|---|---|
+| corpus all-three | 1671 (62.4%) | **1674 (62.5%)** |
+| corpus OEP exact | 1782 | 1782 |
+| corpus imports | 1846 (71.9%) | **1860 (72.4%)** |
+| 200-set (300s) | 126 | 126 (0/0) |
+
++3 all-three / +14 imports / **0 losses**. The 3 gains are `alienyze_memtest`,
+`alienyze_pythonw` and `mpress_ComIntRep` (the last is the known budget flake
+returning, counted as a gain here and a loss in round 25 - it is noise either way).
+
+So Alienyze's binding constraint is now the **OEP pick** (17/126), not imports: 17
+samples have exact OEP and 17 have satisfying imports, but only 2 overlap. The next
+Alienyze lever is therefore the shared pick machinery over the restored image, not
+more store parsing.

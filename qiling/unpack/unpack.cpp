@@ -2137,11 +2137,13 @@ UnpackResult Unpacker::finalize(Qiling& ql) {
         // with a per-sample single-byte key and only decrypts on demand through
         // guard pages the emulation never trips, so the dump holds ciphertext and
         // every downstream parse (OEP pick, import harvest) would see noise.
+        std::vector<std::pair<std::string, std::string>> transform_imports;
         if (packer_ != nullptr) {
             packers::PackerContext tctx;
             tctx.ql = &ql;
             tctx.image_ptr = &image;
             tctx.image_mut = &image;
+            tctx.imports_out = &transform_imports;
             tctx.base = base_;
             tctx.image_size = image_size_;
             tctx.packed_ep_va = packed_ep_va_;
@@ -2152,6 +2154,15 @@ UnpackResult Unpacker::finalize(Qiling& ql) {
             tctx.packed_path = &opts_.sample_path;
             if (packer_->transform_image(tctx)) {
                 sections_ = tctx.adopted_sections;
+            }
+            // pairs the transform recovered (Alienyze's `.alien` store): only adds
+            // to the recall-based import criterion, never removes
+            for (const auto& [dll, fn] : transform_imports) {
+                note_import(sanitize_ascii(dll), sanitize_ascii(fn));
+            }
+            if (opts_.debug && !transform_imports.empty()) {
+                std::fprintf(stderr, "[unpack] transform imports: %zu pairs\n",
+                             transform_imports.size());
             }
         }
         // Amber-class: the payload PE is assembled in a heap buffer and the

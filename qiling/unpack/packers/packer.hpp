@@ -42,6 +42,11 @@ struct PackerContext {
     // decrypt the body in place). Kept separate so every other seam stays
     // read-only by construction.
     std::vector<std::uint8_t>* image_mut = nullptr;
+    // transform_image() may also recover the import set the stub kept out of the
+    // image (Alienyze's `.alien` store); the engine notes each pair after the
+    // transform. Adding pairs can only help the recall-based criterion, so a
+    // partial recovery is safe.
+    std::vector<std::pair<std::string, std::string>>* imports_out = nullptr;
     std::vector<std::uint8_t> adopted;                     // a seam's replacement image
     std::uint64_t adopted_base = 0;                        // ... and its base/size/sections
     std::uint64_t adopted_size = 0;
