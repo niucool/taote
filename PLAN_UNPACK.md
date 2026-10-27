@@ -3092,3 +3092,48 @@ the stub installs its own fs:[0] frames and two #DB dispatches reach their
 handlers. The run dies at pc=0x3c6625d4 *after* the second handler returns, so the
 open question is SEH resumption fidelity (how the handler's return is applied),
 not chain setup - a materially different and riskier target than round 30 assumed.
+
+### 0.17y Round 32: the pick worklist is exhausted by construction (candidate-count proof)
+
+**28 of the 36 pick failures have at most ONE ledger candidate**, so no
+selection or scoring rule can change them. Ledger sizes, from TAOTE_UNPACK_DEBUG
+over all 36:
+
+| ledger candidates | samples |
+|---|---|
+| 0 | 12 |
+| 1 | 16 |
+| 2 | 4 |
+| 4 | 3 |
+| 122 | 1 |
+
+The 12 zero-candidate samples are the Alienyze ones (the XOR transform runs at
+finalize, after the run, so nothing is ledgered and the ladder chooses freely).
+The 16 single-candidate ones have exactly one hop and nothing to compare it
+against. Only 8 samples have a real choice, and one of those is a 122-entry junk
+storm. Round 31 showed 24 of the 36 answer via `section_hop`; this shows the
+overwhelming majority of those must be challenged by a *static* candidate rather
+than selected among hops - which is precisely what the reference refuses to do
+for its strong classes (+1e6).
+
+**Measured and reverted: the weak-shape challenger gate.** If a hop's own bytes
+are only weakly entry-shaped it may be poor evidence, so with
+`TAOTE_OEP_SHAPE2=1` a strongest-hop gate of `shape_at(lead) >= 2` (instead of
+`>= 1`) lets the ladder challenge it. On the same 186-sample subset round 31 used
+(36 pick failures + 150 random section_hop passes) the result is **identical to
+the blanket `TAOTE_OEP_INCUMBENT=0` run: 2 gains / 12 losses**. The 12 losses
+*are* the shape-1 hops, so weakly-shaped hops are usually the right answer in
+this corpus and the ladder is not a better judge. Reverted.
+
+Together with round 31 this closes the pick worklist: neither selecting
+differently among ledgered hops (28/36 have nothing to select), nor letting the
+static ladder override a weak hop (2 gains / 12 losses), nor porting the
+decode-only Pass C first-hit rule (inert, both hits validate) produces a positive
+delta.
+
+**Where the remaining OEP gap actually sits** (786 OEP-wrong of 2501 graded, by
+family): Themida 122, TELock 115, Alienyze 108, Yoda-Protector 101, Neolite 92,
+Amber 69, PEtite 38, RLPack 38. The first five alone are 538 of 786, and in each
+of them the failure is that the body is never decoded (or decoded wrongly), not
+that the entry is mis-picked. So the OEP percentage gap versus the reference is
+overwhelmingly a *decode* problem, and per-sample pick tuning cannot move it.
