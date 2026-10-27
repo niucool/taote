@@ -3002,3 +3002,41 @@ shortcuts were checked and all are closed: the packed header EP is NOT the origi
 (darknamer header 0x237e0 vs true 0xa71e), the `.alien` body carries no MZ/PE
 header under any XOR key, and the graded EP cannot come from the store. Resolving
 these needs the reference's broader evidence chain, not another shape rule.
+
+### 0.17w Round 30: TELock's trap and Neolite's layout, measured offline
+
+**TELock's blocker is now pinned to one instruction.** `telock_gzip` traces as:
+
+```
+[unpack] insn_invalid pc=0x466a23 b=0xf1      <- ICEBP, the anti-emulation trap
+[rundbg] emu error 'Invalid memory fetch (UC_ERR_FETCH_UNMAPPED)' pc=0x3c6625d4
+[unpack] fs:[0] chain=0x0                      <- the SEH chain is EMPTY at that point
+```
+
+taote's invalid-instruction hook already does the right thing for 0xf1 (advance Eip,
+then `seh_dispatch_cpu(0x80000004)`), but there is no handler in the fs:[0] chain to
+receive the #DB, so the stub resumes into garbage. The stub installs its handler
+itself; whether it does so through a path taote does not emulate (a vectored
+handler, or a `mov fs:[0]` that never lands in the TEB) is the open question. This
+is emulation fidelity, not the picker.
+
+**Neolite is not one shape either** (offline measurement over the packed files,
+scoring each section's raw bytes against the x86-likelihood window):
+
+| sample | `.text` best XOR | `.text` score at key 0 | embedded PEs in the file |
+|---|---|---|---|
+| neolite_DarkNamer | key 0 | 224 | none |
+| neolite_HashCalc | key 0 | 144 | none |
+| neolite_cmd | key 0 | 6725 | none |
+| neolite_disk2vhd | key 0 | 18162 | 4 (in `.rsrc`, 5-6 sections each) |
+
+So Neolite's `.text` is **plaintext on disk** (key 0 wins by orders of magnitude -
+no single-byte XOR layer, unlike Alienyze), and only `disk2vhd` carries
+resource-embedded PEs. That kills the "Neolite is XOR-encrypted like Alienyze"
+hypothesis and means the 78 "decode-blocked" Neolite samples are not one mechanism.
+
+**Deliberately not done:** extending the embedded-PE adoption to scan the image's
+own `.rsrc` for payload PEs. `neolite_disk2vhd` has four unrelated embedded PEs
+there (resource payloads of the original program, not the unpack target) and
+picking the largest would replace the image with the wrong program. That is a
+regression generator, not a fix, and it cannot be validated inside a round.
