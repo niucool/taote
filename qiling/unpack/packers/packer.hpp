@@ -115,7 +115,27 @@ public:
     // is the shared decode-only ladder, which the engine also uses as its static
     // fallback for every family (measured: it is what corrects a junk first hop
     // for PECompact/FSG/JDPack/Packman as well).
-    virtual std::uint64_t static_oep_from_image(const PackerContext& ctx) const { return ladder_oep(ctx); }
+    virtual std::uint64_t static_oep_from_image(const PackerContext& ctx) const {
+        // Ladder shaping for the families where it was MEASURED to help. Round 48
+        // gave Alienyze its own class for this; round 50 forced both flags on for
+        // every family over 972 samples and measured who gains: WinUpack 3 gains /
+        // 1 loss, BeRoEXEPacker 1/0, NSPack 1/0, everybody else neutral or worse
+        // (all-three 845 -> 849). So the shaping is opted into by those names and
+        // nowhere else - a family label chosen by measurement, which is the same
+        // basis the detector's own family decision rests on.
+        //
+        // Why it helps them: their stubs also leave a packer STORE next to the
+        // payload, so the boundary-thunk pass has code-shaped junk to latch and
+        // Pass C's tail preference walks away from the real entry.
+        const std::string fam = ctx.family.empty() && name() != nullptr ? name() : ctx.family;
+        if (fam == "WinUpack" || fam == "BeRoEXEPacker" || fam == "NSPack") {
+            PackerContext shaped = ctx;
+            shaped.ladder_skip_boundary = true;
+            shaped.ladder_first_c3 = true;
+            return ladder_oep(shaped);
+        }
+        return ladder_oep(ctx);
+    }
 
     virtual ShadowPolicy shadow_policy() const { return ShadowPolicy::none; }
 

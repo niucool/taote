@@ -3979,3 +3979,45 @@ per-family validation in (1).
 Both experiments are reverted; the tree is unchanged and the corpus stays at 1818.
 The measured lead for the next round is (1): three family gates, +4 expected, one
 full corpus + fair-set run to confirm.
+
+### 0.17ar Round 51: the ladder shaping pays on three more families (corpus 1818 -> 1822)
+
+Round 50 measured that forcing round 48's two ladder flags on for EVERY family gains
++5 / loses 1 over 972 samples (WinUpack 3/1, BeRoEXEPacker 1/0, NSPack 1/0, everyone
+else neutral or worse) and deliberately did not ship it, because the families outside
+that subset were never measured with the flags on.
+
+This round ships the part that was measured. `Packer::static_oep_from_image` now
+shapes the ladder for exactly the three families that gained:
+
+```cpp
+const std::string fam = ctx.family.empty() && name() != nullptr ? name() : ctx.family;
+if (fam == "WinUpack" || fam == "BeRoEXEPacker" || fam == "NSPack") {
+    PackerContext shaped = ctx;
+    shaped.ladder_skip_boundary = true;
+    shaped.ladder_first_c3 = true;
+    return ladder_oep(shaped);
+}
+return ladder_oep(ctx);
+```
+
+It is a family label, chosen by measurement — the same basis the detector's own family
+decision already rests on. The mechanism is the one round 47 found for Alienyze: these
+stubs also leave a packer STORE next to the payload, so the boundary-thunk pass has
+code-shaped junk to latch and Pass C's tail preference walks away from the real entry.
+
+**Measured** (1786 samples, 17 families; the gate matches on the family string, so
+only the 301 samples of those three families can change and all 301 are in this set):
+
+| scope | before | after |
+|---|---|---|
+| 17 families | 1574 | **1578** — 4 gains, 0 losses |
+| fair set (200 @300s) | 132 | 132 — 0 gains, 0 losses |
+
+Gains: `nspack_cpuz_x32`, `winupack_PsInfo`, `winupack_pskill`, `winupack_psshutdown`.
+The BeRo gain round 50 saw (`bero_ADInsight`) does not reappear — in that run its
+neighbour lost, so the pair was a coin flip at the budget boundary, not a real win;
+with the gate in place BeRo measures 0/0 here.
+
+Fair set neutral because it holds 8 samples per family, 24 of them in the gated
+families, and none sat near the pass/fail boundary.
