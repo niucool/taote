@@ -4180,3 +4180,47 @@ instruction addresses and prints them at finalize (env-gated scaffolding, alongs
 Both are per-stub reverse engineering, not emulator tuning; the classification above
 says so quantitatively (503 ciphertext rows, 390 of them in the four anti-emulation
 families).
+
+### 0.17av Round 54: the timing hypothesis for Amber, measured neutral; and the .NET cluster that is not there
+
+The decode class's most obvious emulator-deficiency candidate is the clock: a stub reads
+a counter, decodes, reads again and bails if the delta is zero. taote's two counters
+made that delta ALWAYS zero:
+
+* `GetTickCount` returned upstream's constant `200000` (unless `Sleep` moved the
+  virtual clock).
+* `QueryPerformanceCounter` returned 0 and wrote nothing — "the verbatim quirk" the
+  port preserves from the reference.
+
+So both were made to advance monotonically (one virtual millisecond per read, derived
+from a per-process counter, no host clock), and measured on the family that actually
+probes them. The 240-sample census identified it precisely: **Amber is the only failing
+family whose clean stops call `QueryPerformanceCounter` and `GetTickCount` (30 of 30)**,
+together with `GetStartupInfoA`, `GetSystemTimeAsFileTime`, `GetCurrentProcessId` and
+`msvcrt!_initterm` — i.e. the payload's own CRT startup.
+
+Amber family measurement (152 samples, 85 s): **all-three 83 -> 83, OEP exact 83 -> 83,
+imports 137 -> 137, 0 gains, 0 losses.** Exactly inert, so the change was reverted
+rather than shipped as a deviation from the reference's semantics with nothing to show.
+
+Conclusion: these stubs do not bail on a zero clock delta. Whatever they test, an
+advancing tick is not it.
+
+### A trap worth writing down: the third null-vs-false sighting
+
+Amber's 47 wrong-OEP rows include a striking cluster — `jsc`, `RegAsm`, `MacMakeup`,
+`DataSvcUtil`, `DatabaseEditor`, `HashCalculator`, `aspnet_compiler` … all with
+`code_sim ~1.000`, `imp_recall 1.000`, a claimed OEP near RVA 0x13ef8-0x22e08 and a true
+EP near 0x4a0e-0xe00e. They look like a dozen free conversions, and the dump happens to
+contain exactly one `ff 25` thunk, sitting precisely at the true EP (the CLR entry stub
+of a .NET image; the image imports `mscoree.dll!_CorExeMain`).
+
+They are not conversions. Every one of them has `oep_exact: null` — .NET rows are
+ungraded — and `out_ep == orig_ep`, i.e. the rebuilt image's entry is ALREADY correct
+even though the claimed OEP is not. Filtering with `o.get('oep_exact') is not False`
+(instead of `not o.get('oep_exact')`) makes all fourteen disappear.
+
+That is the third time this session a falsy `null` has invented a cluster (round 52's
+"Eronana 13 valid-PE rows at code_sim 1.0" and round 53's first cross-tab both had the
+same cause). Any worklist query over the report must test `is False` / `is None`
+explicitly.
