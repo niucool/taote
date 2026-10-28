@@ -262,6 +262,13 @@ private:
 
     // the per-section hook handles (RAII: HookRet unregisters)
     std::vector<std::shared_ptr<HookRet>> hooks_;
+    // TAOTE_LASTPC=N: a ring buffer of the last N instruction addresses, for the
+    // clean stops that call no API at all (TELock/Yoda-Protector/Alienyze bail on
+    // an INLINE environment check, so there is nothing to see in the api log).
+    // Env-gated scaffolding: the hook is a per-instruction callback and would cost
+    // the whole throughput budget if it were ever armed by default.
+    std::vector<std::uint64_t> last_pcs_;
+    std::size_t last_pc_pos_ = 0;
     Qiling* ql_ = nullptr;  // the run this unpacker is installed on
     // sections whose write hook has been muted (the reference disables the
     // hook; taote keeps it armed and short-circuits on the first lookup)

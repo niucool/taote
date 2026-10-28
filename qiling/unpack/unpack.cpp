@@ -479,6 +479,19 @@ void Unpacker::install(Qiling& ql) {
     ql_ = &ql;
     classify_sections(ql);
 
+    if (const char* lp = std::getenv("TAOTE_LASTPC"); lp != nullptr) {
+        const std::size_t n = std::strtoul(lp, nullptr, 0);
+        if (n > 0) {
+            last_pcs_.assign(n, 0);
+            auto h = std::make_shared<HookRet>(ql.hook_code([this, n](std::uint64_t addr, std::uint32_t) -> int {
+                last_pcs_[last_pc_pos_ % n] = addr;
+                ++last_pc_pos_;
+                return 0;
+            }));
+            hooks_.push_back(std::move(h));
+        }
+    }
+
     // no hops at all (the Phase 0 artifact-only mode): the dump is the entry
     // state, which is what "no unpacking" means for the scoreboard
     if (!opts_.enable_hop) {
@@ -2170,6 +2183,14 @@ std::uint64_t Unpacker::static_oep_from_image(const std::vector<std::uint8_t>& i
 }
 
 UnpackResult Unpacker::finalize(Qiling& ql) {
+    if (!last_pcs_.empty()) {
+        const std::size_t n = last_pcs_.size();
+        const std::size_t cnt = std::min(last_pc_pos_, n);
+        std::fprintf(stderr, "[unpack] last %zu instructions:\n", cnt);
+        for (std::size_t i = last_pc_pos_ + n - cnt; i < last_pc_pos_ + n; ++i) {
+            std::fprintf(stderr, "[pc] 0x%llx\n", static_cast<unsigned long long>(last_pcs_[i % n]));
+        }
+    }
     detach_hooks();
     UnpackResult res;
     // an embedded-PE adoption replaces the image and moves base_ (Amber-class

@@ -4110,3 +4110,73 @@ newly-correct samples have fully decoded bodies (`code_sim 1.0`) and import reca
 0.39-0.75, so they are 8 potential conversions sitting behind the RLPack import
 question that rounds 45/46 pinned as a data ceiling (payload IAT slots never written,
 zero GetProcAddress calls).
+
+### 0.17au Round 53: the failure set classified by BYTES AT THE TRUE EP, and RLPack closed with evidence
+
+`code_sim` measures similarity over a whole image and is a poor proxy for "was the
+entry decoded". This round classified every graded failure by the direct question: at
+the sample's **true EP**, are the dumped 32 bytes identical to the original's 32 bytes?
+(Mapping the original's RVA through its own section table; 852 failures with an
+`orig_ep` and a readable dump.)
+
+| class | n | families |
+|---|---|---|
+| ciphertext at the true EP | **503** | Themida 115, Yoda-Protector 94, Neolite 91, TELock 90, Alienyze 35, Amber 43, Exe32pack 7, FSG 8 |
+| partial (1-31 of 32 bytes) | 129 | TELock 26, PEtite 26, Amber 22, Exe32pack 12 |
+| **decoded (32/32)** | **218** | RLPack 94, Alienyze 43, WinUpack 18, PEtite 17, Exe32pack 13, Eronana 13 |
+
+Cross-tabulating the 218 decoded rows by what actually fails:
+
+| failing criterion | n | families |
+|---|---|---|
+| pick (imports OK, OEP wrong) | **40** | Alienyze 18, WinUpack 5, Amber 4, PEtite 4, JDPack 4, Molebox 3 |
+| imports (OEP exact) | **94** | RLPack 65, Alienyze 11, WinUpack 8, PEtite 6, MEW 3 |
+| both | 55 | RLPack 28, Alienyze 14, PEtite 7, WinUpack 4 |
+
+The pick count (40) matches round 49's independent `code_sim >= 0.9` estimate of 43,
+so the picker worklist is confirmed at ~40 and is dominated by the Alienyze link-order
+cluster that round 49 refused to overfit.
+
+**RLPack stays closed, now with hard evidence.** It looks like the single biggest
+convertible block — 93 of its 104 samples are decoded at the true EP and fail only on
+imports — so it was worth re-testing rather than trusting round 46's weaker argument.
+Extracting the original's full import pair set (hint-byte aware) and comparing with
+what taote recovered:
+
+| sample | truth | recovered | recall | missing named | **of those, present anywhere in the dump** |
+|---|---|---|---|---|---|
+| rlpack_pskill | 122 | 217 | 0.648 | 39 | **0** |
+| rlpack_portmon | 291 | 401 | 0.395 | 159 | **0** |
+| rlpack_Dbgview | 315 | 405 | 0.400 | 173 | **0** |
+
+**371 missing names, 0 present in the dumped image.** The strings are not there — not
+mis-attributed, not behind a bad DLL marker, absent. RLPack's decoder builds the
+payload with an import resolver that leaves nothing recoverable, so its 93 decoded rows
+are a hard ceiling, not a work item. (Its output is also over-generous: 401 pairs
+against 291 true, precision 0.4.)
+
+### The no-API clean stops get a tool
+
+A 240-sample census of the clean-stop failures (30 lowest-`code_sim` per family, 8
+families, 25 s budget, `TAOTE_APIDBG=1`) split them sharply:
+
+* **90 of 240 call no API at all** — TELock 30/30, Yoda-Protector 30/30, Alienyze 30/30.
+  These bail on an INLINE environment check, so the API log shows nothing.
+* 60 end in `MessageBoxA` (the decoy path), 60 in `ExitProcess`, 19 in
+  `GetCurrentThreadId`, 10 in `TerminateProcess`.
+
+To see inside the first class, `TAOTE_LASTPC=N` now keeps a ring buffer of the last N
+instruction addresses and prints them at finalize (env-gated scaffolding, alongside
+`TAOTE_EMBEDDBG`/`TAOTE_SALVDBG`). It confirms the two shapes:
+
+* **TELock** (`telock_cmd`) spins at `0x4ad4a08f..0x4ad4a0a7`, and those bytes in the
+  DUMP are ciphertext (`jae/jg/push ss/call/add/adc/outsl/js/...`) — the loop executes
+  code the dump never captured, so static reading of the dump cannot recover it.
+* **Yoda-Protector** (`yoda-protector_Hash`) spins in an `eb 01 e8` chain at
+  `0x41258f..0x4125a7` and the last `[pc]` before the clean stop is `0x70000000` — it
+  returns straight into the SEH sentinel, i.e. the AV-handler path round 37's int3
+  resumption did not reach.
+
+Both are per-stub reverse engineering, not emulator tuning; the classification above
+says so quantitatively (503 ciphertext rows, 390 of them in the four anti-emulation
+families).
