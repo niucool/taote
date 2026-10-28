@@ -4399,3 +4399,55 @@ makes `cmake --build . --target taote_unpack` fail with "No rule to make target"
 piped `grep " error"` hides it — a stale binary then gets used for a measurement. The
 committed unpack code builds cleanly under the new name (`cmake --build . --target
 taote`), and the corpus harness must be pointed at `build/tools/taote`.
+
+### 0.17bb Round 59: adoption-over-hop, third attempt, and the discriminator question is answered NO
+
+Round 56 tried letting the heap-payload adoption run even when a hop exists: 6 gains,
+33 losses. It named the defect (the adoption moved `base_`/`image_size_` and only then
+validated the entry, so a rejected candidate still left the engine on the heap while the
+hop pick emitted a stub-image OEP) and named the missing piece: a discriminator between
+a decoy hop that shadows a heap payload and a real hop that already found it.
+
+This round fixed the structural defect properly and tried the discriminator the data
+suggested.
+
+**Fixed (both are correct and were kept through the experiment):** the candidate's entry
+is now read out of the candidate BEFORE any geometry is mutated, and a committed
+adoption outranks the hop pick (`adopted_ep` suppresses `pick_oep`), because the ledger's
+VAs belong to the old base space. With these, an adoption can no longer half-commit.
+
+**The discriminator, measured:** a hop that lands very early cannot be a decoder's
+product — `amber_chgport`/`chgusr`/`netcfg` claim 0x401661 at write **#25/#25/#24**,
+while real landings come after the decoder's work (`aspack_Dbgview` #114955,
+`packman_Sysmon` #709491, `amber_pipelist` #188547). Gating the scan on
+"latest hop < 4096 writes" gave:
+
+| scope | result |
+|---|---|
+| Amber (152) | 110 -> **113**, exactly chgport/chgusr/netcfg, 0 losses |
+| corpus (2678) | 1847 -> **1819** — 4 gains, **32 losses** |
+
+The 32 losses are not boundary rows: **UPX 5 and Yoda-Crypter 8 at `dur=0`**, PECompact 7,
+RLPack 5, Neolite 1, plus boundary rows in NSPack/WinUpack. The reason is now clear and
+worth recording: UPX and Yoda-Crypter hop EARLY BY DESIGN (their decompressor runs after
+the hand-off), so "few writes before the hop" does not mean "decoy". And the deeper
+finding — a complete PE with a validating entry exists in memory for UPX, Yoda-Crypter,
+PECompact, RLPack, ASPack and Packman too, and is NOT the payload (aspack's entry 0x45d4
+against a true 0x15757; packman's 0x1c058 against 0x43cc8) — means "valid PE in memory"
+carries almost no evidence on its own.
+
+So the empty-hop gate is doing real work, not being lazy. Reverted; corpus back to 1847.
+
+**Do not retry this without a discriminator that is grounded in where the payload came
+FROM** (e.g. establish which allocation the stub copied the image into, or require the
+candidate's bytes to be a superset of the decoded section contents) rather than in the
+candidate's plausibility. Three attempts — plausibility-only (56), entry-validation (59),
+hop-timing (59) — have each measured negative.
+
+### Tree note
+
+While this round ran, the parallel workstream moved into the import path itself
+(`qiling/unpack/iat/iat_search.*`, `iat/import_rebuilder.*`, `unpack.hpp`), so a corpus
+run started now measures their changes as well as mine. The 1847 baseline is the r43
+measurement, taken before that work, and any later delta needs the `git status` checked
+first.
