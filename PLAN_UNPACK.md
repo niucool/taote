@@ -4224,3 +4224,49 @@ That is the third time this session a falsy `null` has invented a cluster (round
 "Eronana 13 valid-PE rows at code_sim 1.0" and round 53's first cross-tab both had the
 same cause). Any worklist query over the report must test `is False` / `is None`
 explicitly.
+
+### 0.17aw Round 55: the adopted heap payload was being thrown away (corpus 1822 -> 1847)
+
+Round 54 left one lead: Neolite never decodes into its own sections, so the payload must
+be somewhere else. `TAOTE_HEAPSCAN=1` (new, this round) records every page written
+outside the dumped image and looks for an MZ/PE pair there. The answer was immediate and
+unexpected — **not Neolite, Amber**:
+
+| family | samples | PE found in heap |
+|---|---|---|
+| Amber | 10 | **7** |
+| Neolite | 10 | 0 |
+| Alienyze | 10 | 0 |
+
+And every one of those seven Amber PEs carries `ep == orig_ep` exactly:
+`amber_Sysmon` 0x43cc8, `amber_mmc` 0x3fb0e, `amber_ComIntRep` 0x2800a, `amber_PEViewer`
+0x1504, `amber_md5summer` 0x9ec68, `amber_ConfigProfile` 0x4434, `amber_Autologon`
+0x3980. The payload really is assembled in heap memory — and taote already had the
+machinery to adopt it (`adopt_embedded_pe`, the reference's try_embedded_pe), printed
+
+    [unpack] embedded PE at 0x52bbde6 size 0x2bb000 (stub at 0x400000)
+
+and then reported `oep=0x401000 reason=fallback_guess` anyway.
+
+The cause is two lines: `packers::adopt_embedded_pe` replaces the caller's image buffer
+with the adopted payload and reports the new base/size, but the BASE `Packer::`
+implementation handed it a *copy* and never published it, so the engine's gate
+`!actx.adopted.empty()` rejected the find. `AmberPacker`'s override publishes it, which
+is why Amber samples whose packer resolves to the Amber class adopted correctly and the
+`family=unknown` ones did not. Fixed by publishing the copy on success.
+
+| scope | before | after |
+|---|---|---|
+| **Amber (152)** | all-three 83, oep 83 | **110, 111** — 27 gains, 0 losses |
+| corpus (2678 @85s) | 1822 | **1847** — oep 1925 -> **1952** |
+| fair set (200 @300s) | 132 | **133** — 1 gain (Amber), 0 losses |
+
+Corpus gains: **Amber 27**, NSPack 1. Corpus losses: 3, all at the budget boundary —
+`packman_HDDScan` (`dur=86`; a clean 400 s re-run gives the exact OEP and recall
+**1.0000**), `mpress_ComIntRep` (`dur=86`, the standing flake: 78 s in the previous run)
+and `rlpack_procexp` (`dur=85`; 0.9424 at 400 s against 0.9597 in the previous run, i.e.
+borderline rather than broken). So the honest delta is **+26 to +27** over the 1823
+baseline, not the measured +25.
+
+Note the yoda/neolite/heap idea itself is dead: those stubs write 1-5 pages outside the
+image and never build a PE there, so round 53's ciphertext class for them stands.

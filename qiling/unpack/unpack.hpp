@@ -269,6 +269,13 @@ private:
     // the whole throughput budget if it were ever armed by default.
     std::vector<std::uint64_t> last_pcs_;
     std::size_t last_pc_pos_ = 0;
+    // TAOTE_HEAPSCAN=1: record every page written OUTSIDE the dumped image and, at
+    // finalize, look for a PE image there. A packer that decodes into a GlobalAlloc
+    // buffer and jumps to it (Neolite: CreateFileMapping -> GlobalAlloc ->
+    // FlushInstructionCache -> MessageBox -> ShellExecute) leaves nothing in the
+    // dumped image, so this is the only place its payload can be. Diagnostic only:
+    // a whole-address-space write hook is per-store, which is why it is env-gated.
+    std::set<std::uint64_t> heap_pages_;
     Qiling* ql_ = nullptr;  // the run this unpacker is installed on
     // sections whose write hook has been muted (the reference disables the
     // hook; taote keeps it armed and short-circuits on the first lookup)

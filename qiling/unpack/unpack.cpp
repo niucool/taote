@@ -479,6 +479,17 @@ void Unpacker::install(Qiling& ql) {
     ql_ = &ql;
     classify_sections(ql);
 
+    if (std::getenv("TAOTE_HEAPSCAN") != nullptr) {
+        auto h = std::make_shared<HookRet>(ql.hook_mem_write(
+            [this](int /*access*/, std::uint64_t addr, std::uint32_t /*size*/, std::int64_t /*value*/) -> int {
+                if (addr < base_ || addr >= base_ + image_size_) {
+                    heap_pages_.insert(addr & ~0xfffULL);
+                }
+                return 0;
+            },
+            1, 0));
+        hooks_.push_back(std::move(h));
+    }
     if (const char* lp = std::getenv("TAOTE_LASTPC"); lp != nullptr) {
         const std::size_t n = std::strtoul(lp, nullptr, 0);
         if (n > 0) {
@@ -2183,6 +2194,63 @@ std::uint64_t Unpacker::static_oep_from_image(const std::vector<std::uint8_t>& i
 }
 
 UnpackResult Unpacker::finalize(Qiling& ql) {
+    if (!heap_pages_.empty()) {
+        // Walk the recorded pages in runs and look for an MZ/PE pair. The payload a
+        // stub decodes into a heap buffer is the only candidate that can never show
+        // up in the dumped image itself.
+        std::fprintf(stderr, "[heapscan] %zu pages written outside the image\n", heap_pages_.size());
+        std::size_t found = 0;
+        auto it = heap_pages_.begin();
+        while (it != heap_pages_.end()) {
+            const std::uint64_t start = *it;
+            std::uint64_t end = start + 0x1000;
+            while (heap_pages_.count(end) != 0) {
+                end += 0x1000;
+            }
+            const std::size_t span = static_cast<std::size_t>(std::min<std::uint64_t>(end - start, 0x800000));
+            std::vector<std::uint8_t> buf;
+            try {
+                buf = ql.mem().read(start, span);
+            } catch (...) {
+                buf.clear();
+            }
+            for (std::size_t i = 0; i + 0x40 < buf.size(); ++i) {
+                if (buf[i] == 'M' && buf[i + 1] == 'Z') {
+                    const auto lfanew = static_cast<std::size_t>(static_cast<std::uint32_t>(buf[i + 0x3c]) |
+                                                                 (static_cast<std::uint32_t>(buf[i + 0x3d]) << 8) |
+                                                                 (static_cast<std::uint32_t>(buf[i + 0x3e]) << 16) |
+                                                                 (static_cast<std::uint32_t>(buf[i + 0x3f]) << 24));
+                    if (i + lfanew + 0x40 < buf.size() && buf[i + lfanew] == 'P' && buf[i + lfanew + 1] == 'E' &&
+                        buf[i + lfanew + 2] == 0 && buf[i + lfanew + 3] == 0) {
+                        const auto nsec = static_cast<unsigned>(buf[i + lfanew + 6] |
+                                                               (buf[i + lfanew + 7] << 8));
+                        const auto soh = static_cast<unsigned>(buf[i + lfanew + 20] |
+                                                               (buf[i + lfanew + 21] << 8));
+                        const std::size_t opt = i + lfanew + 24;
+                        std::uint32_t ep = 0;
+                        std::uint32_t imgbase = 0;
+                        if (opt + 32 < buf.size()) {
+                            ep = static_cast<std::uint32_t>(buf[opt + 16]) |
+                                 (static_cast<std::uint32_t>(buf[opt + 17]) << 8) |
+                                 (static_cast<std::uint32_t>(buf[opt + 18]) << 16) |
+                                 (static_cast<std::uint32_t>(buf[opt + 19]) << 24);
+                            imgbase = static_cast<std::uint32_t>(buf[opt + 28]) |
+                                      (static_cast<std::uint32_t>(buf[opt + 29]) << 8) |
+                                      (static_cast<std::uint32_t>(buf[opt + 30]) << 16) |
+                                      (static_cast<std::uint32_t>(buf[opt + 31]) << 24);
+                        }
+                        std::fprintf(stderr,
+                                     "[heapscan] PE at 0x%llx (nsec=%u soh=%u ep=0x%x base=0x%x)\n",
+                                     static_cast<unsigned long long>(start + i), nsec, soh, ep, imgbase);
+                        ++found;
+                        i += lfanew;
+                    }
+                }
+            }
+            it = heap_pages_.lower_bound(end);
+        }
+        std::fprintf(stderr, "[heapscan] candidates: %zu\n", found);
+    }
     if (!last_pcs_.empty()) {
         const std::size_t n = last_pcs_.size();
         const std::size_t cnt = std::min(last_pc_pos_, n);

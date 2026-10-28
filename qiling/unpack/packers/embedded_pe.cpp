@@ -238,10 +238,20 @@ bool Packer::adopt_embedded_pe(PackerContext& ctx) {
     if (ctx.ql == nullptr || ctx.image_ptr == nullptr) {
         return false;
     }
-    // adopt_embedded_pe fills ctx.adopted; the scan itself works on a copy so the
-    // caller's image is untouched until it accepts the payload
+    // The scan works on a copy so the caller's image is untouched until it accepts
+    // the payload; it then REPLACES that copy with the adopted image, which has to
+    // be published or the engine throws the find away (`!actx.adopted.empty()` is
+    // its gate). AmberPacker's override always did this; the base implementation
+    // used to return true while leaving ctx.adopted empty, so every family without
+    // its own override logged "embedded PE at ..." and then reported
+    // reason=fallback_guess anyway (measured on amber_Sysmon, whose heap payload at
+    // 0x52bbde6 has ep 0x43cc8 = the true entry).
     std::vector<std::uint8_t> probe = *ctx.image_ptr;
-    return packers::adopt_embedded_pe(*ctx.ql, ctx, probe);
+    if (!packers::adopt_embedded_pe(*ctx.ql, ctx, probe)) {
+        return false;
+    }
+    ctx.adopted = std::move(probe);
+    return true;
 }
 
 class AmberPacker : public Packer {
