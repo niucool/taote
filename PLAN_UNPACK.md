@@ -3264,3 +3264,51 @@ have an exact OEP and a right body (code_sim 0.87-1.0) but import recall
 DLL name strings and 1102 API-looking strings while the descriptor walk finds 11
 descriptors) - so the reference's PEtite INT-run salvage (petite_unpacker.cpp
 :540-752, name->dll attribution through the module export tables) is the next port.
+
+### 0.17ab Round 35: PEtite's data IS in the dump; the blocker is DLL attribution
+
+PEtite is the best remaining convertible block on paper: 12 samples have an exact
+OEP and a right body (code_sim 0.87-1.0) but import recall 0.03-0.25, and
+unlike RLPack the payload's import data is present. Two facts pinned this round,
+both on `petite_PEViewer.exe` (original: 543 imports).
+
+**1. The original import directory survives in the dump.** At RVA 0x12b000 the
+original's descriptor chain is intact - OFT 0x12b128, Name 0x12b694, FT 0x12b70c -
+and the original's INT/thunk arrays and name strings are present all over the
+section (`GetFileVersionInfoA` at RVA 0x12cf45, `RegCloseKey`, `CreateFileA`,
+`MessageBoxA`, `HeapAlloc` all found verbatim). The reason the pelt is poor is that
+the harvester reads DD[1], which the stub REWROTE to its own rebuilt table at
+0x182680: 11 descriptors, 16 slots, names ending in a DLL cluster at 0x1828ac.
+That rebuilt table is what our "11 descriptors -> 16 imports" line reports, and
+16/543 is the measured recall 0.0333. So this is not a missing-data family; it is
+a "the header points at the stub's table, and the original one is orphaned"
+family.
+
+**2. INT-run detection already works; ATTRIBUTION is what fails.** Replaying
+taote's own table scan offline over the dump finds 12 pointer-spaced name tables,
+including one at 0x12b3d4 with **156** names and one at 0x12b920 with 87 - i.e.
+the candidate names are all there. But the scan then requires "the dll string
+nearest BEFORE the table" and finds none for them, so every table is dropped. The
+original descriptors that would name them are partly overwritten (the descriptor
+at 0x12b000 has Name pointing INTO a name array, not at a DLL string).
+
+**Measured and reverted: the hint/name read fix.** PEtite's thunks point STRAIGHT
+at the name, so reading v+2 (the standard ordinal-hint layout) chopped two
+characters off every name ('GetUserNameA' -> 'tUserNameA'). Preferring whichever
+of `cstr(v)` / `cstr(v+2)` parses longer is safe by construction (when v really is
+a hint the parse at v starts on non-printable hint bytes and fails) and it does
+recover the untruncated names. Measured on the PEtite family (73 samples, 85s
+budget, own run): **0 of 73 samples changed recall** - identical to three decimal
+places on the aggregate (recall 0.393, precision 0.236, imports 23, all-three 23).
+So the INT-table path contributes nothing for this family today; the fix is inert
+and was reverted.
+
+**The next port, precisely scoped.** Name->DLL attribution, which the reference
+gets from the emulator's module export tables (petite_unpacker.cpp:540-752 builds
+`exp2dll` from get_peb_modules + get_sys_modules, skipping ntdll/ntoskrnl, with a
+host-System32 fallback that is `#ifdef _WIN32` and therefore inert on this host).
+taote has no per-module export map - `export_symbols()` is the MAIN image only -
+so the equivalent needs either a loader-side per-module export list or a
+family-side read of the rootfs stub DLLs' export directories. That is the unit of
+work for the next round, and it is the last mile for 12 samples here plus the
+orphan-table path generally.
