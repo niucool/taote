@@ -3574,3 +3574,56 @@ database is a good *fallback* where no attribution exists (a table with no prece
 DLL string), and a bad *override* where an attribution already exists - even a
 noisy-looking one. `mew_Sysmon` is a single-sample win that costs two
 single-sample losses, and one of its "junk" DLLs may well have been real.
+
+### 0.17ai Round 42: Neolite's 78 "imports-ok" samples have ciphertext bodies
+
+An attractive inference died this round: Neolite has 78 samples with **imports
+passing** but a wrong OEP, and imports are read from the dump, so the body "must" be
+decoded and only the entry wrong - i.e. up to 78 samples for a pick fix. Measured:
+
+**All 78 have code_sim < 0.1** (0.022-0.043). Imports pass because the names come
+from the packer's own store, not from the payload body. The inference was wrong and
+checking it cost ten minutes instead of a corpus round.
+
+**What the dump actually holds** (neolite_ADInsight, original ADInsight.exe):
+
+| section | va | dump vsize | original vsize | identical bytes |
+|---|---|---|---|---|
+| .text | 0x1000 | 0x49800 | 0x4962c | **3.7%** |
+| .rdata | 0x4b000 | 0x184ce | 0x184ce | 30.6% |
+| .data | 0x64000 | 0x1e8600 | 0x1e8600 | 19.7% |
+| .rsrc | 0x24d000 | 0x1d33c0 | 0x1d33c0 | 23.2% |
+| .reloc | 0x421000 | 0x4400 | 0x4298 | 2.3% |
+| .neolit | 0x426000 | 0x1a50 | - | the stub |
+
+Two facts worth keeping. First, **the dump's section layout is exactly the
+original's** (VAs and sizes match to the byte, with the stub's own `.neolit`
+appended) - the packer preserves the layout and encrypts in place, so a
+layout-vs-dump size comparison is a cheap way to tell "decoded" from "still
+ciphertext". Second, .text is 75% non-zero but only 3.7% identical: ciphertext, not
+empty.
+
+**Three candidate mechanisms, all measured and rejected:**
+
+1. **The first-write shadow** (the anti-dump overlay MEW/PECompact need, since
+   decrypt-execute-re-encrypt leaves ciphertext in terminal memory). Run with
+   TAOTE_UNPACK_SHADOW_ALL=1 on neolite_ADInsight / neolite_Bginfo /
+   neolite_Clockres: code_sim unchanged at 0.032 / 0.022 / 0.041. Not that pattern.
+2. **The round-33 terminal CRT fill.** Its three signatures find **zero** candidates
+   in all 78 samples (`high = {}` for every one), so the fill cannot reach them; the
+   one sample it does fix (neolite_cmd) is a different shape (decoded body,
+   plausible-but-wrong pick).
+3. **Embedded PEs.** The dump carries valid PEs at 0x29ada0 and 0x376f10, but they
+   are **64-bit** images (`.pdata`, ImageBase 0x1) - bundled helper binaries, not
+   the 32-bit payload. Confirms round 30's rejection of resource-PE adoption.
+
+So Neolite's stub reaches a clean stop (no fault, no emulation error) having hopped
+into a still-encrypted region, i.e. the decryption loop is skipped under emulation.
+The next step there is tracing *why* (an anti-debug/anti-emulation branch), not more
+pick or attribution work - and the trace must start from the clean-stop observation,
+because there is no crash to read.
+
+**Also corrected this round:** the offline "junk DLL" numbers that motivated round
+41's re-attribution experiment were an artefact of a narrower regex than the C++
+image scan (16 DLL stems vs 7 in petite_PEViewer). That experiment's rejection
+stands, but its premise was already invalid before the corpus run.
