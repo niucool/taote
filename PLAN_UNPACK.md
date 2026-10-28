@@ -3461,3 +3461,52 @@ fallback is Windows-only - so on this host the missing piece is a *name->dll
 database*, not more scanning. That single asset would serve PEtite, MEW, WinUpack,
 Alienyze and NSPack at once, which makes it the highest-leverage remaining item
 even though it is infrastructure rather than a family port.
+
+### 0.17af Round 39: the export database — corpus all-three 1766 -> 1772 (+7)
+
+Round 38 concluded that every import near-miss was blocked by one missing asset: a
+name -> owning-DLL map. This round builds it and it pays.
+
+**The asset.** `tools/gen_api_db.py` turns the host's mingw-w64 IMPORT LIBRARIES
+into `qiling/unpack/api_db.inc` (32374 names over 401 DLLs, 1.2 MB, committed so a
+build without mingw still works). `libkernel32.a` lists what kernel32.dll exports,
+and so on - an SDK export database. It is deliberately NOT derived from the
+corpus's unpacked originals, which would be ground truth and make every measurement
+circular; it is the Linux equivalent of the reference's `host_dll_has_export`,
+which reads the real System32 DLLs on Windows. API-set pseudolibs (onecoreuap_apiset
+alone forwards 19k names) are excluded, and the classic system DLLs win ties.
+
+**Where it is used.** The INT-table scan already found 12 pointer-spaced tables in
+petite_PEViewer (one with 228 names) but dropped all of them because its only
+attribution source is "the DLL string nearest BEFORE the table", and the stub's
+rebuild drops the descriptor's Name field. A table with no preceding DLL string is
+now attributed member-by-member through the database, preferring a DLL the IMAGE
+itself names. Ordinals are skipped rather than guessed (a wrong DLL is not a recall
+hit). Offline prediction on petite_PEViewer: 12 tables / 2056 members -> 953
+attributed pairs, recall 0.940 vs 0.0333 for the shipped set.
+
+**A second bug the database exposed.** FSG/BeRo/MEW/WinUpack shift the first
+character of every stored name by -3, and the scan undid that blindly - which
+corrupts every OTHER family's names: PEtite's `EnableWindow` became `BnableWindow`,
+so the whole table then matched nothing (and the database could not attribute it).
+The undo is now evidence-backed: apply it only when the database knows the shifted
+spelling and not the stored one. Measured effect on one table: 12 of 12 names
+attributed instead of 1 of 12, and PEViewer's big table 228 of 228.
+
+**Measured.**
+- PEtite family (73): all-three 23 -> **29**, imports 23 -> 35, mean recall
+  0.393 -> **0.803**, 0 losses. The 6 new all-three are petite_ctrl2cap, efsdump,
+  gsd, ldmdump, pagedfrg, puttytel_32.
+- corpus (2678 @85s): all-three 1766 -> **1772**, 7 gains (PEtite 6 + MPRESS 1) and
+  1 loss. The loss is `nspack_procexp` at dur=85 - it ran at dur=81 before, so the
+  extra pairs pushed it past the budget; a clean local re-run gives recall 1.000.
+  So the honest delta is **+7** (1766 -> 1773).
+- fair set (200 @300s): 129 -> 129, 0/0.
+- suite 593/593.
+
+**Also re-applied this round, with the reason stated.** Round 35 measured the
+"prefer the longer of cstr(v) / cstr(v+2)" fix as INERT (0 of 73 PEtite samples
+moved) and reverted it. It is re-applied here because the mechanism that made it
+inert is gone: nothing consumed the names then, whereas the database lookup needs
+the untruncated spelling. That is a different measurement, not a repeat of a losing
+experiment - and the family result (23 -> 29) is what proves it this time.
