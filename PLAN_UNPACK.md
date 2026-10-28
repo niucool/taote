@@ -4361,3 +4361,41 @@ handful. The 747 graded failures are decode-bound (503 ciphertext at the true en
 round 53) and import-bound (ordinal ceilings), not time-bound. A throughput restructure
 is therefore NOT the next lever, whatever its absolute speedup, and the instruction-budget
 removal stays blocked for the reasons round 15 measured.
+
+### 0.17ba Round 58: Exe32pack's "valid-PE rebuild" item is closed; its residual is a stub-internal dispatch
+
+PLAN_UNPACK item 2 lists "Exe32pack valid-PE rebuild". Closed: **124 of 124 samples
+produce a valid PE** (round 34's zeroed-section-table restore did it). Exe32pack now
+stands at 92 all-three, 107 graded (17 .NET), so 15 rows remain and every one fails BOTH
+criteria (`oep_bad` + `imp_bad`), all at `dur = 0` — they are clean, fast, wrong.
+
+The shape is the same one round 44 recorded, and it is inside the stub, not the emulator:
+`TAOTE_LASTPC` shows the last instructions before `UC_ERR_WRITE_UNMAPPED` on
+`exe32pack_bzip2` are a call through a function-table pointer followed by a store into
+the structure that pointer belongs to:
+
+```
+41781b: push $0x40
+41781d: call *(%esi)          ; dispatch through the stub's own vtable
+41781f: mov %eax,-0x4(%ebp)
+...
+4178a0: mov %eax,0x14(%esi)   ; <- faults: esi == 0x40, so this writes 0x54
+```
+
+`esi` is `0x40` — a size, not a pointer — so the caller handed the dispatcher its own
+argument in the structure slot. That is stub-internal data flow, and the sequence of API
+calls before it (`VirtualProtect` x5, `GetModuleHandleA`, `GetProcAddress` x4,
+`LocalAlloc` returning 0x418304 then 0x50007ec, `RtlZeroMemory`) offers no obviously
+wrong return value to blame.
+
+So Exe32pack's remaining 15 join the anti-emulation class: not a parsing defect, not a
+pick defect, and not a PE-rebuild defect.
+
+### Build layout note
+
+While this round was running, a parallel change in this repo renamed the unpacker target
+`tools/taote_unpack.cpp` -> `tools/taote.cpp` (target `taote_unpack` -> `taote`), which
+makes `cmake --build . --target taote_unpack` fail with "No rule to make target" while a
+piped `grep " error"` hides it — a stale binary then gets used for a measurement. The
+committed unpack code builds cleanly under the new name (`cmake --build . --target
+taote`), and the corpus harness must be pointed at `build/tools/taote`.
