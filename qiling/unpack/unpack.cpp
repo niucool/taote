@@ -1184,32 +1184,54 @@ std::size_t Unpacker::mine_orphan_descriptors(const std::vector<std::uint8_t>& i
             // attributed pairs, recall 0.940 against the original's 570, versus
             // 0.0333 for the report's current set. Without the database the same
             // scan recovers 5 pairs, i.e. nothing.
-            std::size_t attributed = 0;
-            std::string last_dll;
+            // One INT table is ONE dll's import list, so the owners of its NAMED
+            // members are positional evidence for its ordinal members: an
+            // "ordinal_<n>" entry comes from the dll that owns its neighbours,
+            // not from an unknown one. Skipping ordinals was measured as the
+            // remaining PEtite gap (recall 0.803 with every name attributed and
+            // every ordinal dropped).
+            std::map<std::string, std::size_t> owner_votes;
             for (const auto& fn : members) {
-                // "ordinal_<n>" has no export name to look up; and an ordinal's
-                // owner is unknowable without the descriptor, so skip it rather
-                // than guess (a wrong DLL is not a recall hit).
-                if (fn.rfind("ordinal_", 0) == 0) {
-                    continue;
+                if (fn.rfind("ordinal_", 0) != 0) {
+                    if (const char* o = api_owner(fn); o != nullptr) {
+                        ++owner_votes[o];
+                    }
                 }
-                const char* owner = api_owner(fn);
-                if (owner == nullptr) {
-                    continue;
+            }
+            std::string dominant;
+            for (const auto& [dll_name, votes] : owner_votes) {
+                if (dominant.empty() || votes > owner_votes[dominant]) {
+                    dominant = dll_name;
                 }
-                std::string stem(owner);
-                if (!present_dlls.empty() && present_dlls.count(stem) != 0) {
-                    last_dll = stem;
+            }
+            std::size_t attributed = 0;
+            std::size_t ordinals = 0;
+            for (const auto& fn : members) {
+                const bool is_ordinal = fn.rfind("ordinal_", 0) == 0;
+                std::string stem;
+                if (is_ordinal) {
+                    if (dominant.empty()) {
+                        continue;   // no evidence at all for the owner: don't guess
+                    }
+                    stem = dominant;
+                    ++ordinals;
+                } else {
+                    const char* owner = api_owner(fn);
+                    if (owner == nullptr) {
+                        continue;
+                    }
+                    stem = owner;
                 }
                 note_import(sanitize_ascii(stem + ".dll"), sanitize_ascii(fn));
                 ++attributed;
                 ++pairs;
             }
             if (opts_.debug && attributed != 0) {
-                std::fprintf(stderr, "[unpack] orphan INT table at 0x%zx: db-attributed (%zu of %zu names, first %s)\n",
-                             off, attributed, members.size(), members.front().c_str());
+                std::fprintf(stderr,
+                             "[unpack] orphan INT table at 0x%zx: db-attributed (%zu of %zu, %zu ordinals under %s, first %s)\n",
+                             off, attributed, members.size(), ordinals, dominant.c_str(),
+                             members.front().c_str());
             }
-            (void)last_dll;
             continue;
         }
         for (const auto& fn : members) {

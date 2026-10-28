@@ -3510,3 +3510,34 @@ moved) and reverted it. It is re-applied here because the mechanism that made it
 inert is gone: nothing consumed the names then, whereas the database lookup needs
 the untruncated spelling. That is a different measurement, not a repeat of a losing
 experiment - and the family result (23 -> 29) is what proves it this time.
+
+### 0.17ag Round 40: ordinals inherit their table's DLL (corpus 1772 -> 1773)
+
+Round 39 left PEtite at recall 0.803 with every NAME attributed and every ordinal
+dropped. The owner of an ordinal is not free information... except by position: one
+INT table is ONE dll's import list, so the owners of a table's NAMED members are
+evidence for its ordinal members. The attribution branch now votes the named
+members' database owners, takes the dominant one, and assigns the table's
+`ordinal_<n>` entries to it - still refusing to guess when a table has no named
+member at all.
+
+Measured behaviour on petite_PEViewer's tables is exactly what the evidence says:
+BitBlt -> gdi32, CommandLineToArgvW -> shell32, ActivateKeyboardLayout -> user32,
+CoInitialize -> ole32, 87/87 and 228/228 names attributed (that sample's tables
+carry no ordinals, which is why its recall stays 0.803).
+
+**Measured:**
+- PEtite family (73): all-three 29 -> 29, recall 0.803 -> 0.803 (no ordinals there).
+- MEW/WinUpack/RLPack/Alienyze/NSPack (530): all-three 263 -> 264, 2 gains
+  (nspack_ADInsight, nspack_procexp) / 1 loss = winupack_Bginfo at dur=85, which a
+  clean local re-run resolves (oep=0x5b5d42, 2037 imports).
+- corpus (2678 @85s): 1772 -> **1773**, 1 gain (NSPack) / **0 losses**.
+- fair set (200 @300s): 129 -> 129, 0/0.
+- suite 593/593.
+
+**Cost worth recording.** The vote pass makes the boundary samples measurably
+slower: `nspack_procexp` and `winupack_Bginfo` both sit near the 85 s budget and
+both flipped to dur=85 (timeout) in the runs above before a clean re-run showed the
+right answer. Any future work on this path should keep the per-table work in the
+scan (it is O(members)) rather than add passes, and the budget-boundary flakes
+should be read as timing, not accuracy.
