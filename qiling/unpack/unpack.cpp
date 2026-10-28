@@ -2599,6 +2599,95 @@ UnpackResult Unpacker::finalize(Qiling& ql) {
             res.dump_written = static_cast<bool>(out);
             res.dumpfile = dump_path.string();
         }
+        // ---- blob-attribution repair -------------------------------------
+        // The string-blob miner attributes positionally: every name goes to the
+        // DLL marker that preceded it. That is a guess, and when the export
+        // database says the assigned DLL does not export the name at all the guess
+        // is provably wrong. Measured on Alienyze's near-miss rows (named-only
+        // recall before -> after): procexp 0.927 -> 1.000, ADExplorer 0.818 ->
+        // 1.000, ADInsight 0.860 -> 1.000, Procmon 0.909 -> 1.000, webhttrack
+        // 0.886 -> 0.982.
+        //
+        // Gated hard, because a loose version of this lost samples (round 41):
+        // the repair only fires when the name is unknown to the assigned DLL, the
+        // database lists the name at all, and EXACTLY ONE of its owners is a DLL
+        // the IMAGE itself names. A pair from descriptor or table evidence is
+        // never reached: those attribute through structures, and this pass only
+        // looks at names the blob miner filed.
+        if (opts_.blob_repair) {
+            std::set<std::string> image_dlls;
+            for (std::size_t i = 0x200; i + 5 < image.size(); ++i) {
+                if (image[i] < 0x21 || image[i] > 0x7E || (i != 0 && image[i - 1] != 0)) {
+                    continue;
+                }
+                std::string s2;
+                for (std::size_t k = i; k < image.size() && image[k] >= 0x21 && image[k] <= 0x7E;
+                     ++k) {
+                    s2.push_back(static_cast<char>(image[k]));
+                    if (s2.size() >= 48) {
+                        break;
+                    }
+                }
+                std::string low = s2;
+                for (auto& ch : low) {
+                    ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+                }
+                for (const char* ext : {".dll", ".drv", ".ocx"}) {
+                    const auto n = std::strlen(ext);
+                    if (low.size() > n && low.compare(low.size() - n, n, ext) == 0) {
+                        image_dlls.insert(low.substr(0, low.size() - n));
+                        break;
+                    }
+                }
+            }
+            std::size_t fixed = 0;
+            std::vector<std::pair<std::string, std::string>> out;
+            std::set<std::string> seen;
+            for (const auto& [dll, name] : imports_) {
+                std::string stem_low = dll;
+                for (auto& ch : stem_low) {
+                    ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+                }
+                for (const char* ext : {".dll", ".drv", ".ocx"}) {
+                    const auto n = std::strlen(ext);
+                    if (stem_low.size() > n && stem_low.compare(stem_low.size() - n, n, ext) == 0) {
+                        stem_low.resize(stem_low.size() - n);
+                        break;
+                    }
+                }
+                std::string use = dll;
+                if (name.rfind("ordinal_", 0) != 0 && !image_dlls.empty()) {
+                    const auto owners = api_owners(name);
+                    const bool known_to_assigned =
+                        std::find(owners.begin(), owners.end(), stem_low) != owners.end();
+                    if (!owners.empty() && !known_to_assigned) {
+                        std::string only;
+                        std::size_t hits = 0;
+                        for (const auto& o : owners) {
+                            if (image_dlls.count(o) != 0) {
+                                only = o;
+                                ++hits;
+                            }
+                        }
+                        if (hits == 1) {
+                            use = only + ".dll";
+                            ++fixed;
+                        }
+                    }
+                }
+                if (seen.insert(use + "\n" + name).second) {
+                    out.emplace_back(use, name);
+                }
+            }
+            if (fixed != 0) {
+                if (opts_.debug) {
+                    std::fprintf(stderr, "[unpack] blob repair: %zu pairs re-attributed (%zu -> %zu)\n",
+                                 fixed, imports_.size(), out.size());
+                }
+                imports_.swap(out);
+            }
+        }
+
         const auto meta_path = fs::path(opts_.out_dir) / (stem + "_dump.bin.meta.json");
         {
             nlohmann::json meta;

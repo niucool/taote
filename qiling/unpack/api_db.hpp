@@ -11,6 +11,7 @@
 #define QILING_UNPACK_API_DB_HPP
 
 #include <string>
+#include <vector>
 
 namespace qiling {
 namespace unpack {
@@ -18,6 +19,10 @@ namespace unpack {
 // The DLL stem that exports `name` (lowercase, no ".dll"), or nullptr when the
 // name is not a known system export. Case-insensitive.
 const char* api_owner(const std::string& name);
+
+// Every DLL the table lists for `name`, in priority order (the first element is
+// what api_owner returns). Empty when the name is unknown.
+std::vector<std::string> api_owners(const std::string& name);
 
 }  // namespace unpack
 }  // namespace qiling

@@ -53,6 +53,9 @@ struct UnpackOptions {
     bool enable_hop = true;   // the section-hop OEP detection (--no-hop turns it off)
     std::uint32_t max_stages = 16;
     bool debug = false;
+    // the blob-attribution repair (see the pass in unpack.cpp): a positional
+    // string-blob attribution the export database contradicts is re-owned.
+    bool blob_repair = true;
     bool rebuild = true;
     // When the run uses a *synthesized* rootfs (the default), a dll the stub asks
     // LoadLibrary for can be materialized on demand as an export-less decoy

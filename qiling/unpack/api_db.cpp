@@ -38,30 +38,59 @@ const std::unordered_map<std::string_view, std::string_view>& table() {
 
 }  // namespace
 
-const char* api_owner(const std::string& name) {
+namespace {
+
+const std::string_view* lookup(const std::string& name) {
     if (name.empty() || name.size() > 128) {
         return nullptr;
     }
-    char low[128];
+    static char low[128];
     for (std::size_t i = 0; i < name.size(); ++i) {
         const auto c = static_cast<unsigned char>(name[i]);
         low[i] = static_cast<char>((c >= 'A' && c <= 'Z') ? c + 32 : c);
     }
     const auto& t = table();
     const auto it = t.find(std::string_view(low, name.size()));
-    if (it == t.end()) {
+    return it == t.end() ? nullptr : &it->second;
+}
+
+}  // namespace
+
+std::vector<std::string> api_owners(const std::string& name) {
+    std::vector<std::string> out;
+    const auto* v = lookup(name);
+    if (v == nullptr) {
+        return out;
+    }
+    std::size_t start = 0;
+    while (start <= v->size()) {
+        const auto comma = v->find(',', start);
+        const auto end = comma == std::string_view::npos ? v->size() : comma;
+        if (end > start) {
+            out.emplace_back(std::string(v->substr(start, end - start)));
+        }
+        if (comma == std::string_view::npos) {
+            break;
+        }
+        start = comma + 1;
+    }
+    return out;
+}
+
+const char* api_owner(const std::string& name) {
+    const auto* v = lookup(name);
+    if (v == nullptr) {
         return nullptr;
     }
+    const auto comma = v->find(',');
+    const std::string first(v->substr(0, comma == std::string_view::npos ? v->size() : comma));
     // the blob outlives the process: hand back a NUL-terminated copy built once
     static std::unordered_map<std::string, std::string> cache;
-    static const std::string* unused = nullptr;
-    (void)unused;
-    const std::string key(it->second);
-    const auto c = cache.find(key);
-    if (c != cache.end()) {
-        return c->second.c_str();
+    const auto it = cache.find(first);
+    if (it != cache.end()) {
+        return it->second.c_str();
     }
-    return cache.emplace(key, key).first->second.c_str();
+    return cache.emplace(first, first).first->second.c_str();
 }
 
 }  // namespace unpack

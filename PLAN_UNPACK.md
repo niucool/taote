@@ -3735,3 +3735,52 @@ Yoda-Protector 88/101, TELock 56/101, Amber 43/47) versus ~138 crashes (WinUpack
 fetch at pc 0x28, Exe32pack 14 write at addr 0x54, TELock 45 fetch). The crashes are
 traceable; the clean stops need an instruction-level hunt for each stub's exit
 branch, which is the next real unit of work.
+
+### 0.17al Round 45: blob-attribution repair - corpus all-three 1773 -> 1784, imports +68
+
+Round 44's map said Alienyze's CRT import group was a bounded +5 target and that the
+names were unreachable by scanning. The scan was never the problem: the names ARE in
+the dump, in a bare string blob, and the blob miner attributes them POSITIONALLY -
+every name goes to whatever DLL marker preceded it. When the export database says the
+assigned DLL does not export the name at all, that guess is provably wrong.
+
+**The repair.** After the harvest, any pair whose name the assigned DLL does not
+export is re-owned by the database - but only when EXACTLY ONE of the name's owners
+is a DLL the IMAGE itself names. That is much stricter than round 41's rejected
+version, which re-owned whenever the assigned DLL was absent from the image's DLL list
+and used the database's favourite owner; that one took 0 gains / 3 losses because our
+original attribution was often right and the default owner often was not.
+
+The gate needed the full owner list, so `api_db.inc` now carries every owner per name
+(comma-separated, priority-ordered) and `api_owners()` returns them; round 39/40's
+single-owner `api_owner()` is the first element, so nothing else changed behaviour.
+
+**Offline prediction (named-only recall, before -> after):**
+
+| sample | before | after |
+|---|---|---|
+| alienyze_procexp | 0.927 | **1.000** |
+| alienyze_ADExplorer | 0.818 | **1.000** |
+| alienyze_ADInsight | 0.860 | **1.000** |
+| alienyze_Procmon | 0.909 | **1.000** |
+| alienyze_webhttrack | 0.886 | **0.982** |
+
+The looser variant tried first took webhttrack to 0.474 - that is what the
+"exactly one image-named owner" gate is for.
+
+**Measured:**
+- Alienyze family (126): all-three 2 -> **8**, imports 20 -> **74**, mean recall
+  0.584 -> **0.848**, 0 losses.
+- corpus (2678 @85s): all-three 1770 -> **1784**, imports 1975 -> **2043** (+68),
+  oep unchanged at 1875. 15 gains (Alienyze 6, RLPack 6, WinUpack 2, MPRESS 1),
+  1 loss (jdpack_chglogon, recall 0.9412). Against the last committed baseline of
+  1773 the delta is **+11**; the extra 3 are the samples round 41's rejected
+  experiment had cost, which this stricter rule returns.
+- fair set (200 @300s): 129 -> **131** (alienyze_ADInsight, rlpack_ADInsight), 0 losses.
+- suite 593/593.
+
+**Why RLPack gained 6** - worth noting, because round 27 concluded RLPack's imports
+were unrecoverable (the payload IAT slots are never written and the stub makes zero
+GetProcAddress calls). That is still true of the *slots*; what the database repairs is
+the DLL side of names the string miners had already recovered but filed under the
+wrong DLL. The names were there, the ownership was not.
