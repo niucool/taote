@@ -4270,3 +4270,40 @@ baseline, not the measured +25.
 
 Note the yoda/neolite/heap idea itself is dead: those stubs write 1-5 pages outside the
 image and never build a PE there, so round 53's ciphertext class for them stands.
+
+### 0.17ax Round 56: adopting over a hop, measured and rejected (6 gains, 33 losses)
+
+Round 55's adoption is gated on `hop_ledger_.empty()`. Amber's remaining failures
+contain exactly the shape that gate blocks:
+
+| Amber failing rows | n | shape |
+|---|---|---|
+| embedded_pe, oep null, imports ok | 12 | .NET, ungraded - correct |
+| **section_hop, oep WRONG, imports ok** | **7** | a decoy hop shadows the payload |
+| fallback_guess, oep wrong, imports bad | 12 | no heap PE found at all |
+| section_hop, oep null, imports ok | 9 | .NET |
+
+Three of those seven (`chgport`, `chgusr`, `netcfg`) each **claim the same address
+0x401661** - a hop into the stub's own body - while heap memory holds a complete PE
+whose `ep` is the true entry (0x4467, 0x3d99, 0x4919). So the gate was dropped and the
+scan allowed to run with a hop present (plus a bitness guard: the payload must be the
+stub's own PE32/PE32+, because Neolite's dump carries 64-bit helper images).
+
+Amber: 110 -> **113** all-three, exactly the three predicted, 0 losses.
+
+Corpus (2678 @85s): **1847 -> 1820. 6 gains, 33 losses.** Valid PE 2674 -> **2643**,
+OEP 1952 -> 1924, imports 2042 -> 2007. The losses are concentrated: ASPack 13, Packman
+12, PECompact 5, WinUpack 1, Neolite 1 — families whose stubs MAP THEIR OWN INPUT
+(`MapViewOfFile`), so a valid PE really is in memory, and whose hop was already right.
+
+The deeper defect the losses expose is structural, not a tuning issue: adopting replaces
+`base_`/`image_size_` while the hop ledger still holds addresses in the OLD base space,
+so a sample that adopts and then falls through to the hop pick emits `base = heap-address`
+with an OEP from the stub image (`aspack_Dbgview`: base 0x5002774, oep 0x415757) — which
+is also why `valid_pe` collapsed. Any future attempt at this must either validate the
+adopted EP before mutating the geometry, or translate the ledger.
+
+Both edits reverted; the tree is back to round 55 (1847). The reject-the-input-file test
+(compare a candidate's first 4 KB against the packed file's) was implemented and did NOT
+fire on the ASPack candidate, so "it is just the mapped input" is not the whole story
+either - that is where a future attempt should start.
