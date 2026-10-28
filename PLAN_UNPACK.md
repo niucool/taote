@@ -3829,3 +3829,47 @@ The plan's remaining levers are therefore exactly the decode ones from round 43:
 crash-based samples (WinUpack 18 fetch at pc 0x28, Exe32pack 14 write at addr 0x54,
 TELock 45 fetch) and the 581 clean stops that need an instruction-level hunt for each
 stub's exit branch.
+
+### 0.17an Round 47: Alienyze's pick comes from the BOUNDARY pass inside `.alien` (61 samples of headroom, scoped)
+
+Round 45's import repair turned Alienyze from an import problem into a pick problem:
+**53 of its samples now have imports + code_sim >= 0.9 and only the entry is wrong**
+(the pick worklist grew from 36 to 87 samples, Alienyze 53 of them). Their true-EP
+shapes: **crt-thunk 63**, borland 17, msvc-frame 14, other 7 - i.e. mostly
+`e8 <rel32> e9 <rel32>`.
+
+**Which rule actually fires.** TAOTE_UNPACK_DEBUG on alienyze_Clockres:
+
+```
+[unpack] ladder passA CRT-thunks: 2
+[unpack] ladder passB hits=0 first=0x0 last=0x0
+[unpack] ladder boundary-thunks in .alien: 1
+[unpack] alienyze_Clockres.exe ... oep=0x4257e2 reason=ladder_scan
+```
+
+The pick is the **boundary-thunk** pass, and it fires inside `.alien` - the packer's
+own name/value STORE, which is data. Code-like signatures there are coincidence. Pass
+A saw two CRT thunks (ambiguous, so it declined) and Pass C never got a say.
+
+**What the right answer would be, measured.** Replaying the `c3 e8 <rel32> e9 <rel32>`
+scan over the round-39 dumps for Alienyze (87 samples with at least one c3 hit):
+taking the **FIRST** hit is the true EP on **58**; the current rule (last validated,
+else tail) is the true EP on **0**. That is why the tail preference is wrong here: the
+tail hits land in `.alien`.
+
+Corpus-wide the same comparison (samples with 2+ c3 hits, my model of the rule - which
+ignores the earlier passes, so it overstates): first-hit would gain **261** and lose
+**58** (Alienyze 58 gain / 0 loss, then ~14 each for ASPack, BeRo, EnigmaVB, MPRESS,
+Packman, RLPack, UPX). A model, not a measurement - but it says the direction is right.
+
+**Measured and reverted: switching Pass C to first-hit inside the shared ladder.** It
+changed nothing observable (alienyze_Clockres still 0x4257e2) because the boundary pass
+runs earlier and shadows it. Shipping it alone would be an inert edit, so it was
+reverted; the useful change is the ordering, and that has to be a *family seam*:
+
+- `AlienyzePacker::static_oep_from_image` delegating to the shared ladder with the
+  boundary-thunk pass disabled (its `.alien` store is not code), which then lets Pass C
+  with first-hit preference pick 0x4002/0x7474/0xa71e for the samples above.
+- That is ~61 Alienyze samples of headroom (53 pick-only + the 8 already passing
+  imports at lower code_sim), the largest single lever left after round 45, and it is
+  bounded work rather than open-ended anti-emulation.
