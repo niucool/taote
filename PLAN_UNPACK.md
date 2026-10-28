@@ -3372,3 +3372,45 @@ stub write to an address it computes, with the target address not logged. The ne
 step there is a *safe* way to log the faulting write address (the old memdbg probe
 was deleted for crashing the host; a scoped read-only variant inside the existing
 exception path is the shape to try).
+
+### 0.17ad Round 37: the int3 resume bug (fidelity fix, converts nothing)
+
+**Yoda-Protector is the most homogeneous large block left**: 101 samples, 0
+all-three, and all 101 died the same way. TAOTE_SEHDBG shows why:
+
+```
+[sehd] code=80000003 fault=4305fc pc=4305fc chain=ffffcff0 handler=430563
+[sehd] code=80000003 fault=4305fc pc=4305fc chain=ffffcfd0 handler=430570
+[sehd] code=80000003 fault=43063f pc=43063f chain=ffffcfb0 handler=43057d
+[sehd] code=80000003 fault=43063f pc=43063f chain=ffffcf90 handler=43058a
+[sehc] exhausted -> resume 43063f   (x16, then the run dies)
+```
+
+60000003 is STATUS_BREAKPOINT: the stub plants `int 3` anti-debug probes and
+installs fs:[0] handlers for them. When the chain exhausts, taote reloads the
+saved CONTEXT and resumes at its Eip - which for a #BP is the int3 ITSELF, so it
+re-traps on the next instruction forever until the repeat guard trips.
+
+**A real OS resumes at the byte AFTER a breakpoint** (int3 is one byte wide by
+definition), so the exhausted path now advances one byte when the dispatch that
+led there was `0x80000003`. Gated on the exception code, not on the byte: gating
+on the byte was tried first and did nothing, because Yoda decrypts its page on
+demand and by the time anything reads that address the trap has been rewritten
+(measured: the trap at RVA 0x3063f reads 0xC3 in the terminal dump).
+
+**Measured.** The crash loop is gone (resume 0x430640, run ends cleanly with "no
+section hop; OEP guessed" instead of a fatal fault). But:
+- Yoda-Protector family (101 samples): all-three 0 -> 0, oep 0 -> 0, imports 0 -> 0.
+  **Zero gains, zero losses.** The stub now survives its anti-debug chain and then
+  never decodes.
+- corpus (2678 @85s): 1767 -> 1766, 0 gains / 1 loss = `mpress_ComIntRep` at
+  dur=85, the documented budget flake (clean local re-run: oep=0x42800a, 850
+  imports).
+- fair set (200 @300s): 129 -> 129, 0/0.
+- suite 593/593.
+
+Kept anyway, and this is a deliberate choice worth stating plainly: resuming at an
+int3 is simply wrong, and every other family's measured behaviour is unchanged
+(the guard fires only for #BP). It is a prerequisite for any Yoda-Protector work,
+exactly as round 29's TELock label was a prerequisite for TELock work. But it
+converts **nothing**, and the plan should not pretend otherwise.

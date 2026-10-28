@@ -365,6 +365,7 @@ private:
     std::uint64_t seh_retarget_ = 0;        // the pending run-loop restart target
     std::uint64_t seh_context_addr_ = 0;    // the mapped CONTEXT (the reload path)
     std::uint64_t seh_walk_frame_ = 0;      // the fs:[0] frame whose handler is running
+    std::uint32_t seh_active_code_ = 0;     // the exception code being dispatched
     std::uint64_t seh_walk_record_ = 0;     // the EXCEPTION_RECORD shared by the walk
     std::uint64_t seh_walk_ptrs_ = 0;       // the EXCEPTION_POINTERS for the filters
     // the CONTEXT a NtContinue/RtlRestoreContext call wants applied: the CRT's

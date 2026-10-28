@@ -604,6 +604,7 @@ bool QlOsWindows::seh_dispatch(std::uint64_t fault_addr, std::uint32_t access_ty
                                 std::uint32_t exception_code) {
     auto& regs = ql_->arch().regs();
     auto& mem = ql_->mem();
+    seh_active_code_ = exception_code;
 
     // the exception list head (fs:[0]; the TEB rides the FS segment base)
     const auto chain = mem.read_ptr(FS_SEGMENT_ADDR, 4);
@@ -694,6 +695,7 @@ bool QlOsWindows::seh_dispatch(std::uint64_t fault_addr, std::uint32_t access_ty
 // verdict).
 bool QlOsWindows::seh_continue() {
     auto& regs = ql_->arch().regs();
+    auto& mem = ql_->mem();
     const auto ret = static_cast<std::uint32_t>(regs.read("eax"));
     if (std::getenv("TAOTE_SEHDBG") != nullptr) {
         // the walk's decision points, for diagnosing a fixture: which answer the
@@ -749,7 +751,28 @@ bool QlOsWindows::seh_continue() {
             // identical-fault repeat guard bounds a handler that fixes nothing.
             if (seh_continue_on_exhausted_) {
                 seh_load_context();
-                seh_retarget_ = regs.arch_pc();
+                auto resume = regs.arch_pc();
+                // A #BP is a ONE-BYTE trap: Windows reports the breakpoint and
+                // resumes at the byte AFTER it. Resuming at the int3 itself
+                // re-traps on the very next instruction, so the repeat guard
+                // bounds it and the run dies having made no progress. Measured
+                // on the Yoda-Protector family (101 of 101 samples, all failing
+                // with the stub's int3 anti-debug probe): four 0x80000003
+                // dispatches at 0x4305fc/0x43063f, then "[sehc] exhausted ->
+                // resume 43063f" repeating until the guard trips. Gated on the
+                // byte actually being 0xCC, so a handler that repaired a real
+                // faulting instruction still re-executes it (PECompact's null
+                // write at 0x407aae).
+                // Gate on the exception code, not on the byte: the stub decrypts
+                // its page on demand, so by the time anything reads that address
+                // the trap byte may already have been rewritten (measured: the
+                // Yoda-Protector trap at RVA 0x3063f reads 0xC3 in the terminal
+                // dump while the dispatch that got us here was #BP at that exact
+                // address). An int3 is one byte wide by definition.
+                if (resume != 0 && seh_active_code_ == 0x80000003u) {
+                    ++resume;
+                }
+                seh_retarget_ = resume;
                 if (std::getenv("TAOTE_SEHDBG") != nullptr) {
                     std::fprintf(stderr, "[sehc] exhausted -> resume %llx\n",
                                  static_cast<unsigned long long>(seh_retarget_));
