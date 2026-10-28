@@ -3784,3 +3784,48 @@ were unrecoverable (the payload IAT slots are never written and the stub makes z
 GetProcAddress calls). That is still true of the *slots*; what the database repairs is
 the DLL side of names the string miners had already recovered but filed under the
 wrong DLL. The names were there, the ownership was not.
+
+### 0.17am Round 46: after the repair, the import side is at its data ceiling
+
+Post-round-45 map: **2594 gradable, 810 failures = 719 OEP-wrong + 91 imports-only**.
+Per family headroom (gradable - all-three): Themida 122, Alienyze 110, TELock 101,
+Yoda-Protector 101, RLPack 97, Neolite 91, Amber 47, PEtite 44, WinUpack 22, FSG 20,
+Exe32pack 15, NSPack 10.
+
+**The 91 imports-only rows split by what they miss.** 26 of them have ordinals as the
+majority of their misses; the rest are short by named functions that are absent from
+the image. Examples, measured against the original's table:
+
+| sample | recall | misses | ordinals | named | named present in the dump |
+|---|---|---|---|---|---|
+| rlpack_Procmon | 0.9491 | 22 | 15 | 7 | 3 |
+| alienyze_ComIntRep | 0.9450 | 29 | **29** | 0 | 0 |
+| mew_procexp | 0.9463 | 28 | 26 | 2 | 2 |
+| winupack_HWMonitorPro_x32 | 0.9389 | 28 | 27 | 1 | 1 |
+| rlpack_mtinst | 0.9387 | 10 | 0 | 10 | 0 |
+
+**A near-miss cluster I chased and had to abandon, because the evidence evaporated.**
+The ordinals are what block the top of that list, and the grader compares
+`(dll, "#<N>")` pairs - so the ordinal NUMBERS alone would be enough. Scanning
+alienyze_ComIntRep's dump for runs of high-bit dwords found runs of **exactly 29**
+twice (0x8f40c, 0xbc654) and **exactly 23** twice, against a sample that misses
+exactly 29 ordinals. That looked like the data answering the question.
+
+It is a coincidence. The bytes after the 0x8f7c8 run are UTF-16 strings
+("s.t.a.t.i.c", "f.F.b.H", "C.o.n.t.r.o.l. .P.a.n.e.l.\.M.o.u.s.e") - the region is
+.NET metadata, where high-bit dwords are ordinary, and the 29/23 counts match only
+because a metadata table happens to be that long. Recorded so it is not chased again:
+**a dword run whose values merely look like ordinals is not ordinal evidence**; the
+real ordinal arrays live behind the import directory the packers zero, which round 44
+proved for winupack_FileTypesMan.
+
+**So the remaining import work is exhausted** for these families: 26 of 91 are
+ordinal-blocked (no data), and the named remainder is largely absent from the image
+(rlpack_mtinst's 10 are all MSVC CRT internals that appear nowhere). What the
+database repair bought (round 45: imports 1975 -> 2043) was the part that WAS
+recoverable: names present in the dump under the wrong DLL.
+
+The plan's remaining levers are therefore exactly the decode ones from round 43: ~138
+crash-based samples (WinUpack 18 fetch at pc 0x28, Exe32pack 14 write at addr 0x54,
+TELock 45 fetch) and the 581 clean stops that need an instruction-level hunt for each
+stub's exit branch.
