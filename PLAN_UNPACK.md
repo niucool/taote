@@ -3541,3 +3541,36 @@ both flipped to dur=85 (timeout) in the runs above before a clean re-run showed 
 right answer. Any future work on this path should keep the per-table work in the
 scan (it is O(members)) rather than add passes, and the budget-boundary flakes
 should be read as timing, not accuracy.
+
+### 0.17ah Round 41: junk-DLL re-attribution measured and REJECTED (0 gains / 3 losses)
+
+The hypothesis looked strong from offline numbers: in the round-37 near-miss rows a
+large share of the exported pairs named a DLL the dump never mentions
+(winupack_FileTypesMan 225/225, petite_PEViewer 1807/3125, rlpack_mtinst 308/382),
+and the export database knows the real owner for most of those names. So: after the
+harvest, replace the DLL of any pair whose stem is absent from the image's `*.dll`
+strings with the database owner, when that owner is a DLL the image names (or when
+the image names no DLL at all).
+
+**The offline number was an artefact of my own scan.** The C++ image scan (string
+must start after a NUL) finds 16 DLL stems in petite_PEViewer where my offline
+regex found 7, and with the fuller set every one of that sample's pairs is
+attributed to a DLL the image really does name - `fixed = 0`. Measured probes:
+petite_PEViewer 0, winupack_adrestore 0, winupack_Tcpview 0, rlpack_DarkNamer 0,
+alienyze_procexp 12, mew_Sysmon 206.
+
+**mew_Sysmon did convert in isolation** (recall 0.901 -> 1.000 on a local run) which
+made the pass look worth keeping. The corpus says no:
+
+- corpus (2678 @85s): all-three 1773 -> **1770, 0 gains / 3 losses**
+  - mpress_ComIntRep at dur=85 (the usual budget flake)
+  - winupack_dfrgui (dur=10, recall 0.9029) and winupack_ftp (dur=2, recall 0.6242)
+    are genuine losses: the DLL we had assigned was RIGHT even though my scan did
+    not list it, and replacing it with the database's default owner broke the pair.
+- suite 593/593 (it never got that far - the change was reverted).
+
+Reverted. The lesson is the same one round 39 taught from the other side: the
+database is a good *fallback* where no attribution exists (a table with no preceding
+DLL string), and a bad *override* where an attribution already exists - even a
+noisy-looking one. `mew_Sysmon` is a single-sample win that costs two
+single-sample losses, and one of its "junk" DLLs may well have been real.
