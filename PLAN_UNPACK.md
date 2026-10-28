@@ -3911,3 +3911,33 @@ the anti-emulation class from round 43, not the picker.
 in mind. A rule of the shape "prefer the validated hit when the FIRST hit is not
 validated" would have kept it while leaving the other 36 gains intact; that is the
 obvious refinement if this seam is revisited.
+
+### 0.17ap Round 49: the next Alienyze pick cluster, and a rule I refused to write
+
+After round 48, Alienyze still has 31 imports-ok-but-wrong-OEP rows, 18 of them with
+code_sim >= 0.9 (perfect bodies). Their true-EP shapes are the passes our ladder
+declines on ambiguity:
+
+| shape | n | truth among the hits? | truth at index / hits |
+|---|---|---|---|
+| borland (`6a ?? 68 <imm32> e8`) | 7 | yes, every one | **3 of 8** (six samples), 8 of 98 (one) |
+| msvc-frame (`55 8b ec`) | 2 | yes | 3 of 8, 452 of 1776 |
+
+Six samples sit at **index 3 of exactly 8 hits**, and one of them is a NirSoft
+binary like the rest: the first three matching prologues are other CRT functions and
+the fourth is the startup. That is compiler/link ORDER, not a property of the entry
+point - a rule of the shape "take hit #4" would convert six samples here and is
+exactly the coarse overfitting the round-16 lesson (and the family-detection rule)
+forbids. Not written.
+
+The honest options for those 9 need a discriminator that is not positional:
+
+- the reference's Pass E requires only that the pushed immediate is inside the image,
+  which all eight hits satisfy, so it cannot separate them either;
+- "prefer the validated hit when the first is not validated" (round 48's note) would
+  recover alienyze_psloglist but is behaviourally the OLD tail preference for every
+  other sample - it would give back part of the 36 gains, so it is not worth +1.
+
+So Alienyze's pick ceiling is reached for now: 43 of 126, with the remaining 83 split
+into 83 - 31 = 52 bodies that never decode (the anti-emulation class) and the 31
+above whose entries depend on link order.
