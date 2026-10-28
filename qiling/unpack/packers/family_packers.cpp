@@ -31,10 +31,10 @@ private:
 
 std::unique_ptr<Packer> make_petite_packer() { return std::make_unique<FamilyPacker>("PEtite"); }
 std::unique_ptr<Packer> make_telock_packer() { return std::make_unique<FamilyPacker>("TELock"); }
+std::unique_ptr<Packer> make_exe32pack_packer() { return std::make_unique<FamilyPacker>("Exe32pack"); }
 std::unique_ptr<Packer> make_molebox_packer() { return std::make_unique<FamilyPacker>("Molebox"); }
 std::unique_ptr<Packer> make_winupack_packer() { return std::make_unique<FamilyPacker>("WinUpack"); }
 std::unique_ptr<Packer> make_enigma_vb_packer() { return std::make_unique<FamilyPacker>("EnigmaVB"); }
-std::unique_ptr<Packer> make_exe32pack_packer() { return std::make_unique<FamilyPacker>("Exe32pack"); }
 
 }  // namespace packers
 }  // namespace unpack

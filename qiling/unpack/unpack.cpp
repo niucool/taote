@@ -2131,6 +2131,90 @@ UnpackResult Unpacker::finalize(Qiling& ql) {
             res.error = "image read failed";
             return res;
         }
+        // A packer that wipes the payload image's section headers leaves a dump
+        // that parses as a PE whose every section is size 0 at RVA 0, so the
+        // claimed entry maps into no section at all. Measured corpus-wide: this
+        // affects exactly 106 samples, all Exe32pack (the reference documents the
+        // same defect: "Exe32pack zeroes all section headers in the dump"), and
+        // the data directories are NOT wiped (import RVA and IAT survive), so the
+        // image is otherwise intact. The packed file keeps the layout the stub
+        // decodes into, so its own section table is the faithful source: restoring
+        // it puts the claimed entry inside .text on 106 of 106 measured samples.
+        // Gated twice - only when EVERY dumped section header is zero and the
+        // packed table is non-degenerate - so no other image can be touched.
+        const auto restore_degenerate_sections = [this](std::vector<std::uint8_t>& img) {
+            auto rd16_at = [](const std::vector<std::uint8_t>& v, std::size_t o) -> std::uint16_t {
+                if (o + 2 > v.size()) return 0;
+                return static_cast<std::uint16_t>(v[o] | (v[o + 1] << 8));
+            };
+            auto rd32_at = [](const std::vector<std::uint8_t>& v, std::size_t o) -> std::uint32_t {
+                if (o + 4 > v.size()) return 0;
+                return static_cast<std::uint32_t>(v[o]) | (static_cast<std::uint32_t>(v[o + 1]) << 8) |
+                       (static_cast<std::uint32_t>(v[o + 2]) << 16) |
+                       (static_cast<std::uint32_t>(v[o + 3]) << 24);
+            };
+            if (img.size() < 0x40 || img[0] != 'M' || img[1] != 'Z' || opts_.sample_path.empty()) {
+                return;
+            }
+            const auto lf = static_cast<std::size_t>(rd32_at(img, 0x3c));
+            if (lf + 0x40 > img.size() || std::memcmp(img.data() + lf, "PE\0\0", 4) != 0) {
+                return;
+            }
+            const auto nsec = static_cast<std::size_t>(rd16_at(img, lf + 6));
+            const auto soi = static_cast<std::size_t>(rd16_at(img, lf + 20));
+            if (nsec == 0 || nsec > 96) {
+                return;
+            }
+            const auto tbl = lf + 24 + soi;
+            if (tbl + nsec * 40 > img.size()) {
+                return;
+            }
+            for (std::size_t i = 0; i < nsec; ++i) {
+                const auto o = tbl + i * 40 + 8;
+                if (rd32_at(img, o) != 0 || rd32_at(img, o + 4) != 0 || rd32_at(img, o + 8) != 0 ||
+                    rd32_at(img, o + 12) != 0) {
+                    return;   // not the degenerate case
+                }
+            }
+            std::vector<std::uint8_t> packed;
+            try {
+                std::ifstream in(opts_.sample_path, std::ios::binary);
+                packed.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+            } catch (...) {
+                return;
+            }
+            if (packed.size() < 0x40 || packed[0] != 'M' || packed[1] != 'Z') {
+                return;
+            }
+            const auto plf = static_cast<std::size_t>(rd32_at(packed, 0x3c));
+            if (plf + 0x40 > packed.size() || std::memcmp(packed.data() + plf, "PE\0\0", 4) != 0) {
+                return;
+            }
+            const auto pnsec = static_cast<std::size_t>(rd16_at(packed, plf + 6));
+            const auto psoi = static_cast<std::size_t>(rd16_at(packed, plf + 20));
+            if (pnsec != nsec || psoi != soi) {
+                return;   // a different layout: not the same image
+            }
+            const auto ptbl = plf + 24 + psoi;
+            if (ptbl + pnsec * 40 > packed.size()) {
+                return;
+            }
+            bool any = false;
+            for (std::size_t i = 0; i < pnsec && !any; ++i) {
+                const auto o = ptbl + i * 40 + 8;
+                any = rd32_at(packed, o) != 0 || rd32_at(packed, o + 4) != 0 ||
+                      rd32_at(packed, o + 8) != 0;
+            }
+            if (!any) {
+                return;
+            }
+            std::memcpy(img.data() + tbl, packed.data() + ptbl, pnsec * 40);
+            if (opts_.debug) {
+                std::fprintf(stderr, "[unpack] restored %zu zeroed section headers from the packed file\n",
+                             pnsec);
+            }
+        };
+        restore_degenerate_sections(image);
         // Families whose payload is present but still ENCRYPTED at rest
         // transform the image in place first (the reference's
         // recover_alienyze / family_transform_dump_image): Alienyze's stub XORs

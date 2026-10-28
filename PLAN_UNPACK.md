@@ -3198,3 +3198,69 @@ run two measurement harnesses at the same time; the re-run alone was clean.
 gives the same single conversion, so Neolite's other 91 samples are not a
 hop-suppression problem. They remain a decode/pick problem of the kind round 32
 proved unreachable by candidate selection.
+
+### 0.17aa Round 34: the zeroed section table - corpus all-three 1675 -> 1767 (+92)
+
+**The defect.** Exe32pack wipes the payload image's section headers before
+handing off. The dump then parses as a PE whose every section is size 0 at RVA 0,
+so the claimed entry maps into no section: 106 of the family's 124 samples graded
+`pe_why = entry-not-mapped`, i.e. never a valid PE, hence never all-three. The
+reference documents the same shape - "F36: reconstruct degenerate section-table
+path (Exe32pack zeroes all section headers in the dump)" - and rebuilds the table
+from write evidence.
+
+**The fix, and why it is not a family heuristic.** The packer decodes into the
+EXISTING sections (its own stub lives in `.i`), so the packed file's section table
+is intact on disk and describes the image taote just dumped. Restoring it is a
+byte copy of `nsec * 40` bytes, and the data directories were never wiped (the
+import RVA and the IAT survive), so the result is a parseable PE rather than a
+syntactically valid husk. Gated twice, both structural and family-free: only when
+EVERY dumped section header is zero, and only when the packed table has the same
+section count / optional-header size and is itself non-degenerate. Measured
+corpus-wide, exactly 106 dumps in the whole 2676-sample set have an all-zero
+section table, all Exe32pack - so by construction no other family is reachable.
+It lives in `unpack.cpp` rather than a packer seam because the detector labels
+this family `unknown` (round 29's finding), so a family-gated seam would never run.
+
+**Measured (family alone, 124 samples):**
+
+| criterion | before | after |
+|---|---|---|
+| valid PE | 18 | **124** |
+| oep_exact | 0 | **92** |
+| imports | 0 | **105** |
+| all-three | 0 | **92** |
+
+The import jump (0 -> 105) is a second-order effect worth noting: the harvester
+walks the payload's descriptor chain through the section table, so a restored
+table is what lets it find the descriptors at all.
+
+**Corpus (2678 @85s): 1674 -> 1767 all-three, +93 gains / 0 losses.**
+OEP 1783 -> 1875, imports 1859 -> 1965, valid PE 2568 -> 2674. The headline number
+here is measured against the r33 report (1674, which carried the
+`mpress_ComIntRep` budget flake); against the flake-adjusted 1675 the delta is
++92, exactly the family's conversion count.
+
+**Fair set (200 @300s, run alone): 126 -> 129, 0 gains-wrong / 0 losses**
+(exe32pack_AkelAdmin, Exe32pack_AltStreamDump, exe32pack_DocFetcher-1024).
+
+**A prediction that was right for the wrong reason.** An offline pass over the 106
+dumps predicted "the claimed OEP maps into a restored section on 106 of 106
+samples, and equals the recorded original EP on 0 of 106". The first half was the
+real signal and is what shipped; the second half was meaningless because
+`orig_ep` is null for every sample whose PE was invalid, so the comparison ran
+against 0. The grader then reported 92 exact OEPs. Lesson: when a report field is
+gated on the very property under repair, an offline equality test on it proves
+nothing.
+
+**Next targets, measured, not guessed.** Exe32pack still has 32 samples without an
+exact OEP and 19 without satisfying imports. The other families unchanged by this
+round, by remaining all-three headroom: TELock 116 (SEH resumption), RLPack 104
+(import data genuinely absent - zero GetProcAddress calls, verified), Neolite 91
+(OEP; body decodes, pick is plausible-but-wrong), Yoda-Protector 101 and Themida
+122 (never decode). PEtite is the best remaining convertible block: 12 samples
+have an exact OEP and a right body (code_sim 0.87-1.0) but import recall
+0.03-0.25, and unlike RLPack the data IS in the dump (petite_PEViewer carries 14
+DLL name strings and 1102 API-looking strings while the descriptor walk finds 11
+descriptors) - so the reference's PEtite INT-run salvage (petite_unpacker.cpp
+:540-752, name->dll attribution through the module export tables) is the next port.
