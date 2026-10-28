@@ -425,7 +425,7 @@ std::uint64_t ladder_oep(const PackerContext& ctx) {
     // boundary prefix does. Requiring the set to be corpus-unique (exactly one)
     // keeps it inert for the samples whose entry is a plain MSVC/Borland frame
     // (ADExplorer/AccessEnum have zero hits).
-    if (tgt != nullptr) {
+    if (tgt != nullptr && !ctx.ladder_skip_boundary) {
         const auto tb = body_of(*tgt);
         std::size_t bc_count = 0;
         std::size_t bc_off = 0;
@@ -569,6 +569,7 @@ std::uint64_t ladder_oep(const PackerContext& ctx) {
         std::size_t c3_count = 0;
         std::size_t c3_off = 0;
         std::size_t c3_last_off = 0;
+        std::size_t c3_first_off = 0;
         std::size_t c3_valid_off = 0;
         bool c3_prologue_valid = false;
         for (std::size_t i = 0; i + 11 < b.size(); ++i) {
@@ -579,6 +580,9 @@ std::uint64_t ladder_oep(const PackerContext& ctx) {
                     ++c3_count;
                     c3_off = i + 1;
                     c3_last_off = i + 1;
+                    if (c3_first_off == 0) {
+                        c3_first_off = i + 1;
+                    }
                     const auto rel = static_cast<std::int32_t>(
                         static_cast<std::uint32_t>(b[i + 7]) | (static_cast<std::uint32_t>(b[i + 8]) << 8) |
                         (static_cast<std::uint32_t>(b[i + 9]) << 16) |
@@ -614,6 +618,13 @@ std::uint64_t ladder_oep(const PackerContext& ctx) {
         if (c3_count >= 1 && (!mpress || c3_prologue_valid || c3_valid_off != 0)) {
             // a validated hit wins; otherwise the LAST c3 hit (the main entry runs
             // after all CRT init — mpress_ADExplorer: the second of two)
+            // ctx.ladder_first_c3: the FIRST hit. Measured on Alienyze (round 47):
+            // among samples with two or more hits, the first is the true EP on 58
+            // and the tail on 0, because its tail hits land in the `.alien` store.
+            // Every other family keeps the tail preference it was measured with.
+            if (ctx.ladder_first_c3 && c3_first_off != 0) {
+                return ps.start + c3_first_off;
+            }
             return ps.start + (c3_valid_off != 0 ? c3_valid_off : c3_last_off);
         }
         if (c_count == 1 && !(mpress && c3_count == c_count && !c3_prologue_valid)) {

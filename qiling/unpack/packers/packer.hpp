@@ -51,6 +51,10 @@ struct PackerContext {
     // family_terminal_fill) and may replace it. A separate pointer for the same
     // reason imports_out is separate: no other seam can move the entry.
     std::uint64_t* oep_mut = nullptr;
+    // Ladder shaping, for a family whose image contains a packer STORE that
+    // looks like code. See AlienyzePacker::static_oep_from_image.
+    bool ladder_skip_boundary = false;   // don't trust the boundary-thunk pass
+    bool ladder_first_c3 = false;        // Pass C takes the FIRST hit, not the tail
     std::vector<std::uint8_t> adopted;                     // a seam's replacement image
     std::uint64_t adopted_base = 0;                        // ... and its base/size/sections
     std::uint64_t adopted_size = 0;

@@ -3873,3 +3873,41 @@ reverted; the useful change is the ordering, and that has to be a *family seam*:
 - That is ~61 Alienyze samples of headroom (53 pick-only + the 8 already passing
   imports at lower code_sim), the largest single lever left after round 45, and it is
   bounded work rather than open-ended anti-emulation.
+
+### 0.17ao Round 48: Alienyze's ladder seam - corpus all-three 1784 -> 1818 (+34)
+
+Round 47 scoped this and the numbers held. **AlienyzePacker::static_oep_from_image**
+now runs the shared ladder with two shaping flags on `PackerContext`:
+
+- `ladder_skip_boundary = true` - the boundary-thunk pass is off, because the
+  restored image carries the packer's `.alien` name/value STORE and code-shaped
+  signatures inside it are coincidence. That pass was what latched
+  alienyze_Clockres' 0x4257e2 (data) and it ran before Pass C ever got a say.
+- `ladder_first_c3 = true` - Pass C takes the FIRST `c3 e8 <rel32> e9 <rel32>` hit
+  instead of the validated/tail one. Measured over Alienyze's 87 samples with a c3
+  hit: first-hit is the true EP on 58, the tail on 0.
+
+Both are opt-in flags defaulting to the previous behaviour, so every other family
+keeps the rules it was measured with; the mpress gate around the validated-hit branch
+is untouched.
+
+**Measured:**
+- Alienyze family (126): all-three 8 -> **43**, oep_exact 17 -> **54**, imports 74 ->
+  75, **36 gains / 1 loss** (alienyze_psloglist - C3=2 with a validated hit at the
+  second, so the old tail preference was right there; that single case is the price).
+- corpus (2678 @85s): all-three 1784 -> **1818**, oep_exact 1875 -> **1912** (+37),
+  imports unchanged. 36 gains (all Alienyze) / 2 losses: alienyze_psloglist (real)
+  and mpress_ComIntRep at dur=85 (the standing budget flake), so the honest delta is
+  **+35** with one known regression.
+- fair set (200 @300s): 131 -> **132** (alienyze_Autoruns), 0 losses.
+- suite 593/593.
+
+**Where Alienyze now stands:** 43 of 126 all-three (was 2 before round 45), so import
+attribution (+68 imports) and this pick fix together took the family from 2 to 43.
+The remaining 83 are the `<0.3` code_sim group - bodies that never decode - which is
+the anti-emulation class from round 43, not the picker.
+
+**Note for the next pick change:** alienyze_psloglist is the counter-example to keep
+in mind. A rule of the shape "prefer the validated hit when the FIRST hit is not
+validated" would have kept it while leaving the other 36 gains intact; that is the
+obvious refinement if this seam is revisited.

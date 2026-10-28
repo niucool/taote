@@ -585,6 +585,21 @@ class AlienyzePacker : public AmberPacker {
 public:
     const char* name() const override { return "Alienyze"; }
 
+    // The restored image carries the packer's `.alien` STORE next to the payload.
+    // Code-shaped signatures inside it are coincidence, and the shared ladder's
+    // boundary-thunk pass happily latches one (measured: alienyze_Clockres picks
+    // 0x4257e2 in .alien against a true EP of 0x4002; TAOTE_UNPACK_DEBUG shows
+    // "boundary-thunks in .alien: 1" and Pass A declining two CRT thunks as
+    // ambiguous). So this family runs the ladder with that pass off and Pass C
+    // preferring the FIRST hit - measured over Alienyze's 87 samples with a c3
+    // hit, first-hit is the true EP on 58 and the tail on 0.
+    std::uint64_t static_oep_from_image(const PackerContext& ctx) const override {
+        PackerContext shaped = ctx;
+        shaped.ladder_skip_boundary = true;
+        shaped.ladder_first_c3 = true;
+        return ladder_oep(shaped);
+    }
+
     bool transform_image(PackerContext& ctx) override {
         if (ctx.image_mut == nullptr || ctx.image_mut->empty()) {
             return false;
