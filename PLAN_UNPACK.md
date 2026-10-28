@@ -4021,3 +4021,46 @@ with the gate in place BeRo measures 0/0 here.
 
 Fair set neutral because it holds 8 samples per family, 24 of them in the gated
 families, and none sat near the pass/fail boundary.
+
+**Corpus confirmation** (2678 samples @85s, /home/jim/runs/r41, report `R41_CORPUS.md`):
+
+| metric | before | after |
+|---|---|---|
+| all-three | 1818 | **1823** |
+| OEP exact | 1912 | **1918** |
+| imports | 2042 | **2043** |
+| valid PE | 2674 | 2674 |
+
+Five gains, 0 losses: `nspack_cpuz_x32`, `winupack_PsInfo`, `winupack_pskill`,
+`winupack_psshutdown` and `mpress_ComIntRep` — the last is the standing `dur=85`
+budget flake recovering, so the honest delta is the **+4** the family gate measured,
+on top of 1818. WinUpack 74 -> 77 all-three, NSPack 88 -> 89.
+
+### 0.17as The hop-vs-ladder conflict, measured again: the ladder wins 393:4
+
+The five `*_calc`/`*_cmd` pick losses (`winupack_calc`, `nspack_calc`, `molebox_calc`,
+`molebox_cmd`, `winupack_cmd`) share a shape: the **hop ledger already holds the true
+entry** and the static ladder overrides it with a hit inside the packer's own section
+(`.Upack`, `nsp0`, molebox's mangled section names). `winupack_calc` is the clean
+example — debug shows `OEP candidate 0x1012d6c (section_hop)`, then `.Upack: C=1 C3=0
+valid=0` and the final answer is `0x10266b0`, with `oep_last_hop = 0x1012d6c` (true).
+
+So the question is whether the ladder's override is well-founded. Measured over every
+graded r40 row that has both an `oep` and an `oep_last_hop` and where they differ
+(515 rows):
+
+| who was right | n |
+|---|---|
+| ladder | 393 |
+| hop | 4 |
+| neither | 100 |
+
+The override is not the bug — it is right 99% of the time.
+
+Narrowing to the ladder's **weakest** evidence, a unique `c_count == 1` with
+`c3_count == 0` (an unvalidated `e8 .. e9` hit, no CFG thunk): 18 rows, ladder right
+**11**, hop right **2** (`nspack_calc`, `winupack_calc`), both wrong 5. Making the
+verified runtime hop outrank that weak static hit would therefore **gain 2 and lose
+11**, so it is not written. The six hop-right rows are a per-family section-naming
+accident (the packer's own section happens to contain one thunk-shaped run), not a
+mechanism — the same coarse overfitting round 49 refused for Alienyze's "hit #4".
