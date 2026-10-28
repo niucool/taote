@@ -4064,3 +4064,49 @@ verified runtime hop outrank that weak static hit would therefore **gain 2 and l
 11**, so it is not written. The six hop-right rows are a per-family section-naming
 accident (the packer's own section happens to contain one thunk-shaped run), not a
 mechanism — the same coarse overfitting round 49 refused for Alienyze's "hit #4".
+
+### 0.17at Round 52: RLPack joins the ladder gate - +7 OEPs on bodies that were already decoded
+
+Round 51 gated three families on the strength of a 10-family measurement and left the
+other ten untested. This round closed that gap for the six families that still have
+OEP headroom (Amber, Neolite, TELock, RLPack, Eronana Packer, Exe32pack), running the
+same two flags on all 740 of their samples:
+
+| family | samples | all-three | oep_exact |
+|---|---|---|---|
+| all six | 740 | 320 -> 320 (0 gains, 0 losses) | 381 -> **388** |
+| RLPack | 104 | 6 -> 6 | 66 -> **73** (8 gains, 1 loss) |
+| Amber, Neolite, TELock, Eronana, Exe32pack | 636 | unchanged | unchanged |
+
+So five of the six are exactly neutral and stay on the default ladder; **RLPack** gains
+seven OEPs. Its eight gains (`Dbgview`, `PsExec`, `PsGetsid`, `PsInfo`, `portmon`,
+`pskill`, `psshutdown`, `pssuspend`) all have `code_sim 1.0` - a fully decoded body -
+and lose one (`rlpack_geek`). None converts an all-three row, because RLPack's
+remaining block is imports (recall 0.39-0.75 on exactly these samples), not the pick.
+That is still worth shipping: the OEP is now right on eight samples whose body is
+already right, which is the prerequisite for any future import work on them.
+
+Shipped gate: `WinUpack`, `BeRoEXEPacker`, `NSPack`, `RLPack`.
+
+Corpus confirmation (2678 @85s, /home/jim/runs/r42, report `R42_CORPUS.md`):
+
+| metric | before | after |
+|---|---|---|
+| OEP exact | 1918 | **1925** (+7, all RLPack) |
+| all-three | 1823 | 1822 |
+| imports | 2043 | 2042 |
+| valid PE | 2674 | 2674 |
+| fair set (200 @300s) | 132 | 132 - 0 gains, 0 losses |
+
+The single all-three "loss" is `nspack_procexp.exe` at `dur=85`: it times out
+mid-import-mining (recall 0.9463 against a 0.95 bar, `code_sim 0.8999`), and a clean
+local re-run rebuilds 942 imports with the same exact OEP, so the honest all-three
+delta is **0** — the RLPack OEPs do not convert yet, exactly as the family measurement
+predicted. The fair set is neutral for the same reason as round 51: 8 RLPack samples,
+none on a pass/fail boundary.
+
+RLPack now stands at **73 of 104 OEP-correct** (66 before) with 6 all-three. The eight
+newly-correct samples have fully decoded bodies (`code_sim 1.0`) and import recall
+0.39-0.75, so they are 8 potential conversions sitting behind the RLPack import
+question that rounds 45/46 pinned as a data ceiling (payload IAT slots never written,
+zero GetProcAddress calls).

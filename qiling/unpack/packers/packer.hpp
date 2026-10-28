@@ -127,8 +127,12 @@ public:
         // Why it helps them: their stubs also leave a packer STORE next to the
         // payload, so the boundary-thunk pass has code-shaped junk to latch and
         // Pass C's tail preference walks away from the real entry.
+        // Round 52 added RLPack: 8 OEP gains / 1 loss over its 104 samples, all
+        // gains on bodies already at code_sim 1.0 (its imports are the blocker).
+        // Amber, Neolite, TELock, Eronana Packer and Exe32pack were measured with
+        // the same flags and came out exactly neutral, so they are not gated.
         const std::string fam = ctx.family.empty() && name() != nullptr ? name() : ctx.family;
-        if (fam == "WinUpack" || fam == "BeRoEXEPacker" || fam == "NSPack") {
+        if (fam == "WinUpack" || fam == "BeRoEXEPacker" || fam == "NSPack" || fam == "RLPack") {
             PackerContext shaped = ctx;
             shaped.ladder_skip_boundary = true;
             shaped.ladder_first_c3 = true;
