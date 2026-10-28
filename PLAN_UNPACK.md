@@ -3941,3 +3941,41 @@ The honest options for those 9 need a discriminator that is not positional:
 So Alienyze's pick ceiling is reached for now: 43 of 126, with the remaining 83 split
 into 83 - 31 = 52 bodies that never decode (the anti-emulation class) and the 31
 above whose entries depend on link order.
+
+### 0.17aq Round 50: Alienyze's ladder shaping generalises (+5/-1 on 972 samples), and the structural version does not
+
+Round 48's Alienyze seam is two flags. This round asked two questions about them.
+
+**1. Does the pattern generalise?** With both flags forced on for EVERY family
+(`TAOTE_LADDER_SHAPE_ALL=1`, a temporary gate) over 972 samples from the ten families
+with pick headroom:
+
+```
+all-three 845 -> 849   gains 5 / losses 1
+gains : WinUpack 3, BeRoEXEPacker 1, NSPack 1
+losses: WinUpack 1
+```
+
+Net **+4**, so yes - but a family-agnostic picker change cannot be adopted on a
+972-sample subset: the other ~1700 samples (UPX, ASPack, EnigmaVB, EXpressor,
+Yoda-Crypter, Eronana, Amber, Neolite, TELock, MEW, Themida, Exe32pack) were never
+measured with it on, and every one of those families' current behaviour was measured
+WITHOUT it. The honest next step is a per-family gate for the three gainers
+(WinUpack net +2, BeRo +1, NSPack +1) validated by a full corpus run.
+
+**2. Can the same rule be expressed structurally instead of by family label?** The
+idea: the boundary-thunk pass adds no information when its unique hit is ITSELF a
+Pass C hit (`c3 e8 <rel32> e9 <rel32>`) and the section holds more than one - it is
+then just a different member of the same family than Pass C's first-hit rule. That is
+a property of the bytes, not the family.
+
+Measured (`TAOTE_LADDER_STRUCT=1`) over 1786 samples from 17 families:
+**all-three 1574 -> 1573, 0 gains / 1 loss** (bero_ADInsight at dur=86, a timeout
+flake). Inert. So the +5 above does NOT come from the overlap case; it comes from
+disabling the boundary pass outright and preferring the first c3 hit even where the
+boundary hit is unrelated to Pass C - which is exactly the part that needs the
+per-family validation in (1).
+
+Both experiments are reverted; the tree is unchanged and the corpus stays at 1818.
+The measured lead for the next round is (1): three family gates, +4 expected, one
+full corpus + fair-set run to confirm.
