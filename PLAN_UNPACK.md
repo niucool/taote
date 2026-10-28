@@ -3414,3 +3414,50 @@ int3 is simply wrong, and every other family's measured behaviour is unchanged
 (the guard fires only for #BP). It is a prerequisite for any Yoda-Protector work,
 exactly as round 29's TELock label was a prerequisite for TELock work. But it
 converts **nothing**, and the plan should not pretend otherwise.
+
+### 0.17ae Round 38: the import near-misses are all ORDINALS, and ordinals need attribution
+
+**No cheap pick class exists.** Of 719 gradable samples with a wrong OEP, exactly
+**2** are within +-0x40 of the truth (petite_PEview and yoda-protector_PEview, both
++5). There is no constant-offset or near-miss population to fix, which is the third
+independent confirmation that the remaining OEP failures are decode failures.
+
+**The import gap is concentrated and quantified.** Of the rows whose OEP is already
+exact, 109 still fail imports:
+- recall < 0.80: **91** (RLPack 64, PEtite 12, Alienyze 10, NSPack 2)
+- 0.80-0.90: 8
+- 0.90-0.95: 10 (MEW 4, WinUpack 3, Alienyze 1, MPRESS 1, RLPack 1, ...)
+
+**The 0.80-0.95 near-misses are explained exactly by ORDINAL imports.** The
+arithmetic is exact on every one checked:
+
+| sample | original pairs | named | ordinals | we rebuilt |
+|---|---|---|---|---|
+| mew_Bginfo | 861 | 808 | **53** | 807 |
+| mew_adwcleaner | 603 | 568 | **35** | 568 |
+| winupack_FileTypesMan | 240 | 225 | **15** | 225 |
+| rlpack_DarkNamer | 245 | 61 | **184** | 228 |
+
+We rebuild precisely the named ones and none of the ordinals, so recall lands a few
+points under the 0.95 line. (Note the grader reads the OUTPUT PE's import table -
+the sidecar meta is only a fallback - so this is a rebuild gap, not a spelling one.)
+
+**Measured and reverted: accepting ordinal thunks in the INT-table scan.** The
+rebuilder already writes a correct ordinal thunk for an "ordinal_<N>" pair
+(iat/import_rebuilder.cpp ordinal_of, 0x80000000|ord), so the only missing step
+looked like *finding* them: the table scan required every member to point at a name
+string, so an ordinal thunk truncated the table. Allowing a high-bit member
+(`ordinal_ + (v & 0xffff)`, continue) changed group shapes (Bginfo's string groups
+61 -> 91, names 975 -> 1120) but emitted **zero** ordinal pairs: the tables that
+hold them never pass the "nearest preceding dll string" attribution, so
+`dll.empty()` drops them anyway. Measured on MEW+WinUpack (203 samples): **0 gains
+/ 1 loss** (winupack_Bginfo). Reverted.
+
+**The unification worth carrying forward.** PEtite's 12 and these 18 near-miss rows
+are blocked by the SAME missing capability: mapping a recovered name or ordinal to
+its owning DLL. taote has no per-module export map, the rootfs stub DLLs are
+circular (built from the sample's own packed imports), and the reference's host
+fallback is Windows-only - so on this host the missing piece is a *name->dll
+database*, not more scanning. That single asset would serve PEtite, MEW, WinUpack,
+Alienyze and NSPack at once, which makes it the highest-leverage remaining item
+even though it is infrastructure rather than a family port.
