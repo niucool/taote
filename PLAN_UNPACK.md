@@ -3683,3 +3683,55 @@ clean-stop class is instruction-level: find where each family's stub takes its e
 branch (the 18 no-API samples show it happens in code, before any API), which means
 a conditional-branch trace around the anti-debug check rather than more environment
 plumbing.
+
+### 0.17ak Round 44: the remaining 824 failures, fully classified (a proven ceiling per class)
+
+The plan now has a complete map of what is left, each class measured rather than
+estimated. **2594 gradable samples, 824 failures**, split:
+
+| class | n | ceiling / blocker |
+|---|---|---|
+| OEP wrong (= body not decoded) | **719** | anti-emulation: 581 clean stops, ~138 crashes |
+| imports only (OEP already exact) | **105** | 15 ordinal-only, 8 a few names short, 82 data absent |
+
+The 105 imports-only rows, measured by NAMED-only recall (i.e. what recall would be
+if the ordinal entries were free):
+
+| named-only recall | n | families | verdict |
+|---|---|---|---|
+| >= 0.95 | **15** | WinUpack 6, MEW 5, Alienyze 3, MPRESS 1 | blocked ONLY by ordinal values |
+| 0.80-0.95 | **8** | Alienyze 5, PEtite 1, RLPack 1, WinUpack 1 | a few names short |
+| < 0.80 | **82** | RLPack 65, Alienyze 7, PEtite 5, NSPack 2 | names genuinely absent |
+
+**The 15 ordinal-only rows are not reachable, and that is now proven rather than
+assumed.** winupack_FileTypesMan is the exemplar: code_sim is 1.000 (the dump IS the
+original program), `imports` misses by exactly its 15 ordinals, and the harvest
+reports "image import table harvest: 0 descriptors -> 0 imports" - the packer zeroed
+the import directory after its loader resolved it, so the ordinal VALUES exist
+nowhere in the image. The names survive as strings, which is why our 225 named pairs
+are right; a number has no string form, so nothing in the dump can supply it. The
+export database can name the owning DLL (round 40 does) but not the ordinal itself,
+and taote's rootfs stub DLLs are synthesized with names only, so the resolved IAT
+addresses cannot be mapped back to ordinals either. Recorded as a ceiling.
+
+**The 8 in 0.80-0.95 are Alienyze's, and their missing names are ordinary kernel32
+exports** (CreateFileA, CreateThread, EncodePointer, ExitProcess, ExitThread,
+CompareStringW, FreeEnvironmentStringsW) - i.e. the payload's own CRT import group,
+which the `.alien` store parse (round 28's al_hinted_store port) does not cover. That
+is a real, bounded target worth **+5** (the Alienyze rows with an exact OEP), but it
+needs the reference's variant coverage improved, not another scan.
+
+**What I deliberately did NOT do.** The quick way to move the imports number is to
+attribute every name-like string in the image through the database. That would add
+pairs the payload never imports (`kernel32!CreateFileA` because the text appears
+somewhere), which is a true fact about the DLL but not about the program - metric
+inflation, not recovery. The database stays a fallback for names we actually found
+in an import structure.
+
+**So the remaining gap to the reference (1773 -> 1996, 223 samples) lives almost
+entirely in the 719 decode failures**, and round 43 pinned their shape: 581 clean
+stops (Themida 122/122, Alienyze 116/116, Neolite 91/91, PEtite 44/44, RLPack 98/103,
+Yoda-Protector 88/101, TELock 56/101, Amber 43/47) versus ~138 crashes (WinUpack 18
+fetch at pc 0x28, Exe32pack 14 write at addr 0x54, TELock 45 fetch). The crashes are
+traceable; the clean stops need an instruction-level hunt for each stub's exit
+branch, which is the next real unit of work.
