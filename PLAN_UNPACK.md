@@ -3627,3 +3627,59 @@ because there is no crash to read.
 41's re-attribution experiment were an artefact of a narrower regex than the C++
 image scan (16 DLL stems vs 7 in petite_PEViewer). That experiment's rejection
 stands, but its premise was already invalid before the corpus run.
+
+### 0.17aj Round 43: the remaining failures are anti-emulation clean stops (and a PEB fix that did not help)
+
+**The strategic classification the plan has been missing.** Of the 824 gradable
+failures, by how the run ENDS:
+
+| family | n | clean stop | crash |
+|---|---|---|---|
+| Themida | 122 | **122** | 0 |
+| Alienyze | 116 | **116** | 0 |
+| RLPack | 103 | 98 | 5 read |
+| Yoda-Protector | 101 | 88 | 13 read |
+| TELock | 101 | 56 | 45 fetch |
+| Neolite | 91 | **91** | 0 |
+| Amber | 47 | 43 | 3 read / 1 fetch |
+| PEtite | 44 | **44** | 0 |
+| WinUpack | 24 | 5 | **18 fetch** / 1 read |
+| FSG | 20 | 18 | 1 write / 1 read |
+| Exe32pack | 15 | 1 | **14 write** |
+| NSPack | 10 | 10 | 0 |
+
+**581 of 824 (70%) are CLEAN STOPS** - the stub finishes, or chooses to exit, having
+decoded nothing. The crash-based families are the tractable ones and they are the
+small end: Exe32pack 14 write-unmapped (the null-base write at addr 0x54 traced in
+round 33's sibling work), WinUpack 18 fetch-unmapped, TELock 45 fetch-unmapped
+(its self-encrypted stub). Everything big is anti-emulation.
+
+**What the clean stops look like.** Capturing the last APIs before the stop on 48
+samples across 8 families: 18 call NO api at all (detection happens in code - PEB,
+CPUID, rdtsc), 12 end in `ExitProcess`, and the Neolite ones all share one tail:
+
+```
+GetProcAddress -> MessageBoxA -> LoadLibraryA -> GetProcAddress
+   -> ShellExecuteA -> LoadLibraryA -> GetProcAddress -> ExitProcess
+```
+
+i.e. "we detected something, show a box, hand off, exit". MessageBoxA returns IDOK
+and ShellExecuteA returns 33 (>32 success) in taote, so the trigger is upstream.
+
+**Measured and reverted: the PEB anti-emulation surface.** The PEB image is zeroed
+apart from ImageBaseAddress/LdrAddress/ProcessParameters/ProcessHeap/
+NumberOfProcessors, so `RTL_USER_PROCESS_PARAMETERS` was an empty blob and the
+"heap" a zeroed one - both things packers read (own path for the overlay; heap
+Flags = 2 / ForceFlags = 0 as a not-debugged tell). Populating the heap's
+Flags/ForceFlags and the parameters' ImagePathName/CommandLine/Length was implemented
+and measured on Alienyze + Neolite + PEtite + Themida (414 samples):
+**all-three 33 -> 33, oep_exact 54 -> 54, imports 135 -> 132** - no gain and three
+imports losses (alienyze_DiskView, alienyze_PsInfo, alienyze_cpuz_x32). The extra
+heap allocations perturb the layout the string miners walk, so the change costs
+real samples while changing no stub's decision. Reverted.
+
+So PEB self-consistency is not what these stubs test. The next honest probe for the
+clean-stop class is instruction-level: find where each family's stub takes its exit
+branch (the 18 no-API samples show it happens in code, before any API), which means
+a conditional-branch trace around the anti-debug check rather than more environment
+plumbing.
