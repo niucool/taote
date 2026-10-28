@@ -3312,3 +3312,63 @@ so the equivalent needs either a loader-side per-module export list or a
 family-side read of the rootfs stub DLLs' export directories. That is the unit of
 work for the next round, and it is the last mile for 12 samples here plus the
 orphan-table path generally.
+
+### 0.17ac Round 36: 84 corpus samples are .NET and can never be all-three; two avenues closed
+
+**The targeting fact.** `oep_exact = None` in the report does not mean "ungraded
+by accident": tools/unpack_report.py:301 skips the OEP comparison when the
+original PE carries a CLR directory (`orig.get("com_rva")`), because a managed
+assembly's entry lives in metadata and the classic EP comparison is meaningless.
+**84 of the 2678 samples are in that class** (51 of them already pass imports; 37
+already have code_sim >= 0.8, i.e. their dump is essentially the original program).
+They can never contribute an all-three, and a naive "not all-three" count silently
+folds them into the failure budget.
+
+Gradable corpus = **2594**, and 1767/2594 is **68.1%**, not 66.0%. Family headroom
+must be counted with them removed; the biggest blocks become:
+
+| family | n | ok | .NET (ungradable) | real failures |
+|---|---|---|---|---|
+| Themida | 122 | 0 | 0 | 122 |
+| Alienyze | 126 | 2 | 8 | 116 |
+| RLPack | 104 | 0 | 1 | 103 |
+| TELock | 116 | 0 | 15 | 101 |
+| Yoda-Protector | 101 | 0 | 0 | 101 |
+| Neolite | 93 | 2 | 0 | 91 |
+| PEtite | 73 | 23 | 0 | 50 |
+| Amber | 152 | 83 | 22 | 47 |
+| WinUpack | 97 | 74 | 1 | 22 |
+| FSG | 97 | 75 | 2 | 20 |
+| Exe32pack | 124 | 92 | 17 | 15 |
+
+Note Exe32pack after round 34: 32 "failures" are really 17 ungradable .NET rows
+(most with imports recall 1.00 and code_sim 0.9-1.0) plus **15 genuine decode
+failures** at code_sim 0.13-0.21. Amber's 69 drops to 47 for the same reason.
+
+**PEtite's attribution is blocked on this host, and so is the reference's.** The
+next step recorded last round was name->DLL attribution through module export
+tables. Checking the substrate first: taote's rootfs stub DLLs are synthesized by
+tools/stub_dlls.py from the sample's OWN packed import table (`--from-pe`), so they
+export exactly what the stub imports - attributing the payload's original names
+through them is circular. The reference's answer is
+`get_peb_modules`/`get_sys_modules` exports with a host-System32 fallback that is
+`#ifdef _WIN32` and therefore inert on this host. So on Linux there is no export
+knowledge to attribute with, and the 12 PEtite samples are not reachable this way
+without inventing an export database. Recorded so it is not re-attempted as
+"just add attribution".
+
+**TELock's stub is self-encrypted on disk.** Static inspection cannot guide the
+fidelity work: telock_gzip's last section (.k at va 0x65000, raw 0x8800) is
+high-entropy garbage on disk (`6f 31 8b a5 18 d3 f1 1f c4 35 3e 80 f6 da` at RVA
+0x66800), so the handler bodies at 0x466a15/0x466a3c that the SEH trace shows are
+decrypted only in memory by the polymorphic loader. Any further TELock progress has
+to come from observing the decrypted handler's behaviour in the emulator, not from
+reading the file.
+
+**Exe32pack's 15 real decode failures** all die the same way
+(exe32pack_bzip2: `UC_ERR_WRITE_UNMAPPED` at pc=0x4178a0, RVA 0x178a0 inside .k
+[0x11000..0x18302) with SizeOfImage 0x19000, hop ledger one entry 0x4110eb@1) - a
+stub write to an address it computes, with the target address not logged. The next
+step there is a *safe* way to log the faulting write address (the old memdbg probe
+was deleted for crashing the host; a scoped read-only variant inside the existing
+exception path is the shape to try).
