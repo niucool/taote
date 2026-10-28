@@ -4307,3 +4307,57 @@ Both edits reverted; the tree is back to round 55 (1847). The reject-the-input-f
 (compare a candidate's first 4 KB against the packed file's) was implemented and did NOT
 fire on the ASPack candidate, so "it is just the mapped input" is not the whole story
 either - that is where a future attempt should start.
+
+### 0.17ay Round 57: plan item 3 closed - there is no MEW LZMA failure, the residue is ordinals and one budget row
+
+PLAN_UNPACK has carried "MEW LZMA completion/finalize (8 samples)" as priority 3. It is
+stale on both counts: MEW now has **five** failures, and none of them is an LZMA
+finalization problem.
+
+| sample | corpus `dur` | OEP | recall | missing pairs |
+|---|---|---|---|---|
+| mew_Bginfo | 86 | exact | 0.9384 | 53, **all ordinals** |
+| mew_ComIntRep | 85 | exact | 0.9013 | 52, all ordinals |
+| mew_Sysmon | 86 | exact | 0.9053 | 25, all ordinals |
+| mew_adwcleaner_7.2.4.0 | 87 | exact | 0.9370 | 38 = 35 ordinals + 3 named |
+| mew_procexp | 85 | exact | 0.9501 | 26, all ordinals |
+
+All five are at the budget boundary (85-87 s), all five have the exact OEP and a fully
+decoded body, and every one fails only the import criterion. Clean 400 s re-runs
+reproduce the same answers, so the run is not truncating arbitrarily - except for
+`mew_procexp`, whose clean recall is **0.9501**, i.e. it passes the 0.95 bar and its
+corpus failure is purely the 85 s timeout (recall 0.9463 in the run). That is the
+standing budget-flake family, not an accuracy defect.
+
+The other four are the ordinal ceiling, and it is structural, not a harvester bug: the
+payload's own import directory in the dump is destroyed (`mew_procexp`: IMAGE_DIRECTORY
+ENTRY Import at RVA 0x3a4867 with size 0x14, a single descriptor, **zero** thunks), so
+the ordinal values cannot be read from a descriptor chain that no longer exists. The 26
+ordinal pairs taote does report come from the ordinal-vote rule of round 40 applied to
+the string miners' tables - all the recoverable evidence there is.
+
+So priority 3 is closed: nothing in the LZMA path is missing, and the remaining MEW
+headroom is 1 budget flake plus 4 rows behind the corpus-wide ordinal data ceiling.
+
+### 0.17az The throughput lever is measured: the corpus is not timeout-bound
+
+The standing note from round 13 scopes a "throughput restructure" (dispatch_trace at
+174 ns/insn, ~86% of taote's overhead). The MEW rows above are all boundary rows, so it
+was worth asking how much of the corpus the 85 s budget actually costs:
+
+| failure duration | graded failures |
+|---|---|
+| < 30 s | **678** |
+| 30-59 s | 34 |
+| 60-83 s | 3 |
+| **>= 84 s (boundary)** | **32** |
+
+Of those 32, only 13 have the OEP already exact, and their median import recall is
+**0.044** — i.e. most boundary rows are not truncated successes, they are genuinely
+failing runs that happen to burn the budget.
+
+So even an infinite speedup would convert at most ~32 samples, and realistically a
+handful. The 747 graded failures are decode-bound (503 ciphertext at the true entry,
+round 53) and import-bound (ordinal ceilings), not time-bound. A throughput restructure
+is therefore NOT the next lever, whatever its absolute speedup, and the instruction-budget
+removal stays blocked for the reasons round 15 measured.
