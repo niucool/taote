@@ -5221,3 +5221,29 @@ corpus rather than a shape:
 They follow the existing pattern (skip when the corpus is absent - verified with
 `TAOTE_PACKED_DIR=/tmp/no_corpus`, 3 skipped, 0 failed) and run in ~2.5 s. Suite 594 -> **597**,
 all green. No unpack behaviour changed, so the corpus baseline stays all-three **1861**.
+
+### 0.17bw Round 79: measurement hygiene - the corpus must be run on a quiet machine
+
+Every corpus run in this session (r50 through r54) was taken while analysis jobs of the same
+investigation were running beside it - byte scans, single-sample `taote` spot checks, and the
+reference FSG comparison. One row sits close enough to the 85 s cap for that to matter:
+`mpress_ComIntRep` takes **78 s** on a quiet harness, and it was recorded at `dur=85` with only
+19 of 527 pairs mined in r51/r52/r53 and again in r54.
+
+Re-measured three ways with the current binary:
+
+- **solo through the harness**: `dur=32`, OEP exact, import recall **1.0000** - all three.
+- **four copies in parallel**: 68.8 / 70.1 / 70.6 / 71.2 s, 568 imports in all four.
+- **a full quiet corpus (r55 vs r54)**: all-three 1861 -> **1862** (+1, `mpress_ComIntRep`),
+  OEP exact 1972 -> **1973**, imports 2051 -> **2052**, **zero losses**.
+
+So the session's corpus baselines were each one row low, and the honest figure is **1862**
+(all measurements below use r55). The diagnostic rows to watch are the ones at `dur >= 78`:
+`mpress_ComIntRep` (78-85 s), plus `bero_HDDScan` and `mpress_Bginfo`, which both flip their
+claimed OEP at `dur=86` and are genuine budget casualties rather than regressions.
+
+**Rule for future rounds: start the corpus run and do nothing else on the machine until it
+finishes.** A row that lands on the cap looks exactly like a regression otherwise, and this
+session spent three separate verifications on a row that passes in 32 s alone.
+
+FSG is unaffected and unchanged at **94/97** (lowest passing import recall 0.9747).
