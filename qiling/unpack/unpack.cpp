@@ -1077,7 +1077,10 @@ std::size_t Unpacker::mine_orphan_descriptors(const std::vector<std::uint8_t>& i
             return {};
         }
         const auto sh = static_cast<unsigned char>(fn[0] - 3);
-        if (std::isalnum(sh) == 0 && sh != '_') {
+        // '_' covers the CRT internals (_exit, _pctype); '?' covers C++ MANGLED
+        // names, which FSG shifts like everything else ('B?1type_info@@UAE@XZ' is
+        // '??1type_info@@UAE@XZ').
+        if (std::isalnum(sh) == 0 && sh != '_' && sh != '?') {
             return {};
         }
         std::string alt = fn;
@@ -1099,11 +1102,22 @@ std::size_t Unpacker::mine_orphan_descriptors(const std::vector<std::uint8_t>& i
     // the CRT internals the export database does not carry (`_isctype`, `_pctype`,
     // `_mb_cur_max`, which the per-name test alone leaves spelled `bisctype`,
     // `bpctype`, `b_mb_cur_max`).
-    const auto block_is_shifted = [&shifted_form](const std::vector<std::string>& names) {
+    // A stored name beginning "B?" cannot be a real import: MSVC C++ mangling always
+    // begins with '?', so its shift is structural evidence rather than a database
+    // lookup (the mangled names are not in the export database at all, which is why
+    // the evidence vote left fsg_DarkNamer's whole MSVCP60 block spelled "B?0_Logit").
+    const auto mangled_shift = [](const std::string& fn) {
+        return fn.size() >= 2 && fn[0] == 'B' && fn[1] == '?';
+    };
+    const auto block_is_shifted = [&shifted_form, &mangled_shift](const std::vector<std::string>& names) {
         std::size_t for_shift = 0;
         std::size_t against = 0;
         for (const auto& fn : names) {
             if (fn.empty()) {
+                continue;
+            }
+            if (mangled_shift(fn)) {
+                ++for_shift;
                 continue;
             }
             if (api_owner(fn) != nullptr) {
@@ -1117,7 +1131,13 @@ std::size_t Unpacker::mine_orphan_descriptors(const std::vector<std::uint8_t>& i
         }
         return for_shift > against && for_shift != 0;
     };
-    const auto block_name = [&reshift, &shifted_form](const std::string& fn, bool shifted_block) -> std::string {
+    const auto block_name = [&reshift, &shifted_form, &mangled_shift](const std::string& fn, bool shifted_block) -> std::string {
+        if (mangled_shift(fn)) {
+            const auto alt = shifted_form(fn);
+            if (!alt.empty()) {
+                return alt;
+            }
+        }
         if (api_owner(fn) != nullptr) {
             return fn;   // this spelling is a real export: leave it alone
         }

@@ -4877,3 +4877,52 @@ visible: `movsb` with a `call *(%esp)` bit reader), which is a new decompressor,
 15 remaining: 5 broken inputs (above), 6 link-order OEPs whose truth is present but
 indistinguishable per sample, 2 import-only rows whose missing names are mangled-C++ CRT
 imports, and 2 files LIEF refuses to parse at all (`input_parse_failed`).
+
+### 0.17bm Round 70 (FSG): the family is closed at 82/97 - every remaining row is at a named ceiling
+
+The mangled-name shift closes the last spelling gap, and the two "import-only" rows turn out
+to be **ordinal-capped**, not misspelled. Per-row evidence, using the harness's own
+`import_names(parse_pe(original))` as truth:
+
+**`fsg_DarkNamer`: 58 of 245 pairs are nameable.** All **187** missing pairs are MFC42u
+ORDINALS (`#1089`, `#1143`, `#1165`, `#1172`, `#1197`, `#1569`, ...). Its recall is therefore
+`58 / 245 = 0.237`, which is exactly what it now scores - the named part is complete and the
+rest needs an MFC42u ordinal-to-name database that the offline export DB does not carry.
+
+**`fsg_adrestore`: 67 of 79.** Of the 12 missing pairs, **10 are ordinals**
+(`activeds!#9`, `oleaut32!#8`/`#9`, `wldap32!#13`/`#14`/`#118`, ...) and the other 2
+(`comdlg32!PrintDlgA`, `ole32!CoInitialize`) are absent from the decoded dump as text
+entirely. `67 / 79 = 0.848`, again exactly the observed score.
+
+Both are the class round 57 pinned for MEW: ordinal-only imports whose names are not in the
+image. Since the import criterion is recall, no amount of mining converts them.
+
+**The mangled-name fix itself.** `shifted_form` now accepts `?` as a shifted first character,
+and a stored name beginning `B?` is treated as *structural* evidence for the shift (MSVC C++
+mangling always begins with `?`, so `B?` can never be a real import) instead of waiting for a
+database hit the mangled spellings never produce. Measured, full corpus r50 -> r51:
+
+| row | before | after |
+|---|---|---|
+| fsg_DarkNamer | 0.2082 | **0.2367** |
+| fsg_AccessEnum | 0.9224 | **0.9353** |
+| fsg_shmnview | 0.9709 | **0.9806** |
+| mpress_ComIntRep | 1.0000 | 0.0342 (dur=85 budget flake) |
+
+Corpus all-three 1850 -> 1849, OEP exact 1962 -> 1962, imports 2043 -> 2042, the single loss
+being `mpress_ComIntRep` at `dur=85` with only 19 of 527 pairs mined; the same binary runs it
+locally in **34s** with 568 imports on two consecutive runs, and the row flips at dur 78/85/86
+across rounds 51/55/68, so it is worker contention rather than the change. No other row moved.
+
+**FSG's ceiling, itemised.** 82 of 97 with 15 remaining, each now attributable:
+
+| group | n | why it cannot convert |
+|---|---|---|
+| broken inputs | 7 | 5 fault at `0x401000` on their first `movsb` before any API call - the stub's `mov edi,0x401000` is hardcoded while the file loads at a different base, so they cannot run on Windows either; `livekd`'s stream pointer `0x50bb05` is past EOF (truncated); `Snap2HTML` has no PE header at all (its file begins with the stub bytes `bb d0 01 40 00`) |
+| link-order OEPs | 6 | the truth IS a ladder candidate (`fsg_HashCalc` 0x11e58 = hit #68 of 84) but nothing per-sample distinguishes it from ~25 real `55 8b ec` frames and a 16-byte-stride table - the round-49 Alienyze refusal |
+| ordinal-capped | 2 | DarkNamer 58/245, adrestore 67/79 - missing pairs are MFC42u/COM ordinals, the round-57 MEW class |
+
+Moving any of these needs a new capability, not a rule: a static FSG LZ decoder (broken
+inputs), an MFC42u/oleaut32/wldap32 ordinal database (ordinal rows), or a link-order
+discriminator (picks). None of them is a mapping, mining or picker defect, which is what the
+20-row ciphertext block in round 66 looked like.
