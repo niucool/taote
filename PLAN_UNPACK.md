@@ -5162,3 +5162,27 @@ four separate defects - a loader alignment rule applied where alignments were eq
 first-character shift applied per-name instead of per-run, an entry the ladder could not see
 because it is stored as a relative branch, and a stub written for a 0x400000 load - plus five
 inputs that were genuinely malformed.
+
+### 0.17bt Round 76 (FSG): the family is ahead of the reference, and the reference fails the same three
+
+The closing question was whether the three holdouts hide a mechanism the reference has and taote
+lacks. Measured directly - same 97 FSG rows, same harness (`run_big.py`), same 85 s budget, graded
+by the same `unpack_report.py`:
+
+| tool | valid PE | OEP exact | imports | **all-three** |
+|---|---|---|---|---|
+| reference (`pegasus-cli --unpack`) | 95 | 90 | 90 | **90 / 97** |
+| taote | 95 | **95** | **94** | **94 / 97** |
+
+- **No row the reference passes is failed by taote.** Zero.
+- Taote passes **4 rows the reference does not**: `fsg_calc`, `fsg_dfrgui`, `fsg_ftp`,
+  `fsg_mtinst` - exactly the four rescued by the stub rebase (the reference leaves the stub
+  writing to the unmapped `0x401000` and ends on the destination `0x4ad01000` as its OEP).
+- The reference fails the same three holdouts, and two of them outright:
+  `fsg_livekd` and `fsg_Snap2HTML` give **"Target file is not a PE"**, and for `fsg_cmd` it
+  produces a valid PE with `oep_claimed 0x4ad01000` (the decompression destination, not the
+  entry), `code_sim 0.0807` and import recall 0.0044 - taote at least reaches the exact entry
+  (`code_sim 0.963`) and fails only imports, on the 16-bit page overflow proved in 0.17br.
+
+So FSG is closed at **94 of 97, four ahead of the reference, failing nothing the reference
+passes**, and the residual three are inputs that no loader - ours or the reference's - can read.
