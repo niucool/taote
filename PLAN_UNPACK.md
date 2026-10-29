@@ -5450,3 +5450,30 @@ The prototype was reverted rather than kept: it is unmeasured (it cannot convert
 the standing rule is that no unmeasured mechanism sits in the tree. Everything the next round needs
 is recorded above: the base derivation is proven unique (0x420000), the loader branch is 20 lines,
 and the failing instruction is identified.
+
+### 0.17cd Round 85 (FSG): Snap2HTML's stub is a different build, and its third constant points nowhere
+
+With the flat image loading (0.17cc) the stub executes, so its constants can be read properly. The
+scan of its code region (offsets 0..0xd0; anything past 0x1d0 is data) gives:
+
+| offset | instruction | value | base-relative rva | 0x400000-based rva |
+|---|---|---|---|---|
+| 0x001 | `mov ebx,..` | 0x4001d0 | (0x420000 ref) 0x1d0 | 0x1d0 |
+| 0x006 | `mov edi,..` | 0x401000 | 0x1000 | 0x1000 |
+| 0x00b | `mov esi,..` | 0x42f199 | **0xf199 (inside the file)** | 0x2f199 (outside) |
+| 0x0c0 | `mov ebx,..` | 0x44a128 | 0x2a128 (**outside** a 0x1e980 file) | 0x4a128 (**outside** the payload's 0x2c000 image) |
+
+The first three are coherent with base 0x420000 (which is why the derived base is right and the
+rebase pass fixes `ebx`/`edi`). The fourth is not coherent under either reading: at base 0x420000 it
+addresses past the end of the file, and as a payload pointer it addresses past the payload's
+`SizeOfImage`. It is followed by `movzwl (%ebx),%edi` - the block walker - which is exactly where
+the run faults (`pc=0x420065`, read of `0x2`).
+
+So this file is not merely headerless: its stub is a **different FSG build** whose fixup-table
+constant points outside the data the file carries, and the walker then dereferences garbage. Making
+it convert needs that offset resolved by tracing which FSG version wrote it - one row, one build,
+own research. Meanwhile its *stream* is intact (0.17cb) and its base is derivable (0.17cb), so the
+first half of a future fix is already in place.
+
+**FSG closes at 96 of 97 against the reference's 90** - six ahead, failing nothing it passes, with
+every remaining row's blocker identified at the instruction level.
