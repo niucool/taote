@@ -4856,3 +4856,24 @@ unmeasured risk - the mangled names are not what those rows are missing.
 loaded and both count as invalid PE. This is the same LIEF weakness as FSG's section table
 (section A/B of round 66), one level up: it rejects the whole file. A self-parsed fallback
 loader would be needed; that is a different, larger piece of work.
+
+**A, resolved: those five are BROKEN PACKED FILES, and the stub's prologue proves it.**
+Disassembling `fsg_calc`'s entry section (`ro 0x200`, VA 0x13e000) shows hardcoded absolutes:
+
+```
+113e000: mov ebx, 0x4001d0     ; compressed-stream / output marker
+113e005: mov edi, 0x401000     ; DECOMPRESSION DESTINATION - hardcoded 0x400000 base
+113e00a: mov esi, 0x11052e8    ; bit stream, 0x1000000-based (this file's declared base)
+```
+
+The stub's *data* pointers are 0x400000-based while its own image is loaded at 0x1000000, and
+the first `movsb` faults at `edi` before a single API call. On Windows the same file would
+load at the header's 0x1000000 and fault at the same instruction, because nothing has mapped
+0x401000 - so these five are packer output that cannot run, not an emulator deficiency.
+Recovering them would mean re-implementing FSG's LZ stream statically (the bit loop is
+visible: `movsb` with a `call *(%esp)` bit reader), which is a new decompressor, not a fix.
+
+**FSG therefore stands at 82 of 97, and that is its ceiling without a static decoder.** The
+15 remaining: 5 broken inputs (above), 6 link-order OEPs whose truth is present but
+indistinguishable per sample, 2 import-only rows whose missing names are mangled-C++ CRT
+imports, and 2 files LIEF refuses to parse at all (`input_parse_failed`).
