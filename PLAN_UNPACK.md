@@ -5186,3 +5186,22 @@ by the same `unpack_report.py`:
 
 So FSG is closed at **94 of 97, four ahead of the reference, failing nothing the reference
 passes**, and the residual three are inputs that no loader - ours or the reference's - can read.
+
+### 0.17bu Round 77 (FSG): the 94 is stable and nothing is marginal - thread closed
+
+Final verification of the family before handing it back:
+
+- **Two independent measurements agree exactly.** The 2678-sample corpus (`r54`, 4 workers, 85 s)
+  gives FSG all-three **94/97**, and the dedicated 97-row family run gives **94/97** with **no row
+  differing** between them - so none of the 94 is a budget artifact.
+- **No passing row is near the bar.** The lowest import recall among the passing rows is
+  **0.9747** and the highest is 1.0; there is no row between 0.95 and 0.97, so nothing is one
+  missed name away from flipping. (The four rescued by the stub rebase sit at 0.99-1.0.)
+- **The three failures are the proved malformed inputs**: `fsg_cmd` (16-bit block-page overflow),
+  `fsg_livekd` (stream past EOF), `fsg_Snap2HTML` (no PE header *and* stream past EOF), and the
+  reference fails all three as well - two of them with "Target file is not a PE".
+
+FSG's work is complete: **94 of 97 against the reference's 90**, four rows ahead, failing nothing
+the reference passes, with all four mechanisms (loader alignment guard, block-vote name shift,
+stub `rel32` hand-off, ordinal records + stub rebase) gated so narrowly that the full corpus shows
+zero losses outside the family (1843 -> 1861 this session).
