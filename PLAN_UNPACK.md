@@ -5541,3 +5541,35 @@ Everything needed to resume is now recorded across 0.17cb-0.17cf: the base deriv
 unique), the payload base (0x400000, from the stub's own `bf` immediate), the required single
 overlapping mapping, the falal instruction (`0x420065`, bogus LZ distance), and the layout mismatch
 (`.text` at rva 0x2000 vs the stub's 0x1000).
+
+### 0.17cg Round 88 (FSG): the committed tree measures 96/97 - FSG's solvable work is done
+
+Re-measured at the exact HEAD (`84a5a05`), so the number is measured rather than inferred from a
+docs-only diff: FSG family, 97 rows, 85 s, 4 workers - **valid PE 96, OEP exact 96, imports 96,
+all-three 96/97**, the only failure being `fsg_Snap2HTML`.
+
+Where the family stands against the four mechanisms that got it here, and what each bought:
+
+| mechanism | rounds | FSG all-three |
+|---|---|---|
+| start of session | - | 75/97 |
+| loader `FileAlignment < SectionAlignment` guard | 67 | 84 |
+| block-vote first-character shift (incl. structural `B?` mangling) | 68, 70 | 85 |
+| stub `rel32` hand-off (the entry as a bare-RVA relative branch) | 71 | 90 |
+| ordinal records (`02 <u16 ord>`) + stub rebase | 72 | 94 |
+| truncated block-page map | 80 | 95 |
+| zeroed-DOS-signature repair + undecoded-page hand-off | 82 | **96** |
+
+The last row is not a rule away. Across 0.17cb-0.17cf it was established that `fsg_Snap2HTML` is
+headerless (no `PE\0\0` anywhere), that its base is derivable and unique (**0x420000**), that its
+stream is present (7.81 bits/byte at rva 0xf199), that its payload workspace is a *different*
+address (**0x400000**) which **overlaps** the packed image and must share one mapping, and that
+with all of that in place the stub still computes a bogus LZ match distance at `0x420065` because
+its bit stream is read from the wrong place - while the original's `.text` sits at rva **0x2000**,
+not at the 0x1000 the stub decodes to. Settling that means re-implementing FSG's bit reader for
+this build and single-stepping it against a ground truth, which is a research task on one sample,
+not a loader or unpacking rule.
+
+**Conclusion: FSG is solved to its solvable limit - 96 of 97, six ahead of the reference's 90, with
+nothing the reference passes being failed - and the one remaining row is a headerless artifact from
+a different FSG build, whose blocker is identified at the instruction level.**
