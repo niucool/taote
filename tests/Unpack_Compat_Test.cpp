@@ -67,7 +67,17 @@ UnpackResult run_unpack(const RunConfig& cfg) {
     UnpackResult result;
     // a damaged DOS signature is repaired in a copy, exactly as the CLI does
     const auto run_sample = qiling::testing::pe_sample_detail::repairable_sample(cfg.sample);
-    const auto plan = plan_for(run_sample);
+    // Mirror the CLI: a sample whose header cannot be recovered at all is a clean
+    // parse failure, not an exception escaping into the caller (tools/taote.cpp
+    // prints reason=input_parse_failed and returns 1 for exactly this case).
+    SamplePlan plan;
+    try {
+        plan = plan_for(run_sample);
+    } catch (const std::exception&) {
+        result.reason = "input_parse_failed";
+        result.error = "the input header is not recoverable";
+        return result;
+    }
 
     const auto rootfs = fs::temp_directory_path() / ("taote_unpack_test_" + cfg.sample.stem().string());
     std::error_code ec;
@@ -369,6 +379,30 @@ TEST(UnpackCompat, FsgZeroedDosSignatureIsRepaired) {
     EXPECT_EQ(res.oep, res.base + 0x9663u);   // the stub's je target; the fallback was the packed EP
     EXPECT_GT(res.imports.size(), 300u) << res.error;
     EXPECT_TRUE(has_import(res, "kernel32.dll", "CreateFileW"));
+    fs::remove_all(out, ec);
+}
+
+// The last FSG row is dead packer output, and the tool must say so GRACEFULLY.
+// fsg_Snap2HTML ships with no "PE\0\0" anywhere (the packer overwrote its header
+// page with the stub), so there is nothing to repair and nothing to load. The
+// contract this pins is the host-safety one: an unparsable sample returns a clean
+// zero result with an input_parse_failed reason instead of throwing, crashing or
+// emitting a dump that the grader would mistake for an unpack.
+TEST(UnpackCompat, FsgHeaderlessInputFailsGracefully) {
+    const auto sample = fixture("FSG/fsg_Snap2HTML.exe");
+    if (sample.empty()) {
+        GTEST_SKIP() << "packed corpus not present (set TAOTE_PACKED_DIR)";
+    }
+    const auto out = fs::temp_directory_path() / "taote_unpack_fsg_snap2html";
+    std::error_code ec;
+    fs::remove_all(out, ec);
+    const auto res = run_unpack(RunConfig{sample, out, true});
+    EXPECT_EQ(res.base, 0u) << res.error;
+    EXPECT_EQ(res.oep, 0u) << res.error;
+    EXPECT_TRUE(res.imports.empty()) << res.error;
+    EXPECT_FALSE(res.dump_written) << res.error;
+    EXPECT_NE(res.reason.find("input_parse_failed"), std::string::npos)
+        << "reason was: " << res.reason;
     fs::remove_all(out, ec);
 }
 

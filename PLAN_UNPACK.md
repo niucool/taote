@@ -5724,3 +5724,26 @@ the other long-standing holdout, passes.
 That is the closure. There is no measured mechanism left on this family: every row either converts
 all three criteria or is a file whose stub cannot execute and whose data is invalid under the
 family's own format. Further work on it would have to come from new evidence outside the corpus.
+
+### 0.17cm Round 93: the closure's last gap - the dead row is a *graceful* failure, now pinned
+
+Verifying the close turned up one untested edge, and it was worth finding: the shipped CLI handles
+the headerless FSG row cleanly
+
+    reason=input_parse_failed imports=0 error=the input header is not recoverable
+
+but the in-process test harness (`tests/Unpack_Compat_Test.cpp::run_unpack`) did **not** - it called
+`plan_for()` unguarded, so `LIEF parse failed: ...` escaped as a C++ exception instead of coming
+back as a result. The harness's own comment says it measures the library "the same shape the CLI
+drives", so it now mirrors `tools/taote.cpp`: the plan attempt is wrapped, and an unrecoverable
+header returns `reason=input_parse_failed`, `error=the input header is not recoverable`, zero base /
+OEP / imports and no dump.
+
+`UnpackCompat.FsgHeaderlessInputFailsGracefully` pins that contract on `FSG/fsg_Snap2HTML.exe`:
+zero base and OEP, no imports, `dump_written == false`, and an `input_parse_failed` reason - i.e.
+the dead row stays dead *quietly*, which is the "never crash" rule applied to the one file in the
+family that cannot be unpacked. Suite 599 -> **600**, all green; the test skips cleanly when the
+corpus is absent (`TAOTE_PACKED_DIR=/tmp/no_corpus`).
+
+Tests-only change, so the shipped binary is untouched and the family measurement stands: fsg14 at
+HEAD, valid PE 96, OEP exact 96, imports 96, all-three **96/97**, the single failure being this row.
