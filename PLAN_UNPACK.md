@@ -5371,3 +5371,39 @@ bytes to decode. The reference cannot read it either.
 
 Suite 598 -> **599** (`UnpackCompat.FsgZeroedDosSignatureIsRepaired` pins the repaired load, the
 `base+0x9663` entry and the mined imports; it skips when the corpus is absent).
+
+### 0.17cb Round 83 (FSG): fsg_Snap2HTML is NOT truncated - it needs a flat-image loader
+
+Two earlier rounds called this row "truncated, stream past EOF". That was wrong, and the mistake
+was using the base of the **not-packed original** (0x400000) for a file whose header is gone. The
+stub states the base itself:
+
+- its prologue is `bb d0 01 40 00 | bf 00 10 40 00 | be 99 f1 42 00` - `mov esi,0x42f199` is the
+  stream pointer, base-relative;
+- a base must put that stream inside a `0x1e980`-byte file, i.e. lie in `(0x410819, 0x42f199]`,
+  and the only 0x10000-aligned value in that window is **0x420000**;
+- at that base the stream sits at `rva 0xf199`, inside the file, and the region measures **7.81
+  bits/byte** - compressed data, not zeros.
+
+So the file is complete. What it lacks is a **PE header**: `fsg` overwrote the header page with the
+stub (the file begins with `bb d0 01 40 00`), so there is no `PE\0\0` anywhere to parse and no
+section table to map. FSG's own loader simply allocates at 0x420000, copies the file there and
+jumps to offset 0; nothing about the payload needs a header.
+
+A header-synthesis workaround was tried and is the wrong shape: appending a PE header after the
+payload (with `MZ`/`e_lfanew` in the payload's first page, one section mapping the payload at
+`rva 0` and a second mapping a relocated copy of the stub at `rva 0x20000`) does load at the right
+base - the run reports `base=0x420000` - but it never executes (`stages=0`, `imports=0`, entry
+resolved to the base) and the rebuild fails, because the entry/geometry the engine consumes come
+from LIEF's view of a header that is, in truth, not there.
+
+The faithful fix is a **flat-image load path**: when the input has no PE signature but does carry
+the FSG stub prologue, map the file at the base its own `mov esi,<stream>` implies with
+`entry = base + 0`, and hand the engine an image of `SizeOfImage` derived from the stub's block
+table - i.e. teach the loader the thing FSG's loader does, rather than synthesising a header for a
+file that has none. That is a loader feature, not an unpacking rule, and it is the only path left
+for this row (the remaining 96 need nothing).
+
+**FSG otherwise stands at 96 of 97 against the reference's 90** - and every one of the six
+mechanisms behind that is measured on the family and then on the full corpus with zero losses
+outside it.
