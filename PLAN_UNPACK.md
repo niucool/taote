@@ -4777,3 +4777,34 @@ BOTH arms of the A/B, i.e. it belongs to the other workstream's changes, not thi
 **Baseline note:** the corpus baseline is now **1843**, not 1847, because the parallel
 import-path work is in the tree; my change is measured against r49 and moves OEP 1953 ->
 1962 with all-three unchanged.
+
+### 0.17bk Round 68 (FSG): the decoded string run keeps FSG's +3 first-char shift - block-level vote (+7 all-three)
+
+Round 67's loader fix made FSG's payload decode: 15 of its 22 failures went to
+`code_sim 1.000`. That exposed the next block, and it is not a picker or a decoder problem:
+
+* the decoded image carries FSG's bare string run (`ADVAPI32.dll`, `MSVCRT.dll`, then
+  `b_mb_cur_max`, `bisctype`, `iopen`, `wolower`, `sutc`, `bpctype`, `igets`, `vtrerror`,
+  `iflush`, `iclose`, `uealloc`, `jetchar`, `dbort`, `ytrncpy`...) - i.e. every stored
+  import name has its FIRST character shifted by +3 (`_exit` -> `bexit`, `malloc` ->
+  `falloc`, `tolower` -> `wolower`);
+* the miner DID find them (8 groups, 2 dlls, **128 names**) and still scored recall 0.03,
+  because it emitted the shifted spellings - the evidence-backed undo written for the
+  INT-table path in round 39 was never applied to the string-group path;
+* the per-name undo alone recovers only the names the export database carries
+  (`fopen`, `tolower`, `putc`...), leaving `bisctype`, `bpctype`, `b_mb_cur_max` because
+  `_isctype`, `_pctype`, `_mb_cur_max` are CRT internals mingw does not export.
+
+So the shift is treated as a property of the **string run, not of a name**: if the
+evidence backs the shift for more names than it contradicts, every unknown name in that
+block is shifted. `block_is_shifted` / `block_name` implement exactly that, and the block
+then reads `_isctype`, `_pctype`, `fopen`, `tolower`, `strerror`, `fflush`, `_exit`.
+
+**Measured:** FSG family all-three 75 -> **82**, imports 75 -> 85, 0 losses. Corpus
+1843 -> **1850** (+7, all FSG), imports 2033 -> 2043, OEP unchanged at 1962, 0 losses.
+Fair set (200 @300s): 132 -> **133** (`fsg_Cacheset`), 0 losses.
+
+FSG now: **82 of 97**, and its remaining 15 are 6 decoded-but-wrong-OEP, 2 import-only
+(`DarkNamer` 0.208, `adrestore` 0.848), 5 still ciphertext (`calc`, `cmd`, `dfrgui`,
+`ftp`, `mtinst` - all claiming an OEP in a *different base*: 0x1106f67, 0x4ad4a350,
+0x1090aa0, 0x10110f0, 0x10aaa8e) and 2 ungraded (`Snap2HTML`, `livekd`).

@@ -1063,6 +1063,72 @@ std::size_t Unpacker::mine_orphan_descriptors(const std::vector<std::uint8_t>& i
                                   low.compare(low.size() - 4, 4, ".ocx") == 0 ||
                                   low.compare(low.size() - 4, 4, ".sys") == 0);
     };
+
+    // FSG/BeRo/MEW/WinUpack shift the FIRST character of every stored import name
+    // by -3, so a decoded FSG payload's string run reads `bexit`, `falloc`,
+    // `wolower` for `_exit`, `malloc`, `tolower`. The INT-table path undoes that
+    // under api_owner evidence (round 39); the string-group path did not, which is
+    // why FSG's decoded rows recovered 128 names and still scored recall 0.03 -
+    // every name was one character off and matched nothing. Same evidence rule:
+    // apply the shift only when the export database knows the shifted spelling and
+    // not the stored one.
+    const auto shifted_form = [](const std::string& fn) -> std::string {
+        if (fn.empty()) {
+            return {};
+        }
+        const auto sh = static_cast<unsigned char>(fn[0] - 3);
+        if (std::isalnum(sh) == 0 && sh != '_') {
+            return {};
+        }
+        std::string alt = fn;
+        alt[0] = static_cast<char>(sh);
+        return alt;
+    };
+    const auto reshift = [&shifted_form](std::string fn) -> std::string {
+        if (!fn.empty() && api_owner(fn) == nullptr) {
+            const auto alt = shifted_form(fn);
+            if (!alt.empty() && api_owner(alt) != nullptr) {
+                return alt;
+            }
+        }
+        return fn;
+    };
+    // The shift is a property of the STRING RUN, not of a name: one run belongs to
+    // one packer, so if the evidence backs the shift for at least half of the names
+    // that can be tested, every unknown name in that block is shifted - including
+    // the CRT internals the export database does not carry (`_isctype`, `_pctype`,
+    // `_mb_cur_max`, which the per-name test alone leaves spelled `bisctype`,
+    // `bpctype`, `b_mb_cur_max`).
+    const auto block_is_shifted = [&shifted_form](const std::vector<std::string>& names) {
+        std::size_t for_shift = 0;
+        std::size_t against = 0;
+        for (const auto& fn : names) {
+            if (fn.empty()) {
+                continue;
+            }
+            if (api_owner(fn) != nullptr) {
+                ++against;
+                continue;
+            }
+            const auto alt = shifted_form(fn);
+            if (!alt.empty() && api_owner(alt) != nullptr) {
+                ++for_shift;
+            }
+        }
+        return for_shift > against && for_shift != 0;
+    };
+    const auto block_name = [&reshift, &shifted_form](const std::string& fn, bool shifted_block) -> std::string {
+        if (api_owner(fn) != nullptr) {
+            return fn;   // this spelling is a real export: leave it alone
+        }
+        if (shifted_block) {
+            const auto alt = shifted_form(fn);
+            if (!alt.empty()) {
+                return alt;
+            }
+        }
+        return reshift(fn);
+    };
     const auto in_image = [&image](std::uint32_t rva) {
         return rva >= 0x200 && static_cast<std::size_t>(rva) + 2 < image.size();
     };
@@ -1436,14 +1502,23 @@ std::size_t Unpacker::mine_orphan_descriptors(const std::vector<std::uint8_t>& i
                 o = p;
             }
         }
+        // FSG/BeRo/MEW/WinUpack shift the FIRST character of every stored import
+        // name by -3, so a decoded FSG payload's string run reads `bexit`, `falloc`,
+        // `wolower` instead of `_exit`, `malloc`, `tolower`. The INT-table path
+        // undoes that under api_owner evidence (round 39); the string-group path did
+        // not, which is why FSG's decoded rows recovered 128 names and still scored a
+        // recall of 0.03 - every name was one character off and matched nothing.
+        // Same evidence rule here: apply the shift only when the export database
+        // knows the shifted spelling and not the stored one.
         std::set<std::string> seen_dlls;
         for (const auto& [dll, names] : per_dll) {
             seen_dlls.insert(dll);
         }
         if (per_dll.size() >= 3) {
             for (const auto& [dll, names] : per_dll) {
+                const bool shifted_block = block_is_shifted(names);
                 for (const auto& fn : names) {
-                    note_import(sanitize_ascii(dll), sanitize_ascii(fn));
+                    note_import(sanitize_ascii(dll), sanitize_ascii(block_name(fn, shifted_block)));
                 }
             }
             if (opts_.debug) {
@@ -1458,10 +1533,15 @@ std::size_t Unpacker::mine_orphan_descriptors(const std::vector<std::uint8_t>& i
         total_names += names.size();
         unique_dlls.insert(dll);
     }
+    if (opts_.debug) {
+        std::fprintf(stderr, "[unpack] import-string scan: %zu groups, %zu names, %zu dlls\n",
+                     groups.size(), total_names, unique_dlls.size());
+    }
     if (groups.size() >= 2 && total_names >= 6) {
         for (const auto& [dll, names] : groups) {
+            const bool shifted_block = block_is_shifted(names);
             for (const auto& fn : names) {
-                note_import(sanitize_ascii(dll), sanitize_ascii(fn));
+                note_import(sanitize_ascii(dll), sanitize_ascii(block_name(fn, shifted_block)));
                 ++blob_pairs;
             }
         }
