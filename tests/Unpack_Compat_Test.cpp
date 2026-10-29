@@ -382,6 +382,35 @@ TEST(UnpackCompat, FsgZeroedDosSignatureIsRepaired) {
     fs::remove_all(out, ec);
 }
 
+// FSG shifts the first character of every import name by -3, and the undo is a
+// per-BLOCK vote rather than per-name evidence: one string run belongs to one
+// packer, so the shift is a property of the run. That distinction is what makes
+// the CRT internals recoverable - the export database has no _isctype/_pctype,
+// so a per-name "is this a known export once shifted?" test leaves them as
+// bisctype/bpctype and the row's recall stays near zero. fsg_rm ships those
+// names, so asserting them pins the vote itself: drop the vote and this fails
+// while a plain import COUNT would still pass.
+TEST(UnpackCompat, FsgStringShiftIsUndoneAsABlockVote) {
+    const auto sample = fixture("FSG/fsg_rm.exe");
+    if (sample.empty()) {
+        GTEST_SKIP() << "packed corpus not present (set TAOTE_PACKED_DIR)";
+    }
+    const auto out = fs::temp_directory_path() / "taote_unpack_fsg_shiftvote";
+    std::error_code ec;
+    fs::remove_all(out, ec);
+    const auto res = run_unpack(RunConfig{sample, out, true});
+    // vote-only names: no export database entry exists for these spellings
+    for (const char* fn : {"_isctype", "_pctype", "fopen", "tolower", "putc"}) {
+        EXPECT_TRUE(has_import(res, "msvcrt.dll", fn))
+            << fn << " missing - the per-block shift vote did not fire; pairs=" << res.imports.size();
+    }
+    // and the shifted spellings must be gone
+    for (const char* fn : {"bisctype", "bpctype", "b_mb_cur_max"}) {
+        EXPECT_FALSE(has_import(res, "msvcrt.dll", fn)) << fn << " left unshifted";
+    }
+    fs::remove_all(out, ec);
+}
+
 // The last FSG row is dead packer output, and the tool must say so GRACEFULLY.
 // fsg_Snap2HTML ships with no "PE\0\0" anywhere (the packer overwrote its header
 // page with the stub), so there is nothing to repair and nothing to load. The

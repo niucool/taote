@@ -5747,3 +5747,26 @@ corpus is absent (`TAOTE_PACKED_DIR=/tmp/no_corpus`).
 
 Tests-only change, so the shipped binary is untouched and the family measurement stands: fsg14 at
 HEAD, valid PE 96, OEP exact 96, imports 96, all-three **96/97**, the single failure being this row.
+
+### 0.17cn Round 94: the highest-value FSG mechanism is now a real regression lock
+
+Five FSG mechanisms bought the family its 75 -> 96 arc; four were pinned in round 78, and the one
+that was not is the one that bought the most rows: round 68's **per-block first-character shift
+vote**. It was only covered indirectly (`imports.size() > 300` on `fsg_HashCalc`), and a count
+survives a lot of damage, so it was not a lock.
+
+`UnpackCompat.FsgStringShiftIsUndoneAsABlockVote` pins the vote itself on `fsg_rm.exe`, which ships
+the names that separate the two implementations:
+
+| name | per-name evidence alone | with the block vote |
+|---|---|---|
+| `_isctype`, `_pctype` | absent - no export-database entry exists for these spellings | **present** |
+| `fopen`, `tolower`, `putc` | left as `iopen`/`wolower`/`sutc` | **present** |
+
+The test asserts those five are present and that the shifted spellings (`bisctype`, `bpctype`,
+`b_mb_cur_max`) are gone. **It was verified to fail when the mechanism is removed**: with
+`block_is_shifted` forced to `false` the case fails with `_pctype missing ... pairs=110`; with the
+vote restored the suite is **601/601** green. So this is a lock on the mechanism, not on a number.
+
+Tests-only, so the shipped binary is unchanged: fsg14 stays the family measurement at HEAD
+(96/97, single failure `fsg_Snap2HTML.exe`).
