@@ -131,6 +131,44 @@ void Unpacker::classify_sections(Qiling& ql) {
     const auto raw_ep = pe_loader.entry_point;
     packed_ep_va_ = (raw_ep >= base_ && raw_ep < base_ + image_size_) ? raw_ep : base_ + raw_ep;
 
+    // FSG's stub is written for a 0x400000 load: its prologue is
+    // `mov ebx,0x4001d0; mov edi,0x401000; mov esi,<base+stream>` - the first two
+    // operands are absolute for base 0x400000, the third is already relative to the
+    // file's real base. A packed file whose ImageBase is NOT 0x400000 therefore
+    // faults on its FIRST movsb, before any API call, because the destination it
+    // computes is unmapped (it cannot run on Windows either). The packer's own
+    // constants say what it meant, so shift the two absolute operands by
+    // (base - 0x400000) when the stub carries exactly that prologue.
+    if (base_ != 0x400000 &&
+        packed_ep_va_ >= base_ && packed_ep_va_ < base_ + image_size_) {
+        try {
+            auto stub = ql.mem().read(packed_ep_va_, 15);
+            if (stub.size() == 15 && stub[0] == 0xbb && stub[5] == 0xbf && stub[10] == 0xbe) {
+                const auto delta = static_cast<std::uint32_t>(base_ - 0x400000);
+                for (const std::size_t at : {std::size_t{1}, std::size_t{6}}) {
+                    std::uint32_t v = static_cast<std::uint32_t>(stub[at]) |
+                                      (static_cast<std::uint32_t>(stub[at + 1]) << 8) |
+                                      (static_cast<std::uint32_t>(stub[at + 2]) << 16) |
+                                      (static_cast<std::uint32_t>(stub[at + 3]) << 24);
+                    if (v < 0x400000 || v >= 0x800000) {
+                        continue;   // not a 0x400000-based constant: leave it alone
+                    }
+                    const auto moved = v + delta;
+                    stub[at] = static_cast<std::uint8_t>(moved & 0xff);
+                    stub[at + 1] = static_cast<std::uint8_t>((moved >> 8) & 0xff);
+                    stub[at + 2] = static_cast<std::uint8_t>((moved >> 16) & 0xff);
+                    stub[at + 3] = static_cast<std::uint8_t>((moved >> 24) & 0xff);
+                }
+                ql.mem().write(packed_ep_va_, stub);
+                if (opts_.debug) {
+                    std::fprintf(stderr, "[unpack] FSG stub rebased by 0x%x (0x400000 -> %s)\n", delta,
+                                 hex(base_).c_str());
+                }
+            }
+        } catch (...) {
+        }
+    }
+
     // Only the first-write families read the shadow image (and the A/B switch).
     shadow_wanted_ = std::getenv("TAOTE_UNPACK_SHADOW_ALL") != nullptr ||
                      (packer_ != nullptr && packer_->shadow_policy() == packers::ShadowPolicy::first_write);
@@ -1027,6 +1065,87 @@ void Unpacker::detach_hooks() {
 // export address, then scans the dump (unpacker.cpp:8652-9560). Slot coherence is
 // the noise filter: a same-dll run of adjacent slots, or a singleton anchored
 // within two slots of a kept one.
+// The FSG resolved-import list: [dll name\0][6-byte record]*  where a record is
+//   01 <u32 nameptr>            an import by NAME (the +3-shifted string run)
+//   02 <u16 ordinal> 00 00      an import BY ORDINAL
+// and the next DLL name follows the last record. Measured on the five FSG rows that
+// sit exactly at their named-import ceiling (all their missing pairs are ordinals):
+// adrestore recovers activeds#9, oleaut32#8,#9, wldap32#13,#14,#73,#88,#118,#145,#155
+// and ShareEnum recovers comctl32#17 and oleaut32#2,#6..#9,#12,#94,#150,#200..#202 -
+// every one of them exactly. The rebuilder already turns an "ordinal_<N>" pair into a
+// real ordinal thunk (iat/import_rebuilder.cpp:26), so noting the pair is enough.
+std::size_t Unpacker::mine_ordinal_records(const std::vector<std::uint8_t>& image) {
+    if (image.size() < 0x400) {
+        return 0;
+    }
+    const auto at32 = [&image](std::size_t o) -> std::uint32_t {
+        return static_cast<std::uint32_t>(image[o]) | (static_cast<std::uint32_t>(image[o + 1]) << 8) |
+               static_cast<std::uint32_t>(image[o + 2]) << 16 | static_cast<std::uint32_t>(image[o + 3]) << 24;
+    };
+    const auto at16 = [&image](std::size_t o) -> std::uint32_t {
+        return static_cast<std::uint32_t>(image[o]) | (static_cast<std::uint32_t>(image[o + 1]) << 8);
+    };
+    const auto name_byte = [](std::uint8_t c) {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' ||
+               c == '-' || c == '.';
+    };
+    std::size_t noted = 0;
+    std::size_t groups = 0;
+    for (std::size_t i = 4; i + 4 < image.size(); ++i) {
+        if (image[i] != '.' || (image[i + 1] != 'd' && image[i + 1] != 'D') ||
+            (image[i + 2] != 'l' && image[i + 2] != 'L') || (image[i + 3] != 'l' && image[i + 3] != 'L')) {
+            continue;
+        }
+        // walk back to the start of the name and require a NUL right after ".dll"
+        std::size_t b = i;
+        while (b > 0 && name_byte(image[b - 1]) && i - b < 40) {
+            --b;
+        }
+        const std::size_t end = i + 4;
+        if (b == i || end >= image.size() || image[end] != 0) {
+            continue;
+        }
+        std::string dll(reinterpret_cast<const char*>(image.data() + b), i - b + 4);
+        bool has_dot = false;
+        for (const auto ch : dll) {
+            has_dot = has_dot || ch == '.';
+        }
+        if (!has_dot || dll.size() < 6) {
+            continue;
+        }
+        // the record list, until it stops looking like one
+        std::vector<std::uint32_t> ords;
+        std::size_t p = end + 1;
+        while (p + 6 <= image.size() && ords.size() < 512) {
+            if (image[p] == 0x02) {
+                ords.push_back(at16(p + 1));
+                p += 6;
+            } else if (image[p] == 0x01) {
+                const auto ptr = at32(p + 1);
+                if (ptr < 0x200 || ptr >= image.size()) {
+                    break;
+                }
+                p += 6;
+            } else {
+                break;
+            }
+        }
+        if (ords.empty()) {
+            continue;
+        }
+        ++groups;
+        for (const auto ord : ords) {
+            note_import(sanitize_ascii(dll), "ordinal_" + std::to_string(ord));
+            ++noted;
+        }
+        i = end;
+    }
+    if (opts_.debug && noted != 0) {
+        std::fprintf(stderr, "[unpack] ordinal records: %zu groups, %zu ordinals\n", groups, noted);
+    }
+    return noted;
+}
+
 std::size_t Unpacker::mine_orphan_descriptors(const std::vector<std::uint8_t>& image) {
     if (image.size() < 0x400) {
         return 0;
@@ -2890,6 +3009,7 @@ UnpackResult Unpacker::finalize(Qiling& ql) {
         // then every orphaned chain the stub left behind), then the salvage scan
         harvest_image_imports(image);
         mine_orphan_descriptors(image);
+        mine_ordinal_records(image);
         salvage_iat(ql, image);
 
         // no hop fired: park the OEP on a plausible payload prologue so the

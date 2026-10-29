@@ -155,6 +155,11 @@ private:
     // payload's import DESCRIPTORS in the image while the header's import directory
     // points at the stub's own table. Mine every orphaned descriptor chain.
     std::size_t mine_orphan_descriptors(const std::vector<std::uint8_t>& image);
+    // FSG keeps the payload's import RESOLUTION list in the decoded image: after each
+    // DLL name come 6-byte records, 01 <u32 nameptr> for a by-name import and
+    // 02 <u16 ordinal> 00 00 for a BY-ORDINAL one. Those ordinals are the only
+    // recoverable source for a payload whose descriptor/INT arrays the packer zeroed.
+    std::size_t mine_ordinal_records(const std::vector<std::uint8_t>& image);
 
     UnpackOptions opts_;
     // the family seam (packers/packer.hpp): only the family-specific policy lives

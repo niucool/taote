@@ -4992,3 +4992,52 @@ taote defect:**
 The ordinal group is the same MEW class round 57 closed: `api_db.inc` carries names only (no
 ordinal entries), the decoded dump's descriptor and INT arrays are zeroed, and the IAT slots hold
 bound addresses, so an ordinal has no recoverable name path without an ordinal database.
+
+### 0.17bo Round 72 (FSG): the ordinals ARE in the image, and the five ordinal-capped rows convert
+
+Round 71 closed by declaring the last five rows "ordinal-capped": their missing pairs are
+`oleaut32`/`comctl32`/`wldap32`/`mfc42u` ordinals, `api_db.inc` carries names only, and the
+decoded dump's descriptor and INT arrays are zeroed. The missing piece was not a database - it
+was **FSG's own resolved-import list, which sits in the decoded image**:
+
+```
+... "WLDAP32.dll\0" | 02 91 00 00 00 00 | 02 0e 00 00 00 00 | 02 58 00 00 00 00 | ...
+                    | 02 76 00 00 00 00 | 02 0d 00 00 00 00 | 01 00 70 40 00 | "ACTIVEDS.dll\0" ...
+```
+
+After every DLL name come 6-byte records: `01 <u32 nameptr>` for a by-name import (the pointer
+reaches FSG's `+3`-shifted string run) and `02 <u16 ordinal> 00 00` for a **by-ordinal** one.
+`mine_ordinal_records` walks that structure and notes each ordinal as `ordinal_<N>`; the
+rebuilder already turns such a pair into a real `0x80000000|N` thunk
+(`iat/import_rebuilder.cpp:26`), so the artifact reports `('#N')` exactly like the truth.
+
+Recovered exactly, per sample (truth compare):
+
+| sample | recovered |
+|---|---|
+| fsg_adrestore | activeds#9, oleaut32#8,#9, wldap32#13,#14,#73,#88,#118,#145,#155 - all 10 |
+| fsg_ShareEnum | comctl32#17, oleaut32#2,#6..#9,#12,#94,#150,#200..#202 - 20 of 22 |
+| fsg_DarkNamer | 184 of 187 MFC42u ordinals |
+
+FSG family (97 rows): imports 85 -> **90**, all-three 85 -> **90** (+5: AccessEnum, DarkNamer,
+Diskmon, ShareEnum, adrestore, 0 losses). Full corpus r52 -> r53: all-three 1852 -> **1857**,
+imports 2042 -> **2047**, OEP exact 1968 unchanged, 0 gains outside FSG and 0 losses.
+
+### 0.17bp Round 72b (FSG): the five ciphertext rows run, by shifting the stub's own constants
+
+Round 71 called those five broken inputs "cannot run on Windows either". That is still true of
+the file as shipped, but the packer's intent is recoverable from the stub itself: all five carry
+`bb d0 01 40 00 bf 00 10 40 00 be <base+stream>` - `mov ebx,0x4001d0`, `mov edi,0x401000` are
+absolute for a 0x400000 load while `mov esi,<stream>` is already relative to the file's real
+base. So the file is *mis-relocated*, not truncated, and the constants say exactly what the
+packer meant.
+
+The engine now shifts those two operands by `base - 0x400000` when the stub carries that exact
+prologue. The gate is provable rather than tuned: of the 2678 corpus samples, **95 carry the
+prologue and every one of them is FSG**, and exactly 5 of those 95 have `base != 0x400000` - the
+five broken rows. The other 90 are untouched because the shift is skipped when the base is
+0x400000.
+
+Measured per sample, the repaired stubs decode and hand off to the *original* entry:
+`fsg_calc` rva 0x12d6c, `fsg_cmd` 0x829a, `fsg_dfrgui` 0x141fa - each exactly the original
+program's `AddressOfEntryPoint`.
