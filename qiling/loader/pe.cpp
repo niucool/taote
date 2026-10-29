@@ -91,6 +91,7 @@ std::uint64_t QlLoaderPE::load_parsed(std::unique_ptr<LIEF::PE::Binary> parsed, 
     // the stub never starts). Well-formed images are aligned, so this is inert
     // for them.
     const auto file_align = static_cast<std::uint64_t>(parsed->optional_header().file_alignment());
+    const auto section_align = static_cast<std::uint64_t>(parsed->optional_header().section_alignment());
     std::ifstream align_file(host_path, std::ios::binary);
     std::vector<std::uint8_t> align_bytes;
     if (align_file) {
@@ -102,7 +103,15 @@ std::uint64_t QlLoaderPE::load_parsed(std::unique_ptr<LIEF::PE::Binary> parsed, 
         }
         const auto raw_ptr = static_cast<std::uint64_t>(section.pointerto_raw_data());
         const auto raw_size = static_cast<std::uint64_t>(section.sizeof_raw_data());
-        if (file_align != 0 && raw_ptr != 0 && (raw_ptr % file_align) != 0 && raw_size != 0) {
+        // The page-below rule is only meaningful when FileAlignment is SMALLER than
+        // SectionAlignment: that is when a section's raw data can start part-way into
+        // a page. When the two are EQUAL there is no sub-page padding to compensate for
+        // and the declared pointer is honest - fsg_HashCalc (both 0x1000) declares its
+        // entry section at ro 0xe00, and applying the rule there maps the HEADER page
+        // over the stub ("MZ\x90\x00" at RVA 0xab000), so the packed EP executed into
+        // data and the sample died after four instructions. Measured: FSG OEP 75 -> 84.
+        if (file_align != 0 && file_align < section_align && raw_ptr != 0 && (raw_ptr % file_align) != 0 &&
+            raw_size != 0) {
             const auto aligned = raw_ptr - (raw_ptr % file_align);
             if (aligned < align_bytes.size()) {
                 const auto n = static_cast<std::size_t>(

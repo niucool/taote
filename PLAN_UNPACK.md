@@ -4732,3 +4732,48 @@ must map `ro..ro+rs` rather than the aligned page. That is the next change to tr
 `nspack_cmd` (EP-side stub at ro 0x1a9, FileAlignment 0x200) as the guard.
 
 Both repairs reverted; corpus back to 1847.
+
+### 0.17bj Round 67: FSG's page-below rule - the two-line discriminator, measured clean (+9 OEP)
+
+Round 66 left the fix scoped as "the supplement must fire when LIEF omitted the section AND
+it holds the packed EP", and two broader versions had measured badly. The actual cause is
+one line earlier than that, and the discriminator is PE semantics rather than LIEF
+bookkeeping:
+
+the loader's **page-below rule** ("an unaligned PointerToRawData means the stub hides in
+the page overlap", written for NSPack/WinUpack) fired for FSG too, because fsg_HashCalc
+declares its entry section at `ro = 0xe00` and `FileAlignment` is 0x1000. It therefore
+mapped the *header page* over the stub - `MZ\x90\x00` at RVA 0xab000 - and the packed EP
+executed into data. But a page-below rule only makes sense when **FileAlignment <
+SectionAlignment**; when they are equal there is no sub-page padding to compensate for and
+the declared pointer is honest. FSG has both at 0x1000; NSPack (0x200/0x1000) and WinUpack
+(0x200/0x1000) keep the rule.
+
+```cpp
+const auto section_align = ...section_alignment();
+if (file_align != 0 && file_align < section_align && raw_ptr != 0 && (raw_ptr % file_align) != 0 && ...)
+```
+
+Only 132 of 2677 corpus samples have `FileAlignment >= SectionAlignment` (EnigmaVB 16,
+Themida 16, FSG 15, Yoda-Crypter 15, Molebox 14, Alienyze 13, Yoda 13, Eronana 11, JDPack
+10, Neolite 9), so the blast radius is bounded by construction.
+
+**Measured as a clean A/B on one tree** (the repo currently also carries another
+workstream's import-path changes in `qiling/unpack/iat/*`, which move the baseline, so
+r48-vs-r49 is a same-tree pair rather than a comparison against round 55's number):
+
+| run | guard | all-three | OEP exact | imports |
+|---|---|---|---|---|
+| r49 | off | 1843 | 1953 | 2033 |
+| r48 | **on** | 1843 | **1962** | 2033 |
+
+**+9 OEP, exactly FSG, zero all-three movement and zero regressions.** The nine FSG
+samples get the right entry but still fail imports, so nothing converts yet - the FSG
+`both` class is now a decode-and-import problem rather than a mapping one.
+
+Fair set (200 @300s): 133 -> 132, the single loss being `rlpack_ADInsight`, which fails in
+BOTH arms of the A/B, i.e. it belongs to the other workstream's changes, not this one.
+
+**Baseline note:** the corpus baseline is now **1843**, not 1847, because the parallel
+import-path work is in the tree; my change is measured against r49 and moves OEP 1953 ->
+1962 with all-three unchanged.
