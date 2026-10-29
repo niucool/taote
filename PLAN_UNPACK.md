@@ -5041,3 +5041,36 @@ five broken rows. The other 90 are untouched because the shift is skipped when t
 Measured per sample, the repaired stubs decode and hand off to the *original* entry:
 `fsg_calc` rva 0x12d6c, `fsg_cmd` 0x829a, `fsg_dfrgui` 0x141fa - each exactly the original
 program's `AddressOfEntryPoint`.
+
+Measured, FSG family (97 rows, 85s), with the stub rebase live:
+
+| | before | after |
+|---|---|---|
+| valid PE | 95 | 95 |
+| OEP exact | 90 | **95** |
+| imports | 90 | **94** |
+| **all-three** | 90 | **94** (+4: calc, dfrgui, ftp, mtinst, 0 losses) |
+
+The three remaining rows, each with its evidence:
+
+- **`fsg_cmd`** decodes to the exact entry (OEP exact, code_sim 0.963) and then runs away: the
+  stub's `movsb` walks to `0xad24000`, ~96 MB past the destination. Its stream is NOT missing -
+  section 1 (`va 0x4a000, rs 0x16c4b, ro 0x400`) really does contain the bytes at `rva 0x4ae24` -
+  and its destination is `base + 0x1000` like the four that now pass, so this is a
+  decoder-semantics question (a different FSG stage or stop marker), not a mapping one.
+- **`fsg_livekd`** is truncated: its stub's stream pointer is `rva 0x10bb05`, section 0 declares
+  `rs 0x8271f` from `ro 0`, but the file is only `0x931f3` bytes, so the stream is past EOF and
+  the decode reads zeros. (It also ships with its `MZ` signature zeroed - repair that and it
+  parses, then runs away exactly as above.)
+- **`fsg_Snap2HTML`** has no PE header at all: the file begins with the stub bytes
+  `bb d0 01 40 00`, so LIEF refuses it and nothing loads.
+
+Full corpus r53 -> r54: all-three 1857 -> **1861** (the same four), OEP exact 1968 -> **1972**,
+imports 2047 -> **2051**, no gains or losses outside FSG.
+
+**FSG is therefore 94 of 97.** Session arc: 75 -> 94, corpus 1843 -> 1861, four mechanisms -
+the `FileAlignment < SectionAlignment` loader guard (payloads decode), the block-vote first-
+character shift (names match), the stub's `rel32` hand-off (the entry), FSG's ordinal records and
+the stub rebase (the rest). The three holdouts are inputs whose stub never finishes: cmd's
+decoder runs away with a valid stream and destination, livekd's stream is past EOF, Snap2HTML has
+no PE header to load.
