@@ -5104,3 +5104,36 @@ zero-filled tail. (Repairing its zeroed `MZ` makes it parse; it then runs away e
 mechanisms, each measured on the family and then on the full corpus with zero losses outside it:
 the `FileAlignment < SectionAlignment` loader guard, the block-vote first-character shift, the
 stub's `rel32` hand-off, and the ordinal records plus the stub rebase.
+
+### 0.17br Round 74 (FSG): fsg_cmd is a 16-bit page OVERFLOW in the packer, not a decoder mystery
+
+Round 73 recorded `fsg_cmd` as "diverges in the second pass" and left the cause open. It is now
+arithmetic. The multi-pass block table at `base+0x1d0` holds the destination **VA page** as a
+16-bit word, and the stub shifts it: `movzwl (%ebx),%edi; shl $0xc,%edi` - nothing is added, so
+the word must already be the full VA page:
+
+| sample | base | base page | word | stub computes | correct VA page | rva |
+|---|---|---|---|---|---|---|
+| fsg_calc | 0x1000000 | 0x1000 | 0x1056 | 0x1056000 = base+0x56000 | 0x1056 | 0x56000 |
+| fsg_ftp | 0x1000000 | 0x1000 | 0x100c | 0x100c000 = base+0xc000 | 0x100c | 0xc000 |
+| fsg_dfrgui | 0x1000000 | 0x1000 | 0x101c | 0x101c000 = base+0x1c000 | 0x101c | 0x1c000 |
+| **fsg_cmd** | **0x4ad00000** | **0x4ad00** | **0xad26** | **0xad26000 - NOT mapped** | **0x4ad26** | **0x26000** |
+
+`0x4ad26` is 306470, which does not fit in 16 bits, so the packer wrote `0xad26` - the low half.
+The stub then decodes its second block to `0xad26000` and faults at `0xad24000`, which is the
+"96 MB runaway" round 72 saw. The reconstruction is unambiguous (`page = base_page + (word -
+(base_page & 0xffff))` yields 0x26000 and 0x43000, both inside `fsg_cmd`'s payload `.text`), but
+it cannot be repaired from outside: a table patch stays 16-bit and the stub's `shl $0xc` can
+never produce `0x4ad26000`. Fixing it means replacing the stub's arithmetic, i.e. inventing a
+different stub than the packer wrote.
+
+**So all three of FSG's remaining rows are malformed packer output, proved:**
+
+| row | why it cannot convert | proof |
+|---|---|---|
+| fsg_cmd | 16-bit block-page overflow at a high load base | table word 0xad26 vs correct page 0x4ad26 (= base page 0x4ad00 + rva 0x26000); `0x4ad26 > 0xffff` |
+| fsg_livekd | truncated stream | stream `rva 0x10bb05` against `rs 0x8271f` from `ro 0` in a `0x931f3`-byte file |
+| fsg_Snap2HTML | no PE header to load | the file contains no `PE\0\0` sequence at all |
+
+**FSG final: 94 of 97** (75 at session start), corpus 1843 -> **1861**, and every remaining
+failure is an input the packer itself could not have loaded.
