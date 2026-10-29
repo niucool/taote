@@ -4595,3 +4595,33 @@ Unresolved, so nothing shipped; the tree stays at the shipped 1847.
 Worth noting for the next attempt: with the TSC constant and only TWO reads, a delta
 comparison is not obviously what this stub does at all - the two reads sit at the same pc,
 which is more like "read until it changes" (a spin) than "measure an interval".
+
+### 0.17bf Round 63: the RDTSC shim failed for a stub reason, not an engine one - and the semantics are now a test
+
+Round 62 left one ambiguity: its shim fired but its register write "did not survive to the
+next read". Two explanations were open - the engine restores the register file across the
+hook boundary, or the stub does something of its own.
+
+Answered, with a new regression test
+(`CoreHooks.RegisterWriteInCodeHookReachesNextInstruction`): a register written inside a
+`UC_HOOK_CODE` callback **is** visible to the next instruction. The test is deliberately
+minimal - `mov eax, 0x11111111` then a hook at the following `nop` that writes EAX, then
+`uc_reg_read` - so it pins the ordering unicorn gives us (a code hook for an address runs
+BEFORE that address executes) rather than any unpack plumbing. Suite is 594 tests.
+
+So the engine is not at fault, and the round-62 shim's failure is a property of
+themida_Bginfo's own code: the stub must save/relocate `eax:edx` around the read before it
+compares them. That also explains the shape - two RDTSC at the SAME pc returning the same
+constant, which is a "read it twice / restore and re-read" pattern rather than "measure an
+interval between two reads".
+
+Consequence for the plan: writing a plausible TSC into those registers cannot help unless
+the value is what the stub actually carries forward. Patching the instruction instead
+(rewrite `0F 31` in guest memory, or trap it as `int3` and emulate in the SEH #BP path of
+round 37) would sidestep the save/restore, and is the next concrete idea for that family -
+but it needs the patched page to survive the protector rewriting its own code, which
+Themida does, so it is not a small change.
+
+Note on the earlier test-writing trap, since it cost a cycle: `A3` is the 64-bit
+`mov moffs64, eax` form and faults with UC_ERR_WRITE_UNMAPPED in an x86-64 engine; the
+absolute-disp32 store is `89 04 25 <disp32>`.

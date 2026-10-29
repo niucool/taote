@@ -89,6 +89,36 @@ TEST(CoreHooks, CodeHookFiresWithAddressAndSize) {
     EXPECT_EQ(hits[0].second, 5u);  // mov eax, 1
 }
 
+// A register written inside a CODE hook must be visible to the NEXT instruction.
+// This is what the RDTSC shim in qiling/unpack relies on: unimplemented probes
+// (a constant TSC, round 62 of PLAN_UNPACK) have to be corrected from a hook that
+// runs before the consumer. It also pins the ordering unicorn gives us: the code
+// hook for an address fires BEFORE that address executes.
+TEST(CoreHooks, RegisterWriteInCodeHookReachesNextInstruction) {
+    HookHarness h;
+    QlCoreHooks hooks(*h.uc);
+
+    // mov eax, 0x11111111 ; nop ; nop
+    const std::string blob =
+        "\xB8\x11\x11\x11\x11"
+        "\x90"
+        "\x90";
+    uc_mem_write(h.uc, 0x1000, blob.data(), blob.size());
+
+    auto handle = hooks.hook_code([&h](std::uint64_t address, std::uint32_t) {
+        if (address == 0x1005) {
+            const std::uint32_t v = 0xdeadbeefu;
+            uc_reg_write(h.uc, UC_X86_REG_EAX, &v);
+        }
+        return 0;
+    }, 0x1005, 0x1005);
+
+    ASSERT_EQ(uc_emu_start(h.uc, 0x1000, 0x1006, 0, 0), UC_ERR_OK);
+    std::uint32_t eax = 0;
+    ASSERT_EQ(uc_reg_read(h.uc, UC_X86_REG_EAX, &eax), UC_ERR_OK);
+    EXPECT_EQ(eax, 0xdeadbeefu);
+}
+
 TEST(CoreHooks, BlockHookFires) {
     HookHarness h;
     QlCoreHooks hooks(*h.uc);
