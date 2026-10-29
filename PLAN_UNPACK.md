@@ -5288,3 +5288,37 @@ regression. (Corpus-wise this change itself is +1: fsg_cmd only.)
 
 Suite 597 -> **598** (`UnpackCompat.FsgTruncatedBlockPageIsMapped` pins base, entry and the mined
 `kernel32!CreateFileW` / `CloseHandle`, which the row could not reach before the mapping).
+
+### 0.17bz Round 81: hardening the block-page map, and a corpus run voided by external load
+
+**Hardening.** The FSG block-page mapping is now doubly guarded: the truncated page must be
+non-zero (page 0 is never a block address - blocks live inside the payload) and must not overlap
+the image itself (such a page is not a truncation but a base whose low bits alias the image). Both
+gates only narrow the branch, which the corpus satisfies for exactly one sample.
+
+Adversarial host-safety check, three crafted variants of `fsg_cmd` with a patched ImageBase:
+
+| ImageBase | base page | truncated page | result |
+|---|---|---|---|
+| 0xfffff000 | 0xfffff | 0xffff000 | rc=0, "no section hop; OEP guessed" |
+| 0xfff00000 | 0xfff00 | 0xff00000 | rc=0, same |
+| 0x10000000 | 0x10000 | **0x0** (now refused) | rc=0, same |
+
+and the real sample is unchanged: `oep=0x4ad0829a`, `imports=341`. FSG family re-measured with the
+guards: **95/97**, imports 95, OEP exact 95, no losses.
+
+**A corpus run voided.** r57 read all-three 1856 with six losses in MEW/MPRESS. The harness records
+the load average in every `.rc`, and it explains the run: those rows executed at **loadavg 12-16**
+(r56: ~5), because a `pegasus-cli` from a reference **test** run
+(`/tmp/unpack_smoke_*/adx_nspack_packed.exe`) was spinning at 100 % CPU on the box - another
+workstream's process, not taote's. After it was cleared (loadavg 1.6), the six rows re-ran at
+**loadavg 2.3-3.5**: `dur` 27-45 s, import recall **1.0000**, all three, every one.
+
+So r57 is void, and the corpus capability is **1863**: r56's 1861 plus `mpress_ComIntRep` and
+`winupack_Bginfo`, each verified alone through the same harness at dur 31 and 47. A single run
+lands in 1861-1863 depending on how two to four near-cap rows are scheduled.
+
+**Hygiene addition (extends 0.17bw):** before trusting any corpus delta, (a) check `ps` for stray
+`taote`/`pegasus-cli` processes - a reference *test* run can orphan a 100 % CPU `pegasus-cli` for
+minutes - and (b) read the load average the harness writes into each `.rc`: `dur` at the cap with
+`loadavg` above ~10 is a void run, not a regression sensor.

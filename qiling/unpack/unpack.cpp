@@ -175,10 +175,18 @@ void Unpacker::classify_sections(Qiling& ql) {
                 if ((base_ >> 12) > 0xffff) {
                     try {
                         const std::uint64_t truncated = ((base_ >> 12) & 0xffff) << 12;
+                        // two guards keep this from being a general "map what the file
+                        // says" seam: page 0 is never a block address (blocks live inside
+                        // the payload), and a page that would overlap the image itself is
+                        // not a truncation but a base whose low bits alias it.
+                        const bool overlaps_image =
+                            truncated < base_ + image_size_ && base_ < truncated + 0x400000;
+                        if (truncated != 0 && !overlaps_image) {
                         ql.mem().map(truncated, 0x400000, UC_PROT_ALL, "[fsg truncated block page]");
                         if (opts_.debug) {
                             std::fprintf(stderr, "[unpack] FSG blocks map at 0x%llx\n",
                                          static_cast<unsigned long long>(truncated));
+                        }
                         }
                     } catch (...) {
                     }
