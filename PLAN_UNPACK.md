@@ -5322,3 +5322,14 @@ lands in 1861-1863 depending on how two to four near-cap rows are scheduled.
 `taote`/`pegasus-cli` processes - a reference *test* run can orphan a 100 % CPU `pegasus-cli` for
 minutes - and (b) read the load average the harness writes into each `.rc`: `dur` at the cap with
 `loadavg` above ~10 is a void run, not a regression sensor.
+
+Measured on a cleaner run (r58, mean loadavg 5.13, the guarded binary): all-three 1861 -> **1862**
+(imports 2051 -> 2052, OEP exact 1973 unchanged, **zero losses**), the +1 being
+`winupack_Bginfo` landing under the cap this time while `mpress_ComIntRep` landed on it - which is
+the 1861-1863 band behaving exactly as described, not a change of behaviour between runs.
+
+**Where the session ends.** FSG **95 of 97** against the reference's **90**; corpus capability
+**1863** (single runs read 1861-1862 depending on two near-cap rows); OEP exact 1973/2501, imports
+2052/2568, valid PE 2674/2678, suite **598/598**. FSG's two remaining rows are the two truncated
+inputs (`fsg_livekd`'s stream is 0x88400 bytes past its section's raw data; `fsg_Snap2HTML` has no
+PE header at all and its stream is 0x10819 bytes past EOF), and the reference cannot read either.
