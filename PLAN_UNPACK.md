@@ -5706,3 +5706,21 @@ can convert it - which is what "prove it per-sample and close with evidence" ask
 closes at **96 of 97** against the reference's **90 of 97**, with the reference also failing this row
 ("Target file is not a PE"). Both closures are now mechanism-level, and the decoder harness that
 proved it is committed as the off-by-default `TAOTE_FSGTRACE` gate.
+
+### 0.17cl Round 92b: closure verified at HEAD, twice
+
+`fsg14` (97 rows, 85 s, 4 workers, tree `65b88a0`) reproduces `fsg13` exactly:
+
+| arm | valid PE | OEP exact | imports | all-three | only failure |
+|---|---|---|---|---|---|
+| fsg13 (round 91) | 96 | 96 | 96 | 96 | `fsg_Snap2HTML.exe` |
+| **fsg14 (HEAD `65b88a0`)** | **96** | **96** | **96** | **96** | `fsg_Snap2HTML.exe` (unparsable) |
+
+So the two docs-only commits between them changed nothing, and the end state of the family is:
+75 of 97 all-three at the session start, **96 of 97 now**, against the reference's 90 of 97, with the
+single remaining row proved dead packer output (0.17ck) rather than a taote defect. `fsg_livekd.exe`,
+the other long-standing holdout, passes.
+
+That is the closure. There is no measured mechanism left on this family: every row either converts
+all three criteria or is a file whose stub cannot execute and whose data is invalid under the
+family's own format. Further work on it would have to come from new evidence outside the corpus.
