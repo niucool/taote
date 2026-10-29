@@ -191,6 +191,63 @@ std::uint64_t ladder_oep(const PackerContext& ctx) {
             }
         }
     }
+    // FSG: the stub opens with `mov ebx,imm32; mov edi,imm32; mov esi,imm32`
+    // (bb ?? ?? ?? ?? bf ?? ?? ?? ?? be) and its dispatch ends in a conditional jump
+    // (0f 84 rel32) whose target the packer left as a BARE RVA - and that target is
+    // the true OEP. Measured on the six FSG rows the pattern passes still get wrong:
+    // AccessEnum 0x7a98, Diskmon 0xb4b8, HashCalc 0x11e58, ShareEnum 0x9013,
+    // psshutdown 0x677f, shmnview 0xb008 - the LAST such target in the stub, every
+    // time. Round 69 looked for these OEPs as stored dwords in the packed file and
+    // found none, because the packer encodes them as rel32, not as data.
+    if (ctx.packed_ep_va > ctx.base) {
+        const auto ep_rva = ctx.packed_ep_va - ctx.base;
+        const auto ep_off = static_cast<std::size_t>(ep_rva);
+        if (ep_off + 11 < image.size() && image[ep_off] == 0xbb && image[ep_off + 5] == 0xbf &&
+            image[ep_off + 10] == 0xbe) {
+            std::size_t stub_end = std::min<std::size_t>(ep_off + 0x1000, image.size());
+            for (const auto& ps : sections) {
+                if (ps.start <= ctx.packed_ep_va && ctx.packed_ep_va < ps.end) {
+                    stub_end = std::min<std::size_t>(stub_end, static_cast<std::size_t>(ps.end - ctx.base));
+                    break;
+                }
+            }
+            std::uint64_t best = 0;
+            for (std::size_t i = ep_off; i + 6 <= image.size() && i < stub_end; ++i) {
+                if (image[i] != 0x0f || image[i + 1] != 0x84) {
+                    continue;
+                }
+                std::int32_t rel = 0;
+                std::memcpy(&rel, image.data() + i + 2, sizeof rel);
+                const auto tgt = static_cast<std::int64_t>(ep_rva) +
+                                 static_cast<std::int64_t>(i - ep_off) + 6 + rel;
+                if (tgt < 0x1000 || tgt >= static_cast<std::int64_t>(image.size())) {
+                    continue;
+                }
+                if (tgt >= static_cast<std::int64_t>(ep_rva) &&
+                    tgt < static_cast<std::int64_t>(stub_end)) {
+                    continue;   // stays inside the stub: not a hand-off
+                }
+                const auto to = static_cast<std::size_t>(tgt);
+                if (to + 3 > image.size()) {
+                    continue;
+                }
+                // the hand-off target must look like a function start
+                const bool codeish = (image[to] == 0x55 && image[to + 1] == 0x8b && image[to + 2] == 0xec) ||
+                                     image[to] == 0x6a || image[to] == 0xe8 || image[to] == 0xcc ||
+                                     image[to] == 0xc3;
+                if (codeish) {
+                    best = static_cast<std::uint64_t>(tgt);
+                }
+            }
+            if (best != 0) {
+                if (ctx.debug) {
+                    std::fprintf(stderr, "[unpack] ladder: FSG stub hand-off rva=0x%llx\n",
+                                 static_cast<unsigned long long>(best));
+                }
+                return ctx.base + best;
+            }
+        }
+    }
     const auto body_of = [&](const PackSection& ps) {
         std::vector<std::uint8_t> b;
         if (ps.start < ctx.base) {

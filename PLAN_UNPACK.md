@@ -4926,3 +4926,69 @@ Moving any of these needs a new capability, not a rule: a static FSG LZ decoder 
 inputs), an MFC42u/oleaut32/wldap32 ordinal database (ordinal rows), or a link-order
 discriminator (picks). None of them is a mapping, mining or picker defect, which is what the
 20-row ciphertext block in round 66 looked like.
+
+### 0.17bn Round 71 (FSG): the six wrong-OEP rows are SOLVED - the stub stores the entry as a rel32
+
+Round 69 concluded the true OEP was not stored in the packed file, because a byte search for the
+RVA (and RVA+base) as a little-endian dword found nothing. That search was looking for the wrong
+encoding: the stub carries the entry as a **relative branch target**. Disassembling the FSG stub
+around its dispatch:
+
+```
+4ab0be: pop  %edi
+4ab0bf: mov  $0x4ab128,%ebx      ; the stub's own fixup table
+4ab0c4: inc  %edi
+...
+4ab0df: decb (%edi)
+4ab0e1: je   0x411e58            ; <-- THE TRUE OEP, as a rel32 branch
+4ab0e7: push %edi
+```
+
+`je 0x411e58` is `fsg_HashCalc`'s truth (claim was 0x462bf8). The target is encoded as
+`0f 84 <rel32>` computed against a 0-RVA layout, so it decodes to the **bare RVA** of the
+payload entry - which is also why the run faulted at `0xab140` instead of a base-relative
+address, and why the packer's 0x400000 assumption shows through.
+
+All six remaining wrong-OEP rows carry it, and in every one it is the LAST such target in the
+stub:
+
+| sample | truth RVA | stub target | claim before |
+|---|---|---|---|
+| fsg_AccessEnum | 0x7a98 | 0x7a98 | 0x403a53 |
+| fsg_Diskmon | 0xb4b8 | 0xb4b8 | 0x406a90 |
+| fsg_HashCalc | 0x11e58 | 0x11e58 | 0x462bf8 |
+| fsg_ShareEnum | 0x9013 | 0x9013 | 0x4172dc |
+| fsg_psshutdown | 0x677f | 0x677f | 0x40ef36 |
+| fsg_shmnview | 0xb008 | 0xb008 | 0x4146dc |
+
+`ladder_oep` now has this as its second pass (after the MPRESS static reader), gated on the exact
+FSG stub prologue `bb <imm32> bf <imm32> be` at the packed EP plus these conditions on the
+target: inside the dumped image, outside the stub's own section, and looking like a function
+start (`55 8b ec` / `6a` / `e8` / `cc` / `c3`). The last qualifying target wins.
+
+Measured, FSG family (97 rows, 85s):
+
+| | before | after |
+|---|---|---|
+| valid PE | 95 | 95 |
+| OEP exact | 84 | **90** (+6, exactly these six) |
+| imports | 85 | 85 |
+| **all-three** | 82 | **85** (+3: HashCalc, psshutdown, shmnview, 0 losses) |
+
+Full corpus r50 -> r52: all-three 1850 -> **1852**, OEP exact 1962 -> **1968** (the same six),
+imports 2043 -> 2042. The imports movement is `mpress_ComIntRep` alone, capped at dur=85 with 19
+of 527 pairs mined - the identical binary run four-way locally finishes in **68.8 / 70.1 / 70.6 /
+71.2 s with 568 imports in all four**, and my own analysis jobs were running alongside that corpus,
+so the row is contended rather than regressed (it flips at dur 78/85/86 across rounds 51/55/68).
+
+**FSG now stands at 85 of 97, and every remaining row is capped by something that is not a
+taote defect:**
+
+| group | n | ceiling |
+|---|---|---|
+| broken inputs | 7 | 5 fault at `0x401000` on their first `movsb` before any API call (`mov edi,0x401000` hardcoded while the file loads elsewhere); `livekd`'s stream pointer is past EOF; `Snap2HTML` has no PE header |
+| ordinal-capped | 5 | DarkNamer 58/245 = 0.237, ShareEnum 214/237 = 0.903, AccessEnum 217/232 = 0.935, Diskmon 201/214 = 0.939, adrestore 67/79 = 0.848 - the missing pairs are oleaut32/comctl32/mfc42u ORDINALS, and even perfect name recovery lands at 0.948 / 0.944 / 0.907, under the 0.95 bar |
+
+The ordinal group is the same MEW class round 57 closed: `api_db.inc` carries names only (no
+ordinal entries), the decoded dump's descriptor and INT arrays are zeroed, and the IAT slots hold
+bound addresses, so an ordinal has no recoverable name path without an ordinal database.
