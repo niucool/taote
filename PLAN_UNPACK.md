@@ -5508,3 +5508,36 @@ next round's work rather than a rule to add now.
 
 **FSG is 96 of 97** (reference: 90), and this row is the only one left; its blocker is now an LZ
 match-distance computation with two named candidates, not a mapping or header question.
+
+### 0.17cf Round 87 (FSG): the payload workspace overlaps the packed image - and the decode still misreads
+
+Two things were established by rebuilding the flat-image path with a **payload workspace** (the
+second stub immediate, `bf 00 10 40 00`, names it: the payload's `.text` at 0x400000, while the
+packed image sits at 0x420000 from the stream pointer):
+
+1. **The two regions overlap and must be ONE mapping.** The payload image is
+   `0x400000..0x42c000` (the original's `SizeOfImage` is 0x2c000) and the packed image is
+   `0x420000..0x45f000`; they intersect over 0xc000 bytes. FSG gets away with it because the
+   stream it reads (`0x42f199+`) lies above everything it writes (`0x401000..0x42c000`), so the
+   overlap is only in bytes already consumed. Mapping them as two regions fails - the payload map
+   is refused as overlapping - and the run then dies on its first `movsb`, which is how the
+   requirement was found. One span covering both, with the file written at its own base and the
+   rest zero, gets past it.
+2. **The decode then still misreads the stream.** With `edi = 0x401000` left un-rebased (this
+   build's payload base is its own workspace) and the stream at `0x42f199`, the LZ copy path still
+   computes a bogus match distance (`esi = edi - eax` lands at `0x2`). So neither candidate from
+   0.17ce is sufficient on its own: the bit stream itself is being read from the wrong place or
+   misaligned, and the original's layout says why this is not obvious - its `.text` starts at
+   **rva 0x2000** (`va 8192, vs 122276, raw 512`, first bytes `80 fd 01 00`), not at the 0x1000 the
+   stub decodes to, and the packed byte at the stream start is `0x80` where the payload's first
+   byte at 0x1000 is not defined by any section at all.
+
+That last mismatch is the crux and it is a decode-semantics question for a build used by exactly
+one sample: confirming it needs FSG's bit reader re-implemented (or single-stepped) against a
+ground truth for *this* build, not another loader tweak. The prototype is reverted again - it is
+still unmeasured - and the tree stays at **96/97** with nothing unmeasured in it.
+
+Everything needed to resume is now recorded across 0.17cb-0.17cf: the base derivation (0x420000,
+unique), the payload base (0x400000, from the stub's own `bf` immediate), the required single
+overlapping mapping, the falal instruction (`0x420065`, bogus LZ distance), and the layout mismatch
+(`.text` at rva 0x2000 vs the stub's 0x1000).
