@@ -5602,3 +5602,26 @@ a different FSG build whose blocker is understood to the instruction and whose r
 decoder re-implementation with a harness, not another rule. Every mechanism shipped this session is
 measured on the family and on the full 2678-sample corpus, guarded by five contract tests, and the
 tree carries nothing unmeasured.
+
+### 0.17ci Round 90 (FSG): decoder harness - one bug found and fixed, one remains; the dump is 89.6%
+
+Continuing 0.17ch's harness against `fsg_cmd`, whose decode taote gets right:
+
+- **Found and fixed a real semantics bug**: in the bit reader's reload path (`mov dl,[esi];
+  adc dl,dl`) the CARRY-OUT is both the bit the caller reads and the flag the next
+  `adc ecx,ecx` in the length readers consumes, so `CF` must be stored rather than recomputed from
+  the byte's MSB. The instruction-level emulator (`add8`/`adc8`) already did this correctly, which
+  is why the fix did not change its result - the divergence is elsewhere.
+- **The target is sound**: taote's `fsg_cmd` dump is **89.6 % byte-identical to the original's
+  image** overall (92.0 % over the payload span `rva 0x1000-0x4a000`, 1.2 % in the tail, which is
+  the fixup/undecoded area), so the dump is the right thing to reproduce; a naive "first 32 bytes
+  must match at the same rva" test was misleading me, not a layout shift.
+- **The emulator reproduces 12.8 % of it** (0x7b5 bytes emitted, then a back-reference walks below
+  the image at 17.8k instructions). So one semantic difference remains, somewhere in the length
+  paths or the `call [esp]` trampoline, and finding it needs a differential trace - log the same
+  pc's register state from unicorn (a temporary gate in the stub's hook) and from the emulator,
+  then bisect the first disagreement. That is the next concrete step, and it is a debugging
+  session, not a design decision.
+
+Nothing from this work is in the tree (the harness lives in `/tmp/fsgemu.py`); FSG remains at
+**96/97**, measured at HEAD, six ahead of the reference's 90.
