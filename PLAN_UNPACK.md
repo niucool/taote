@@ -5477,3 +5477,34 @@ first half of a future fix is already in place.
 
 **FSG closes at 96 of 97 against the reference's 90** - six ahead, failing nothing it passes, with
 every remaining row's blocker identified at the instruction level.
+
+### 0.17ce Round 86 (FSG): correction - the constant is fine, the LZ match distance is not
+
+Round 85 recorded Snap2HTML's `mov ebx,0x44a128` as a constant that "points nowhere". That was
+wrong, and the arithmetic says so plainly:
+
+```
+0x44a128 - base(0x420000) = rva 0x2a128      payload SizeOfImage = 0x2c000  -> INSIDE
+0x421000 + (0x2a128 - 0x1000) = 0x44a128     i.e. it addresses the decoded payload
+```
+
+So the constant is exactly right for base 0x420000: it is the fixup table living INSIDE the
+payload image the stub decodes. Nothing needs rebasing there.
+
+The fault is elsewhere, and the reported address identifies it: the run reads `0x2` in the LZ copy
+path, where `esi = edi - eax`, so `eax` - the match DISTANCE - came out as **0x420ffe**. A distance
+that size is not a stream value at all; it is what the stub computes when it reads bits from the
+wrong place. So on this build either the stream start (`esi = base + 0xf199`) or the first
+destination (`edi = base + 0x1000`, and the block table's first word is page `0x422` =
+base + 0x2000) is not what the stub expects - two candidates, and one experiment each:
+
+1. run with `edi = base + 0x2000` (the block table's first page) and see whether the match distances
+   become sane;
+2. run with `esi` advanced/retreated to the next plausible stream boundary and compare the first
+   decoded bytes against the original's `rva 0x1000`.
+
+Both need the flat-image loader re-applied (reverted in 0.17cd, recipe in 0.17cc), so this is the
+next round's work rather than a rule to add now.
+
+**FSG is 96 of 97** (reference: 90), and this row is the only one left; its blocker is now an LZ
+match-distance computation with two named candidates, not a mapping or header question.
