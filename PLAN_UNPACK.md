@@ -5663,3 +5663,46 @@ model goes until more of the fixup-walker opcodes are implemented.
 That is the remaining work for this row, and it is a modelling/debugging task with a validated
 harness and a two-byte hypothesis - not another loader rule. Nothing from the harness is in the
 tree except the trace gate; FSG remains at **96/97** measured at HEAD.
+
+### 0.17ck Round 92 (FSG CLOSED, 96/97): the last row is damaged stub + non-decodable data, proved by sweep
+
+Round 91 narrowed `fsg_Snap2HTML.exe` to two mutated stub bytes using the validated model. Finishing
+that line of work settles the row, and it settles it the other way.
+
+**1. The stub is damaged, not merely a sibling.** Comparing each FSG sample's stub (0x1d0 bytes at
+its entry section, the three absolute immediates normalised) against every other sample gives a
+tight family: `fsg_cmd`'s nearest neighbours differ by **12 of 464 bytes**, which is just the
+immediates and a couple of data words. `fsg_Snap2HTML`'s nearest neighbour differs by **49 bytes**
+and its code contains instructions that cannot run at all - `8b 00 a0 04 00` at stub+0x87 decodes
+to `mov eax,[eax]; mov al,ds:0x5ea40004`, where every intact build has
+`8b f7 2b f0 f3` = `mov esi,edi; sub esi,eax; rep movsb`, the whole match-copy. A file whose own
+entry stub cannot execute is not a decoder-semantics puzzle.
+
+**2. Its data does not decode under the family's format either.** Replacing the damaged code region
+with the intact build's code (keeping Snap2HTML's own data, block table and stream) and sweeping
+both unknowns - stream start and payload destination - over the plausible values leaves nothing:
+
+| stream | dest | result |
+|---|---|---|
+| 0xf199 (the stub's own constant) | 0x401000 | out-of-buffer match read at 0x3ffa24 after 1 byte |
+| 0xf199 | 0x402000 | same at 0x3ffe5e after 0x13 bytes |
+| 0x1000 | 0x402000 | wild write to 0xfd8e0001 |
+| 0x400 | 0x401000 | out-of-buffer read after 0x100 bytes |
+| 0x200 | any | wild write to 0xfd8e0001 |
+
+Every arm dies within a few hundred instructions: match distances that point before the start of the
+output buffer (which a valid LZ stream cannot produce, since a match may only reference data already
+decoded) or destination addresses that are nonsense (0xfd8e0001). The apparent 21-24 % "match" in
+that table is zeros matching zeros, not decoding.
+
+**3. The control is clean.** The same model, same code, same method decodes `fsg_cmd`'s stream to
+**0x22c1f bytes** and then enters the block walker, which is why taote's cmd dump is 89.6 %
+byte-identical to the original's image.
+
+**Conclusion.** `fsg_Snap2HTML.exe` has no `PE\0\0` anywhere, its entry stub is damaged in the two
+places that compute and apply matches, and its data is invalid under the family's format from every
+plausible start. It is dead packer output, not a taote defect, and no mapping, mining or picking rule
+can convert it - which is what "prove it per-sample and close with evidence" asked for. FSG therefore
+closes at **96 of 97** against the reference's **90 of 97**, with the reference also failing this row
+("Target file is not a PE"). Both closures are now mechanism-level, and the decoder harness that
+proved it is committed as the off-by-default `TAOTE_FSGTRACE` gate.
