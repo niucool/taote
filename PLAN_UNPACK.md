@@ -5074,3 +5074,33 @@ character shift (names match), the stub's `rel32` hand-off (the entry), FSG's or
 the stub rebase (the rest). The three holdouts are inputs whose stub never finishes: cmd's
 decoder runs away with a valid stream and destination, livekd's stream is past EOF, Snap2HTML has
 no PE header to load.
+
+### 0.17bq Round 73 (FSG): the three holdouts, probed one level deeper
+
+**`fsg_cmd`'s decoder is the same code as the four that now pass** - bytes 0..287 of the stub
+are identical to `fsg_calc`'s except the `mov esi,<stream>` immediate - and its inputs are
+right: the dump's `rva 0x4ae24` equals the file's `0x1224`, all 128 blocks of the first `0x1000`
+of section 1 match `file@0x400`, and the destination is `base+0x1000` like the passing four.
+The stub is a MULTI-PASS decoder: when a pass ends (`lods; shr eax,1; je`) it does
+`pop edi; pop ebx; movzwl (%ebx),%edi` and walks a block table at `base+0x1d0`, then jumps back
+to `push ebx; call <decode>` for the next pass. That table is correctly based in both files
+(`fsg_cmd` dword at +6 = `0x4ad22834` = base+0x22834, `fsg_calc` = `0x1051c50` = base+0x51c50),
+so the second pass is where `fsg_cmd` diverges: its `movsb` walks ~96 MB past the destination
+(`0xad24000`) instead of terminating. That is a decoder-semantics question - which pass, with
+which `esi`, and what ends it - and answering it means re-implementing FSG's multi-pass LZ
+outside the emulator, not another rule inside it.
+
+**`fsg_Snap2HTML` cannot be loaded at all**: the file contains no `PE\0\0` sequence anywhere
+(only the stub at offset 0, `bb d0 01 40 00 bf 00 10 40 00 be 99 f1 42 00`), so there is no
+section table to map and no entry to hand to the ladder. A fallback loader would have to
+synthesise a flat image from the stub alone.
+
+**`fsg_livekd` is truncated**: its stream pointer is `rva 0x10bb05`, but section 0 declares
+`rs 0x8271f` from `ro 0` against a `0x931f3`-byte file, so the bytes it decodes from are the
+zero-filled tail. (Repairing its zeroed `MZ` makes it parse; it then runs away exactly as
+`fsg_cmd` does.)
+
+**FSG closes this session at 94 of 97** (75 at the start), corpus 1843 -> 1861, through four
+mechanisms, each measured on the family and then on the full corpus with zero losses outside it:
+the `FileAlignment < SectionAlignment` loader guard, the block-vote first-character shift, the
+stub's `rel32` hand-off, and the ordinal records plus the stub rebase.
