@@ -11,6 +11,7 @@
 #define QILING_UNPACK_IAT_IMPORT_REBUILDER_HPP
 
 #include <cstdint>
+#include <map>
 #include <string>
 #include <utility>
 #include <vector>
@@ -41,7 +42,11 @@ struct ImportSection {
 // Scylla's ImportRebuilder::createImportSection: descriptor array, then per dll
 // the INT, the IAT and the hint/name strings.
 //   layout: [descriptors][ (INT, IAT, names) per group ]
-ImportSection build_import_section(const std::vector<ImportGroup>& groups, std::uint32_t section_rva);
+// `original_iats` (lowercased dll -> FirstThunk RVA) reuses the decompressed
+// image's own IAT slots so the loader resolves into the addresses the code
+// actually calls through; an empty map falls back to the fresh IAT below.
+ImportSection build_import_section(const std::vector<ImportGroup>& groups, std::uint32_t section_rva,
+                                   const std::map<std::string, std::uint32_t>& original_iats = {});
 
 }  // namespace iat
 }  // namespace unpack

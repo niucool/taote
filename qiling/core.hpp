@@ -65,6 +65,10 @@ struct QilingOptions {
     // a user profile path (None/default profile otherwise)
     std::optional<std::string> profile;
 
+    // --set SECTION.KEY=VALUE overrides, applied after the built-in profile and
+    // any --profile file (the command line wins). section -> key -> value.
+    std::map<std::string, std::map<std::string, std::string>> profile_overrides;
+
     bool console = true;
     bool log_plain = false;
 

@@ -58,6 +58,11 @@ public:
     bool has_option(std::string_view section, std::string_view key) const;
     std::optional<std::string> get(std::string_view section, std::string_view key) const;
 
+    // Upserts one option (the section is created on demand; the key is
+    // case-folded like every read key). The command-line overrides use this so
+    // they layer over the built-in profile with "later value wins" semantics.
+    void set(std::string_view section, std::string_view key, std::string value);
+
     // Base-0 integer conversion, mirroring profile_setup's int(base=0) converter.
     // A missing option raises QlErrorBase (NoOptionError analogue); a malformed
     // integer raises std::invalid_argument (ValueError analogue).

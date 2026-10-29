@@ -154,6 +154,11 @@ std::optional<std::string> IniConfig::get(std::string_view section, std::string_
     return opt->second;
 }
 
+void IniConfig::set(std::string_view section, std::string_view key, std::string value) {
+    auto& options = sections_[std::string(section)];
+    options[ascii_casefold(key)] = std::move(value);
+}
+
 std::int64_t IniConfig::get_int(std::string_view section, std::string_view key) const {
     const auto value = get(section, key);
     if (!value.has_value()) {

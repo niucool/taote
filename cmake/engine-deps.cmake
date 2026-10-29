@@ -32,3 +32,11 @@ endfunction()
 
 _qiling_engine_dep(unicorn::unicorn unicorn unicorn/unicorn.h unicorn)
 _qiling_engine_dep(keystone::keystone keystone keystone/keystone.h keystone)
+
+# unicorn's qemu core is threaded with pthreads. On MinGW that resolves to
+# winpthreads, and the vcpkg port links it PRIVATE — which is dropped from the
+# installed static archive's link interface. Propagate it so consumers that
+# actually pull qemu objects (emulation) link winpthreads too.
+if(MINGW)
+    set_property(TARGET unicorn::unicorn APPEND PROPERTY INTERFACE_LINK_LIBRARIES pthread)
+endif()

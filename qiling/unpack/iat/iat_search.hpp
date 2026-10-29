@@ -88,6 +88,11 @@ struct DescriptorWalk {
     std::vector<std::pair<std::string, std::string>> imports;
     std::uint32_t descriptor_rva = 0;  // the first descriptor the walk started at
     std::size_t descriptors = 0;
+    // lowercased dll -> its FirstThunk (IAT) RVA. The rebuilt descriptors must
+    // point their FirstThunk back at these addresses: the decompressed code
+    // still calls through the original IAT slots, and the Windows loader only
+    // writes resolved addresses into the FirstThunk the descriptor names.
+    std::map<std::string, std::uint32_t> iat_rva_by_dll;
 };
 // `start_rvas` are the candidate descriptor-table RVAs to try, in order; an empty
 // list lets the walker scan for a plausible table itself.

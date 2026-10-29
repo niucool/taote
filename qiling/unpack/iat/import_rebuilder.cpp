@@ -69,7 +69,8 @@ std::vector<ImportGroup> group_imports(const std::vector<std::pair<std::string, 
     return groups;
 }
 
-ImportSection build_import_section(const std::vector<ImportGroup>& groups, std::uint32_t section_rva) {
+ImportSection build_import_section(const std::vector<ImportGroup>& groups, std::uint32_t section_rva,
+                                   const std::map<std::string, std::uint32_t>& original_iats) {
     ImportSection out;
     if (groups.empty()) {
         return out;
@@ -130,8 +131,16 @@ ImportSection build_import_section(const std::vector<ImportGroup>& groups, std::
 
         const std::uint32_t int_rva = section_rva + static_cast<std::uint32_t>(int_off);
         const std::uint32_t this_iat_rva = section_rva + static_cast<std::uint32_t>(iat_off);
-        if (out.iat_rva == 0) {
-            out.iat_rva = this_iat_rva;
+        // FirstThunk: point back at the ORIGINAL IAT when the decompressed image's
+        // own descriptor named one — the code still calls through those slots, so
+        // the Windows loader must write the resolved addresses there, not into the
+        // fresh IAT this section also carries.
+        const auto orig_it = original_iats.find(grp.dll);
+        const std::uint32_t first_thunk = orig_it != original_iats.end() ? orig_it->second : this_iat_rva;
+        // IAT data directory anchors at the lowest FirstThunk (the true start of
+        // the reconstructed IAT), matching the reference's layout.
+        if (out.iat_rva == 0 || first_thunk < out.iat_rva) {
+            out.iat_rva = first_thunk;
         }
         out.iat_size += static_cast<std::uint32_t>((n + 1) * 4);
 
@@ -139,7 +148,7 @@ ImportSection build_import_section(const std::vector<ImportGroup>& groups, std::
         put_u32(blob, desc_off + 4, 0);             // TimeDateStamp
         put_u32(blob, desc_off + 8, 0);             // ForwarderChain
         put_u32(blob, desc_off + 12, dll_name_rva);  // Name
-        put_u32(blob, desc_off + 16, this_iat_rva);  // FirstThunk
+        put_u32(blob, desc_off + 16, first_thunk);   // FirstThunk
     }
     return out;
 }

@@ -1,9 +1,9 @@
-// tools/taote_unpack.cpp — the unpacker CLI (PLAN_UNPACK.md §3 Phase 0).
+// tools/taote.cpp — the unpacker CLI (PLAN_UNPACK.md §3 Phase 0).
 //
 // The flag surface is pegasus's, so the reference evaluation harness
 // (tools/unpack_eval/run_all.sh) drives taote unmodified:
 //
-//   taote_unpack -t <packed.exe> --unpack --unpack-output <dir> --unpack-timeout 85
+//   taote -t <packed.exe> --unpack --unpack-output <dir> --unpack-timeout 85
 //
 // Artifacts (the reference's contract, PLAN_UNPACK §1.6):
 //   <stem>_dump.bin            the image at the OEP
@@ -15,10 +15,17 @@
 // (deterministic, and the analogue of the reference's decoy modules). --rootfs
 // points at a real Windows tree instead; the sample is staged into
 // <rootfs>/Windows/ for that case.
+//
+// Profiles: the Windows PE defaults are built into the binary (the exact
+// contents of qiling/profiles/windows.ql), so no .ql file is required. A
+// `--profile <file>` layers a user profile on top, and repeated
+// `--set SECTION.KEY=VALUE` overrides individual values (wins over --profile).
 #include <LIEF/PE.hpp>
 
 #include <csignal>
+#if !defined(_WIN32)
 #include <execinfo.h>
+#endif
 
 #include <cstdio>
 #include <cstdlib>
@@ -28,6 +35,7 @@
 #include <algorithm>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -46,9 +54,10 @@ using qiling::testing::pe_sample_detail::write_stub_dll;
 namespace {
 
 void usage() {
-    std::cout << "usage: taote_unpack -t <sample> [--unpack] [--unpack-output DIR]\n"
-                 "                    [--unpack-timeout SECONDS] [--rootfs DIR] [--json]\n"
-                 "                    [--no-hop] [--argv ARGS] [--count N] [--family NAME]\n"
+    std::cout << "usage: taote -t <sample> [--unpack] [--unpack-output DIR]\n"
+                 "                 [--unpack-timeout SECONDS] [--rootfs DIR] [--json]\n"
+                 "                 [--no-hop] [--argv ARGS] [--count N] [--family NAME]\n"
+                 "                 [--profile FILE] [--set SECTION.KEY=VALUE]...\n"
                  "\n"
                  "  -t, --target PATH        the packed PE to unpack\n"
                  "      --unpack             enable unpacking (default when -t is given)\n"
@@ -59,7 +68,10 @@ void usage() {
                  "      --json               print the result as one JSON object\n"
                  "      --no-hop             disable section-hop OEP detection (the Phase 0\n"
                  "                           artifact-only mode: dump the entry state)\n"
-                 "      --family NAME        family label for the metadata (default: auto)\n";
+                 "      --family NAME        family label for the metadata (default: auto)\n"
+                 "      --profile FILE       load a .ql profile over the built-in defaults\n"
+                 "      --set S.K=V          override one profile value (repeatable; wins\n"
+                 "                           over --profile), e.g. --set KERNEL.pid=42\n";
 }
 
 std::string json_escape(const std::string& in) {
@@ -90,7 +102,7 @@ std::string json_escape(const std::string& in) {
 std::string guess_family(const fs::path& sample) {
     const auto det = detect_from_file(sample.string());
     if (std::getenv("TAOTE_DEBUG_DETECTOR") != nullptr) {
-        std::fprintf(stderr, "[detector] %s -> %s (%s%s%s)\n", sample.filename().c_str(), det.name.c_str(),
+        std::fprintf(stderr, "[detector] %s -> %s (%s%s%s)\n", sample.filename().string().c_str(), det.name.c_str(),
                      det.sig_kind.c_str(), det.detail.empty() ? "" : ": ", det.detail.c_str());
     }
     return det.name;
@@ -99,28 +111,35 @@ std::string guess_family(const fs::path& sample) {
 }  // namespace
 
 namespace {
+#if !defined(_WIN32)
 // TAOTE_UNPACK_BT: a host crash prints its stack instead of dying silently
 // (the unpack path parses attacker-controlled images; Phase 6 hardens it, this
-// makes the first failure diagnosable).
+// makes the first failure diagnosable). backtrace() is glibc-only, so the
+// handler is POSIX-only; Windows runs degrade to the plain crash.
 void crash_trace(int) {
     void* frames[64];
     const int n = ::backtrace(frames, 64);
-    std::fprintf(stderr, "[taote_unpack] host fault, backtrace:\n");
+    std::fprintf(stderr, "[taote] host fault, backtrace:\n");
     ::backtrace_symbols_fd(frames, n, 2);
     std::_Exit(139);
 }
+#endif
 }  // namespace
 
 int main(int argc, char** argv) {
+#if !defined(_WIN32)
     if (std::getenv("TAOTE_UNPACK_BT") != nullptr) {
         std::signal(SIGSEGV, crash_trace);
         std::signal(SIGABRT, crash_trace);
     }
+#endif
     std::string target;
     std::string out_dir = "./unpacked";
     std::string rootfs;
     std::string family;
     std::string argv_tail;
+    std::string profile_path;
+    std::map<std::string, std::map<std::string, std::string>> profile_overrides;
     std::uint64_t timeout = 120;
     // The instruction budget is a safety net, not the primary limiter (the
     // simulated-time budget is). The reference has no instruction cap at all
@@ -164,11 +183,24 @@ int main(int argc, char** argv) {
             json = true;
         } else if (arg == "--no-hop") {
             enable_hop = false;
+        } else if (arg == "--profile" && i + 1 < argc) {
+            profile_path = argv[++i];
+        } else if (arg == "--set" && i + 1 < argc) {
+            const std::string spec = argv[++i];
+            const auto eq = spec.find('=');
+            const auto dot = spec.find('.');
+            if (eq == std::string::npos || dot == std::string::npos || dot == 0 || eq < dot ||
+                dot + 1 == eq || eq + 1 == spec.size()) {
+                std::cerr << "taote: --set expects SECTION.KEY=VALUE, got: " << spec << "\n";
+                return 2;
+            }
+            profile_overrides[spec.substr(0, dot)][spec.substr(dot + 1, eq - dot - 1)] =
+                spec.substr(eq + 1);
         } else if (arg == "-h" || arg == "--help") {
             usage();
             return 0;
         } else {
-            std::cerr << "taote_unpack: unknown argument " << arg << "\n";
+            std::cerr << "taote: unknown argument " << arg << "\n";
             return 2;
         }
     }
@@ -178,7 +210,7 @@ int main(int argc, char** argv) {
     }
     const fs::path sample(target);
     if (!fs::exists(sample)) {
-        std::cerr << "taote_unpack: no such file: " << target << "\n";
+        std::cerr << "taote: no such file: " << target << "\n";
         return 2;
     }
 
@@ -219,7 +251,7 @@ int main(int argc, char** argv) {
             const auto now = fs::file_time_type::clock::now();
             for (const auto& e : fs::directory_iterator(tmp)) {
                 const auto name = e.path().filename().string();
-                if (name.rfind("taote_unpack_", 0) != 0 || !e.is_directory()) {
+                if (name.rfind("taote_", 0) != 0 || !e.is_directory()) {
                     continue;
                 }
                 std::error_code ec;
@@ -232,7 +264,7 @@ int main(int argc, char** argv) {
         } catch (...) {
         }
         run_rootfs = fs::temp_directory_path() /
-                     ("taote_unpack_" + std::to_string(::getpid()) + "_" +
+                     ("taote_" + std::to_string(::getpid()) + "_" +
                       std::to_string(std::hash<std::string>{}(sample.string()) % 100000));
         fs::create_directories(run_rootfs / "Windows" / "System32");
         fs::create_directories(run_rootfs / "Windows" / "registry");
@@ -275,6 +307,10 @@ int main(int argc, char** argv) {
     options.archtype = plan.is64 ? qiling::QL_ARCH::X8664 : qiling::QL_ARCH::X86;
     options.timeout = timeout;
     options.count = count;
+    if (!profile_path.empty()) {
+        options.profile = std::move(profile_path);
+    }
+    options.profile_overrides = std::move(profile_overrides);
     options.argv.push_back(exe_in_rootfs.string());
     if (!argv_tail.empty()) {
         options.argv.push_back(argv_tail);

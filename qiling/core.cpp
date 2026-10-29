@@ -9,6 +9,7 @@
 #include "qiling/os/memory.hpp"
 #include "qiling/os/os.hpp"
 #include "qiling/profiles/inireader.hpp"
+#include "qiling/default_profiles.hpp"
 #include "qiling/snapshot.hpp"
 #include "qiling/utils.hpp"
 
@@ -17,7 +18,7 @@ namespace qiling {
 namespace {
 
 // core.py: the profile lookup for shellcode execution
-IniConfig profile_setup(QL_OS ostype, const std::optional<std::string>& user_config);
+IniConfig profile_setup(QL_OS ostype, const QilingOptions& options);
 
 }  // namespace
 
@@ -125,7 +126,7 @@ Qiling::Qiling(const QilingOptions& options) {
     }
 
     // ---- profile ----
-    profile_default_ = profile_setup(*ostype, options.profile);
+    profile_default_ = profile_setup(*ostype, options);
     profile_ = &profile_default_;
 
     // ---- loader ----
@@ -415,8 +416,8 @@ std::function<std::unique_ptr<QlMemoryManager>(Qiling*)> select_component_memory
 
 namespace {
 
-// the lowercase name of the os (os_name_table reverse lookup; the profile file
-// name derives from it)
+// the lowercase name of the os (os_name_table reverse lookup; the built-in
+// profile's source label derives from it)
 std::string_view os_profile_stem(QL_OS ostype) {
     switch (ostype) {
         case QL_OS::LINUX: return "linux";
@@ -432,54 +433,42 @@ std::string_view os_profile_stem(QL_OS ostype) {
     return "blob";
 }
 
-// Where the bundled profiles live. utils.py reads them from
-// qiling_home/profiles; the port has to work both from a build tree and from a
-// copied install tree, so the lookup is, in order:
-//   1. $TAOTE_PROFILE_DIR                        (an explicit override)
-//   2. <exedir>/../share/qiling/profiles          (the installed layout:
-//                                                 bin/ + share/)
-//   3. <exedir>/share/qiling/profiles            (a vendored/side-by-side tree)
-//   4. QILING_SOURCE_DIR/qiling/profiles         (the build tree)
-// The exe-relative probes are what make `build/deploy` relocatable: it can be
-// copied anywhere and the binaries still find their data.
-std::filesystem::path profile_dir() {
-    if (const char* env = std::getenv("TAOTE_PROFILE_DIR"); env != nullptr && *env != '\0') {
-        return std::filesystem::path(env);
+// The built-in profile text, embedded at build time from qiling/profiles/<os>.ql
+// (see cmake/default_profiles.hpp.in). The binaries no longer need the .ql files
+// at runtime. Returns nullopt for the OSes that ship no bundled profile
+// (mcu, blob) — their CODE section comes from --profile/--set, as before.
+std::optional<std::string_view> default_profile_text(QL_OS ostype) {
+    switch (ostype) {
+        case QL_OS::WINDOWS: return profiles::kDefaultWindows;
+        case QL_OS::LINUX:   return profiles::kDefaultLinux;
+        case QL_OS::MACOS:   return profiles::kDefaultMacos;
+        case QL_OS::FREEBSD: return profiles::kDefaultFreebsd;
+        case QL_OS::DOS:     return profiles::kDefaultDos;
+        case QL_OS::UEFI:    return profiles::kDefaultUefi;
+        case QL_OS::QNX:     return profiles::kDefaultQnx;
+        default:             return std::nullopt;  // MCU, BLOB
     }
-    const auto exe = host_executable_path();
-    if (!exe.empty()) {
-        const auto bin_dir = exe.parent_path();
-        std::error_code ec;
-        const auto installed = bin_dir / ".." / "share" / "qiling" / "profiles";
-        if (std::filesystem::is_directory(installed, ec)) {
-            return std::filesystem::weakly_canonical(installed, ec);
-        }
-        const auto side_by_side = bin_dir / "share" / "qiling" / "profiles";
-        if (std::filesystem::is_directory(side_by_side, ec)) {
-            return std::filesystem::weakly_canonical(side_by_side, ec);
-        }
-    }
-#ifdef QILING_SOURCE_DIR
-    return std::filesystem::path(QILING_SOURCE_DIR) / "qiling" / "profiles";
-#else
-    return {};
-#endif
 }
 
-IniConfig profile_setup(QL_OS ostype, const std::optional<std::string>& user_config) {
+IniConfig profile_setup(QL_OS ostype, const QilingOptions& options) {
     IniConfig config;
 
-    // read the default profile first (utils.py: qiling_home/profiles/<os>.ql)
-    const std::filesystem::path profile_name =
-        std::filesystem::path(os_profile_stem(ostype)).replace_extension(".ql");
-    const auto dir = profile_dir();
-    if (!dir.empty()) {
-        config.read(dir / profile_name);
+    // the default profile is embedded (utils.py: qiling_home/profiles/<os>.ql)
+    const auto text = default_profile_text(ostype);
+    if (text.has_value()) {
+        config.read_string(*text, std::string(os_profile_stem(ostype)) + ".ql (built-in)");
     }
 
-    // a user-specified profile adds or overrides existing settings
-    if (user_config.has_value()) {
-        config.read(std::filesystem::path(*user_config));
+    // --profile <file>: a user-specified profile adds or overrides settings
+    if (options.profile.has_value()) {
+        config.read(std::filesystem::path(*options.profile));
+    }
+
+    // --set SECTION.KEY=VALUE: command-line overrides win over both
+    for (const auto& [section, kv] : options.profile_overrides) {
+        for (const auto& [key, value] : kv) {
+            config.set(section, key, value);
+        }
     }
 
     return config;

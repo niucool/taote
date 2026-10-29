@@ -249,6 +249,10 @@ private:
     std::string reason_;
     std::vector<std::pair<std::string, std::string>> imports_;
     std::set<std::string> import_seen_;
+    // the descriptor count harvest_image_imports recovered from the decoded
+    // payload's own import directory (0 = the packer destroyed it, e.g.
+    // FSG/BeRo/MEW/WinUpack). Gates the noisy bare-string heuristics in
+    // mine_orphan_descriptors, which are only valid when that table is gone.
     std::uint64_t gpa_sentinel_ = 0x77001000;  // the reference's fake-GPA range
     // the reference's last_ll_name_ (unpacker.cpp:269-330): the dll the stub most
     // recently opened, used to attribute a GPA whose module handle resolves to
@@ -258,6 +262,12 @@ private:
     // salvage diagnostics (the tests assert on them)
     std::size_t salvaged_slots_ = 0;
     std::size_t salvaged_pairs_ = 0;
+    std::size_t image_descriptor_count_ = 0;
+    // lowercased dll -> FirstThunk (IAT) RVA from the payload's own descriptors
+    std::map<std::string, std::uint32_t> image_iat_rva_by_dll_;
+    // lowercased dll -> the code-referenced IAT slot RVA observed by the salvage
+    // scan (these are authoritative: the code calls through them)
+    std::map<std::string, std::uint32_t> salvaged_iat_rva_by_dll_;
     std::vector<std::uint8_t> header_snapshot_;  // the packed file's first 0x400
 
     // the per-section hook handles (RAII: HookRet unregisters)
@@ -291,6 +301,8 @@ struct RebuildInput {
     bool is_64 = false;
     std::vector<std::pair<std::string, std::string>> imports;
     std::vector<std::uint8_t> header_snapshot;  // the packed file's first 0x400
+    // lowercased dll -> FirstThunk (IAT) RVA from the payload's own descriptors
+    std::map<std::string, std::uint32_t> iat_rva_by_dll;
 };
 
 // Rebuilds a file-layout PE from the dump, appending a .pgimp import section.

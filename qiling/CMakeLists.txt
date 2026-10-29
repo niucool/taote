@@ -25,7 +25,6 @@ add_library(qiling STATIC
     os/stats.cpp
     os/artifacts.cpp
     os/volumes.cpp
-    gdbserver.cpp
     os/path.cpp
     os/filestruct.cpp
     os/disk.cpp
@@ -97,7 +96,8 @@ target_compile_definitions(qiling PRIVATE QILING_SOURCE_DIR="${PROJECT_SOURCE_DI
 
 # Consumers include as "qiling/xxx.hpp" — the include root is the repository root,
 # mirroring the Python package layout (port root = repo root, PORT_PLAN.md D16).
-target_include_directories(qiling PUBLIC ${PROJECT_SOURCE_DIR})
+# PROJECT_BINARY_DIR additionally exposes the generated qiling/default_profiles.hpp.
+target_include_directories(qiling PUBLIC ${PROJECT_SOURCE_DIR} ${PROJECT_BINARY_DIR})
 
 find_package(LIEF CONFIG REQUIRED)
 
@@ -112,6 +112,10 @@ target_link_libraries(qiling PUBLIC
 if(WIN32)
     # the posix socket layer rides winsock (the QlSocket host calls)
     target_link_libraries(qiling PUBLIC ws2_32)
+else()
+    # the gdbserver slice (PLAN_PARITY Phase 3 item 7) is POSIX-only for now:
+    # gdbserver.cpp includes arpa/inet.h, poll.h, sys/socket.h and unistd.h.
+    target_sources(qiling PRIVATE gdbserver.cpp)
 endif()
 
 add_library(qiling::qiling ALIAS qiling)

@@ -7,6 +7,12 @@
 // .pgimp import section.
 #include "qiling/unpack/unpack.hpp"
 
+#if defined(__has_include)
+#if __has_include(<unicorn/x86.h>)
+#include <unicorn/x86.h>
+#endif
+#endif
+
 #include "qiling/unpack/api_db.hpp"
 #include "qiling/unpack/iat/iat_search.hpp"
 #include "qiling/unpack/iat/import_rebuilder.hpp"
@@ -409,6 +415,17 @@ void Unpacker::install_gpa_sentinel(Qiling& ql) {
         } catch (...) {
             dll.clear();
         }
+        // the LoadLibrary handle is the most authoritative owner of this
+        // GetProcAddress call: a by-ordinal probe (lpProcName < 0x10000) has no
+        // name to look up, and name-based attribution matches the first dll that
+        // happens to import that ordinal (activeds!ordinal_9 was being stolen by
+        // oleaut32!ordinal_9). Check the handle map before any name lookup.
+        if (dll.empty() && hmod != 0) {
+            const auto hit = handle_names_.find(hmod);
+            if (hit != handle_names_.end()) {
+                dll = hit->second;
+            }
+        }
         if (dll.empty() && !name.empty()) {
             // the handle is often a decoy: attribute by who exports the name
             // (the reference's last_ll_name_/alias evidence analogue)
@@ -424,12 +441,6 @@ void Unpacker::install_gpa_sentinel(Qiling& ql) {
                 }
             } catch (...) {
                 dll.clear();
-            }
-        }
-        if (dll.empty()) {
-            const auto hit = handle_names_.find(hmod);
-            if (hit != handle_names_.end()) {
-                dll = hit->second;
             }
         }
         if (dll.empty()) {
@@ -479,6 +490,32 @@ void Unpacker::install(Qiling& ql) {
     ql_ = &ql;
     classify_sections(ql);
 
+    // TAOTE_CPUIDBG=1: log every CPUID and RDTSC the guest executes. These are the
+    // inline environment probes an anti-emulation stub uses, and they leave no API
+    // trace at all (TELock/Yoda/Alienyze make zero API calls before bailing).
+    if (std::getenv("TAOTE_CPUIDBG") != nullptr) {
+        {
+            auto h = std::make_shared<HookRet>(ql.hook_insn([this](const std::vector<std::uint64_t>&) -> int {
+                const auto& r = ql_->arch().regs();
+                const auto leaf = r.read("eax");
+                const auto sub = r.read("ecx");
+                std::fprintf(stderr, "[cpuid] leaf=0x%llx sub=0x%llx\n",
+                             static_cast<unsigned long long>(leaf), static_cast<unsigned long long>(sub));
+                return 0;
+            }, UC_X86_INS_CPUID));
+            std::fprintf(stderr, "[cpuidbg] cpuid hook ok=%d\n", h->obj() != nullptr ? 1 : 0);
+            hooks_.push_back(std::move(h));
+        }
+        {
+            auto h = std::make_shared<HookRet>(ql.hook_insn([this](const std::vector<std::uint64_t>&) -> int {
+                const auto& r = ql_->arch().regs();
+                std::fprintf(stderr, "[rdtsc] pc=0x%llx\n", static_cast<unsigned long long>(r.arch_pc()));
+                return 0;
+            }, UC_X86_INS_RDTSC));
+            std::fprintf(stderr, "[cpuidbg] rdtsc hook ok=%d\n", h->obj() != nullptr ? 1 : 0);
+            hooks_.push_back(std::move(h));
+        }
+    }
     if (std::getenv("TAOTE_HEAPSCAN") != nullptr) {
         auto h = std::make_shared<HookRet>(ql.hook_mem_write(
             [this](int /*access*/, std::uint64_t addr, std::uint32_t /*size*/, std::int64_t /*value*/) -> int {
@@ -1276,6 +1313,13 @@ std::size_t Unpacker::mine_orphan_descriptors(const std::vector<std::uint8_t>& i
     // blob in order: a dll-like string starts a group, the strings after it name that
     // dll, until the next dll-like string (the reference's orphan-name mining).
     std::size_t blob_pairs = 0;
+    // Descriptor-less packers only: when the image already carries a real import
+    // descriptor chain (harvest_image_imports found >= 4), the bare-string blob
+    // heuristics below only fabricate phantom imports (MSPDB80.DLL, hhctrl.ocx)
+    // from data strings, so skip them for those images.
+    if (image_descriptor_count_ >= 4) {
+        return pairs + blob_pairs;
+    }
     // FSG/BeRo/MEW/WinUpack store the payload's import list as a bare string run:
     // [dll][name][name]…[marker][dll][name]… with one- or two-character separator
     // pieces ('D', 'r') between the blocks and no pointer table at all. Walk the run
@@ -1436,12 +1480,15 @@ void Unpacker::harvest_image_imports(const std::vector<std::uint8_t>& image) {
     // Molebox, Neolite, PECompact), so this recovers their import set without
     // any emulation evidence.
     const auto walk = iat::walk_import_descriptors(image, base_);
+    image_descriptor_count_ = walk.descriptors;
+    image_iat_rva_by_dll_ = walk.iat_rva_by_dll;
     for (const auto& pr : walk.imports) {
         note_import(pr.first, pr.second);
     }
     if (opts_.debug) {
-        std::fprintf(stderr, "[unpack] image import table harvest: %zu descriptors -> %zu imports\n",
-                     walk.descriptors, imports_.size());
+        std::fprintf(stderr, "[unpack] image import table harvest: %zu descriptors -> %zu imports (desc_rva=%s, iat_map=%zu)\n",
+                     walk.descriptors, imports_.size(), hex(walk.descriptor_rva).c_str(),
+                     walk.iat_rva_by_dll.size());
     }
 }
 
@@ -1598,6 +1645,32 @@ void Unpacker::salvage_iat(Qiling& ql, const std::vector<std::uint8_t>& image) {
         return;
     }
 
+    // Collect the loaded DLL modules' address ranges so the scan below skips
+    // them. A real rootfs maps genuine vendor DLLs whose own memory is dense
+    // with self-pointers (their own IAT/export tables), and scanning those
+    // produces thousands of false IAT hits (measured on upx_ADExplorer.exe:
+    // kernel32!WerpNotifyLoadStringResource plus hundreds of WER/ntdll names).
+    // The guest's IAT lives in its own image or in a private heap buffer, never
+    // inside a loaded DLL, so skipping the modules loses nothing real.
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> module_ranges;
+    try {
+        for (const auto& img : ql.loader().save()) {
+            if (img.base == 0 || img.base == base_ || img.end <= img.base) {
+                continue;
+            }
+            module_ranges.emplace_back(img.base, img.end);
+        }
+    } catch (...) {
+    }
+    const auto in_module = [&module_ranges](std::uint64_t lo, std::uint64_t hi) {
+        for (const auto& [b, e] : module_ranges) {
+            if (lo < e && hi > b) {
+                return true;
+            }
+        }
+        return false;
+    };
+
     // Scylla's IATSearch: scan the image, then every other mapped region (the
     // stubs that rebuild the IAT themselves keep the table in a private buffer)
     iat::IatScanner scanner(symbols, is_64_ ? 8u : 4u);
@@ -1606,8 +1679,8 @@ void Unpacker::salvage_iat(Qiling& ql, const std::vector<std::uint8_t>& image) {
         for (const auto& mi : ql.mem().get_mapinfo()) {
             const auto lo = std::get<0>(mi);
             const auto hi = std::get<1>(mi);
-            if (hi <= lo || lo == base_ || hi - lo > 0x400000 || lo < 0x10000) {
-                continue;  // the FS/GDT scratch and the engine's own maps
+            if (hi <= lo || lo == base_ || hi - lo > 0x400000 || lo < 0x10000 || in_module(lo, hi)) {
+                continue;  // the FS/GDT scratch, the engine's own maps, and loaded DLLs
             }
             std::vector<std::uint8_t> bytes;
             try {
@@ -1626,6 +1699,104 @@ void Unpacker::salvage_iat(Qiling& ql, const std::vector<std::uint8_t>& image) {
     for (const auto& hit : kept) {
         note_import(hit.dll, hit.name);
     }
+    // Reconstruct the payload's IAT layout from the in-image hits. The original
+    // descriptor table is destroyed (UPX zeroes it), but the IAT slots themselves
+    // still hold resolved pointers and are laid out as one contiguous run per dll,
+    // separated by 4-byte zero terminators. Segment those runs and attribute each
+    // to its dll by the named hits it contains — by-ordinal slots resolve to
+    // shared stub cells (activeds!ordinal_2 and oleaut32!ordinal_9 both land on
+    // the same synthetic address), so their dll label is noise. All-ordinal dlls
+    // fall back to import-count matching against the unclaimed segments.
+    struct IatSeg {
+        std::uint32_t start = 0;
+        std::uint32_t end = 0;
+        std::size_t n = 0;
+        std::map<std::string, std::size_t> named;
+    };
+    std::vector<IatSeg> segs;
+    {
+        // The descriptor walk's FirstThunk values name the *stub's* IAT for
+        // UPX-style images (the header import directory still points there), and
+        // the *payload's* IAT for descriptor-restoring packers. Either way those
+        // slots must not pollute the payload segmentation below: in the former
+        // case they are junk, in the latter the walk map already carries the
+        // correct anchors (the merge below keeps them as the fallback).
+        std::uint32_t stub_lo = 0xFFFFFFFFu;
+        std::uint32_t stub_hi = 0;
+        for (const auto& [dll, rva] : image_iat_rva_by_dll_) {
+            (void)dll;
+            if (rva == 0) {
+                continue;
+            }
+            stub_lo = std::min(stub_lo, rva);
+            stub_hi = std::max(stub_hi, rva);
+        }
+        std::vector<std::tuple<std::uint32_t, std::string, bool>> slots;  // rva, dll, is_named
+        for (const auto& hit : scanner.hits()) {
+            if (hit.va < base_ || hit.va >= base_ + image_size_) {
+                continue;
+            }
+            const auto rva = static_cast<std::uint32_t>(hit.va - base_);
+            if (stub_lo <= stub_hi && rva + 4 > stub_lo && rva < stub_hi + 0x10) {
+                continue;  // the stub's own IAT, not the payload's
+            }
+            const bool named = hit.name.compare(0, 8, "ordinal_") != 0;
+            slots.emplace_back(rva, hit.dll, named);
+        }
+        std::sort(slots.begin(), slots.end(),
+                  [](const auto& a, const auto& b) { return std::get<0>(a) < std::get<0>(b); });
+        for (const auto& [rva, dll, named] : slots) {
+            if (segs.empty() || rva > segs.back().end + 4) {
+                segs.push_back(IatSeg{rva, rva, 1, {}});
+            } else if (rva == segs.back().end + 4) {
+                segs.back().end = rva;
+                segs.back().n += 1;
+            } else {
+                continue;  // duplicate slot rva
+            }
+            if (named) {
+                segs.back().named[dll] += 1;
+            }
+        }
+    }
+    std::map<std::string, std::uint32_t> anchors;
+    std::set<std::size_t> claimed;
+    for (std::size_t i = 0; i < segs.size(); ++i) {
+        if (segs[i].named.empty()) {
+            continue;
+        }
+        std::string best;
+        std::size_t bestn = 0;
+        for (const auto& [dll, c] : segs[i].named) {
+            if (c > bestn) {
+                best = dll;
+                bestn = c;
+            }
+        }
+        if (!best.empty()) {
+            anchors[best] = segs[i].start;
+            claimed.insert(i);
+        }
+    }
+    std::map<std::string, std::size_t> counts;
+    for (const auto& [dll, name] : imports_) {
+        (void)name;
+        counts[dll] += 1;
+    }
+    for (const auto& [dll, count] : counts) {
+        if (anchors.count(dll) != 0) {
+            continue;
+        }
+        for (std::size_t i = 0; i < segs.size(); ++i) {
+            if (claimed.count(i) != 0 || segs[i].n != count) {
+                continue;
+            }
+            anchors[dll] = segs[i].start;
+            claimed.insert(i);
+            break;
+        }
+    }
+    salvaged_iat_rva_by_dll_ = std::move(anchors);
     salvaged_slots_ = kept.size();
     salvaged_pairs_ = kept.size();
     if (opts_.debug) {
@@ -2810,6 +2981,16 @@ UnpackResult Unpacker::finalize(Qiling& ql) {
             in.is_64 = res.is_64;
             in.imports = imports_;
             in.header_snapshot = header_snapshot_;
+            // the salvage scan's code-referenced IAT slots win over the descriptor
+            // walk's FirstThunk (which names the stub's table for UPX-style images);
+            // fall back to the descriptor walk for any dll the salvage never saw.
+            {
+                auto iat_map = image_iat_rva_by_dll_;
+                for (const auto& [dll, rva] : salvaged_iat_rva_by_dll_) {
+                    iat_map[dll] = rva;
+                }
+                in.iat_rva_by_dll = std::move(iat_map);
+            }
             auto rebuilt = rebuild_pe(in);
             if (!rebuilt.empty()) {
                 const auto exe_path = fs::path(opts_.out_dir) / (stem + "_unpacked.exe");
@@ -2974,6 +3155,14 @@ std::vector<std::uint8_t> rebuild_pe(const RebuildInput& in) {
         s.vsize = rd32(mem, e + 8);
         s.va = rd32(mem, e + 12);
         s.chars = rd32(mem, e + 36);
+        // the UPX decompression stub clears MEM_WRITE on the executable sections
+        // in the dump's in-memory header, leaving the payload's .data region
+        // read-only. Restore the characteristics the loader actually mapped them
+        // with from the packed file's header snapshot (RWX), and write them back
+        // below — the section headers are otherwise copied verbatim from mem.
+        if (in.header_snapshot.size() > e + 36 + 4) {
+            s.chars = rd32(in.header_snapshot, e + 36);
+        }
         secs.push_back(s);
         const std::uint64_t end = static_cast<std::uint64_t>(s.va) + s.vsize;
         if (end > max_va_end) {
@@ -2997,7 +3186,7 @@ std::vector<std::uint8_t> rebuild_pe(const RebuildInput& in) {
     // ---- the .pgimp blob (Scylla's ImportRebuilder: iat/import_rebuilder)
     const auto groups = iat::group_imports(in.imports);
     const std::uint32_t new_va = align_up(max_va_end, sec_align);
-    const auto section = iat::build_import_section(groups, new_va);
+    const auto section = iat::build_import_section(groups, new_va, in.iat_rva_by_dll);
     if (section.blob.empty()) {
         return {};
     }
@@ -3036,6 +3225,7 @@ std::vector<std::uint8_t> rebuild_pe(const RebuildInput& in) {
     for (const auto& s : secs) {
         wr32(out, s.entry_off + 16, s.raw_size);
         wr32(out, s.entry_off + 20, s.raw_ptr);
+        wr32(out, s.entry_off + 36, s.chars);
         const std::uint64_t avail = mem.size() > s.va ? mem.size() - s.va : 0;
         const std::uint64_t content = std::min<std::uint64_t>(s.raw_size, avail);
         if (content > 0 && static_cast<std::size_t>(s.raw_ptr) + content <= out.size()) {

@@ -36,6 +36,17 @@ endif()
 
 enable_testing()
 
+# Embed the bundled .ql profiles into the library so the binaries no longer need
+# the profile files at runtime (the built-in defaults must match qiling/profiles/).
+# `--profile <file>` and `--set SECTION.KEY=VALUE` are layered on top at runtime.
+foreach(TAOTE_OS windows linux macos freebsd dos uefi qnx)
+    file(READ "${CMAKE_CURRENT_SOURCE_DIR}/qiling/profiles/${TAOTE_OS}.ql" TAOTE_PROFILE_${TAOTE_OS})
+endforeach()
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/default_profiles.hpp.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/qiling/default_profiles.hpp"
+    @ONLY)
+
 add_subdirectory(qiling)
 add_subdirectory(qltool)
 add_subdirectory(tools)
@@ -74,7 +85,7 @@ endif()
 
 install(TARGETS qiling
         ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}")
-install(TARGETS qltool parity_trace gap_census taote_unpack qiling_tests
+install(TARGETS qltool parity_trace gap_census taote qiling_tests
         RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
 install(DIRECTORY qiling/
         DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/qiling"

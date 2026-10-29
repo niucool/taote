@@ -187,6 +187,10 @@ DescriptorWalk walk_import_descriptors(const std::vector<std::uint8_t>& image, s
                 continue;
             }
             ++found;
+            std::string dll_key = sanitize_ascii(dll);
+            std::transform(dll_key.begin(), dll_key.end(), dll_key.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            out.iat_rva_by_dll[dll_key] = ft != 0 ? ft : oft;  // the IAT the code calls through
             const auto thunk_rva = oft != 0 ? oft : ft;
             for (std::size_t k = 0; k < 4096; ++k) {
                 const auto toff = static_cast<std::size_t>(thunk_rva) + k * ptr;

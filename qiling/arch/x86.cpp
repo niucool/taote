@@ -160,19 +160,23 @@ RegMap reg_map_zmm() {
     return m;
 }
 
-RegMap merge(RegMap base) {
+// Named merge_reg_maps (not `merge`) so the unqualified recursive call below can
+// never be hijacked by std::merge via ADL: std::map's associated namespace is
+// std, and a 5-argument call would otherwise make std::merge a candidate and
+// instantiate it with std::map as an iterator.
+RegMap merge_reg_maps(RegMap base) {
     return base;  // fold helper
 }
 
 template <typename... Rest>
-RegMap merge(RegMap base, RegMap next, Rest... rest) {
+RegMap merge_reg_maps(RegMap base, RegMap next, Rest... rest) {
     base.merge(next);
-    return merge(std::move(base), std::move(rest)...);
+    return merge_reg_maps(std::move(base), std::move(rest)...);
 }
 
 template <typename... Maps>
 RegMap merged_maps(Maps... maps) {
-    return merge(std::move(maps)...);
+    return merge_reg_maps(std::move(maps)...);
 }
 
 }  // namespace
