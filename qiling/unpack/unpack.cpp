@@ -160,6 +160,29 @@ void Unpacker::classify_sections(Qiling& ql) {
                     stub[at + 3] = static_cast<std::uint8_t>((moved >> 24) & 0xff);
                 }
                 ql.mem().write(packed_ep_va_, stub);
+                // The stub's multi-pass block table stores the destination VA PAGE in a
+                // 16-bit word and the stub only shifts it (`movzwl (%ebx),%edi;
+                // shl $0xc,%edi`), so a load base above 0xFFFF pages truncates that
+                // field: fsg_cmd's block 2 wants page 0x4ad26 (= base 0x4ad00000 +
+                // rva 0x26000) and the packer stored 0xad26, so the stub decodes to
+                // 0xad26000 and dies before its last blocks - which is exactly where
+                // the payload's import run lives (25 imports mined, recall 0.004).
+                // Give it the page it asks for. The block addresses are its own
+                // arithmetic on the truncated field, so the mapping restores the
+                // packer's intent rather than guessing at it; the corpus has exactly
+                // one such sample (fsg_cmd: FSG prologue + base page 0x4ad00), and it
+                // goes from recall 0.004 to 1.0000 with the entry already exact.
+                if ((base_ >> 12) > 0xffff) {
+                    try {
+                        const std::uint64_t truncated = ((base_ >> 12) & 0xffff) << 12;
+                        ql.mem().map(truncated, 0x400000, UC_PROT_ALL, "[fsg truncated block page]");
+                        if (opts_.debug) {
+                            std::fprintf(stderr, "[unpack] FSG blocks map at 0x%llx\n",
+                                         static_cast<unsigned long long>(truncated));
+                        }
+                    } catch (...) {
+                    }
+                }
                 if (opts_.debug) {
                     std::fprintf(stderr, "[unpack] FSG stub rebased by 0x%x (0x400000 -> %s)\n", delta,
                                  hex(base_).c_str());

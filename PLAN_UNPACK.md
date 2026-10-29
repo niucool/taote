@@ -5247,3 +5247,44 @@ finishes.** A row that lands on the cap looks exactly like a regression otherwis
 session spent three separate verifications on a row that passes in 32 s alone.
 
 FSG is unaffected and unchanged at **94/97** (lowest passing import recall 0.9747).
+
+### 0.17bx Round 80 (FSG): the truncated block page - FSG reaches 95/97
+
+Round 74 closed `fsg_cmd` as unfixable because the block table's 16-bit page field truncates
+(`0x4ad26` -> `0xad26`, so the stub decodes to `0xad26000`) and a table patch cannot help: the
+stub's own `shl $0xc` on a 16-bit value can never produce `0x4ad26000`. What that missed is that
+the stub does not need the *table* repaired - it needs the *page it asks for*:
+
+> map the truncated page (`((base >> 12) & 0xffff) << 12`) and the stub finishes its blocks.
+
+The addresses are the stub's own arithmetic on what the packer stored, so the mapping restores
+the packer's intent instead of guessing at it. A 4 MB region is mapped there (catch-all, so a
+failed map cannot fault the host) inside the same gate as the rebase: the exact 11-byte FSG
+prologue and `base >> 12 > 0xffff`. Across the 2678-sample corpus **exactly one sample** satisfies
+both - `fsg_cmd` - so the blast radius is one row, by construction.
+
+Measured on that row: 25 imports mined -> **341**, import recall 0.004 -> **1.0000** (all 229 of
+the original's pairs), entry already exact, `code_sim 0.96`, and deterministic across runs.
+
+FSG family (97 rows): imports 94 -> **95**, all-three 94 -> **95** (+1: fsg_cmd, 0 losses).
+**FSG is now 95/97 against the reference's 90/97**, and the two remaining rows fail in both tools:
+`fsg_Snap2HTML` (no PE header *and* its stream is past EOF) and `fsg_livekd` (stream past EOF).
+
+### 0.17by Round 80b: the corpus figure is 1863 with a +/-2 band, and here is the band
+
+The quiet corpus run for this change measured all-three **1861**, not 1863, because two rows sat
+exactly on the 85 s cap. Both are boundary rows, verified individually through the same harness:
+
+| row | in the 4-worker corpus | alone |
+|---|---|---|
+| `mpress_ComIntRep` | dur=85, 19 of 527 pairs, recall 0.034 (r56); dur=84, recall 1.000 (r55) | **dur=31, recall 1.0000** |
+| `winupack_Bginfo` | dur=85, recall 0.937 (r56); dur=83, recall 1.000 (r55) | **dur=47, recall 1.0000** |
+
+plus `bero_HDDScan` and `mpress_Bginfo`, which flip their claimed OEP at `dur=86`. So the corpus
+capability is **1863**, and any single measurement lands in **1861-1863** depending on how two to
+four near-cap rows are scheduled. Future rounds should quote the band and name the rows rather
+than diffing single runs: a 1-2 row movement with these names in it is scheduling, not
+regression. (Corpus-wise this change itself is +1: fsg_cmd only.)
+
+Suite 597 -> **598** (`UnpackCompat.FsgTruncatedBlockPageIsMapped` pins base, entry and the mined
+`kernel32!CreateFileW` / `CloseHandle`, which the row could not reach before the mapping).

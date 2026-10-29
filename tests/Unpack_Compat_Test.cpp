@@ -323,6 +323,29 @@ TEST(UnpackCompat, FsgStubIsRebasedForANonDefaultBase) {
     fs::remove_all(out, ec);
 }
 
+// The mult-pass block table stores the destination VA PAGE in a 16-bit word and the
+// stub only shifts it, so a load base above 0xFFFF pages truncates the field:
+// fsg_cmd (base 0x4ad00000) wants page 0x4ad26 and the packer wrote 0xad26. The
+// stub then decodes to 0xad26000 and dies before its last blocks - which hold the
+// payload's import run - so without the mapping this row mines 25 imports (recall
+// 0.004) instead of all 229.
+TEST(UnpackCompat, FsgTruncatedBlockPageIsMapped) {
+    const auto sample = fixture("FSG/fsg_cmd.exe");
+    if (sample.empty()) {
+        GTEST_SKIP() << "packed corpus not present (set TAOTE_PACKED_DIR)";
+    }
+    const auto out = fs::temp_directory_path() / "taote_unpack_fsg_blockpage";
+    std::error_code ec;
+    fs::remove_all(out, ec);
+    const auto res = run_unpack(RunConfig{sample, out, true});
+    ASSERT_EQ(res.base, 0x4ad00000u) << res.error;
+    EXPECT_EQ(res.oep, res.base + 0x829au);          // the original's entry
+    EXPECT_GT(res.imports.size(), 300u) << res.error;  // 25 before the block page was mapped
+    EXPECT_TRUE(has_import(res, "kernel32.dll", "CreateFileW"));
+    EXPECT_TRUE(has_import(res, "kernel32.dll", "CloseHandle"));
+    fs::remove_all(out, ec);
+}
+
 // The grader's own calibration: a hand-built artifact from the *not-packed*
 // original must grade VERIFIED. Here that means the rebuilt PE keeps the
 // original's EP RVA and a parseable section table, which is exactly checks
