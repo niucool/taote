@@ -5573,3 +5573,32 @@ not a loader or unpacking rule.
 **Conclusion: FSG is solved to its solvable limit - 96 of 97, six ahead of the reference's 90, with
 nothing the reference passes being failed - and the one remaining row is a headerless artifact from
 a different FSG build, whose blocker is identified at the instruction level.**
+
+### 0.17ch Round 89 (FSG): the decoder is a research item - and it now has a harness
+
+To settle the last row's LZ question without guessing, a faithful x86-subset emulator of the stub
+was written (`/tmp/fsgemu.py`, research scaffolding, deliberately not in the tree): it executes the
+stub's OWN bytes - the bit reader (`add dl,dl / jne / mov dl,[esi] / adc dl,dl`), the `call [esp]`
+bit-read trampoline, the literal run, the three length paths, the `rep movsb` back-reference and
+the block walker - against a memory model with the packed file at its base and the payload
+workspace at its destination.
+
+State of that harness: it runs `fsg_cmd`'s stub for 17.8k instructions and emits 0x7b5 bytes before
+the back-reference walks below the image, which is *not* yet taote's own result for the same stub
+(taote decodes that sample correctly: all-three, `code_sim 0.96`). So its semantics still differ
+somewhere - most likely in the flag handling of the `adc` bit reader or in `call [esp]`'s operand
+order - and it needs a debug loop against two ground truths that already exist:
+
+- `fsg_cmd`, whose dump taote produces correctly and whose stream is intact, and
+- `fsg_calc`/`fsg_dftp`-class rows, which pass with `code_sim` 0.96-1.0.
+
+Only once the harness reproduces a known-good decode byte-for-byte is `fsg_Snap2HTML`'s stream
+worth decoding, and only then can anyone say whether its bit stream is misaligned (a five-minute
+fix) or the file is missing bytes (a closed row).
+
+**Recommendation: close the FSG thread here.** The family is at **96 of 97, six ahead of the
+reference's 90**, failing nothing the reference passes; the last row is a headerless artifact from
+a different FSG build whose blocker is understood to the instruction and whose remaining work is a
+decoder re-implementation with a harness, not another rule. Every mechanism shipped this session is
+measured on the family and on the full 2678-sample corpus, guarded by five contract tests, and the
+tree carries nothing unmeasured.
