@@ -4451,3 +4451,64 @@ While this round ran, the parallel workstream moved into the import path itself
 run started now measures their changes as well as mine. The 1847 baseline is the r43
 measurement, taken before that work, and any later delta needs the `git status` checked
 first.
+
+### 0.17bc Round 60: where the anti-emulation stubs actually RUN - and it is not out of image
+
+Round 59 concluded that any future adoption work needs evidence about where the payload
+comes FROM. The cheapest form of that evidence is execution: if a stub decodes its
+payload into another region, it must also JUMP there. `TAOTE_LASTPC=64` records the last
+64 instruction addresses; comparing them against `[base, base + dump size)` answers it
+directly (10 lowest-`code_sim` failures per family):
+
+| family | samples | executed outside the image |
+|---|---|---|
+| Themida | 10 | **0** — all in-image |
+| TELock | 10 | **0** — all in-image |
+| Neolite | 10 | **0** — all in-image |
+| Yoda-Protector | 10 | **10** — but only at 0x70000000 |
+
+So for the three biggest ciphertext-at-entry families (Themida 115, TELock 90, Neolite 91
+rows) **the payload is never executed anywhere else**: the decoder simply never runs, and
+there is nothing to capture. Every "dump the other buffer" idea — heap scan, embedded-PE
+adoption, shadow region — is closed for them by this measurement, not by an argument.
+
+Yoda-Protector is different, and the difference is instructive. Its stubs DO leave the
+image, but only into the SEH sentinel page, and the trace says why:
+
+```
+[sehd] code=80000003 fault=4125fc pc=4125fc chain=ffffcff0 next=0     handler=412563
+[sehd] code=80000003 fault=4125fc pc=4125fc chain=ffffcfd0 next=ffffcff0 handler=412570
+[sehd] code=80000003 fault=41263f pc=41263f chain=ffffcfb0 next=ffffcfd0 handler=41257d
+[sehd] code=80000003 fault=41263f pc=41263f chain=ffffcf90 next=ffffcfb0 handler=41258a
+[fault] access=24 addr=0x70000000 pc=0x70000000
+[sehc] ret=0 frames=0 walk=0xffffcf90 ctx=0x70004100 esp=0xffffcf80 eip=0x70000000
+```
+
+`0x80000003` is STATUS_BREAKPOINT: the protector raises its own int3s and walks FOUR
+registered handlers (0x412563, 0x412570, 0x41257d, 0x41258a), each of which answers
+**ret=0 = EXCEPTION_CONTINUE_SEARCH**, so the chain exhausts, round 37's int3 resumption
+loads pc+1, and the walk continues into the sentinel page byte by byte (addr
+0x70000000, 0x70000001, 0x70000002, ...) until the fetch finally faults.
+
+So Yoda's 101 rows are not a decode or a heap problem at all: they are its own SEH/int3
+protocol, where the protector's handlers decline the breakpoint that the protector
+itself raised. Whether that is taote mis-reporting the exception to those handlers (code,
+flags, or the CONTEXT the handler reads) or the handlers genuinely requiring an
+unimplemented disposition is the next question for that family - and it is a contained
+one: 4 handler addresses, one exception code, one loop.
+
+One more step was taken on Yoda and it stops there: those four handler addresses point
+into an obfuscated `eb 01 / e9 <rel32>` ladder, not real code —
+
+```
+412563: jmp 412566      ; eb 01
+412565: jmp 41a857      ; e9 e8 82 00 00
+412570: jmp 412573
+412572: jmp 41de64
+41257d: jmp 412580
+41257f: jmp 41d171
+```
+
+so the handlers themselves are encrypted and reading them statically is useless, exactly
+as with TELock's dump. Chasing Yoda further means runtime tracing of the decrypted chain,
+which is a much larger piece of work than a measured round and is not started here.
