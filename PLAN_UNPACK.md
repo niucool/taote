@@ -5137,3 +5137,28 @@ different stub than the packer wrote.
 
 **FSG final: 94 of 97** (75 at session start), corpus 1843 -> **1861**, and every remaining
 failure is an input the packer itself could not have loaded.
+
+### 0.17bs Round 75 (FSG): fsg_Snap2HTML is truncated too - the family is closed
+
+The last open question was whether the headerless file could still be decoded by synthesising a
+flat image from the stub alone. Its own constants rule that out: the stub opens
+`bb d0 01 40 00 bf 00 10 40 00 be 99 f1 42 00` - `mov ebx,0x4001d0`, `mov edi,0x401000`,
+`mov esi,0x42f199` - and the original's ImageBase is **0x400000**, so the stream it wants to read
+sits at `rva 0x2f199`. The packed file is **0x1e980** bytes: the stream is 0x10819 bytes past the
+end of the file. So `fsg_Snap2HTML` lost its header page *and* the tail of its data; there is
+nothing to decode from even if a loader could be synthesised for it.
+
+That completes the family. **FSG: 94 of 97**, and the three holdouts are all inputs whose own
+bytes make them unloadable, each with a proof:
+
+| row | proof |
+|---|---|
+| fsg_cmd | block-page field is 16 bits: correct destination page 0x4ad26 (base 0x4ad00000 + rva 0x26000) truncated to 0xad26, so the stub decodes to 0xad26000 and faults; a table patch stays 16-bit and `shl 12` cannot produce 0x4ad26000 |
+| fsg_livekd | stream `rva 0x10bb05` against `rs 0x8271f` from `ro 0` in a `0x931f3`-byte file |
+| fsg_Snap2HTML | no `PE\0\0` anywhere, and the stub's stream at `rva 0x2f199` against a `0x1e980`-byte file |
+
+Everything else in FSG now converts: the 20-row ciphertext block that opened this thread was
+four separate defects - a loader alignment rule applied where alignments were equal, a
+first-character shift applied per-name instead of per-run, an entry the ladder could not see
+because it is stored as a relative branch, and a stub written for a 0x400000 load - plus five
+inputs that were genuinely malformed.
