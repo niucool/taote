@@ -239,6 +239,90 @@ TEST(UnpackCompat, UnpackMetaJsonValid) {
     fs::remove_all(out, ec);
 }
 
+// FSG's four mechanisms, pinned on the sample that isolates each (PLAN_UNPACK.md
+// 0.17bj/0.17bk/0.17bn/0.17bo). They are the reason FSG went 75 -> 94 of 97, and
+// every one of them was invisible to the pattern passes that preceded it.
+namespace {
+bool has_import(const UnpackResult& r, const char* dll, const char* fn) {
+    // the mined DLL spelling keeps the image's case ("WLDAP32.dll"), which is what
+    // the grader lowercases on both sides - so compare case-insensitively here
+    const auto want = std::string(dll);
+    for (const auto& [d, n] : r.imports) {
+        if (d.size() != want.size() || n != fn) {
+            continue;
+        }
+        bool same = true;
+        for (std::size_t i = 0; i < d.size(); ++i) {
+            same = same && std::tolower(static_cast<unsigned char>(d[i])) ==
+                               std::tolower(static_cast<unsigned char>(want[i]));
+        }
+        if (same) {
+            return true;
+        }
+    }
+    return false;
+}
+}  // namespace
+
+// The entry is stored in the stub as a REL32 branch (`je 0x411e58`) that decodes
+// to a bare RVA, so no dword search can find it and the ladder used to claim
+// 0x462bf8. Reaching the exact entry also proves the loader's page-below rule no
+// longer overwrites FSG's entry section (round 67): without that guard the packed
+// EP executes the header page and the payload never decodes.
+TEST(UnpackCompat, FsgEntryIsTheStubRel32HandOff) {
+    const auto sample = fixture("FSG/fsg_HashCalc.exe");
+    if (sample.empty()) {
+        GTEST_SKIP() << "packed corpus not present (set TAOTE_PACKED_DIR)";
+    }
+    const auto out = fs::temp_directory_path() / "taote_unpack_fsg_rel32";
+    std::error_code ec;
+    fs::remove_all(out, ec);
+    const auto res = run_unpack(RunConfig{sample, out, true});
+    ASSERT_EQ(res.base, 0x400000u) << res.error;
+    EXPECT_EQ(res.oep, res.base + 0x11e58u);   // the truth; the ladder said 0x462bf8
+    EXPECT_GT(res.imports.size(), 300u);       // the payload's own table, not the stub's 5
+    fs::remove_all(out, ec);
+}
+
+// FSG keeps its resolved-import list in the decoded image as 6-byte records after
+// each DLL name: `02 <u16 ordinal> 00 00` for a by-ordinal import. Without mining
+// them adrestore sits at recall 0.848 (its 10 missing pairs are all ordinals).
+TEST(UnpackCompat, FsgOrdinalRecordsAreMined) {
+    const auto sample = fixture("FSG/fsg_adrestore.exe");
+    if (sample.empty()) {
+        GTEST_SKIP() << "packed corpus not present (set TAOTE_PACKED_DIR)";
+    }
+    const auto out = fs::temp_directory_path() / "taote_unpack_fsg_ordinals";
+    std::error_code ec;
+    fs::remove_all(out, ec);
+    const auto res = run_unpack(RunConfig{sample, out, true});
+    ASSERT_EQ(res.base, 0x400000u) << res.error;
+    EXPECT_TRUE(has_import(res, "activeds.dll", "ordinal_9")) << res.error;
+    EXPECT_TRUE(has_import(res, "wldap32.dll", "ordinal_118"));
+    EXPECT_TRUE(has_import(res, "wldap32.dll", "ordinal_155"));
+    EXPECT_TRUE(has_import(res, "oleaut32.dll", "ordinal_8"));
+    fs::remove_all(out, ec);
+}
+
+// The stub is written for a 0x400000 load: `mov ebx,0x4001d0` and
+// `mov edi,0x401000` are absolute while `mov esi,<stream>` is relative to the
+// file's real base. fsg_calc loads at 0x1000000, so without the rebase it faults
+// on its first movsb before any API call; with it the stub decodes and hands off
+// at the original's entry RVA 0x12d6c.
+TEST(UnpackCompat, FsgStubIsRebasedForANonDefaultBase) {
+    const auto sample = fixture("FSG/fsg_calc.exe");
+    if (sample.empty()) {
+        GTEST_SKIP() << "packed corpus not present (set TAOTE_PACKED_DIR)";
+    }
+    const auto out = fs::temp_directory_path() / "taote_unpack_fsg_rebase";
+    std::error_code ec;
+    fs::remove_all(out, ec);
+    const auto res = run_unpack(RunConfig{sample, out, true});
+    ASSERT_EQ(res.base, 0x1000000u) << res.error;
+    EXPECT_EQ(res.oep, res.base + 0x12d6cu);   // the original's AddressOfEntryPoint
+    fs::remove_all(out, ec);
+}
+
 // The grader's own calibration: a hand-built artifact from the *not-packed*
 // original must grade VERIFIED. Here that means the rebuilt PE keeps the
 // original's EP RVA and a parseable section table, which is exactly checks

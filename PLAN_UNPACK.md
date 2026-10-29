@@ -5205,3 +5205,19 @@ FSG's work is complete: **94 of 97 against the reference's 90**, four rows ahead
 the reference passes, with all four mechanisms (loader alignment guard, block-vote name shift,
 stub `rel32` hand-off, ordinal records + stub rebase) gated so narrowly that the full corpus shows
 zero losses outside the family (1843 -> 1861 this session).
+
+### 0.17bv Round 78 (FSG): the four mechanisms are pinned by tests (suite 594 -> 597)
+
+FSG's work was measured but not guarded: nothing in the suite would have caught a regression in
+any of the four mechanisms. Three contract tests now do, each asserting a number measured on the
+corpus rather than a shape:
+
+| test | sample | pin |
+|---|---|---|
+| `UnpackCompat.FsgEntryIsTheStubRel32HandOff` | `FSG/fsg_HashCalc.exe` | `oep == base+0x11e58` (the stub's `je` target; the ladder used to claim `0x462bf8`) and `imports > 300` (the payload's own table, not the stub's 5 - which also pins the loader's page-below guard, since without it the payload never decodes) |
+| `UnpackCompat.FsgOrdinalRecordsAreMined` | `FSG/fsg_adrestore.exe` | `activeds!ordinal_9`, `wldap32!ordinal_118`, `wldap32!ordinal_155`, `oleaut32!ordinal_8` are present - without the `02 <u16>` record mining this row sits at recall 0.848 |
+| `UnpackCompat.FsgStubIsRebasedForANonDefaultBase` | `FSG/fsg_calc.exe` | `base == 0x1000000` and `oep == base+0x12d6c`, the original's `AddressOfEntryPoint`; without the rebase the stub faults on its first `movsb` |
+
+They follow the existing pattern (skip when the corpus is absent - verified with
+`TAOTE_PACKED_DIR=/tmp/no_corpus`, 3 skipped, 0 failed) and run in ~2.5 s. Suite 594 -> **597**,
+all green. No unpack behaviour changed, so the corpus baseline stays all-three **1861**.
