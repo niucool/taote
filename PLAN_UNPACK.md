@@ -4693,3 +4693,42 @@ mapping against the packed table on `fsg_HashCalc` (and on a passing FSG sample)
 whether the `ro`-ordering is honoured, then decide whether the loader should clamp or sort
 raw offsets when a packed table is deliberately unsorted. That is a bounded, mechanical
 change on a family with 20 rows, unlike the protector work.
+
+### 0.17bi Round 66: FSG's entry section is DROPPED BY LIEF - and the obvious repair is unsafe
+
+Round 65's lead proved real, and the mechanism is now pinned:
+
+* `fsg_HashCalc`'s section table is `(va 0x1000, rs 0)`, `(va 0x82000, rs 0x28558,
+  ro 0x1000)`, `(va 0xab000, rs 0x200, ro 0xe00)` - the third entry's raw pointer goes
+  **backwards** relative to the second's.
+* **LIEF reports only the middle section.** A debug print of every section LIEF yields for
+  that file lists exactly one (`va 0x82000`); the entry section at 0xab000 is absent. The
+  engine therefore never maps the stub, the packed EP 0xab000 executes into whatever is
+  there, and the run dies after four instructions with no API calls.
+* The passing samples have a monotonic table (`fsg_Bginfo`: ro 0x400 then 0x200 is fine
+  because 0x200 is inside the header block and 0x200 < 0x400 is *aligned* at
+  FileAlignment 0x200), which is why 75 of 97 FSG samples work.
+
+Two repairs were tried and measured:
+
+1. **Map every section from the raw file instead of `section.content()`.** FSG's own
+   family measurement looked good - OEP 75 -> **84**, 0 losses - but corpus-wide it is a
+   catastrophe: **1847 -> 1711, 140 losses** (NSPack 90, WinUpack 37, BeRo, Molebox,
+   RLPack). Those families *depend* on LIEF's content, so the wholesale replacement is
+   out.
+2. **Supplement only for sections LIEF never mapped.** Still broken, for a subtler reason:
+   FSG's FileAlignment is 0x1000, so its `ro = 0xe00` is *unaligned*, and the loader's
+   existing FileAlignment rule ("an unaligned raw pointer means the stub is hidden in the
+   page overlap" - the NSPack/WinUpack trick) claims it first and maps the wrong page.
+   Excluding unaligned pointers from the supplement restores NSPack
+   (`nspack_cmd` back to 0x4ad0829a) but also excludes exactly the FSG case.
+
+So the discriminator cannot be "is the raw pointer aligned" - LIEF's *dropping* and the
+loader's *page-overlap* rule both look at the same unaligned pointer and mean opposite
+things. What distinguishes them is whether LIEF reported the section at all: the supplement
+must fire when LIEF omitted it **and** the section is the one holding the packed EP, and it
+must map `ro..ro+rs` rather than the aligned page. That is the next change to try, with
+`fsg_HashCalc` (EP 0xab000, ro 0xe00, FileAlignment 0x1000) as the regression and
+`nspack_cmd` (EP-side stub at ro 0x1a9, FileAlignment 0x200) as the guard.
+
+Both repairs reverted; corpus back to 1847.
