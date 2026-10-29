@@ -239,6 +239,39 @@ std::uint64_t ladder_oep(const PackerContext& ctx) {
                     best = static_cast<std::uint64_t>(tgt);
                 }
             }
+            // A second sweep accepts a target that is NOT code-shaped when the image at
+            // that RVA was never decoded (all zero): fsg_livekd's stub carries
+            // `je 0x9663`, which IS the original's entry, but its payload never decodes
+            // because the packed stream is truncated, so the first sweep rejects it for
+            // lacking a prologue. Only reached when the strict sweep found nothing, and
+            // only when the target page is entirely zero, so a decoded image is never
+            // affected.
+            if (best == 0) {
+                for (std::size_t i = ep_off; i + 6 <= image.size() && i < stub_end; ++i) {
+                    if (image[i] != 0x0f || image[i + 1] != 0x84) {
+                        continue;
+                    }
+                    std::int32_t rel = 0;
+                    std::memcpy(&rel, image.data() + i + 2, sizeof rel);
+                    const auto tgt = static_cast<std::int64_t>(ep_rva) +
+                                     static_cast<std::int64_t>(i - ep_off) + 6 + rel;
+                    if (tgt < 0x1000 || tgt >= static_cast<std::int64_t>(image.size())) {
+                        continue;
+                    }
+                    if (tgt >= static_cast<std::int64_t>(ep_rva) &&
+                        tgt < static_cast<std::int64_t>(stub_end)) {
+                        continue;
+                    }
+                    const auto to = static_cast<std::size_t>(tgt);
+                    bool zero_page = to + 0x100 <= image.size();
+                    for (std::size_t k = 0; zero_page && k < 0x100; ++k) {
+                        zero_page = image[to + k] == 0;
+                    }
+                    if (zero_page) {
+                        best = static_cast<std::uint64_t>(tgt);
+                    }
+                }
+            }
             if (best != 0) {
                 if (ctx.debug) {
                     std::fprintf(stderr, "[unpack] ladder: FSG stub hand-off rva=0x%llx\n",

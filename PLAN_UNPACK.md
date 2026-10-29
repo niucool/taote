@@ -5333,3 +5333,41 @@ the 1861-1863 band behaving exactly as described, not a change of behaviour betw
 2052/2568, valid PE 2674/2678, suite **598/598**. FSG's two remaining rows are the two truncated
 inputs (`fsg_livekd`'s stream is 0x88400 bytes past its section's raw data; `fsg_Snap2HTML` has no
 PE header at all and its stream is 0x10819 bytes past EOF), and the reference cannot read either.
+
+### 0.17ca Round 82 (FSG): the zeroed DOS signature - FSG reaches 96/97
+
+`fsg_livekd` was written off twice (round 76 "stream past EOF", round 81 the same). Both were true
+of its *data* but overlooked that the file could not even be loaded: it ships with `00 00` where
+`MZ` belongs, so LIEF refuses it and the run never starts (`reason=input_parse_failed`). Its header
+is otherwise coherent - `e_lfanew` points at a valid `PE\0\0` and the section table parses.
+
+Two narrow additions, both needed:
+
+1. **Repair the magic in a COPY.** `pe_sample_detail::repairable_sample()` returns the input
+   unchanged when it parses, and otherwise - only when the DOS signature is missing while
+   `e_lfanew` lands on a real PE signature - writes a 2-byte-corrected copy to a temp dir and
+   returns that. It is shared by the CLI and the test harness, so both load the same bytes, and the
+   caller's file is never touched. `fsg_Snap2HTML` still fails cleanly ("the input header is not
+   recoverable") because it has no PE signature at all.
+2. **Accept the hand-off target when it was never decoded.** `fsg_livekd`'s stub carries
+   `je 0x9663` - *exactly* the original's entry - but the strict sweep in `ladder_oep` rejects it
+   because the bytes there are not code-shaped: its packed stream really is truncated, so the body
+   never decodes (`code_sim 0.105`). A second sweep, reached only when the strict one finds nothing,
+   accepts such a target when its page is **entirely zero**, which a decoded image is not.
+
+Measured on the row: `valid_pe` yes, OEP **exact** (`0x409663` = base+0x9663, the fallback was the
+packed EP `0x51e000`), imports **0.9733** (368 pairs against 150), and the body still undecoded -
+so it converts on the criteria without pretending the payload decrypts.
+
+FSG family (97 rows): valid PE 95 -> **96**, OEP exact 95 -> **96**, imports 95 -> **96**,
+all-three 95 -> **96** (+1: fsg_livekd, 0 losses). Full corpus r58 -> r59 (mean loadavg 4.68):
+all-three 1862 -> **1863**, valid PE 2674 -> **2675**, OEP exact 1973 -> **1974**, imports
+2052 -> **2053**, **0 losses**.
+
+**FSG is 96/97 against the reference's 90/97.** The single remaining row is `fsg_Snap2HTML`: no
+`PE\0\0` anywhere in the file (its header page was overwritten by the stub) *and* its stream at
+`rva 0x2f199` against a `0x1e980`-byte file, so there is neither a section table to map nor the
+bytes to decode. The reference cannot read it either.
+
+Suite 598 -> **599** (`UnpackCompat.FsgZeroedDosSignatureIsRepaired` pins the repaired load, the
+`base+0x9663` entry and the mined imports; it skips when the corpus is absent).

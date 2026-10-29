@@ -110,6 +110,57 @@ inline SamplePlan plan_for(const fs::path& sample) {
     return plan;
 }
 
+// A damaged DOS signature makes LIEF refuse a file whose PE header and section
+// table are otherwise intact: fsg_livekd ships with 00 00 where "MZ" belongs, so
+// plan_for() throws and the sample cannot be loaded at all, although e_lfanew
+// points at a valid PE signature. Repair the magic in a COPY (never the caller's
+// file) and return that path; return the input unchanged when it is fine or not
+// repairable. Shared by the CLI and the tests so both load the same bytes.
+inline fs::path repairable_sample(const fs::path& sample) {
+    try {
+        plan_for(sample);
+        return sample;   // parses as-is
+    } catch (const std::exception&) {
+    }
+    std::ifstream in(sample, std::ios::binary);
+    std::vector<std::uint8_t> head(0x400);
+    in.read(reinterpret_cast<char*>(head.data()), static_cast<std::streamsize>(head.size()));
+    head.resize(static_cast<std::size_t>(in.gcount()));
+    if (head.size() < 0x40 || (head[0] == 'M' && head[1] == 'Z')) {
+        return sample;   // no DOS signature to repair, or it is already there
+    }
+    const auto lfanew = static_cast<std::uint32_t>(head[0x3c]) |
+                        (static_cast<std::uint32_t>(head[0x3d]) << 8) |
+                        (static_cast<std::uint32_t>(head[0x3e]) << 16) |
+                        (static_cast<std::uint32_t>(head[0x3f]) << 24);
+    if (lfanew == 0 || lfanew + 4 > head.size() || head[lfanew] != 'P' || head[lfanew + 1] != 'E' ||
+        head[lfanew + 2] != 0 || head[lfanew + 3] != 0) {
+        return sample;   // the PE header is gone too; nothing to repair
+    }
+    const auto dir = fs::temp_directory_path() /
+                     ("taote_repair_" + std::to_string(::getpid()) + "_" +
+                      std::to_string(std::hash<std::string>{}(sample.string()) % 100000));
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    const auto fixed = dir / sample.filename();
+    fs::copy_file(sample, fixed, fs::copy_options::overwrite_existing, ec);
+    if (ec) {
+        return sample;
+    }
+    std::fstream f(fixed, std::ios::in | std::ios::out | std::ios::binary);
+    f.seekp(0);
+    const char mz[2] = {'M', 'Z'};
+    f.write(mz, 2);
+    f.close();
+    try {
+        plan_for(fixed);
+        return fixed;
+    } catch (const std::exception&) {
+        return sample;
+    }
+}
+
+
 // the minimal stub dll: the correct PE headers/sections/export table, one
 // 0xC3 cell per export, entry point 0 (so the loader's DllMain drive skips).
 // Rendered by hand, mirroring tools/stub_dlls.py (which seeds the reference
@@ -669,7 +720,7 @@ inline SampleOutcome run_pe_sample(const std::string& bin_name, const SampleOpti
     std::shared_ptr<std::deque<std::uint64_t>> pc_ring;  // TAOTE_PE_TRACE ring
     std::shared_ptr<HookRet> trace_hook;
     try {
-        const auto plan = plan_for(sample);
+        const auto plan = plan_for(repairable_sample(sample));
         const auto rootfs = run_opts.rootfs.has_value() ? *run_opts.rootfs
                                                     : make_rootfs(fs::path(bin_name).stem().string());
 

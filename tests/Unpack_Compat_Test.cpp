@@ -65,7 +65,9 @@ struct RunConfig {
 UnpackResult run_unpack(const RunConfig& cfg) {
     using namespace qiling::testing::pe_sample_detail;
     UnpackResult result;
-    const auto plan = plan_for(cfg.sample);
+    // a damaged DOS signature is repaired in a copy, exactly as the CLI does
+    const auto run_sample = qiling::testing::pe_sample_detail::repairable_sample(cfg.sample);
+    const auto plan = plan_for(run_sample);
 
     const auto rootfs = fs::temp_directory_path() / ("taote_unpack_test_" + cfg.sample.stem().string());
     std::error_code ec;
@@ -87,7 +89,7 @@ UnpackResult run_unpack(const RunConfig& cfg) {
         }
     }
     const auto staged = rootfs / "Windows" / cfg.sample.filename();
-    fs::copy_file(cfg.sample, staged, fs::copy_options::overwrite_existing);
+    fs::copy_file(run_sample, staged, fs::copy_options::overwrite_existing);
 
     qiling::os::register_dlls();
     qiling::QilingOptions options;
@@ -99,7 +101,7 @@ UnpackResult run_unpack(const RunConfig& cfg) {
     options.argv.push_back(staged.string());
 
     UnpackOptions uopts;
-    uopts.sample_path = cfg.sample.string();
+    uopts.sample_path = run_sample.string();
     uopts.out_dir = cfg.out_dir.string();
     uopts.enable_hop = cfg.hop;
     uopts.rootfs = rootfs.string();
@@ -343,6 +345,30 @@ TEST(UnpackCompat, FsgTruncatedBlockPageIsMapped) {
     EXPECT_GT(res.imports.size(), 300u) << res.error;  // 25 before the block page was mapped
     EXPECT_TRUE(has_import(res, "kernel32.dll", "CreateFileW"));
     EXPECT_TRUE(has_import(res, "kernel32.dll", "CloseHandle"));
+    fs::remove_all(out, ec);
+}
+
+// A zeroed DOS signature makes LIEF refuse a file whose PE header is otherwise
+// intact: fsg_livekd ships with 00 00 where "MZ" belongs. The tool repairs the
+// magic in a COPY and runs that, so the sample loads at all; its stub then carries
+// `je 0x9663`, which is the original's entry, and the payload's import run mines to
+// recall 0.973 even though the packed stream is truncated and the body stays
+// undecoded (code_sim 0.105). Both halves are needed: without the copy repair the
+// run never starts, and without the undecoded-target sweep the entry stays at the
+// packed EP.
+TEST(UnpackCompat, FsgZeroedDosSignatureIsRepaired) {
+    const auto sample = fixture("FSG/fsg_livekd.exe");
+    if (sample.empty()) {
+        GTEST_SKIP() << "packed corpus not present (set TAOTE_PACKED_DIR)";
+    }
+    const auto out = fs::temp_directory_path() / "taote_unpack_fsg_livekd";
+    std::error_code ec;
+    fs::remove_all(out, ec);
+    const auto res = run_unpack(RunConfig{sample, out, true});
+    ASSERT_EQ(res.base, 0x400000u) << res.error;
+    EXPECT_EQ(res.oep, res.base + 0x9663u);   // the stub's je target; the fallback was the packed EP
+    EXPECT_GT(res.imports.size(), 300u) << res.error;
+    EXPECT_TRUE(has_import(res, "kernel32.dll", "CreateFileW"));
     fs::remove_all(out, ec);
 }
 

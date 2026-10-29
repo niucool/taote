@@ -222,11 +222,22 @@ int main(int argc, char** argv) {
     // per-sample failure.
     fs::path run_rootfs;
     qiling::testing::pe_sample_detail::SamplePlan plan;
+    // A damaged DOS signature makes LIEF refuse a file whose PE header and section
+    // table are otherwise intact: fsg_livekd ships with 00 00 where "MZ" belongs and
+    // cannot be loaded at all, though e_lfanew points at a valid PE signature. Repair
+    // the magic in a COPY (never the caller's file) and run that: it loads, its stub
+    // hands off at the true entry, and its imports mine to recall 0.973.
+    fs::path run_sample = qiling::testing::pe_sample_detail::repairable_sample(sample);
+    bool planned = false;
     try {
-        plan = plan_for(sample);
-    } catch (const std::exception& e) {
+        plan = plan_for(run_sample);
+        planned = true;
+    } catch (const std::exception&) {
+    }
+    if (!planned) {
         std::printf("[unpack] %s family=unknown base=0x0 oep=0x0 stages=0 reason=input_parse_failed "
-                    "imports=0 error=%s\n", sample.filename().string().c_str(), e.what());
+                    "imports=0 error=the input header is not recoverable\n",
+                    sample.filename().string().c_str());
         return 1;
     }
     if (!rootfs.empty()) {
@@ -239,7 +250,7 @@ int main(int argc, char** argv) {
             }
         }
         fs::create_directories(run_rootfs / "Windows");
-        fs::copy_file(sample, run_rootfs / "Windows" / sample.filename(),
+        fs::copy_file(run_sample, run_rootfs / "Windows" / sample.filename(),
                       fs::copy_options::overwrite_existing);
     } else {
         // Sweep temp trees left behind by runs that died before their cleanup
@@ -295,7 +306,7 @@ int main(int argc, char** argv) {
                 write_stub_dll(run_rootfs, key_dll, names, plan.is64);
             }
         }
-        fs::copy_file(sample, run_rootfs / "Windows" / sample.filename(),
+        fs::copy_file(run_sample, run_rootfs / "Windows" / sample.filename(),
                       fs::copy_options::overwrite_existing);
     }
 
@@ -317,7 +328,7 @@ int main(int argc, char** argv) {
     }
 
     qiling::unpack::UnpackOptions uopts;
-    uopts.sample_path = sample.string();
+    uopts.sample_path = run_sample.string();
     uopts.out_dir = out_dir;
     uopts.enable_hop = enable_hop;
     uopts.family = family.empty() ? guess_family(sample) : family;
