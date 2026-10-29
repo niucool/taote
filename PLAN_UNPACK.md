@@ -5417,3 +5417,36 @@ dead, env-gated code: the tree stays at 96/97 with nothing unmeasured in it. The
 future round is above: base 0x420000 from the stub's own `mov esi,0x42f199` (the unique
 0x10000-aligned value that keeps the stream inside the file), `entry = base + 0`, and an image size
 derived from the stub's block table.
+
+### 0.17cc Round 84 (FSG): the flat-image path runs - and the blocker moves into the stub
+
+The flat-image load was built properly this round (a `flat_image_base` on `QilingOptions` and
+`UnpackOptions`, a loader branch that maps the whole file at that base with `entry = base`, an
+engine branch that takes one synthetic section when LIEF cannot parse, a shared
+`pe_sample_detail::flat_image_base()` that derives the base from the stub's `mov esi,<stream>` and
+requires it to be UNIQUE, and a CLI plan for a file with no import table). It works as far as it
+goes:
+
+```
+[unpack] FSG stub rebased by 0x20000 (0x400000 -> 0x420000)
+[pc] 0x42001e 0x42009d 0x42009f 0x42004f 0x420051 0x420063 0x420064 0x420065
+[fault] access=19 addr=0x2 pc=0x420065
+```
+
+- the image loads at exactly the derived **0x420000**,
+- the FSG rebase fires and shifts the stub's `0x400000`-based operands to `base`,
+- the stub executes: its bit reader (`0x42001e`), a decode path (`0x42004f`-`0x420051`) and the
+  length-extend path (`0x420063`) all run,
+- then it faults reading address **0x2** at `0x420065`, before any payload byte is mined
+  (`import_string scan: 0 groups, 0 names`), and falls back to a hop inside the stub
+  (`oep=0x420015`).
+
+So the loader half is solved and the remaining blocker for this row is **inside the stub**: on this
+file it takes a decode path the four repaired samples never take, and reads a near-null value. That
+is a decoder-semantics trace (single-step the 0x420063-0x42008x block with `esi`/`eax`/`ecx`
+recorded), not a mapping question - and it is now the *only* thing between FSG and 97/97.
+
+The prototype was reverted rather than kept: it is unmeasured (it cannot convert the row yet) and
+the standing rule is that no unmeasured mechanism sits in the tree. Everything the next round needs
+is recorded above: the base derivation is proven unique (0x420000), the loader branch is 20 lines,
+and the failing instruction is identified.
