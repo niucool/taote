@@ -353,6 +353,13 @@ std::uint64_t ladder_oep(const PackerContext& ctx) {
             std::fprintf(stderr, "[unpack] ladder passB hits=%zu first=0x%llx last=0x%llx\n", hits,
                          static_cast<unsigned long long>(frames.empty() ? 0 : frames.front()),
                          static_cast<unsigned long long>(frames.empty() ? 0 : frames.back()));
+            if (std::getenv("TAOTE_LADDERDUMP") != nullptr) {
+                std::fprintf(stderr, "[unpack] passB offsets:");
+                for (const auto f : frames) {
+                    std::fprintf(stderr, " 0x%llx", static_cast<unsigned long long>(f - ctx.base));
+                }
+                std::fprintf(stderr, "\n");
+            }
         }
         // A program that shares this frame shape across several functions
         // (Cacheset has 3, AccessEnum 2) makes "unique" false, so the hops we

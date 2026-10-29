@@ -4808,3 +4808,51 @@ FSG now: **82 of 97**, and its remaining 15 are 6 decoded-but-wrong-OEP, 2 impor
 (`DarkNamer` 0.208, `adrestore` 0.848), 5 still ciphertext (`calc`, `cmd`, `dfrgui`,
 `ftp`, `mtinst` - all claiming an OEP in a *different base*: 0x1106f67, 0x4ad4a350,
 0x1090aa0, 0x10110f0, 0x10aaa8e) and 2 ungraded (`Snap2HTML`, `livekd`).
+
+### 0.17bl Round 69 (FSG): the last 15, classified per sample with evidence
+
+FSG is at **82/97** (75 before this session's two fixes). The remaining 15 fall into four
+groups, each now measured rather than guessed:
+
+**A. Five still ciphertext - these decompress to a HARDCODED 0x400000, and that is not a
+mapping bug we can paper over.** `fsg_calc`, `fsg_cmd`, `fsg_dfrgui`, `fsg_ftp`,
+`fsg_mtinst` all declare a base that is *not* 0x400000 (0x1000000 / 0x4ad00000), and all
+five fault on their FIRST store at exactly **0x401000**:
+
+```
+fsg_calc      base=0x1000000  fault write 0x401000 pc=0x113e022
+fsg_cmd       base=0x4ad00000 fault write 0x401000 pc=0x4ad61022
+fsg_dfrgui    base=0x1000000  fault write 0x401000 pc=0x10ed022
+fsg_ftp       base=0x1000000  fault write 0x401000 pc=0x1016022
+fsg_mtinst    base=0x1000000  fault write 0x401000 pc=0x113d022
+```
+
+The instruction is FSG's LZ `movsb` loop, so the destination pointer is 0x400000-based
+regardless of the declared base. Two repairs were tried and both failed: a zero-filled
+alias at 0x400000 (the stub then reads zeros as its compressed source and runs away), and a
+populated alias (same runaway, fault moving to 0xffffe000), and forcing the load base to
+0x400000 breaks the process layout ("Requested memory is unavailable", base ends 0x0). The
+decoder's own bit-loop has to be understood before this moves - it is FSG-specific, not a
+loader rule.
+
+**B. Six decoded with the WRONG OEP - and the truth IS a ladder candidate, chosen by link
+order.** `TAOTE_LADDERDUMP=1` (new) prints every Pass-B offset. For `fsg_HashCalc` the true
+entry **0x11e58 is hit #68 of 84**, in a list that is mostly a 16-byte-stride table
+(0x8b00..0x91a0) plus ~25 real `55 8b ec` frames. Pass C then overrides with a validated
+thunk (claim 0x462bf8). That is the same link-order ambiguity round 49 refused to encode for
+Alienyze: the right value is present, and nothing in a single sample says which candidate is
+"the entry".
+
+**C. Two import-only rows.** `fsg_DarkNamer` (recall 0.216) and `fsg_adrestore` (0.848).
+DarkNamer's decoded run IS shifted (`bcontrolfp`, `bwcmdln`, `bXcptFilter`, `bonexit`,
+`zcscpy`) and the block vote handles those, but its C++ MANGLED imports (`B?1type_info@@UAE@XZ`,
+`B?0exception@@QAE@ABV0@@Z`) need the shifted first character to be `?`, which the vote
+rejected as non-alphanumeric. Extending the shift to accept `?` measured **neither gain nor
+loss** (82 -> 82, DarkNamer 0.208 -> 0.216), so it was reverted rather than kept as
+unmeasured risk - the mangled names are not what those rows are missing.
+
+**D. Two rows LIEF cannot parse at all.** `fsg_Snap2HTML`, `fsg_livekd`: the run ends
+`stages=0 reason=input_parse_failed error=LIEF parse failed` on the INPUT file, so nothing is
+loaded and both count as invalid PE. This is the same LIEF weakness as FSG's section table
+(section A/B of round 66), one level up: it rejects the whole file. A self-parsed fallback
+loader would be needed; that is a different, larger piece of work.
