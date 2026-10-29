@@ -4512,3 +4512,48 @@ into an obfuscated `eb 01 / e9 <rel32>` ladder, not real code —
 so the handlers themselves are encrypted and reading them statically is useless, exactly
 as with TELock's dump. Chasing Yoda further means runtime tracing of the decrypted chain,
 which is a much larger piece of work than a measured round and is not started here.
+
+### 0.17bd Round 61: Themida allocates, never decrypts, and exits on purpose
+
+Round 60 established that Themida/TELock/Neolite never execute outside their own image.
+This round asked what their image actually contains at the end, and what the stub's last
+instructions are.
+
+**The image is mostly untouched.** The true-EP page of the dump, 8 Themida samples:
+
+| sample | dump | true-EP page |
+|---|---|---|
+| themida_7z | 0x6c4000 | 100% zeros |
+| themida_ADInsight | 0xb83000 | 100% zeros |
+| themida_AccessEnum | 0x6c5000 | 100% zeros |
+| themida_Autoruns | 0x80a000 | 100% zeros |
+| themida_BatteryInfoView | 0x6fb000 | 100% zeros |
+| themida_Bginfo | 0xb1c000 | 100% zeros |
+| themida_ADExplorer | 0x769000 | entropy 7.94 (encrypted) |
+| themida_Autologon | 0x730000 | entropy 7.94 (encrypted) |
+
+The dumps are 2-3x the packed files and share 0.1-1.7% of their 64-byte blocks, so the
+engine really is holding a fresh `SizeOfImage`-sized image - one the stub allocated and
+then left zero-filled at the entry, with a couple of pages encrypted.
+
+**The stub exits on purpose.** `TAOTE_LASTPC` on `themida_Bginfo` ends in a textbook
+epilogue, not a fault:
+
+```
+713d32: add  $0x27,%edx
+713d38: movl $0x0,(%edx)
+713d3e: pop %edi; pop %esi; pop %ebp; pop %ebx; pop %edx; pop %ecx; pop %eax
+713d45: popf
+713d46: ret  $0x0
+```
+
+So Themida's run ends because the protector returned from its own dispatch code after
+storing a zero - a voluntary exit, exactly the "detected and bail" shape the census found
+for the whole class, and consistent with the decoders never running. There is no point in
+that sequence where a decoder half-finished; nothing was attempted.
+
+That makes the three biggest ciphertext families one problem, not three: an
+environment check that taote answers wrongly, early, before any decoding. Finding it
+needs whole-run tracing of the stub (millions of instructions to find one branch), which
+is a research task rather than a measured round - and the round-43 PEB surface and
+round-54 clock experiments already rule out the two cheapest suspects.
