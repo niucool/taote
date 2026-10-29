@@ -4557,3 +4557,41 @@ environment check that taote answers wrongly, early, before any decoding. Findin
 needs whole-run tracing of the stub (millions of instructions to find one branch), which
 is a research task rather than a measured round - and the round-43 PEB surface and
 round-54 clock experiments already rule out the two cheapest suspects.
+
+### 0.17be Round 62: the RDTSC a protector reads is a CONSTANT - and the shim that would fix it does not take
+
+Round 61 left "an environment check answered wrongly, early" as the shape behind the three
+biggest ciphertext families. The inline probes that leave no API trace are CPUID and
+RDTSC, so a `UC_X86_INS` hook (`TAOTE_CPUIDBG`) was added to log them. Note for whoever
+re-adds it: `UC_X86_INS_CPUID` is an ENUM VALUE, not a macro, so `#ifdef` around it is
+always false and the hook silently compiles to nothing — include `<unicorn/x86.h>` and
+test for the strings in the binary.
+
+What it shows, over the five anti-emulation families:
+
+| family | cpuid | rdtsc |
+|---|---|---|
+| Themida (themida_Bginfo) | 0 | **2, both at pc 0x720edc** |
+| TELock, Neolite, Alienyze, Yoda-Protector | 0 | 0 |
+
+And the value unicorn hands the stub is **constant**, not merely jittery: reading
+`eax:edx` at the second occurrence (the first occurrence's result) gives
+`0x9812de0000000a` on every one of three runs, byte-identical. So a protector that asks
+"did the clock advance between two reads?" always sees a delta of **zero** - the standard
+emulator fingerprint, and exactly the shape round 54 tested at the API level (GetTickCount
+/ QPC), where it measured inert.
+
+**The shim, and why it is not shipped.** Unicorn exposes no TSC control (`UC_CTL_*` has
+nothing for it) and the `UC_HOOK_INSN` trampoline returns `void`, so the instruction
+cannot be skipped. The approach tried: the INSN hook learns the pc, installs a paired
+code hook at `pc + 2` (RDTSC is 2 bytes), and that hook overwrites `eax:edx` with a
+monotonically advancing virtual TSC seeded from the first real value. It runs - the
+callback fires at 0x720ede with the pending flag set - but **the register write does not
+survive to the next read**: the second RDTSC still sees `0x9812de0000000a`. Either
+unicorn restores the register file across the hook boundary, or the stub saves/restores
+the pair around the read (which would make the delta comparison itself pointless for it).
+Unresolved, so nothing shipped; the tree stays at the shipped 1847.
+
+Worth noting for the next attempt: with the TSC constant and only TWO reads, a delta
+comparison is not obviously what this stub does at all - the two reads sit at the same pc,
+which is more like "read until it changes" (a spin) than "measure an interval".
