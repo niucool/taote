@@ -4665,3 +4665,31 @@ ordinal ceiling (payload descriptor chains destroyed), the pick rows are link or
 the 558 ciphertext rows are the anti-emulation class whose decoders demonstrably never run
 (rounds 60-63). Nothing in this table is unexplored; the remaining work is stub-level
 reverse engineering of four protectors.
+
+### 0.17bh Round 65: a mechanical lead in FSG's 20 failures - a scrambled section table
+
+The refreshed classification (round 64) leaves FSG as the one non-protector family with a
+double-digit ciphertext block: 20 rows, all `dur=0`, `code_sim` 0.08-0.26, import recall
+~0.00-0.03, and all with the OEP wrong. FSG is a trivial decompress-in-place packer, so
+that shape is suspicious. What the probes show:
+
+* `fsg_HashCalc`: the run executes **four instructions**, makes **zero** API calls, and
+  ends `stages=0 reason=fallback_guess`. The packed EP is 0xab000 and execution stops
+  exactly there - but the bytes at that address in the DUMP are not the stub: they are
+  `4d 5a 90 00 ...`, i.e. a PE header (the packed file's own).
+* The stub's real code (`bb d0 01 40 00` = `mov ebx, 0x4001d0`) appears in the dump at
+  offset **0xe00** - which is exactly its *file* offset, not its RVA.
+* And the packed file's section table is scrambled in a way FSG is known for: three
+  sections with `ro` values 0x0, **0x1000**, **0x0e00** - non-monotonic and overlapping
+  (section 2's raw data starts *before* section 1's), with section 1 having `rs=0x28558`
+  from `va=0x82000`.
+
+So the most likely story is a mapping defect for non-monotonic raw offsets, not a
+protector: the stub is placed at the wrong RVA, executes into a data page, and stops.
+75 of 97 FSG samples have sane tables and pass, which fits.
+
+Not yet proven, and recorded as such: the next step is to compare the engine's per-section
+mapping against the packed table on `fsg_HashCalc` (and on a passing FSG sample) and see
+whether the `ro`-ordering is honoured, then decide whether the loader should clamp or sort
+raw offsets when a packed table is deliberately unsorted. That is a bounded, mechanical
+change on a family with 20 rows, unlike the protector work.
