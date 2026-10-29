@@ -5625,3 +5625,41 @@ Continuing 0.17ch's harness against `fsg_cmd`, whose decode taote gets right:
 
 Nothing from this work is in the tree (the harness lives in `/tmp/fsgemu.py`); FSG remains at
 **96/97**, measured at HEAD, six ahead of the reference's 90.
+
+### 0.17cj Round 91 (FSG): the last row's blocker is TWO BYTES in the stub, found by differential tracing
+
+The differential harness from 0.17ch/0.17ci is now validated, and it answered the question.
+
+**The harness.** `TAOTE_FSGTRACE=<n>` (new, env-gated, off by default - the same class of
+scaffolding as `TAOTE_LASTPC`/`TAOTE_SEHDBG`) logs one line per executed instruction of the stub's
+own section: `pc eax ebx ecx edx esi edi`. Run against `fsg_cmd`, it can be diffed line-for-line
+with the hand-written emulator (`/tmp/fsgemu.py`). Getting them to agree took three real
+corrections, and the model now matches unicorn **byte-for-byte over 40 000 instructions and 2.1 M
+instructions of the full run**, with zero mismatching lines:
+
+| # | what was wrong in the model | evidence |
+|---|---|---|
+| 1 | `2b cb` decoded as `sub ebx,ecx` | it is `sub ECX, EBX` (the reg field is the destination): unicorn had `ecx=1` where the model had `ebx=-1` |
+| 2 | the incoming `ebp` was zeroed | the stub *reads* an incoming `ebp` at `xchg eax,ebp; mov eax,ebp`; unicorn starts it at `0xffffd000` |
+| 3 | `rep movsb` hooked once | unicorn re-fires the code hook per iteration *and once more for the `ecx==0` evaluation* |
+| 4 | `call [esp]` return address off by one | `ff 14 24` is 3 bytes, not 2 |
+
+**The finding.** Pointing the validated model at `fsg_Snap2HTML` decodes its first literal byte to
+**0x80** - exactly the original's `.text` first byte - and then diverges, because stub offset
+**0x65-0x67** differs from the sibling build:
+
+| | stub+0x63 | stub+0x68 |
+|---|---|---|
+| `fsg_cmd` (and the other repaired samples) | `91 48 c1 e0 08 ac` = `xchg eax,ecx; dec eax; shl eax,8; lodsb` | |
+| **`fsg_Snap2HTML`** | `91 48 c1 03 00 ac` = `xchg eax,ecx; dec eax; rol dword [ebx],0; lodsb` | |
+
+`shl eax,8` is the match-DISTANCE computation; `rol dword [ebx],0` is a no-op that also does not
+touch `eax`, so the distance comes out wrong - which is exactly the `0x420ffe` bogus distance the
+real run reports at `pc=0x420065`. So the row is not an LZ-format mystery: **two bytes of the packed
+file's stub are mutated**, and the sibling build says what they should be. Patching them back
+(`c1 03 00` -> `c1 e0 08`) makes the model progress past that instruction, which is as far as the
+model goes until more of the fixup-walker opcodes are implemented.
+
+That is the remaining work for this row, and it is a modelling/debugging task with a validated
+harness and a two-byte hypothesis - not another loader rule. Nothing from the harness is in the
+tree except the trace gate; FSG remains at **96/97** measured at HEAD.

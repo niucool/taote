@@ -596,6 +596,35 @@ void Unpacker::install(Qiling& ql) {
             1, 0));
         hooks_.push_back(std::move(h));
     }
+    // TAOTE_FSGTRACE: log the stub's own execution, one line per instruction, so a
+    // hand-written model of FSG's decoder can be diffed against unicorn's. Used to
+    // validate /tmp/fsgemu.py against fsg_cmd, whose decode taote gets right.
+    if (const char* ft = std::getenv("TAOTE_FSGTRACE"); ft != nullptr) {
+        const auto n = std::strtoul(ft, nullptr, 0);
+        if (n > 0) {
+            auto h = std::make_shared<HookRet>(ql.hook_code([this, n, &ql](std::uint64_t addr, std::uint32_t) -> int {
+                static std::size_t emitted = 0;
+                if (emitted >= n || packed_ep_va_ == 0) {
+                    return 0;
+                }
+                if (addr < packed_ep_va_ || addr >= packed_ep_va_ + 0x200) {
+                    return 0;
+                }
+                auto& regs = ql.arch().regs();
+                std::fprintf(stderr, "[fsgt] %llx eax=%llx ebx=%llx ecx=%llx edx=%llx esi=%llx edi=%llx\n",
+                             static_cast<unsigned long long>(addr),
+                             static_cast<unsigned long long>(regs.read("eax") & 0xffffffffull),
+                             static_cast<unsigned long long>(regs.read("ebx") & 0xffffffffull),
+                             static_cast<unsigned long long>(regs.read("ecx") & 0xffffffffull),
+                             static_cast<unsigned long long>(regs.read("edx") & 0xffffffffull),
+                             static_cast<unsigned long long>(regs.read("esi") & 0xffffffffull),
+                             static_cast<unsigned long long>(regs.read("edi") & 0xffffffffull));
+                ++emitted;
+                return 0;
+            }));
+            hooks_.push_back(std::move(h));
+        }
+    }
     if (const char* lp = std::getenv("TAOTE_LASTPC"); lp != nullptr) {
         const std::size_t n = std::strtoul(lp, nullptr, 0);
         if (n > 0) {
