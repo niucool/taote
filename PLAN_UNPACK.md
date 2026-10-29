@@ -4625,3 +4625,43 @@ Themida does, so it is not a small change.
 Note on the earlier test-writing trap, since it cost a cycle: `A3` is the 64-bit
 `mov moffs64, eax` form and faults with UC_ERR_WRITE_UNMAPPED in an x86-64 engine; the
 absolute-disp32 store is `89 04 25 <disp32>`.
+
+### 0.17bg Round 64: refreshed classification after the Amber gain - the picker worklist is 41 rows, not 144
+
+Priority 1's standing instruction is to re-run the by-first-failing-criterion
+classification. Round 53 did it before round 55 shipped +27 Amber samples, so here it is
+again on the current clean report (`/home/jim/runs/r43`, 1847), now also split by whether
+the dumped bytes at the TRUE EP match the original's (the round-53 body test):
+
+| criterion | rows | of which decoded | of which ciphertext |
+|---|---|---|---|
+| pick (imports OK, OEP wrong) | 144 | **41** | 103 |
+| imports (OEP exact) | 105 | 94 | 11 |
+| both | 498 | 54 | 444 |
+| **total** | **747** | **189** | **558** |
+
+The headline is the first line. "Pick" looks like 144 samples but **103 of them are
+ciphertext at the entry** - Neolite alone contributes 78, whose imports pass only because
+they come from the packer's own store (round 42). The real picker worklist is **41
+decoded rows**: Alienyze 18, WinUpack 5, Amber 4, JDPack 4, PEtite 4, and the rest single
+samples. That is the same 40-row figure rounds 49/53 arrived at by two other routes, and
+round 49 already measured that its Alienyze cluster is link order rather than a rule.
+
+So priority 1 is conclusively capped: 41 rows, 18 of them the documented Alienyze
+link-order cluster, and no unexplored family left in that class.
+
+Where the mass actually is, by body state:
+
+| class | rows | biggest |
+|---|---|---|
+| ciphertext at the true EP | **558** | Themida 122, TELock 100, Yoda-Protector 98, PEtite 23, FSG 20, Alienyze 19, Exe32pack 15 |
+| decoded, import-only | 94 | RLPack 65 (data ceiling), Alienyze 11, WinUpack 8, PEtite 6, MEW 3 |
+| decoded, pick-only | 41 | Alienyze 18 |
+| decoded, both | 54 | RLPack 26 |
+
+Every one of those columns now has a measured reason why it is stuck: RLPack's 91 rows are
+a data ceiling (371 missing names, 0 present in the dump), the import-only rows are the
+ordinal ceiling (payload descriptor chains destroyed), the pick rows are link order, and
+the 558 ciphertext rows are the anti-emulation class whose decoders demonstrably never run
+(rounds 60-63). Nothing in this table is unexplored; the remaining work is stub-level
+reverse engineering of four protectors.
