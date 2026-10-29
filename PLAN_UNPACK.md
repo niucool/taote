@@ -5407,3 +5407,13 @@ for this row (the remaining 96 need nothing).
 **FSG otherwise stands at 96 of 97 against the reference's 90** - and every one of the six
 mechanisms behind that is measured on the family and then on the full corpus with zero losses
 outside it.
+
+Prototyped and reverted: a `TAOTE_FLAT_BASE` path (loader maps the file at 0x420000 with
+`entry = base`, engine takes one synthetic section when LIEF fails) compiles and would run, but the
+**CLI never gets there** - `plan_for()` throws before `Qiling` is constructed, because the tool needs
+a PE to derive the stub-dll rootfs. So the flat-image load is a three-layer feature (CLI staging,
+loader geometry, engine sections), not a rule, and it was reverted unfinished rather than left as
+dead, env-gated code: the tree stays at 96/97 with nothing unmeasured in it. The exact recipe for a
+future round is above: base 0x420000 from the stub's own `mov esi,0x42f199` (the unique
+0x10000-aligned value that keeps the stream inside the file), `entry = base + 0`, and an image size
+derived from the stub's block table.
