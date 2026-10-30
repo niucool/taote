@@ -7222,3 +7222,17 @@ No rep-string, no exotic instruction in the copy path - so the divergence is NOT
 what the decoder decides to copy and from where: the bit reader (`shr esi,cl` at 0x417a9d) or the
 distance/length decode around 0x417926. That is the next probe's target, and the census above is what makes
 it a two-minute question: every payload byte's provenance is now known.
+
+One more fact from the same disassembly, worth having before the next session starts: the error label
+0x4181c7 is reached from MORE than the checksum. The bit reader's control path ends with
+
+    417ae5  test BYTE PTR [ebp+0x8],0x20
+    417ae9  je   0x4181c7            ; same error label as the checksum at 0x417327
+
+so `[ebp+0x8]` - the decompressor's FIRST argument, one of the four stack dwords the caller pushed
+(0x408863 / 0x4147ff / 0 / 0x41864c) - carries a flag whose bit 0x20 decides whether the decode may
+continue. The tracer run shows the routine failing at the very first 0x102-window refill
+(`cmp [ebp-0x10],0x102 ; jae 0x4178d7` at 0x417aad-0x417ab4), i.e. almost immediately, which fits a flag
+test rather than a data comparison: check the value of `[ebp+0x8] & 0x20` FIRST in the next session, since
+that is a one-probe answer and, if it is clear under taote, the decode never had a chance rather than
+producing wrong bytes.
