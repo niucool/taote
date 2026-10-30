@@ -685,6 +685,25 @@ void Unpacker::install(Qiling& ql) {
                              static_cast<unsigned long long>(rd("edi")), static_cast<unsigned long long>(rd("ebp")),
                              static_cast<unsigned long long>(rd("esp")), static_cast<unsigned long long>(ret));
                 std::fprintf(stderr, "[probe]   @eax='%s' @edx='%s'\n", peek(rd("eax")).c_str(), peek(rd("edx")).c_str());
+                // TAOTE_PROBE_EBP_DISP=<dec>: also show the dword at [ebp+disp] - the slot an
+                // indirect call is about to use, which is where a pre-resolved API pointer lives
+                if (const char* d = std::getenv("TAOTE_PROBE_EBP_DISP")) {
+                    const auto disp = static_cast<std::int64_t>(std::strtoll(d, nullptr, 0));
+                    const auto at = static_cast<std::uint64_t>(static_cast<std::int64_t>(rd("ebp")) + disp);
+                    std::uint64_t v = 0;
+                    std::string raw = "?";
+                    try {
+                        const auto b4 = ql.mem().read(at, 4);
+                        if (b4.size() == 4) {
+                            v = static_cast<std::uint64_t>(b4[0]) | (static_cast<std::uint64_t>(b4[1]) << 8) |
+                                (static_cast<std::uint64_t>(b4[2]) << 16) | (static_cast<std::uint64_t>(b4[3]) << 24);
+                        }
+                        raw = peek(v);
+                    } catch (...) {
+                    }
+                    std::fprintf(stderr, "[probe]   [ebp%+lld]=0x%llx @ptr='%s'\n", static_cast<long long>(disp),
+                                 static_cast<unsigned long long>(v), raw.c_str());
+                }
                 return 0;
             }));
             if (h->obj() != nullptr) {

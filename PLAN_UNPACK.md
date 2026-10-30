@@ -6498,3 +6498,31 @@ walks and the hash it compares - and check it against the exported names of the 
 synthesized stub dll, which is where the wrong pointer comes from. 18 rows ride on the OEP alone
 (they are already decoded and import-complete) plus 11 on the recall tail. No code changed this round;
 suite 602/602, tree clean, baseline unchanged (r65: all-three 1957 in-run, 1960 capability).
+
+### 0.17dh Round 114: Alienyze's resolver slot is ZERO - the stub's own hash walk found nothing
+
+One probe answered the question 0.17dg left open. `TAOTE_PROBE` gained a `TAOTE_PROBE_EBP_DISP`
+companion (reads the dword at `[ebp+disp]`, i.e. the slot an indirect call is about to use), both
+env-gated and off by default. At the dying instruction on `alienyze_AccessEnum.exe`:
+
+    [probe] pc=0x44fc43 eax=0x400000 ebx=0x0 ecx=0x42a20b edx=0x42a024 ebp=0xffffcffc
+    [probe]   @eax='MZ......................'   @edx='user32.dll.MessageBoxW.A'
+    [probe]   [ebp-132]=0x0 @ptr='?'
+
+So the instruction `call DWORD PTR [ebp-0x84]` calls through a slot that is **0**, and the argument
+being pushed is Alienyze's own import spec `"user32.dll.MessageBoxW.A"` (dot-separated, its private
+store format) - the stub is invoking its *resolver* with a spec, and the resolver pointer was never
+filled in. `eax` still holds the main image base (0x400000), i.e. the stub never even resolved its
+first import.
+
+That is a much sharper statement than "the hand-off never arrives": the stub's own export-table hash
+walk - the one that fills these slots before any API call - returns nothing under taote, while under
+the reference the very same call site is the run's first dispatch (LoadLibraryA, returning to
+0x44fc49). Everything downstream (the 151 297-byte XOR, the body copies, the section hop) is
+unaffected and already working: the image is decoded statically to code_sim 1.000.
+
+Next step (recorded, and now very narrow): find the walk that stores into `[ebp-0x84]` - locate it by
+probing the instruction that writes that slot (watch `ebp-0x84` for the first write) and log the
+module it walks, the hash it compares and the name it reconstructs; then compare against the export
+directory taote's synthetic stub dll actually exposes. The suspicion is the export DIRECTORY shape
+(name/ordinal arrays), since the same dlls serve every other family. 18 rows ride on this.
