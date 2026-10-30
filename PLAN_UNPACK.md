@@ -5791,3 +5791,62 @@ matching the dedicated fsg14 arm row for row.
 So the FSG arc closed with no collateral damage: the honest corpus capability at HEAD is
 **1864/2678 all-three** (the 1863-1864 band, since `mpress_ComIntRep` sits on the budget boundary),
 OEP exact 1974/2501, imports 2054/2568, valid PE 2675/2678, suite 601/601.
+
+### 0.17cp FSG - AUTHORITATIVE SUMMARY (read this, not the intermediate sections)
+
+The family's record spans sections 0.17bj-0.17co and several of them state conclusions that later
+rounds overturned. This section is the single source of truth; where it disagrees with an earlier
+section, this one wins.
+
+**Final state, measured at HEAD (`fb5cdb1`).** FSG is **96 of 97 all-three** (valid PE 96, OEP exact
+96, imports 96) against the reference's **90 of 97**, so six rows ahead, failing nothing the reference
+passes. Reproduced by two dedicated family arms (`fsg13`, `fsg14`: 97 rows, 85 s, 4 workers) and by
+the full corpus run (`r60`, 1864/2678 all-three, zero losses). `fsg_livekd.exe` and `fsg_cmd.exe`,
+the long-standing holdouts, both pass (`oep 0x409663 / 0x4ad0829a`).
+
+**The five shipped mechanisms**, each measured family-first then corpus, zero losses outside FSG:
+
+| mechanism | effect | pinned by |
+|---|---|---|
+| `FileAlignment < SectionAlignment` guard in the loader | entry section stops being dropped (9 OEPs) | `FsgEntryIsTheStubRel32HandOff` |
+| per-BLOCK undo of the -3 first-char shift (incl. `B?` mangled names) | imports 75 -> 85 (7 rows) | `FsgStringShiftIsUndoneAsABlockVote` |
+| OEP from the stub's `0f 84` rel32 hand-off | 6 wrong-OEP rows -> exact | `FsgEntryIsTheStubRel32HandOff` |
+| ordinal-record mining + stub rebase for non-0x400000 bases | 4 rows convert | `FsgOrdinalRecordsAreMined`, `FsgStubIsRebasedForANonDefaultBase` |
+| truncated block-page map (16-bit page overflow) | `fsg_cmd` converts | `FsgTruncatedBlockPageIsMapped` |
+
+plus `FsgZeroedDosSignatureIsRepaired` for the zeroed-`MZ` repair (which must happen BEFORE Qiling is
+constructed, hence the shared `repairable_sample` helper).
+
+**The one failure is dead packer output, not a taote defect.** `fsg_Snap2HTML.exe` has no `PE\0\0`
+anywhere, its entry stub is damaged (49 of 464 stub bytes diverge from its nearest neighbour where a
+normal row diverges by 12, including `mov eax,[eax]; mov al,ds:0x5ea40004` where every intact build
+has the whole match-copy `mov esi,edi; sub esi,eax; rep movsb`), and its data decodes from no
+plausible stream start x destination under the family's own semantics - every arm dies on a match
+distance pointing before the output buffer or on a nonsense write, while the `fsg_cmd` control
+decodes 0x22c1f valid bytes with the same model. The row fails gracefully and that contract is pinned
+by `FsgHeaderlessInputFailsGracefully`.
+
+**Superseded sections - do not act on these:**
+
+| section | superseded claim | now |
+|---|---|---|
+| 0.17bm | "closed at 82/97, every row at a ceiling" | 96/97 |
+| 0.17bs | "`fsg_Snap2HTML` is truncated" | complete file, headerless; payload just not decodable |
+| 0.17bu | "the 94 is stable, thread closed" | 96 |
+| 0.17cd | "Snap2HTML's third constant points nowhere" | the constant is correct (0.17ce) |
+| 0.17cg/0.17ch | "solvable work is done / decoder is a research item" | closed with a mechanism-level proof (0.17ck) |
+| 0.17cj | "the blocker is two mutated stub bytes" | part of it: the stub is damaged in the match-copy too |
+
+**The harness.** `TAOTE_FSGTRACE=<n>` (env-gated, off by default) logs one line per executed stub
+instruction. It enabled a hand-written model of FSG's decoder that matches unicorn **byte-exactly
+over 40 000 instructions and 2.1 M instructions of a full run**. That is how the last row was
+settled, and it is the tool to reach for if an FSG-like build ever appears again. Traps worth
+keeping: `2b cb` is `sub ECX,EBX` (reg field is the destination), the stub reads an INCOMING `ebp`,
+unicorn re-fires the code hook per `rep movsb` iteration plus once for `ecx==0`, and `ff 14 24` is
+3 bytes.
+
+**Why nothing more is planned.** Every row either converts all three criteria or is a file whose
+entry stub cannot execute. New work on this family would have to start from evidence outside the
+corpus. Measurement hygiene still applies to any future corpus number: quiet machine, no stray
+`pegasus-cli`, and treat `mpress_ComIntRep`, `winupack_Bginfo`, `bero_HDDScan` and `mpress_Bginfo` as
+budget-boundary rows (1863-1864 band) rather than diffs.
