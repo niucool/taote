@@ -6333,3 +6333,33 @@ Next concrete step (recorded): catch the loop's ENTRY - log `ebx`/`eax` at the f
 computes. That names the operand the packer expects (its own file-mapping view, its module base, or a
 heap block) and therefore the real defect. No code changed this round; suite 602/602, tree clean,
 baseline unchanged (r63: all-three 1873/2678).
+
+### 0.17dd Round 110: Neolite's stub calls ExitProcess on purpose - the decode never starts
+
+The round-109 next step was to catch the loop's entry and name the operand. Doing that answered the
+question at a different level: **the stub is not failing to decode, it is deliberately terminating.**
+
+Added a small generic debug gate, `TAOTE_PROBE=<hex pc>` (off by default, same class as
+`TAOTE_LASTPC`/`TAOTE_FSGTRACE`): the first three times that exact pc executes it prints the guest
+registers, the return slot and a 24-byte ASCII peek at `eax`/`edx`. With it:
+
+* the string loop `0x416e26` is a plain NUL-terminated XOR-0xff decryptor (`ebx` walks `.neolit`
+  from `0x4160df`, `eax` walks a stack buffer) - normal, not a runaway;
+* the run's last 40 PCs end at the pair `call [ebx]` / `call [ebp-4]`, and probing them gives
+  `GetProcAddress(hModule=0x10020000, lpProcName="ExitProcess")` returning the cell `0x10021030`,
+  then the stub **calls it**.
+
+So the whole Neolite flow on this row is: `GetModuleHandleA`, `GetModuleFileNameA`, `GlobalAlloc`,
+`CreateFileA(C:/Windows\neolite_ProduKey.exe)`, `CreateFileMappingA`, `MapViewOfFile` (verified in
+0.17dc to return the real `MZ` bytes), decrypt `"ExitProcess"`, resolve it, call it. The process exits
+after six imports and 0.1 s, which is exactly what the artifact showed: the packed file copied to
+rva 0x1000 and nothing decoded.
+
+That reframes the family for the next round: Neolite's 91 failing rows take an **early-exit path**,
+so the question is no longer "why is the decode wrong" but "which test sends the stub down the exit
+branch". The shape is visible in `.neolit`: the exit is reached through a helper that ends
+`test eax,eax; jne` (`0x416e0a`) and a `call 0x416591` argument path at `0x416e15`, i.e. a helper
+whose result decides between "carry on" and "leave". Next step (recorded): log the guest's arguments
+and return values for the six calls in order, and the value tested at `0x416e0a`, so the failing
+condition is identified from data. TAOTE_PROBE ships (env-gated, off by default, suite 602/602,
+behaviour unchanged - a no-probe run still reports `oep=0x40d21e imports=635`).

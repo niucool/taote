@@ -638,6 +638,61 @@ void Unpacker::install(Qiling& ql) {
         }
     }
 
+    // TAOTE_PROBE=<hex pc>: dump the guest registers and the return slot the first
+    // time that exact pc executes. A debugging aid (like TAOTE_LASTPC/TAOTE_FSGTRACE):
+    // a stub loop that runs away is only diagnosable if you can see which pointer it
+    // was handed, and the operand is computed by its CALLER, so log the stack slot too.
+    if (const char* probe = std::getenv("TAOTE_PROBE")) {
+        const auto want = static_cast<std::uint64_t>(std::strtoull(probe, nullptr, 0));
+        if (want != 0) {
+            auto hits = std::make_shared<int>(0);
+            auto h = std::make_shared<HookRet>(ql.hook_code([this, &ql, want, hits](std::uint64_t addr,
+                                                                                  std::uint32_t) -> int {
+                if (addr != want || *hits >= 3) {
+                    return 0;
+                }
+                ++*hits;
+                auto& regs = ql.arch().regs();
+                const auto rd = [&regs](const char* n) { return regs.read(n); };
+                std::uint64_t ret = 0;
+                try {
+                    const auto sp = rd("esp");
+                    const auto bytes = ql.mem().read(sp, 4);
+                    if (bytes.size() == 4) {
+                        ret = static_cast<std::uint64_t>(bytes[0]) | (static_cast<std::uint64_t>(bytes[1]) << 8) |
+                              (static_cast<std::uint64_t>(bytes[2]) << 16) |
+                              (static_cast<std::uint64_t>(bytes[3]) << 24);
+                    }
+                } catch (...) {
+                }
+                const auto peek = [&ql](std::uint64_t a) {
+                    std::string out;
+                    try {
+                        for (auto b : ql.mem().read(a, 24)) {
+                            out += (b >= 0x20 && b < 0x7f) ? static_cast<char>(b) : '.';
+                        }
+                    } catch (...) {
+                        out = "?";
+                    }
+                    return out;
+                };
+                std::fprintf(stderr,
+                             "[probe] pc=0x%llx eax=0x%llx ebx=0x%llx ecx=0x%llx edx=0x%llx esi=0x%llx"
+                             " edi=0x%llx ebp=0x%llx esp=0x%llx ret=0x%llx\n",
+                             static_cast<unsigned long long>(addr), static_cast<unsigned long long>(rd("eax")),
+                             static_cast<unsigned long long>(rd("ebx")), static_cast<unsigned long long>(rd("ecx")),
+                             static_cast<unsigned long long>(rd("edx")), static_cast<unsigned long long>(rd("esi")),
+                             static_cast<unsigned long long>(rd("edi")), static_cast<unsigned long long>(rd("ebp")),
+                             static_cast<unsigned long long>(rd("esp")), static_cast<unsigned long long>(ret));
+                std::fprintf(stderr, "[probe]   @eax='%s' @edx='%s'\n", peek(rd("eax")).c_str(), peek(rd("edx")).c_str());
+                return 0;
+            }));
+            if (h->obj() != nullptr) {
+                hooks_.push_back(std::move(h));
+            }
+        }
+    }
+
     // no hops at all (the Phase 0 artifact-only mode): the dump is the entry
     // state, which is what "no unpacking" means for the scoreboard
     if (!opts_.enable_hop) {
