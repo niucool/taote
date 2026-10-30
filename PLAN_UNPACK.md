@@ -7191,3 +7191,34 @@ divergence is in the DECRYPT loop that runs before the copies, exactly as 0.17dw
 (the store region differs between the engines in ~15% of bytes). The next probe is therefore the first
 write into the store region with a pc OTHER than 0x4171c1/0x417206 - the tracer's `uniq` output over a
 larger n names it directly.
+
+### 0.17dy Round 129: the writer census - where every payload byte comes from
+
+0.17dx said "the next probe is the first write into the store region whose pc is not the copy loop".
+Done, and the answer is a complete map of the decode's data flow (all measured with the range tracer):
+
+    writes into the payload section 0x401000-0x413000:
+      12,464  pc=0x417206   memcpy helper (0x4171f5-0x417213: rep movsd + rep movsb)
+       7,529  pc=0x4171c1   the overlapping BACKWARD copy of the 12-byte relocation table
+           4  pc=0x41720f   the same helper's byte tail
+           3  pc=0x417217   `mov [edi],al`, the first instruction of the decompressor at 0x417214
+
+    writes into the heap buffer the memcpy reads from (0x5004572, i.e. GlobalAlloc(0xbc70)):
+       5,827  pc=0x417a92     875  pc=0x417a5a      241  pc=0x417aa4
+       3,323  pc=0x417926     874  pc=0x417a61        3  pc=0x417ed2 ...
+
+So no XOR/decrypt loop writes into the payload at all: the image is filled by copies whose SOURCE is the
+decompressor's heap buffer, and the decoder's own stores are at 0x417a5a/0x417a61/0x417a92/0x417926.
+Disassembled, that inner loop is ordinary LZ copying - a two-byte-at-a-time match copy with the standard
+short-distance overlap branch:
+
+    417a4c  mov ecx,edi ; sub ecx,edx / cmp ecx,ebx ; jb 0x417a6b   ; overlap test
+    417a54  mov ecx,edi ; sub ecx,ebx                              ; src = edi - distance
+    417a58  mov dl,[ecx] ; 417a5a mov [edi],dl ; inc edi ; inc ecx
+    417a5c  mov dl,[ecx+1] ; 417a61 mov [edi],dl                    ; two bytes per pass
+    417a90  mov dl,[ecx] ; 417a92 mov [edi],dl ; inc edi ; inc ecx  ; the long run
+
+No rep-string, no exotic instruction in the copy path - so the divergence is NOT in the copying but in
+what the decoder decides to copy and from where: the bit reader (`shr esi,cl` at 0x417a9d) or the
+distance/length decode around 0x417926. That is the next probe's target, and the census above is what makes
+it a two-minute question: every payload byte's provenance is now known.
