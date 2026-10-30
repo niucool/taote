@@ -41,6 +41,14 @@ enable_testing()
 # `--profile <file>` and `--set SECTION.KEY=VALUE` are layered on top at runtime.
 foreach(TAOTE_OS windows linux macos freebsd dos uefi qnx)
     file(READ "${CMAKE_CURRENT_SOURCE_DIR}/qiling/profiles/${TAOTE_OS}.ql" TAOTE_PROFILE_${TAOTE_OS})
+    # The embedded profiles are read at CONFIGURE time, so editing a .ql did not
+    # rebuild anything: a profile change looked applied (the binary rebuilt, no
+    # error) while the old text stayed embedded. Round 131 lost a whole corpus
+    # run to that - `cmake --build` after changing [OS32] stack_address produced
+    # a binary whose guest stack was still 0xfffdd000. Make the .ql files
+    # configure dependencies so the next build regenerates the header.
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/qiling/profiles/${TAOTE_OS}.ql")
 endforeach()
 configure_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/cmake/default_profiles.hpp.in"

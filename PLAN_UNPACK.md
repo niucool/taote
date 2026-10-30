@@ -7338,7 +7338,8 @@ installed) rather than whether it should fault.
 Family arm: **TELock 116 rows -> 116 valid PE / 1 OEP exact / 0 imports / 0 all-three**, unchanged, as
 expected for a fidelity fix that does not by itself decode the family. Corpus (r71) below.
 
-**Corpus r71** (2678 rows, 85 s budget, 4 workers, `TMPDIR=/home/jim/tmp`, 74 min):
+**Corpus r71** - *a no-op measurement, see 0.17eb: the profile change was not in that binary*
+(2678 rows, 85 s budget, 4 workers, `TMPDIR=/home/jim/tmp`, 74 min):
 
 | run | valid PE | OEP exact | imports | all-three |
 |---|---|---|---|---|
@@ -7355,3 +7356,50 @@ the graded criterion** and buys the 5.3x-deeper stub execution plus a ladder tha
 Suite: 602/602, 0 failed (three cases - `PegasusParity.ConfigParityMountsFilesAndPatchesTheRegistry`,
 `PegasusParity.PEBModulesPopulated`, `QilingPeCompat.PeWinX86ReturnFromMainExitTrap` - failed once under
 `ctest -j4` and pass both alone and on the rerun; they share temp roots, not stack state).
+
+### 0.17eb Round 131b: the profile is embedded at CONFIGURE time - r71 measured a no-op, and the stack search must run after the image
+
+Three defects in round 131's own work, all found by chasing one probe that disagreed with it.
+
+**1. The .ql profile is read at `configure_file` time, not build time.** `CMakeLists.txt` does
+`file(READ .../profiles/<os>.ql)` + `configure_file(... @ONLY)`, so editing `windows.ql` and running
+`cmake --build` rebuilds the binary **without regenerating `build/qiling/default_profiles.hpp`**. Round 131
+fell straight into it: the corpus run it published as "r71, the stack change measured" executed a binary
+whose guest stack was still 0xfffdd000, which is why its numbers were *exactly* the r68 baseline. It was
+caught when a fresh probe printed `[sehd] ... chain=ffffcfb0` - a negative stack on a build that was
+supposed to have a positive one. Fix: every profile is now a `CMAKE_CONFIGURE_DEPENDS` entry, so the next
+build regenerates the header.
+
+**2. `find_free_space` cannot answer this question where round 131 asked it.** The first version slid the
+stack base with `mem.find_free_space(stack_size, 0x1200000)` at the point the profile is read. That reads
+`map_info_`, and on the PE path the image is not mapped yet (`load_image` runs later), so
+`telock_adwcleaner_7.2.4.0.exe` was told 0x1200000 is free - and the *image* map then threw
+`Requested memory is unavailable`, because that sample's `SizeOfImage` is 0x1293000 from 0x400000, i.e.
+straight through 0x1200000. The family arm lost a valid PE (116 -> 115) to exactly that row.
+
+**3. The search now runs at the map site, after the image.** The stack map moved behind a `map_stack`
+lambda: the shellcode path keeps calling it where it always did, the PE path calls it right after
+`pe_image_size_ = last_image_size_`, and the base is searched forward geometrically (step doubles from
+`align_up(stack_size)` to 16 MB, 32 tries) until `mem.is_available()` agrees. `is_available` reads the
+emulator's real mappings, so it cannot race the image. Measured: `telock_adwcleaner_7.2.4.0.exe` lands at
+**0x1a1f000 after 6 tries** and loads again (oep 0x1690037, family TELock); `telock_7z.exe` keeps 0x1200000
+with 0 tries. `TAOTE_STACKDBG=1` prints `[stack] base=... size=... tries=...`, off by default.
+
+**Corpus r72** (2678 rows, 85 s, 4 workers, 71 min) - the change actually in the binary this time:
+
+| run | valid PE | OEP exact | imports | all-three |
+|---|---|---|---|---|
+| r68/r69 baseline | 2675 | 2115 | 2081 | 1989 (capability 1991) |
+| r71 (no-op) | 2675 | 2115 | 2081 | 1989 |
+| **r72 (live)** | **2675** | **2115** | **2083** | **1991** |
+
+Two gains, **zero losses**: `expressor_Everything` (in-run now, 60 s) and `nspack_ADInsight` (86 s, the row
+that used to need an isolated re-run) - i.e. r72 is the first corpus run that reaches the whole 1991
+capability figure in one pass. Row-level OEP/import movements are three: the two gains plus
+`bero_geek.exe`, which loses its exact entry (0x159760 -> 0x5f9008), the same trade round 131 recorded
+(`rlpack_geek` gained it there and does not here); neither geek row is all-three either way. TELock arm
+unchanged at 116 valid PE / 1 OEP / 0 imports / 0 all-three. Suite 602/602 serially (one flaky case under
+`ctest -j4`, `PegasusParity.FileAccessEmulationX86`, passes alone - these parity cases share temp roots).
+
+**Lesson to keep:** a profile edit is a *configure* input. Verify with `TAOTE_STACKDBG`/a probe that the
+value is live BEFORE spending a corpus run on it.

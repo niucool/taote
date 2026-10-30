@@ -840,11 +840,15 @@ void QlLoaderPE::run() {
     // get_valid_ranges(size, hint). 32-bit only: the 64-bit stack sits in the
     // high user range that no image reaches.
     if (bits == 32) {
-        try {
-            stack_address_ = ql_->mem().find_free_space(stack_size_, stack_address_);
-        } catch (...) {
-            // nothing free at or above the hint: keep the profile's value and
-            // let the map below surface the collision
+        // keep the profile's base; the free-range search happens at the map
+        // site below, where the answer can be checked against what is ACTUALLY
+        // mapped (find_free_space reads map_info_, and the image is not in it
+        // yet at this point - measured: telock_adwcleaner_7.2.4.0.exe reports
+        // 0x1200000 as free here and the map then refuses it).
+        if (std::getenv("TAOTE_STACKDBG") != nullptr) {
+            std::fprintf(stderr, "[stack] hint=0x%llx size=0x%llx\n",
+                         static_cast<unsigned long long>(stack_address_),
+                         static_cast<unsigned long long>(stack_size_));
         }
     }
     image_address_ = static_cast<std::uint64_t>(profile.get_int(ossection, "image_address"));
@@ -887,16 +891,44 @@ void QlLoaderPE::run() {
     structure_last_addr_ = bits == 64 ? os::windows::GS_SEGMENT_ADDR : os::windows::FS_SEGMENT_ADDR;
 
     // loader/pe.py load(): the stack map rides BOTH paths (the shellcode
-    // + the PE) before the branch
-    {
+    // + the PE) before the branch.
+    //
+    // The base is searched forward from the configured value: a Windows-like
+    // 32-bit stack base (0x1200000, the reference's alloc_stack hint) can land
+    // inside a big image (20 of the 2676 corpus samples declare
+    // base+SizeOfImage past it), and the search is geometric so a 28 MB image
+    // costs one extra test, not one per stack-size step.
+    //
+    // On the PE path the search runs AFTER load_image: the conflict is the
+    // image mapping over the stack (measured: telock_adwcleaner_7.2.4.0.exe
+    // declares SizeOfImage 0x1293000 from 0x400000, i.e. straight through
+    // 0x1200000, and mapping the stack first made the image map throw
+    // "Requested memory is unavailable"). load_image is the thing that decides
+    // where the image landed, so it has to win the race.
+    const auto map_stack = [this, bits]() {
         auto& mem = ql_->mem();
+        if (bits == 32 && stack_size_ != 0) {
+            std::uint64_t step = mem.align_up(stack_size_);
+            int tries = 0;
+            while (!mem.is_available(stack_address_, stack_size_) && tries < 32) {
+                stack_address_ += step;
+                step = step < 0x1000000ull ? step * 2 : 0x1000000ull;
+                ++tries;
+            }
+            if (std::getenv("TAOTE_STACKDBG") != nullptr) {
+                std::fprintf(stderr, "[stack] base=0x%llx size=0x%llx tries=%d\n",
+                             static_cast<unsigned long long>(stack_address_),
+                             static_cast<unsigned long long>(stack_size_), tries);
+            }
+        }
         mem.map(stack_address_, stack_size_, UC_PROT_ALL, "[stack]");
-    }
+    };
 
     if (!ql_->code().empty()) {
         // the shellcode path (loader/pe.py load(pe=None))
         is_driver_ = false;
 
+        map_stack();
         auto& mem = ql_->mem();
         mem.map(entry_point, static_cast<std::uint64_t>(ql_->os().code_ram_size()), UC_PROT_ALL, "[shellcode]");
         mem.write(entry_point, ql_->code());
@@ -927,6 +959,7 @@ void QlLoaderPE::run() {
 
         pe_image_address_ = load_image(ql_->path(), ql_->targetname());
         pe_image_size_ = last_image_size_;
+        map_stack();
 
         if (is_driver_) {
             init_driver_object();
