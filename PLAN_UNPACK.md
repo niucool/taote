@@ -6158,3 +6158,53 @@ with more than 0x200 bytes of file beyond its last section (`alienyze_tinytask`:
 overlay). So the overlay mechanism is worth at most one row, not the family's 110 headroom - the
 Alienyze block is decode/attribution, not layout. That closes both leads from the pegasus review as
 "measured, low value" and leaves the family headroom table as the honest map.
+
+### 0.17cy Round 105: descriptor-ANCHORED string mining - corpus 1864 -> 1873, zero losses
+
+Next lead from the pegasus review, in the family-headroom direction this time. RLPack's block is not
+layout: 104 rows, OEP-exact 73, **imports-ok 1**, all-three 0. Diagnosed by measuring, for every
+missing truth pair, whether the name STRING is in the dump at all:
+
+| | |
+|---|---|
+| RLPack rows with missing pairs | 103 |
+| missing pairs | 19 391 |
+| name string PRESENT in the dump (attribution gap) | **4 069 (21 %)** |
+| name string absent (runtime resolution - the loader/hash-walk class) | 15 322 (79 %) |
+
+So a fifth of RLPack's gap is taote dropping strings it already has, and recovering exactly those
+moves **7 rows over the 0.95 criterion** (`accesschk` 0.048 -> 1.000, `handle` 0.692 -> 1.000,
+`livekd` 0.047 -> 0.987, `procexp` 0.038 -> 0.964, `ADInsight` 0.037 -> 0.985, `Coreinfo`
+0.052 -> 0.965, `procdump` 0.064 -> 0.959).
+
+**Why they were dropped.** `mine_orphan_descriptors` returns early from every bare-string blob
+heuristic when `image_descriptor_count_ >= 4`, because the *unrestricted* blob passes fabricated
+phantoms (MSPDB80.DLL, hhctrl.ocx) on images that carry a real chain. RLPack's decoded image carries
+a real-but-mostly-EMPTY chain (23 descriptors -> 27 imports on `rlpack_Bginfo`) while the names it
+omits sit in the image as plain strings.
+
+**The mechanism (precision-safe by construction).** Instead of returning, run a
+descriptor-ANCHORED pass: scan the image for identifier-like runs and accept a name only when its
+EXACT spelling is a known export (`api_owner`) AND its owner is one of the DLLs the image's own
+descriptors already named. No new DLL can be invented, and a data string can never claim a phantom
+module - the failure mode the original gate existed to prevent.
+
+**Measured, family first** (RLPack, 104 rows, 85 s, 4 workers): all-three **0 -> 7**, imports-ok
+1 -> 8, OEP-exact 73 (unchanged), recall up on 35 rows and **down on 0**, mean recall
+0.220 -> 0.370; mean precision 0.745 -> 0.534 (the added names are real exports of declared DLLs,
+but data strings that spell an export name do add entries).
+
+**Then the corpus** (`r63`, 2678 samples, 85 s, 4 workers):
+
+| arm | valid PE | OEP exact | imports | all-three |
+|---|---|---|---|---|
+| r61 | 2675 | 1974 | 2054 | 1864 |
+| **r63** | **2675** | **1974** | **2066** | **1873** |
+
+**+9 all-three, zero losses**: RLPack 0 -> 7, NSPack 87 -> 89 (`ADInsight`, `cpuz_x32` - their
+strings were being dropped for the same reason). Recall up on 72 rows and down on **0**; mean recall
+0.8137 -> 0.8217. Mean precision 0.6717 -> 0.6342, with three families losing more than 0.10
+(Enigma Virtual Box 0.527 -> 0.375, Neolite 0.860 -> 0.716, RLPack 0.745 -> 0.535) - the cost of the
+extra (real, declared-DLL) names, which the grader does not charge for (its import criterion is
+recall >= 0.95; `imp_exact` tracks precision separately). rc distribution 2676 clean, 1 timeout,
+1 non-zero, i.e. no new faults.

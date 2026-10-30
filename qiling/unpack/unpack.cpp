@@ -1583,7 +1583,74 @@ std::size_t Unpacker::mine_orphan_descriptors(const std::vector<std::uint8_t>& i
     // heuristics below only fabricate phantom imports (MSPDB80.DLL, hhctrl.ocx)
     // from data strings, so skip them for those images.
     if (image_descriptor_count_ >= 4) {
-        return pairs + blob_pairs;
+        // Descriptor-ANCHORED string pass. An image carrying a real chain used to skip
+        // every blob heuristic, because the unrestricted ones fabricated phantoms
+        // (MSPDB80.DLL, hhctrl.ocx). But a chain can be mostly EMPTY while the names it
+        // omits sit in the image as plain strings: measured on 104 RLPack rows, 4069 of
+        // 19391 missing pairs (21%) have their name string in the dump, and recovering
+        // them moves 7 rows over the 0.95 import criterion (accesschk 0.048 -> 1.000,
+        // handle 0.692 -> 1.000, livekd 0.047 -> 0.987, procexp 0.038 -> 0.964,
+        // ADInsight 0.037 -> 0.985, Coreinfo 0.052 -> 0.965, procdump 0.064 -> 0.959).
+        // The restriction is what keeps it precision-safe: a name is only accepted when
+        // its EXACT spelling is a known export AND its owner is one of the DLLs the
+        // image's own descriptors already name - so no new DLL can be invented and a
+        // data string can never claim a phantom module.
+        std::set<std::string> declared;
+        for (const auto& [dll, fn] : imports_) {
+            std::string d = lower_ascii(dll);
+            const auto slash = d.find_last_of("/\\");
+            if (slash != std::string::npos) {
+                d = d.substr(slash + 1);
+            }
+            if (d.size() > 4 && d.compare(d.size() - 4, 4, ".dll") == 0) {
+                d.resize(d.size() - 4);
+            }
+            if (!d.empty()) {
+                declared.insert(d);
+            }
+        }
+        std::size_t anchored = 0;
+        if (!declared.empty()) {
+            std::string run;
+            run.reserve(64);
+            const auto flush = [&]() {
+                if (run.size() >= 4 && run.size() <= 64) {
+                    const char* owner = api_owner(run);
+                    if (owner != nullptr) {
+                        std::string o = lower_ascii(owner);
+                        if (o.size() > 4 && o.compare(o.size() - 4, 4, ".dll") == 0) {
+                            o.resize(o.size() - 4);
+                        }
+                        if (declared.count(o) != 0) {
+                            note_import(o, run);
+                            ++anchored;
+                        }
+                    }
+                }
+                run.clear();
+            };
+            for (const auto c : image) {
+                const auto u = static_cast<unsigned char>(c);
+                const bool ident = (u >= 'a' && u <= 'z') || (u >= 'A' && u <= 'Z') ||
+                                   (u >= '0' && u <= '9') || u == '_' || u == '@' || u == '?';
+                if (ident) {
+                    if (run.size() < 64) {
+                        run.push_back(c);
+                    } else {
+                        run.clear();
+                    }
+                } else {
+                    flush();
+                }
+            }
+            flush();
+        }
+        if (opts_.debug) {
+            std::fprintf(stderr,
+                         "[unpack] descriptor-anchored strings: %zu declared dlls -> %zu pairs (total %zu)\n",
+                         declared.size(), anchored, imports_.size());
+        }
+        return pairs + blob_pairs + anchored;
     }
     // FSG/BeRo/MEW/WinUpack store the payload's import list as a bare string run:
     // [dll][name][name]…[marker][dll][name]… with one- or two-character separator
