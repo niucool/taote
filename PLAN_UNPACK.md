@@ -5770,3 +5770,24 @@ vote restored the suite is **601/601** green. So this is a lock on the mechanism
 
 Tests-only, so the shipped binary is unchanged: fsg14 stays the family measurement at HEAD
 (96/97, single failure `fsg_Snap2HTML.exe`).
+
+### 0.17co Round 95: full corpus at HEAD after the FSG close - 1864, zero losses
+
+The corpus figure quoted through rounds 78-94 was measured at round 82's binary (r59). Every commit
+since was docs or tests only, but "no behaviour change" is a claim, not a measurement, so the corpus
+was re-run at HEAD (`2682958`): 2678 samples, 85 s, 4 workers, started on a quiet machine
+(loadavg 0.27, no stray pegasus-cli) and finished 2678/2678.
+
+| arm | valid PE | OEP exact | imports | all-three |
+|---|---|---|---|---|
+| r59 (round 82 binary) | 2675 | 1974 | 2053 | 1863 |
+| **r60 (HEAD `2682958`)** | **2675** | **1974** | **2054** | **1864** |
+
+Exactly one row changed, in the safe direction: `mpress_ComIntRep.exe` all-three False -> True (its
+imports land when the machine is idle - the known boundary row that needs ~78 s alone). **Zero
+all-three losses, zero OEP changes, zero valid-PE changes.** FSG inside the same run grades 96 of 97,
+matching the dedicated fsg14 arm row for row.
+
+So the FSG arc closed with no collateral damage: the honest corpus capability at HEAD is
+**1864/2678 all-three** (the 1863-1864 band, since `mpress_ComIntRep` sits on the budget boundary),
+OEP exact 1974/2501, imports 2054/2568, valid PE 2675/2678, suite 601/601.
