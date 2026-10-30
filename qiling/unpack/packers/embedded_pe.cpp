@@ -610,9 +610,102 @@ public:
         return ladder_oep(shaped);
     }
 
+    // Alienyze's stub reads its import store and its restored body out of the
+    // image itself, so the emulation has to start from the decoded image: the
+    // finalize-only transform left the stub's table walk looking at zeros and it
+    // jumped to the payload with an empty IAT.
+    bool seed_image_before_run() const override { return true; }
+
+    // Once the body has been restored IN PLACE the payload is already at its
+    // final address, so the Amber-class "the payload was assembled elsewhere,
+    // adopt the embedded PE" step must not run: measured on
+    // alienyze_ADInsight.exe, adoption found a launcher-shaped blob inside the
+    // restored image and re-based the whole result to 0x512abe6, which cost the
+    // row the OEP the hop had just found.
+    bool adopt_embedded_pe(PackerContext& ctx) override {
+        if (restored_in_place_) {
+            return false;
+        }
+        return AmberPacker::adopt_embedded_pe(ctx);
+    }
+    mutable bool restored_in_place_ = false;
+    // how much of the hollow span the restore actually covered, and how big that
+    // span was: a partial restore is not a decoded image, so it must not be
+    // seeded (see the seed gate in transform_image)
+    mutable std::size_t restored_bytes_ = 0;
+    mutable std::size_t hollow_span_ = 0;
+
     bool transform_image(PackerContext& ctx) override {
         if (ctx.image_mut == nullptr || ctx.image_mut->empty()) {
             return false;
+        }
+        static thread_local bool in_seed = false;
+        if (ctx.seed_mode && !in_seed) {
+            // PRE-RUN SEED: the stub's own code lives in the packed file as plain
+            // text while the payload body it wants back is stored XORed inside
+            // `.alien`, and the two share the section the finalize-time transform
+            // rewrites wholesale. So run the normal recovery on a COPY and write
+            // back only the sections the packer hollowed (raw_size == 0) - the
+            // stub's code then stays exactly as the loader mapped it.
+            const auto seed_secs = alienyze::stub_sections(*ctx.image_mut);
+            if (seed_secs.empty()) {
+                return false;
+            }
+            std::vector<std::uint8_t> work = *ctx.image_mut;
+            packers::PackerContext sub = ctx;
+            sub.image_mut = &work;
+            sub.image_ptr = &work;
+            sub.seed_mode = false;
+            sub.adopted_sections.clear();
+            // the hollow span this image declares, for the completeness test
+            std::size_t span = 0;
+            {
+                std::uint32_t hs = 0, he = 0;
+                for (const auto& s : seed_secs) {
+                    if (s.name == ".alien" || s.va == 0 || s.vsize == 0 || s.rsize != 0) {
+                        continue;
+                    }
+                    if (hs == 0) {
+                        hs = s.va;
+                    }
+                    he = std::max<std::uint32_t>(he, s.va + s.vsize);
+                }
+                span = he > hs ? static_cast<std::size_t>(he - hs) : 0;
+            }
+            in_seed = true;
+            restored_in_place_ = false;
+            restored_bytes_ = 0;
+            hollow_span_ = span;
+            const bool ok = transform_image(sub);
+            in_seed = false;
+            // Only a COMPLETE restore may be written back: when the body copy is
+            // skipped (score below the gate) the copy holds the XORed image, and
+            // copying its hollow sections back would plant key bytes where the
+            // packed file had zeros (measured on alienyze_pythonw: 4110 bytes of
+            // junk, the stub then hopped at 0x1d001395 and import recall fell
+            // 1.000 -> 0.386).
+            if (!ok || !restored_in_place_) {
+                return false;
+            }
+            ctx.adopted_sections = sub.adopted_sections;
+            for (const auto& s : seed_secs) {
+                if (s.rsize != 0 || s.va == 0 || s.vsize == 0 || s.name == ".alien") {
+                    continue;
+                }
+                const std::size_t lo = s.va;
+                const std::size_t hi = std::min<std::size_t>(s.va + s.vsize, work.size());
+                if (hi <= lo || lo >= ctx.image_mut->size()) {
+                    continue;
+                }
+                std::copy(work.begin() + static_cast<std::ptrdiff_t>(lo),
+                          work.begin() + static_cast<std::ptrdiff_t>(hi),
+                          ctx.image_mut->begin() + static_cast<std::ptrdiff_t>(lo));
+                ctx.seeded_ranges.emplace_back(ctx.base + lo, ctx.base + hi);
+            }
+            if (ctx.debug) {
+                std::fprintf(stderr, "[unpack] alienyze: seed wrote the hollow sections only\n");
+            }
+            return true;
         }
         auto& mem = *ctx.image_mut;
         const auto secs = alienyze::stub_sections(mem);
@@ -707,6 +800,8 @@ public:
                 std::copy_n(mem.begin() + static_cast<std::ptrdiff_t>(psrc),
                             static_cast<std::ptrdiff_t>(n),
                             mem.begin() + static_cast<std::ptrdiff_t>(hollow_start));
+                restored_in_place_ = true;
+                restored_bytes_ = n;
                 if (ctx.debug) {
                     std::fprintf(stderr,
                                  "[unpack] alienyze: body copy [0x%x..0x%llx) <- .alien+0x%x "

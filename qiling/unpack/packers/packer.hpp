@@ -70,6 +70,18 @@ struct PackerContext {
     std::uint64_t hop_hint = 0;
     bool is_64 = false;
     bool debug = false;
+
+    // True while transform_image() runs as the pre-run seed: the image is STILL
+    // PACKED, so only the parts the stub reads may be written back - never the
+    // stub's own code.
+    bool seed_mode = false;
+
+    // The absolute VA ranges a pre-run seed actually rewrote. Only these become
+    // claimed ranges: the stub's own section must NOT, or the first pc executed
+    // inside the stub is itself counted as a section hop (measured: Alienyze's
+    // stub entry 0x44f7e0 became hop #0 and stole the OEP on rows whose static
+    // pick had been exact).
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> seeded_ranges;
     std::string family;
     // the PACKED file on disk: the static OEP readers that work from the
     // packer's own stub data (the MPRESS fix-imports stub) read it, exactly as
@@ -149,6 +161,15 @@ public:
     // and family_transform_dump_image(). A true return means the image was
     // rewritten (ctx.image_ptr contents), so downstream parses must re-read it.
     virtual bool transform_image(PackerContext& /*ctx*/) { return false; }
+
+    // Does this family's static image recovery need to run BEFORE the stub, as
+    // well as at finalize? Alienyze's stub walks its own import table out of the
+    // restored .rdata and jumps to the payload when it finds an empty record, so
+    // an emulation over the still-packed image never builds the IAT (measured:
+    // the record at rva 0x9608 reads 0 during the run and is correct in the
+    // artifact). Default false: a family opts in only after its decoder is shown
+    // to be idempotent against the stub's own decode.
+    virtual bool seed_image_before_run() const { return false; }
 
     // Correct the OEP AFTER the pick, from the terminal image. The reference's
     // family_terminal_fill: a last resort for the families whose hop machinery

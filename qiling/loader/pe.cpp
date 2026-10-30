@@ -973,7 +973,7 @@ void QlLoaderPE::run() {
             (void)load_dll(each);
         }
     } else {
-        for (const char* each : {"ntdll.dll", "kernelbase.dll", "kernel32.dll", "mscoree.dll", "ucrtbase.dll"}) {
+        for (const char* each : {"ntdll.dll", "kernel32.dll", "kernelbase.dll", "mscoree.dll", "ucrtbase.dll"}) {
             (void)load_dll(each);
         }
         init_imports();

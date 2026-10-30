@@ -559,6 +559,74 @@ void Unpacker::install(Qiling& ql) {
     ql_ = &ql;
     classify_sections(ql);
 
+    // TAOTE_SEED_STATIC / Packer::seed_image_before_run: run the family's static
+    // image recovery against the guest's mapped image BEFORE the stub executes.
+    // Off unless the family asks for it (or the env lever forces it for an A/B):
+    // a family whose decode is not idempotent against the stub's own writeback
+    // would be corrupted by pre-seeding, so this is opt-in per family.
+    if (packer_ != nullptr && image_size_ != 0 && base_ != 0 &&
+        (packer_->seed_image_before_run() || std::getenv("TAOTE_SEED_STATIC") != nullptr)) {
+        try {
+            std::vector<std::uint8_t> image = ql.mem().read(base_, image_size_);
+            const auto before = image;
+            packers::PackerContext tctx;
+            tctx.ql = &ql;
+            tctx.image_ptr = &image;
+            tctx.image_mut = &image;
+            std::vector<std::pair<std::string, std::string>> seed_imports;
+            tctx.imports_out = &seed_imports;
+            tctx.base = base_;
+            tctx.image_size = image_size_;
+            tctx.packed_ep_va = packed_ep_va_;
+            tctx.is_64 = is_64_;
+            tctx.debug = opts_.debug;
+            tctx.family = opts_.family;
+            tctx.sections = sections_;
+            tctx.packed_path = &opts_.sample_path;
+            tctx.seed_mode = true;
+            if (packer_->transform_image(tctx)) {
+                if (tctx.adopted_sections.size() > 0) {
+                    sections_ = tctx.adopted_sections;
+                }
+                std::size_t changed = 0;
+                for (std::size_t i = 0; i < image.size() && i < before.size(); ++i) {
+                    changed += (image[i] != before[i]) ? 1 : 0;
+                }
+                if (changed != 0) {
+                    ql.mem().write(base_, image);
+                }
+                // The seed is a WRITE by us: register the restored pages as
+                // claimed so a stub that hands off into them is recognised as a
+                // section hop (Alienyze's stub jumps straight to the payload
+                // entry after building the IAT, and nothing else writes there).
+                if (changed != 0) {
+                    for (const auto& r : tctx.seeded_ranges) {
+                        if (r.second <= r.first) {
+                            continue;
+                        }
+                        const auto claim = std::make_pair(r.first, r.second);
+                        ever_written_.insert(claim);
+                        written_ranges_.insert(claim);
+                    }
+                    if (!tctx.seeded_ranges.empty()) {
+                        wr_cache_lo_ = base_;
+                        wr_cache_hi_ = base_ + image_size_;
+                    }
+                }
+                if (opts_.debug) {
+                    std::fprintf(stderr, "[unpack] static seed: %zu bytes changed before the stub, %zu pairs\n",
+                                 changed, seed_imports.size());
+                }
+                for (const auto& [dll, fn] : seed_imports) {
+                    note_import(sanitize_ascii(dll), sanitize_ascii(fn));
+                }
+            }
+        } catch (...) {
+            // the seed is an optimisation: a family whose transform throws on the
+            // live image keeps the packed one and the run proceeds as before
+        }
+    }
+
     // TAOTE_CPUIDBG=1: log every CPUID and RDTSC the guest executes. These are the
     // inline environment probes an anti-emulation stub uses, and they leave no API
     // trace at all (TELock/Yoda/Alienyze make zero API calls before bailing).

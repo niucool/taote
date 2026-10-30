@@ -6681,3 +6681,70 @@ Next step, now well-founded: **seed the emulated image with the static decode be
 (the recovery already exists; it just runs too late), so the stub's table walk, its IAT build and its
 hand-off all operate on data that exists. That should convert the 18 pure-OEP rows without needing the
 loop accelerator - the stub then only has to *walk*, not *decode*.
+
+### 0.17dl Round 118: Alienyze - seed the emulation with the static decode, and the stub completes
+
+0.17dk established that the stub's import-table walk reads `.rdata` while the emulation still holds the
+packed image. This round fixes that and the family converts.
+
+Three pieces, each needed:
+
+1. **`Packer::seed_image_before_run()`** (default false) plus `Unpacker::install` running the family's
+   static recovery against the mapped image *before* `ql.run()` (`TAOTE_SEED_STATIC=1` forces it for an
+   A/B). Alienyze opts in.
+2. **The seed writes back ONLY the hollowed sections** (`raw_size == 0`): the first attempt XORed
+   `[first_sec_va, end)` like the finalize path does, which rewrites the stub's own code - the run then
+   died at `0x44f7e5` reading address `0x6f` (the XOR key) because the stub was executing XORed bytes.
+   `PackerContext::seed_mode` makes `AlienyzePacker::transform_image` run the normal recovery on a COPY
+   and copy back just the sections the packer hollowed, leaving the stub's code exactly as loaded.
+3. **The seed's pages are registered as claimed** (`written_ranges_`/`ever_written_`), because the jump
+   into them is a hand-off even though no emulated write ever touched them. Without this the payload
+   entry was reached but never claimed (`hop ledger (0)`).
+
+Measured on `alienyze_AccessEnum.exe`: the stub now runs the reference's WHOLE prologue - the file
+mapping, then the ~200 `LoadLibraryA`/`GetProcAddress` pair IAT build (matching the reference's
+`0xfeedf0xx` burst call for call), then `msvcrt.__set_app_type`, `__getmainargs`, `_controlfp`,
+`_except_handler3`, and the payload's own SEH. And the OEP lands exactly:
+
+    [unpack] OEP candidate 0x407a98 (section_hop)      <- truth 0x7a98
+    [unpack] hop ledger (2): 0x44f7e0@0 0x407a98@502
+    [unpack] alienyze_AccessEnum.exe family=Alienyze ... oep=0x407a98 stages=1
+             reason=section_hop imports=506
+
+Alienyze family arm (126 rows, 85 s, 4 workers):
+
+| arm | valid PE | OEP exact | imports | all-three |
+|---|---|---|---|---|
+| r65/r66 baseline | 125 | 54 | 74 | 43 |
+| preload-order swap only (0.17di) | 125 | 33 | 56 | 27 |
+| **seed + swap + seed claims** | 125 | **85** | **79** | **56** |
+
+The order swap alone was a regression; with the decode actually present it is what lets the stub find
+kernel32 at all, so the pair ships or falls together.
+
+Two refinements were needed before the corpus was clean, both found by measuring:
+
+* the seed must claim ONLY the ranges it wrote (`PackerContext::seeded_ranges`). Claiming every section
+  made the first pc executed inside the stub's own `.alien` a section hop (hop #0 was `0x44f7e0`, the
+  stub entry), which stole the OEP on 15 rows whose static pick had been exact;
+* Alienyze must not adopt an embedded PE once it has restored the body IN PLACE: on
+  `alienyze_ADInsight.exe` the Amber-class adoption found a launcher-shaped blob inside the restored
+  image and re-based the whole result to `0x512abe6`, throwing away the OEP the hop had just found.
+  `AlienyzePacker::adopt_embedded_pe` now declines when `restored_in_place_` is set.
+
+Alienyze family arm after both refinements (126 rows, 85 s, 4 workers): **125 / 108 / 79 / 75** (valid PE
+/ OEP exact / imports / all-three) against the 125 / 54 / 74 / 43 baseline.
+
+Corpus (r68, 2678 rows, 85 s, 4 workers) versus r66:
+
+| | valid PE | OEP exact | imports | all-three |
+|---|---|---|---|---|
+| r66 | 2675 | 2061 | 2077 | 1958 |
+| **r68** | **2675** | **2115** | **2081** | **1989** |
+
+34 gains (33 Alienyze + mpress_Listdlls) and 3 losses. Re-running the three losses alone at 1 worker
+and a 200 s budget: `expressor_Everything.exe` passes in 41 s and `nspack_ADInsight.exe` in 36 s (both
+were 85-86 s wall-bound in the 4-worker arm - the parallel-budget flip the harness warning describes),
+so the capability figure is **1991**. `alienyze_pythonw.exe` is a REAL loss: its stub unpacks a second
+stage at `0x1d001395` and the hop re-bases the result to `0x1d000000` (import recall 1.000 -> 0.386).
+That row is the known cost of the swap; it is one row against 33.
