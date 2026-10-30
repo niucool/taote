@@ -6459,3 +6459,42 @@ every button set.
 `nspack_procexp` (84 -> 85 s). Re-run alone at a 120 s budget they give 32 s / 34 s / 49 s and **all
 three pass**, so they are the known budget-boundary artefacts, not regressions - the capability figure
 is **1960/2678**. Suite 602/602.
+
+### 0.17dg Round 113: Alienyze - the stub dies on ONE unresolved indirect call (0x44fc43)
+
+Applied the Neolite method (one row -> reference -> diff) to the next family. Alienyze, 126 rows:
+all-three 43, valid 125, OEP-exact 54, imports-ok 74; two clean sub-classes:
+
+| class | rows | shape |
+|---|---|---|
+| pure OEP | **18** | code_sim >= 0.9, imports ok, OEP wrong (17 of 18 with |delta| >= 0x1000) |
+| pure imports | **11** | OEP exact, recall 0.935-0.945 (just under 0.95) |
+
+**Reference vs taote on `alienyze_AccessEnum.exe`:** pegasus reports `oep 0x407a98` (the truth) with
+`reason=section_hop`; taote reports `oep 0x403a53` with `reason=ladder_scan` and an EMPTY hop ledger -
+although the dump is fully decoded (code_sim 1.000), because Alienyze is decoded *statically* by
+taote's port of the reference's `alienyze.cpp` (XOR-key recovery + body restore). So the emulation's
+only job here is to hand off the entry, and it never gets there.
+
+**Where it dies, exactly.** taote's run ends at pc `0x44fc43`, which disassembles to
+
+    44fc42: 52                  push edx
+    44fc43: ff 95 7c ff ff ff   call DWORD PTR [ebp-0x84]     <-- last pc taote reaches
+    44fc49: 89 85 d4 fe ff ff   mov [ebp-0x12c], eax
+
+and the reference's API trace records its FIRST dispatch at `ret=0x44fc49` - i.e. **the same call
+site**, there `LoadLibraryA`. So the stub resolves its API pointers up front (its own hash walk over a
+module's export table) and calls them through stack slots; in taote that slot holds something that is
+not a dispatchable thunk, so the call goes nowhere and the emulation stops quietly (rc=0, no fault, no
+error, 615 ms).
+
+The reference additionally *accelerates* Alienyze's stub loops (`install_alienyze_loopacc_`:
+`PC 0x44f9e5` strhash, `PC 0x450088` a 151 297-byte XOR with key 0x6f, `PC 0x450107..0x450116` body
+copies into 0x401000/.rdata/.data - all three shapes are printed by `SE_DEBUG_LOOPACC=1`). taote has
+no loop accelerator at all, so even after the pointer is fixed the walk may need one.
+
+Next step (recorded, data-first): log the stub's hash-walk - the module whose export directory it
+walks and the hash it compares - and check it against the exported names of the corresponding
+synthesized stub dll, which is where the wrong pointer comes from. 18 rows ride on the OEP alone
+(they are already decoded and import-complete) plus 11 on the recall tail. No code changed this round;
+suite 602/602, tree clean, baseline unchanged (r65: all-three 1957 in-run, 1960 capability).
