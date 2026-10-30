@@ -132,6 +132,9 @@ UnpackResult run_unpack(const RunConfig& cfg) {
         }
     } catch (const qiling::QlErrorBase& e) {
         result.error = e.what();
+        if (result.reason.empty()) {
+            result.reason = "init_failed";   // mirrors the CLI's else branch
+        }
     }
     if (ql != nullptr) {
         if (captured != nullptr) {

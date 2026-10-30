@@ -3302,6 +3302,14 @@ UnpackResult Unpacker::finalize(Qiling& ql) {
         res.error = "unpack finalize failed";
     }
     return res;
+
+    // A corrupt-header input can fail before any stage runs (the loader refuses
+    // it, e.g. an absurd section count), which used to print "reason=" with
+    // nothing after it. Every specific label above wins; this only names a
+    // state nothing else claimed.
+    if (res.reason.empty()) {
+        res.reason = res.base == 0 ? "init_failed" : "no_hop";
+    }
 }
 
 // ---------------------------------------------------------------------------

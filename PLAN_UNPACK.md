@@ -5965,3 +5965,41 @@ everything else is >= 0.857 code_sim and >= 0.975 recall, so nothing passes by l
 | fsg_strings | 0x400000 | 0x58a6 | 1/section_hop | 1.000 | 1.000 | yes |
 | fsg_sync | 0x400000 | 0x49fe | 1/section_hop | 1.000 | 1.000 | yes |
 | fsg_sysexp | 0x400000 | 0xacb2 | 1/section_hop | 1.000 | 1.000 | yes |
+
+### 0.17cr Round 98: host-safety audit of the FSG code paths, and a diagnostic hole it found
+
+The one standing rule never yet applied to this family was "never crash" against *hostile* input: all
+FSG work had been on well-formed samples (plus the crafted `ImageBase` stress of round 81). So twelve
+corrupt variants of the FSG rows were run through the shipping CLI:
+
+| variant | rc | crash | reason |
+|---|---|---|---|
+| truncated to 0x200 | 0 | no | `dump_verbatim` |
+| truncated to half | 0 | no | `ladder_scan` |
+| EP past EOF | 0 | no | `fallback_guess` |
+| EP inside the headers | 0 | no | `fallback_guess` |
+| `NumberOfSections = 0` | 0 | no | `dump_verbatim` |
+| `NumberOfSections = 0xffff` | 0 | no | **`init_failed`** (was empty) |
+| `SizeOfImage = 0` | 0 | no | `section_hop` |
+| entry section raw pointer past EOF | 0 | no | `fallback_guess` |
+| base at the 4 GB boundary | 0 | no | `ladder_scan` |
+| stub bytes zeroed | 0 | no | `fallback_guess` |
+| headerless row + grafted `PE\0\0` | 1 | no | `input_parse_failed` |
+| headerless row truncated | 1 | no | `input_parse_failed` |
+
+No crash, no hang, no runaway allocation: every variant finished in <= 1 s with rc 0 or 1. **The
+audit's one real find was a diagnostic hole.** A header the loader refuses outright (the absurd
+`NumberOfSections`) printed `reason=` with nothing after it, so the single most corrupt class of input
+was the least diagnosable one. Three small fixes, all text-only:
+
+1. `Unpacker::finalize` names the state it could not otherwise classify, **at the very end** of the
+   function so every specific label still wins (`init_failed` / `no_hop`). The naive placement at
+   `res.reason = reason_` was caught immediately: it pre-empted `dump_verbatim` on the
+   truncated-header rows and cost them their specific label.
+2. `tools/taote.cpp`'s `else` branch - the engine never came up, so no `finalize()` result exists -
+   sets `init_failed`.
+3. The test harness mirrors it, so an in-process run reports the same words as the CLI.
+
+**Measured after the change:** `fsg15` (97 rows, 85 s, 4 workers) gives valid PE 96, OEP exact 96,
+imports 96, all-three **96/97**, and **no row's all-three changed** against `fsg14`; `fsg_cmd`
+(341 imports), `fsg_HashCalc` (446) and `fsg_livekd` (368) are bit-identical; suite 601/601.

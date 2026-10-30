@@ -381,6 +381,9 @@ int main(int argc, char** argv) {
         ql.reset();
     } else {
         unpacker.detach_hooks();
+        // the engine never came up (a header the loader refuses outright, e.g. an
+        // absurd section count), so there is no finalize() result to name it
+        result.reason = "init_failed";
     }
 
     if (!run_error.empty() && result.error.empty()) {
