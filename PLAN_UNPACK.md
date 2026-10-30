@@ -7263,3 +7263,95 @@ Bounded next step for whoever picks this up: log the two operands at 0x417327 (e
 memory at [ebp-0xb654]) on the FIRST pass, and the same two values under the reference if its trace can be
 coaxed to print them (it has no equivalent gate, so the practical route is to compute the expected fold
 from the compressed stream by hand for the first pass and see which side is off).
+
+### 0.17ea Round 131: TELock's blocker is the SIGN of the stack base - ported the reference's stack placement
+
+TELock is the biggest reference-solvable gap in the corpus: the r70 report has 116 TELock rows, **all 116
+failing all-three with `imp_recall < 0.1`** (1 row OEP-exact), i.e. the stub never decodes, while the
+reference unpacks the same file cleanly (`telock_7z.exe`: reason `unpacked`, `oep_found` true, **109**
+import functions, `image_written_fraction` 0.9191, 5 sections rewritten). The bucket census of r70's 693
+failures, with `oep_exact is False` counted strictly (None means the ORIGINAL is .NET/COM and the grader
+skips OEP - 80 such rows):
+
+| bucket | rows |
+|---|---|
+| invalid PE / timeout | 8 |
+| ungraded OEP (.NET/COM original) | 80 |
+| OEP exact + decoded -> imports only | 96 |
+| OEP exact + undecoded | 29 |
+| OEP wrong + decoded | 82 |
+| OEP wrong + undecoded | **398** |
+
+**The trace.** `telock_7z.exe` runs for 0 s, writes 6,482 bytes into its own last section
+(0x418000-0x41b000), latches a first hop at 0x418037 and stops. With `TAOTE_SEHDBG` the ladder is visible:
+`insn_invalid pc=0x419a08 b=0xf1` (ICEBP, already ported - see the comment at unpack.cpp:922), then two
+`#DB` dispatches (`handler=0x4199fa`, then `handler=0x419a41`). The stub's own ladder in the decoded image
+is a trampoline-stream construction:
+
+    419a3b pusha ; 419a3c call 419a47
+    419a47 push fs:[0] ; mov fs:[0],esp ; pushf ; or [esp],0x100 ; popf  ; TF = 1
+    419a5c clc ; 419a5d jae 0x419a3b          ; the TF trap fires here
+    419a41 mov esp,[esp+8] ; jmp 0x419a61      ; the handler restores esp from its frame
+    419a78 or esp,esp ; 419a7a jne 0x419a7d    ; jumps MID-INSTRUCTION (into `ror eax,imm8`)
+    419a80 mov ebx,[esp] ; 419a83 pop eax ; 419a84 sub ebx,0x411473
+    419a8a test esp,esp ; 419a8c jns 0x419a91 ; <-- THE FORK
+    419a8e setno [edx+3] ; 419a92 les edi,[esi] ; 0x419a98 xor esi,0x3d670c58 ...
+
+Both engines execute this stream identically (the reference's `SE_DEBUG_HOP` log and taote's
+`TAOTE_LASTPC` ring agree instruction for instruction through 0x419a8c), and both dumps carry the same
+bytes at 0x419a80 - the divergence is *not* a decode difference. It is the conditional:
+the reference executes 0x419a91 and 0x419a93 and never 0x419a8e or 0x419a92 (`grep -c` on its log: 1, 0, 1,
+0), i.e. its `jns` is **taken**; taote's falls through into the `les` trap stream and dies there.
+
+`jns` reads SF, and SF comes from the preceding `test esp,esp`. A probe at 0x419a8c says why:
+
+    [probe] pc=0x419a8c ... ebp=0xffffd000 esp=0xffffcfb8
+    [probe]   eflags=0x00000086 [PF SF ]
+
+taote's 32-bit guest stack lives at the profile's `0xfffdd000`, so `test esp,esp` sets SF: this is an
+ordinary **stack-address sanity check** (a real 32-bit Windows stack is a low positive address, ~0x0012xxxx),
+and taote answers it wrong. The reference reserves the stack at a Windows-like base - `binemu.cpp
+alloc_stack` passes `reserve_hint = 0x1200000` to `get_valid_ranges` - and its esp is therefore positive.
+
+**The port.** `qiling/profiles/windows.ql` `[OS32] stack_address` 0xfffdd000 -> **0x1200000**, plus the
+reference's `get_valid_ranges` behaviour in `QlLoaderPE::run`: slide to the first free range at or above the
+hint, because 20 of the 2676 corpus samples declare base+SizeOfImage past 0x1200000 (the `*_adwcleaner`
+family, `alienyze_HDDScan`, `themida_HDDScan`, ...). 32-bit only: the 64-bit stack sits at 0x7ffffffde000,
+which no image reaches.
+
+**Measured effect on the row** (`telock_7z.exe`):
+
+| | before | after |
+|---|---|---|
+| esp at the fork | 0xffffcfb8 (SF set) | 0x121ffb8 (SF clear) |
+| eflags at 0x419a8c | 0x86 PF SF | 0x06 PF |
+| writes into the stub's section | 6,482 | **34,489** (5.3x) |
+| SEH dispatches | 2 | 3 (+ `#BP` at 0x41808d -> handler 0x4180c5) |
+
+So the ladder is now authentic past the fork, and the *next* blocker is named: after the `#BP` dispatch the
+stub reads 0x70000000 upward one byte at a time (faults at `pc=0x41808e` for addr 0x70000000, 0x70000001,
+0x70000002, ...), i.e. it is walking the synthetic SEH sentinel arena - the page taote maps for its own
+dispatch. The reference has no such arena, so that walk is aimed at whatever its own dispatch left behind;
+the next round's question is what 0x41808e is looking for (a handler signature, or the frame it just
+installed) rather than whether it should fault.
+
+Family arm: **TELock 116 rows -> 116 valid PE / 1 OEP exact / 0 imports / 0 all-three**, unchanged, as
+expected for a fidelity fix that does not by itself decode the family. Corpus (r71) below.
+
+**Corpus r71** (2678 rows, 85 s budget, 4 workers, `TMPDIR=/home/jim/tmp`, 74 min):
+
+| run | valid PE | OEP exact | imports | all-three |
+|---|---|---|---|---|
+| r68/r69 baseline (capability) | 2675 | 2115 | 2081 | **1989 / 1991** |
+| **r71 (Windows-like stack)** | **2675** | **2115** | **2081** | **1989 / 1991** |
+
+Row-level diff r68 -> r71 is 4 rows and exactly one OEP each way: `rlpack_geek.exe` **gains** the exact
+entry (0x159760) and `bero_geek.exe` **loses** it (0x159760 -> 0x5f9008, code_sim 0.878 -> 0.696); neither
+is all-three either way (their import recall is ~0.01/0.05). `expressor_Everything` (False -> True) and
+`mpress_ComIntRep` (True -> False at the 85 s wall) are the known harness-edge rows and both pass solo
+(41 s / 32.5 s), as do `mpress_cpuz_x32` (44.6 s) and `nspack_ADInsight` (34.2 s). So the change is **free on
+the graded criterion** and buys the 5.3x-deeper stub execution plus a ladder that follows the reference.
+
+Suite: 602/602, 0 failed (three cases - `PegasusParity.ConfigParityMountsFilesAndPatchesTheRegistry`,
+`PegasusParity.PEBModulesPopulated`, `QilingPeCompat.PeWinX86ReturnFromMainExitTrap` - failed once under
+`ctest -j4` and pass both alone and on the rerun; they share temp roots, not stack state).

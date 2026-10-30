@@ -841,6 +841,21 @@ void Unpacker::install(Qiling& ql) {
                                  static_cast<unsigned long long>(rd("fsbase")));
                 } catch (...) {
                 }
+                // the flags: a decrypt ladder's branch (TELock's `jns` over an
+                // overlapping instruction stream) is decided by SF/OF alone, so a
+                // divergence that looks like a decode difference is often a flag
+                // difference. env-gated with the rest of the probe.
+                try {
+                    const auto fl = rd("eflags");
+                    std::fprintf(stderr,
+                                 "[probe]   eflags=0x%08llx [%s%s%s%s%s%s%s%s]\n",
+                                 static_cast<unsigned long long>(fl),
+                                 (fl & 0x1) ? "CF " : "", (fl & 0x4) ? "PF " : "",
+                                 (fl & 0x10) ? "AF " : "", (fl & 0x40) ? "ZF " : "",
+                                 (fl & 0x80) ? "SF " : "", (fl & 0x400) ? "OF " : "",
+                                 (fl & 0x800) ? "DF " : "", (fl & 0x40000) ? "AC " : "");
+                } catch (...) {
+                }
                 std::fprintf(stderr, "[probe]   @eax='%s' @edx='%s'\n", peek(rd("eax")).c_str(), peek(rd("edx")).c_str());
                 // TAOTE_PROBE_EBP_DISP=<dec>: also show the dword at [ebp+disp] - the slot an
                 // indirect call is about to use, which is where a pre-resolved API pointer lives

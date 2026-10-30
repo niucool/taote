@@ -12,7 +12,13 @@ KI_USER_SHARED_DATA = 0x7ffe0000
 [OS32]
 heap_address = 0x5000000
 heap_size = 0x5000000
-stack_address = 0xfffdd000
+# The 32-bit stack base is WINDOWS-LIKE on purpose: packer stubs sanity-check the
+# stack ADDRESS, and the reference reserves it at a low positive base
+# (binemu.cpp alloc_stack's 0x1200000 hint), not at the historical 0xfffdd000
+# page. TELock's ladder is the measured case: its decryptor runs
+# `test esp,esp; jns` over an overlapping instruction stream, so a stack with
+# bit 31 set takes the trap stream instead of the real branch.
+stack_address = 0x1200000
 stack_size = 0x21000
 image_address = 0x400000
 dll_address = 0x10000000

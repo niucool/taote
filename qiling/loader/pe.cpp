@@ -834,6 +834,19 @@ void QlLoaderPE::run() {
 
     stack_address_ = static_cast<std::uint64_t>(profile.get_int(ossection, "stack_address"));
     stack_size_ = static_cast<std::uint64_t>(profile.get_int(ossection, "stack_size"));
+    // A Windows-like stack base can land inside a big image (20 of the 2676
+    // corpus samples declare base+SizeOfImage beyond the configured 0x1200000),
+    // so slide to the first free range at or above it - the reference's
+    // get_valid_ranges(size, hint). 32-bit only: the 64-bit stack sits in the
+    // high user range that no image reaches.
+    if (bits == 32) {
+        try {
+            stack_address_ = ql_->mem().find_free_space(stack_size_, stack_address_);
+        } catch (...) {
+            // nothing free at or above the hint: keep the profile's value and
+            // let the map below surface the collision
+        }
+    }
     image_address_ = static_cast<std::uint64_t>(profile.get_int(ossection, "image_address"));
     dll_address_ = static_cast<std::uint64_t>(profile.get_int(ossection, "dll_address"));
     entry_point = static_cast<std::uint64_t>(profile.get_int(ossection, "entry_point"));
