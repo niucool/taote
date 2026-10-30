@@ -6971,3 +6971,34 @@ Next step: stop chasing the frame. The stub's chain after the two `VirtualProtec
 0x4170bb (the prologue probe's `ret` value), i.e. a return address INSIDE the table - so the
 `rep movsd` copy-and-call sequence at 0x417179-0x417188 is what goes wrong, not the arithmetic around it.
 Dump the 8 stack dwords at the `call ebx` (0x417173) and see which return slot the stub overwrites.
+
+### 0.17dr Round 124: PEtite's return chain - the stub `ret`s into its own table
+
+0.17dq asked for the stack dwords at the stub's `call ebx`. The probe now prints an 8-dword window at
+`esp` (part of `TAOTE_PROBE`, env-gated, off by default), which answers it directly on
+`petite_rrdec.exe`:
+
+    pc=0x417173 (call ebx = VirtualProtect#1)
+      esp=0x500c5ea  stack: 400780 880 4 41871c 6 c 400780 880
+    pc=0x417188 (call ebx = VirtualProtect#2)
+      esp=0x500c602  stack: 400780 880 2 41871c 417000 ffffcfce 400000 0
+    pc=0x4171aa (the btr error/good test)
+      esp=0x500c602  stack: 4170bb 41709d 417061 417042 417008 ffffcfce 400000 0
+
+The five leading values are the pointers the stub builds with `push eax; add byte [esp],N` at
+0x417191-0x4171a6 - `0x4170bb`, `0x41709d`, `0x417061`, `0x417042`, `0x417008`, i.e. offsets into its
+OWN table. So at the branch test the top of stack is **0x4170bb**, and the value that eventually
+`ret`s is a table pointer: the stub returns into its data (0x4170f3, one byte before the "ERROR!" /
+"Corrupt Data!" strings) instead of continuing at 0x4171c9. The real return address is still on the
+stack in slot 6 (`0xffffcfce`), one slot lower than the stub expects - so the stub's push/pop accounting
+is off by one call's worth of arguments, not by a corrupted pointer.
+
+That fits the sequence exactly: `call ebx` at 0x417173 consumes its six pushed args (esp moves 0x18 from
+0x500c5ea to 0x500c602), the second `call ebx` at 0x417188 is entered with the stack already at the next
+frame, and the five `push eax` message pointers then sit where the stub expects its return address.
+
+Next step: compare the same two windows under the reference. Its stub never shows the box, so its slot 1
+at 0x4171aa must hold either 0xffffcfce (the caller) or the code address 0x4171xx - which tells us
+whether the stub's own accounting depends on the `pushfw`/`pusha` pair at 0x417125-0x417128 (i.e. whether
+the emulator's `pusha` writes 8 dwords the way the stub counts them) or on the two `VirtualProtect`
+argument counts it pushes around them.

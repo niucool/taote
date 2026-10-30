@@ -782,6 +782,27 @@ void Unpacker::install(Qiling& ql) {
                              static_cast<unsigned long long>(rd("edx")), static_cast<unsigned long long>(rd("esi")),
                              static_cast<unsigned long long>(rd("edi")), static_cast<unsigned long long>(rd("ebp")),
                              static_cast<unsigned long long>(rd("esp")), static_cast<unsigned long long>(ret));
+                // an 8-dword window at esp: a stub that corrupts its own return
+                // chain is only diagnosable by seeing the slots it pushes
+                try {
+                    const auto sp0 = rd("esp");
+                    std::string win;
+                    for (int k = 0; k < 8; ++k) {
+                        const auto b4 = ql.mem().read(sp0 + 4 * static_cast<std::uint64_t>(k), 4);
+                        if (b4.size() != 4) {
+                            win += " --";
+                            continue;
+                        }
+                        const auto v = static_cast<std::uint64_t>(b4[0]) | (static_cast<std::uint64_t>(b4[1]) << 8) |
+                                       (static_cast<std::uint64_t>(b4[2]) << 16) |
+                                       (static_cast<std::uint64_t>(b4[3]) << 24);
+                        char buf[16];
+                        std::snprintf(buf, sizeof(buf), " %llx", static_cast<unsigned long long>(v));
+                        win += buf;
+                    }
+                    std::fprintf(stderr, "[probe]   stack[esp..+32]:%s\n", win.c_str());
+                } catch (...) {
+                }
                 try {
                     std::fprintf(stderr, "[probe]   fs_base=0x%llx\n",
                                  static_cast<unsigned long long>(rd("fsbase")));
