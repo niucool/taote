@@ -6295,3 +6295,41 @@ run end at 0.1 s. The section table gives the shape to test: only `.neolit` is e
 (`exec=1`, inplace) while `.text` is file-backed ciphertext (`raw=0xc600`, `exec=0`), so an in-place
 decrypt of a file-backed section is the case the hop detector has to see. No code changed; suite
 602/602, tree clean, baseline unchanged (r63: all-three 1873/2678).
+
+### 0.17dc Round 109: Neolite's file mapping is CORRECT - the stub then runs away in a string XOR loop
+
+Continued the trace from 0.17db. Two things are now established, and one candidate cause is excluded.
+
+**The mapping trio is not the problem.** Instrumented `CreateFileA` / `CreateFileMappingA` /
+`MapViewOfFile` (env-gated, reverted after measuring):
+
+    [mapdbg] CreateFileA path=C:/Windows\neolite_ProduKey.exe -> 0xa000000e
+    [mapdbg] CreateFileMappingA hFile=0xa000000e size=0x0 -> 0xa0000010
+    [mapdbg] MapViewOfFile hFileMapping=0xa0000010 off=0x0 size=0x0 -> 0x5001158 head=4d5a900003000000
+
+The stub opens its own staged file, maps it, and the view's first bytes are the real `MZ` header - so
+taote hands the decoder the right bytes and the "guest asked for a file it cannot see" hypothesis dies.
+
+**What ends the run.** The last 64 PCs (the existing `TAOTE_LASTPC` ring) are one tight loop, and it
+does not fault or time out: `rc=0`, no `error=`, no `[fault]` line, only six imports
+(`GetModuleHandleA`, `GetModuleFileNameA`, `GlobalAlloc`, `CreateFileA`, `CreateFileMappingA`,
+`MapViewOfFile`). The loop at `0x416e26` is a NUL-terminated string decryptor:
+
+    416e26: 8a 0b      mov  cl, [ebx]
+    416e28: 43         inc  ebx
+    416e29: 84 c9      test cl, cl
+    416e2b: 74 08      je   0x416e35
+    416e2d: 80 f1 ff   xor  cl, 0xff
+    416e30: 88 08      mov  [eax], cl
+    416e32: 40         inc  eax
+    416e33: eb f1      jmp  0x416e26
+
+i.e. the stub is decrypting a string that never terminates where it is looking, and the run ends
+through one of the quiet stop paths (an unhandled SEH dispatch or thread switch, not the instruction
+budget - the budget is 2e9 and the whole run is 0.1 s).
+
+Next concrete step (recorded): catch the loop's ENTRY - log `ebx`/`eax` at the first
+`0x416e26` and the return address on the stack, then walk one frame up to see which pointer the stub
+computes. That names the operand the packer expects (its own file-mapping view, its module base, or a
+heap block) and therefore the real defect. No code changed this round; suite 602/602, tree clean,
+baseline unchanged (r63: all-three 1873/2678).
