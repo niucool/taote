@@ -7183,3 +7183,11 @@ returns only a comment), so these run through unicorn natively - which means the
 the entry table the loop reads (12 bytes per entry, first word's bit 31) or in unicorn's DF handling on
 one of these two forms. That is now a two-way question with a one-command answer each, and the tracer is
 the tool for both.
+
+DF handling checked: the tracer's addresses DESCEND (0x412ffc, 0x412ff8, ...), which is only possible if
+unicorn honours `std` for `rep movsd`, so both string forms are faithful and the 12-byte entry table the
+loop reads is being applied correctly. That closes the copy/relocation branch entirely: PEtite's remaining
+divergence is in the DECRYPT loop that runs before the copies, exactly as 0.17dw's input comparison said
+(the store region differs between the engines in ~15% of bytes). The next probe is therefore the first
+write into the store region with a pc OTHER than 0x4171c1/0x417206 - the tracer's `uniq` output over a
+larger n names it directly.
