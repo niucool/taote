@@ -6363,3 +6363,48 @@ whose result decides between "carry on" and "leave". Next step (recorded): log t
 and return values for the six calls in order, and the value tested at `0x416e0a`, so the failing
 condition is identified from data. TAOTE_PROBE ships (env-gated, off by default, suite 602/602,
 behaviour unchanged - a no-probe run still reports `oep=0x40d21e imports=635`).
+
+### 0.17de Round 111: the reference DECODES this Neolite row - taote diverges, and the row is decodable
+
+The single most useful measurement of the Neolite thread so far, and it took one command: the
+reference on the same sample.
+
+| | pegasus | taote |
+|---|---|---|
+| OEP | **0x40d10a (exact, the original's EP)** | 0x40d21e |
+| dump vs original image | **98.7 %** | 44.4 % |
+| imports | 17 | 635 (recall 1.0000) |
+| reason | section_hop | section_hop |
+
+So `neolite_ProduKey.exe` is NOT a dead sample and NOT an inherently hard decode: the reference runs
+the same stub and comes out with the payload. Everything taote has measured about this row so far
+(0.17db-0.17dd: the packed file copied to rva 0x1000, the stub resolving `"ExitProcess"` and calling
+it) is therefore a DIVERGENCE, not the packer's behaviour - and the divergence is in taote's API
+answers, because the guest's own code is identical.
+
+Added `TAOTE_APITRACE=<n>` (env-gated, off by default; prints dll!name, the raw stack arguments and
+the return value for the first n dispatches, plus the string argument for LoadLibraryA /
+GetProcAddress / CreateFileA). The Neolite row's whole visible flow is then:
+
+    LoadLibraryA(name)            -> 0x10020000
+    GetProcAddress(h, name)       -> cell in the stub dll
+    GetModuleHandleA(0)           -> 0x400000
+    GetModuleFileNameA(...)       -> 0x1f  (31 chars)
+    CreateFileA(path)             -> handle
+    CreateFileMappingA(h,0,2,0)   -> handle
+    MapViewOfFile(...)            -> view whose head is the real MZ
+    GlobalAlloc(0, 0x10004)       -> a heap block
+    ExitProcess(0)                <- the give-up path
+
+Two candidate causes were tested and one is excluded. **Heap alignment was NOT it**: Windows heaps
+return 8/16-byte aligned blocks, this bump allocator advanced by the raw size, and
+`GlobalAlloc(0,0x10004)` returned `0x50159dd` (odd) - so rounding chunk sizes up to 16 was
+implemented and measured: the address became `0x5015b20` (aligned) and the stub still took the
+`ExitProcess` path, with the dump unchanged at 44.4 %. Reverted (no measured gain, so it does not
+ship). **One anomaly to chase:** in the longer trace a `GetProcAddress` resolves to `0x419090`, which
+is inside `.reloc`, i.e. a bogus export address - a resolution that should not exist.
+
+Next step (recorded): get the reference's side of the same six calls (pegasus has the sample, so its
+own API trace is the oracle) and diff the two sequences answer by answer. The row is provably
+decodable (98.7 %), so this is a semantics bug hunt with a known-good counterpart, not a packer
+mystery. Suite 602/602, tree clean; only the gated trace gate is new code.

@@ -781,7 +781,65 @@ void QlOsWindows::hook_winapi(std::uint64_t address, std::uint32_t size) {
     // it with the resolved params and the fcall unwinds the frame (rax + the
     // pc = the return address) unless the handler stopped the emulation first
     set_api_dll(imported->dll);
+    // TAOTE_APITRACE=<n>: print the first n dispatches with their raw stack windows and
+    // the answer - the cheapest way to compare one stub's API view against the
+    // reference's (a packed stub that takes its give-up path usually does so because
+    // ONE answer differs, and the answers are what this prints).
+    const char* apitrace_env = std::getenv("TAOTE_APITRACE");
+    static int apitrace_left = apitrace_env != nullptr ? std::atoi(apitrace_env) : 0;
+    const bool apitrace = apitrace_env != nullptr && apitrace_left > 0;
+    std::uint64_t apitrace_sp = 0;
+    if (apitrace) {
+        --apitrace_left;
+        try {
+            apitrace_sp = ql_->arch().regs().read("esp");
+        } catch (...) {
+        }
+    }
     call_api(*ql_, address, imported->name, api->params, api->cc, api->handler, api->passthru);
+    if (apitrace) {
+        const auto sp_at = [&](int k) { return apitrace_sp + 4 * static_cast<std::uint64_t>(k); };
+        std::string args;
+        try {
+            const auto sp = apitrace_sp;
+            for (int k = 1; k <= 4; ++k) {
+                const auto bytes = ql_->mem().read(sp + 4 * static_cast<std::uint64_t>(k), 4);
+                if (bytes.size() == 4) {
+                    const auto v = static_cast<std::uint64_t>(bytes[0]) | (static_cast<std::uint64_t>(bytes[1]) << 8) |
+                                   (static_cast<std::uint64_t>(bytes[2]) << 16) |
+                                   (static_cast<std::uint64_t>(bytes[3]) << 24);
+                    char buf[32];
+                    std::snprintf(buf, sizeof(buf), " 0x%llx", static_cast<unsigned long long>(v));
+                    args += buf;
+                }
+            }
+        } catch (...) {
+            args = " ?";
+        }
+        std::uint64_t ret = 0;
+        try {
+            ret = ql_->arch().regs().read("eax");
+        } catch (...) {
+        }
+        std::string text;
+        if (imported->name.find("GetProcAddress") != std::string::npos ||
+            imported->name.find("LoadLibrary") != std::string::npos ||
+            imported->name.find("CreateFile") != std::string::npos) {
+            try {
+                const auto bytes = ql_->mem().read(sp_at(2), 40);
+                for (auto b : bytes) {
+                    if (b == 0) {
+                        break;
+                    }
+                    text += (b >= 0x20 && b < 0x7f) ? static_cast<char>(b) : '.';
+                }
+            } catch (...) {
+            }
+        }
+        std::fprintf(stderr, "[apitrace] %s!%s args:%s ret=0x%llx%s%s\n", imported->dll.c_str(),
+                     imported->name.c_str(), args.c_str(), static_cast<unsigned long long>(ret),
+                     text.empty() ? "" : " name=", text.c_str());
+    }
 
     // the answer the environment gave is what a replay re-produces; an entry the
     // serving path already consumed (a pointer answer, re-derived by the real
