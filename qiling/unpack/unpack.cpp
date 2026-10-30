@@ -721,7 +721,8 @@ void Unpacker::install(Qiling& ql) {
         auto h = std::make_shared<HookRet>(ql.hook_mem_write(
             [this, &ql, watch_addr, want, seen](int /*access*/, std::uint64_t addr, std::uint32_t size,
                                                 std::int64_t value) -> int {
-                if (addr <= watch_addr && watch_addr + 8 > addr && *seen < want) {
+                if (addr <= watch_addr && addr + static_cast<std::uint64_t>(size) > watch_addr &&
+                    *seen < want) {
                     ++*seen;
                     const auto pc = ql.arch().regs().arch_pc();
                     std::fprintf(stderr, "[watch] write to 0x%llx (len %d, covers 0x%llx) val=0x%llx pc=0x%llx\n",

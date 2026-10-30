@@ -6804,3 +6804,55 @@ rebuilt WHILE the corpus was running - and all four pass solo at 1 worker / 200 
 (dur 86, wall-bound, as in r68) passes in 35 s. With those five put back, the capability figure is
 **1991**, identical to r68: the wide-box and FindWindow changes are free, which is what the four family
 arms already said. Lesson for the harness: never rebuild the CLI under a live corpus run.
+
+### 0.17dn Round 120: Alienyze's payload dies on a DATA import, not on the decode
+
+With the seed in place the stub builds the payload's IAT and hands off, and the payload's CRT then
+faulted at once:
+
+    [fault] access=19 addr=0xccc3c031 pc=0x407b6f
+
+0x407b6f is `cmp byte [esi],0x22` in the CRT's command-line scan, and `0xccc3c031` is the *content of a
+stub-DLL cell* (`31 c0 c3 cc` = `xor eax,eax; ret; int3`). What produced it: the payload loads an IAT
+slot (`mov eax, ds:0x408174`), and a `TAOTE_WATCH_ADDR=0x408174` trace shows the stub's own IAT fill
+writing `0x476ae0` there - a synthesized *code* thunk. That slot is a **DATA import** (`__argv`), and
+`GetProcAddress` on a data export must return the ADDRESS OF THE VARIABLE, not a callable: the caller
+does `mov eax,[slot]; mov esi,[eax]` and needs a mapped pointer to the value.
+
+The reference has exactly this mechanism (`winemu.cpp get_proc` -> `handle_import_data` +
+`data_export_addrs_`, with data handlers registered for `_acmdln` and `__initenv`). taote had no data
+path at all, so every msvcrt data symbol resolved to a `ret` cell.
+
+`GetProcAddress` now answers the msvcrt data symbols with a live variable: `__argc` (a cell holding
+argc), `__argv`/`__wargv` and `__initenv`/`_environ` (a cell holding the address of a strings array
+built with `alloc_strings_array`, the same allocator `__getmainargs` uses), and `_acmdln`/`_wcmdln` (a
+cell holding a pointer to a NUL-terminated empty string, i.e. the reference's behaviour: the CRT scan
+reads a mapped terminator and stops).
+
+Measured on `alienyze_AccessEnum.exe`: **zero faults** for the whole run (it previously faulted at
+0x407b6f, then marched the SEH dispatch through 0x70000000) and the API count rises from ~200 to 268.
+
+Also fixed in the debug gate itself: `TAOTE_WATCH_ADDR`'s range test was `addr <= watch && watch + 8 >
+addr`, which matched every write BELOW the watched address; it is now
+`addr <= watch && addr + size > watch`.
+
+Family arm (126 rows, 85 s, 4 workers) is unchanged at **125/108/79/75**: the extra payload execution
+does not add import pairs (the stub's IAT fill already provided them).
+
+**MEASURED AND REVERTED.** The corpus (r70, 2678 rows, 85 s, 4 workers) came out WORSE - all-three
+1986 -> 1985 with 6 gains and 7 losses - and the losses are the interesting part:
+
+    pecompact_DriverView   2 s -> 120 s wall (rc=124)      pecompact_shexview  2 s -> 120 s
+    pecompact_OpenedFilesView / shmnview  2 s -> 120 s     pecompact_cpuz_x32  OEP lost at 85 s
+    eronana_wininst-7.1    rc=-11 (SIGSEGV)
+
+Reproduced solo: `pecompact_DriverView` and `pecompact_shexview` both take **129 s** where they used to
+take 2 s. Those rows PASS today precisely because their payload faults immediately and the dump is
+taken; give the payload a live `__argv`/`_acmdln` and it keeps running, blows the 85 s budget and the
+artifact is lost. A first version without a per-symbol cache was worse still (it built a strings array
+on every `GetProcAddress`, and the `eronana` segfault was that allocation explosion), but caching does
+not fix the root cause: **running further is not free here**.
+
+So the data-export path is reverted in full. It stays recorded as a latent correctness gap (a data
+import resolved to a code thunk) together with the measurement that fixing it alone costs more than it
+pays - it needs a budget story, exactly like the rejected post-OEP grace window and the wider rootfs.
