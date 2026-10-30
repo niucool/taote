@@ -6234,3 +6234,36 @@ pointed at, not an import-mining or export-table mechanism. Reverted (api_db unt
 
 Recorded so the next round does not chase it: a hash-walk packer cannot be helped by exporting more
 names when the names are only ever produced by calls the run never reaches.
+
+### 0.17da Round 107: Neolite's blocker is HOP SELECTION, not decode and not imports
+
+Neolite (93 rows) is mapped as 91 of headroom, and the family table only says "not all-three". The
+breakdown says something much more useful:
+
+| criterion | Neolite r63 |
+|---|---|
+| valid PE | 93 / 93 |
+| **imports ok (recall >= 0.95)** | **80 / 93** |
+| OEP exact | **2 / 93** |
+| all-three | 2 / 93 |
+| code_sim | < 0.3 on **91** rows |
+
+So the family is neither decode-blocked nor import-blocked: a hop IS accepted on 91 rows
+(`reason=section_hop stages=1` for 91, `family_fill` for 2) and the imports are already right on 80 -
+but the artifact is the WRONG hop. OEP deltas to truth: 2 exact, 4 within 0x1000, 19 within 0x10000,
+**68 at >= 0x10000** - i.e. the accepted hop is usually nowhere near the payload entry.
+
+Checked against the FSG mechanism before porting anything: for three sampled rows
+(`ProduKey` +276, `sysexp` +386, `DriverView` -763) there is **no `e8`/`e9`/`0f 84` rel32 branch in
+the claimed page whose target is the true entry**, so Neolite's stub does not hand the entry over the
+way FSG's does and the FSG rule does not transfer.
+
+That makes Neolite's lever the **hop picker / acceptance gate** - which candidate in the claim ledger
+becomes the OEP - and it is the largest single lever left in the family table: 80 of 93 rows already
+have the imports and would convert on an OEP correction alone, so a picker win here is worth up to 80
+all-three, versus a handful for any import-side mechanism.
+
+Next concrete step (recorded): dump the claim ledger for 3-5 Neolite rows (every candidate hop with
+its address, section, first bytes and whether the payload decodes there) and compare against truth, so
+the discriminator is derived from data rather than guessed. No code changed this round; suite
+602/602, tree clean, baseline unchanged (r63: all-three 1873/2678).
