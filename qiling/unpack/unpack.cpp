@@ -713,6 +713,11 @@ void Unpacker::install(Qiling& ql) {
                              static_cast<unsigned long long>(rd("edx")), static_cast<unsigned long long>(rd("esi")),
                              static_cast<unsigned long long>(rd("edi")), static_cast<unsigned long long>(rd("ebp")),
                              static_cast<unsigned long long>(rd("esp")), static_cast<unsigned long long>(ret));
+                try {
+                    std::fprintf(stderr, "[probe]   fs_base=0x%llx\n",
+                                 static_cast<unsigned long long>(rd("fsbase")));
+                } catch (...) {
+                }
                 std::fprintf(stderr, "[probe]   @eax='%s' @edx='%s'\n", peek(rd("eax")).c_str(), peek(rd("edx")).c_str());
                 // TAOTE_PROBE_EBP_DISP=<dec>: also show the dword at [ebp+disp] - the slot an
                 // indirect call is about to use, which is where a pre-resolved API pointer lives

@@ -6604,3 +6604,41 @@ reference calls `VirtualProtect(0x401000, 0xc600, 4)` between `GetFileAttributes
 `UnmapViewOfFile`; taote's run never calls it, and the stub jumps to the payload without the
 151 297-byte 0x6f XOR having been replayed in emulation, so the payload executes a half-decoded
 image. The gate to port is the reference's `install_alienyze_loopacc_` family accelerator.
+
+### 0.17dj Round 116: Alienyze - the stub jumps to the payload having skipped its IAT build
+
+The dll-order experiment of 0.17di gets the stub running, and this round says exactly where the run
+then diverges - one step past the file mapping.
+
+Reference (`SE_DEBUG_APICTX`, alienyze_AccessEnum.exe), after the mapping calls:
+
+    ... MapViewOfFile -> 0x2c000 ; UnmapViewOfFile -> 1 ; CloseHandle -> 1
+    kernel32.LoadLibraryA -> 0x77000000          <-- the IAT build starts here
+    kernel32.GetProcAddress x ~80                (0xfeedf0xx thunks, one per name)
+    kernel32.LoadLibraryA x ~10 more dlls, more GetProcAddress
+    ... then the payload's own CRT starts at the true entry
+
+taote with the swapped preload order stops after **four** API calls:
+
+    LoadLibraryA(user32) / GetProcAddress(MessageBoxW) / MessageBoxW -> 1 /
+    GetFileAttributesExW -> 1 / CreateFileW / CreateFileMappingA / MapViewOfFile /
+    UnmapViewOfFile -> 1 / CloseHandle -> 1
+    then `call 0x407a98` (return slot 0x4502bb) - the true payload entry, with the IAT still empty
+
+and the payload dies on its first dereference:
+
+    [fault] access=19 addr=0x0 pc=0x407a98     (TAOTE_SEHDBG=1)
+
+with `fsbase = 0x6000` confirmed correct (that is `FS_SEGMENT_ADDR`; reading `fs:0` is not the
+problem). So the crash is a NULL call through an IAT slot the stub never filled - because it skipped
+the whole LoadLibraryA/GetProcAddress block.
+
+The remaining question is therefore narrow: **which test between CloseHandle and the IAT build sends
+taote's stub down the shortcut branch**. The candidates are the answers it receives just before -
+`GetFileAttributesExW`'s WIN32_FILE_ATTRIBUTE_DATA (taote fills attrs/3 timestamps/size from the host
+file) and the mapped view's size - so the next step is to log the arguments of the stub's own
+decoder call after CloseHandle and compare the value it tests against the reference's.
+
+Round 116 ships only the probe improvement (`[probe]` now also prints `fsbase`, which is what excluded
+the TEB hypothesis) and this record; the preload order stays `ntdll, kernelbase, kernel32` because the
+swapped arm measured worse (Alienyze all-three 43 -> 27).
