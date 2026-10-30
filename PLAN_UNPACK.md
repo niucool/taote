@@ -7236,3 +7236,30 @@ continue. The tracer run shows the routine failing at the very first 0x102-windo
 test rather than a data comparison: check the value of `[ebp+0x8] & 0x20` FIRST in the next session, since
 that is a one-probe answer and, if it is clear under taote, the decode never had a chance rather than
 producing wrong bytes.
+
+### 0.17dz Round 130: the argument flag is 0x60 - excluded; the checksum is the real reject
+
+One probe, as planned:
+
+    [probe] pc=0x417ae5 eax=0x11 ebx=0x408865 ecx=0x9 edx=0x500282c esi=0x1602 edi=0x5004d71
+    [probe]   [ebp+8]=0x60
+
+`0x60 & 0x20` is non-zero, so `je 0x4181c7` is NOT taken and the decoder keeps going - on all three
+invocations the probe caught (args `0x60` each time, with different `ebx` bases 0x408865 / 0x4112a6 /
+0x411597 and `esi` bit-buffer values 0x1602 / 0x59b / 0x1660, i.e. three separate streams decoded from
+three stores). So the flag hypothesis is excluded, and the reject is the decompressor's own checksum at
+0x417319-0x417327:
+
+    417319  mov eax,ebx ; not ebx ; shr ebx,0x10 ; and eax,0xffff ; xor ebx,eax
+    417327  jne 0x4181c7
+
+That is a 16-bit halves fold of the stream's own state compared against the expected value at
+`[ebp-0xb654]` - a *consistency* check on the decoder's accumulated state, not on the output. Since it
+fires at the END of a pass, the decoder runs to completion and then disagrees about the final state, which
+means the divergence is a small arithmetic difference accumulated during the pass (consistent with the
+sparse 14-bytes-in-page-one output damage) rather than an early bail-out.
+
+Bounded next step for whoever picks this up: log the two operands at 0x417327 (ebx after the fold, and the
+memory at [ebp-0xb654]) on the FIRST pass, and the same two values under the reference if its trace can be
+coaxed to print them (it has no equivalent gate, so the practical route is to compute the expected fold
+from the compressed stream by hand for the first pass and see which side is off).
