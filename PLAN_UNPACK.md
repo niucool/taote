@@ -6080,3 +6080,41 @@ lives outside the family directory, and no row the mechanisms could help is curr
 
 That is the last cross-cutting check available: the family is at its ceiling (0.17cu), gated
 completely (here), pinned (0.17bv/0.17cn/0.17ct), documented per row (0.17cq) and host-safe (0.17cr).
+
+### 0.17cw Round 103: the post-OEP grace window was PORTED, MEASURED and REJECTED
+
+The next priority after FSG was pegasus's post-OEP grace window (`unpacker.cpp:5980-6035`,
+`oep_grace_secs_for_packer_`): after an accepted hop, stop once the deadline has passed AND the
+import floor is quiet AND an artifact exists, instead of emulating the already-unpacked application
+to the wall. It is the largest mechanism taote lacked, so it was implemented behind a gate
+(`--oep-grace SECS`, `TAOTE_OEP_GRACE` env, `< 0` = off) and armed from every accepted hop, with a
+block hook installed only when the window is on.
+
+**First arm (window = 0 s, quiet floor 200k blocks / 3 s) read as a huge win - and was wrong.**
+Against r61 it showed 13 all-three gains and 20 % wall saved on the 40 wall-bound rows. The gains
+came from comparing against a *contended* baseline: re-running the same rows solo showed
+`bero_Bginfo` at 63 s / 1957 imports with the window **off** as well, i.e. the r61 figure (86 s /
+2 imports) was the row being cut off before its hop under corpus load, not a window effect.
+Instrumenting the hook settled it: on the corpus those rows never armed at all (`grace tick
+blocks=500000 armed=0 imports=0 stages=0`), because the stub decode alone fills the 85 s budget.
+
+**Back-to-back A/B, same 40 wall-bound rows, same machine, window OFF vs ON** (quiet floor raised to
+1M blocks / 10 s after the first corpus arm lost `mpress_ComIntRep` 1.0000 -> 0.0342 and
+`winupack_Bginfo` 1.0000 -> 0.9373):
+
+| arm | wall | all-three | recall drops |
+|---|---|---|---|
+| window OFF | 2717 s | - | - |
+| window ON (1M blocks / 10 s) | **2749 s (101 %)** | **0 gains, 2 losses** | `expressor_Bginfo` 1.0000 -> 0.0337, `nspack_Bginfo` 1.0000 -> 0.0314 |
+
+**Why it cannot work here.** The reference's saving (`8b05c902`: `--unpack` 11.08 s -> 1.24 s;
+`5ebede29`: UPX corpus 442 s -> 39 s) is earned by not emulating hundreds of seconds of *application*
+code after the hop, at 8.3 us/API. In taote the stub's own decode is what fills the budget - the
+post-OEP application run is a small fraction - so there is nothing to save, and any window that stops
+early stops inside the decode's late import burst (both losses are 1.0000 -> ~0.03, the whole burst).
+Raising the floor to 10 s did not fix it, and raising it further would eliminate the window.
+
+So the mechanism is reverted (code back to HEAD, suite 602/602 green, no behaviour change) and
+recorded here as measured-and-rejected. The real lever for those 40 rows is **instruction
+throughput** (the ~174 ns/insn dispatch cost), not a post-OEP window - stopping earlier cannot help
+a run that never gets far enough.
