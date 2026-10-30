@@ -6903,3 +6903,39 @@ to the prologue scan over written ranges - which includes the stub's own section
 should therefore keep the generic ladder and fix the *scan target*, not replace the ladder: on this row
 the decoded payload is section 1 (0x401000, 0x12000 bytes) and the truth is its first `55 8b ec 6a`
 (0x401160 = offset 0x1160).
+
+### 0.17dp Round 122: PEtite's nag is a symptom - the reference's stub never shows it
+
+Round 121 reverted two PEtite ports and recorded "keep the ladder, fix the scan target". Tested
+unconfounded this time (the earlier 31/28 was measured WITH the family override still in place):
+
+* excluding the packed-EP section from the picker's fallback prologue scan, ALONE: PEtite
+  **73/35/36/29 - exactly the baseline**, i.e. neutral. Reverted (a neutral change is not worth a
+  corpus run); recorded so the next attempt does not redo it.
+
+Why it is neutral, and what the real chain is, both measured on `petite_rrdec.exe`:
+
+1. truth `0x401160` starts `55 89 e5 83 ec 18` - a **C2-shaped** prologue, not the `55 8b ec 6a` the
+   reference's PEtite validator scans for, so a prologue scan tuned to the reference's pattern cannot
+   find this row at all;
+2. the generic ladder finds nothing here (`passA 0, passB 0, boundary 0, C=0` on every section), so the
+   pick falls back to the junk-latch hop `0x417175@2`;
+3. and the run ENDS at `0x4170f3`, i.e. after ~0xF3 bytes of the stub - the payload never executes.
+
+What ends it is the interesting part. `TAOTE_APICTX`-style trace of the stub:
+
+    GlobalAlloc(0, 0xbc70) -> heap        VirtualProtect(0x400780, 0x880, 4) -> 1
+    VirtualProtect(0x400780, 0x880, 2) -> 1
+    MessageBoxA(0, 0x4170fd, 0x4170f6, 0x10) -> 2      (uType 0x10 = MB_ICONHAND, buttons = MB_OK)
+    ExitProcess(0xffffffff)
+
+taote answers the box IDCANCEL (the blanket policy) and the stub exits. **But the reference's stub never
+shows the box at all**: its trace on the same file is GlobalAlloc, VirtualProtect, VirtualProtect, then
+straight into the `LoadLibraryA`/`GetProcAddress` IAT build and the payload's CRT
+(`msvcrt.__set_app_type`, `__getmainargs`, `atexit`). So the nag is a SYMPTOM of an earlier divergence -
+the stub's own post-decrypt validation fails under taote and it reports an error before exiting - and no
+message-box answer can fix it. This is an independent confirmation of the round-119 rule: refine the
+decode, never the answer.
+
+Next step for PEtite: find what the stub validates between the second `VirtualProtect` and the box (the
+box's own strings at 0x4170f6/0x4170fd are the error text - read them, they name the failed check).
