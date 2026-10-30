@@ -7031,3 +7031,26 @@ decoded, and the `...214` family of wrong OEPs disappears with it.
 Next step: probe inside 0x417214 for its failing comparison (the routine is 0x100-ish bytes; the return
 value is set to 0 on some validation of the input buffer at 0x408863/0x4147ff). Diff the same call's
 inputs against the reference, where the stub never reaches the box.
+
+### 0.17dt Round 124c: what the failing routine needs from the heap
+
+The decompressor at 0x417214 sizes its own stack out of the block the stub allocated:
+
+    417214  push ebp ; mov ebp,esp ; mov [edi],al
+    417219  sub  esp,0xbad8        ; 47,832 bytes of frame
+    41724e  mov  [ebp-0xb658],eax  ; ... and it also touches 46,680 bytes BELOW ebp
+    417254  mov  [ebp-0xa240],eax
+
+With the run's numbers (call at 0x4171e2, callee esp 0x500c5ee -> ebp 0x500c5ea) the deepest access is
+`0x500c5ea - 0xb658 = 0x5000f92`, only **0x5e4 bytes above the block's start** (0x50009ae). The routine is
+therefore operating with a margin of ~1.5 KB inside a 48,240-byte (0xbc70) GlobalAlloc block - it fits, so
+this is not a mapping fault, and the run confirms it (no fault line at all; the routine simply returns 0
+and the stub takes its error branch).
+
+Two consequences for the next attempt:
+* the heap block must stay CONTIGUOUS and at least 0xbc70 bytes, which is true today but is the reason the
+  alignment experiment could not help: the margin is 0x5e4, and any change that lowers the block start by
+  more than that turns this into a fault instead of a failure;
+* the "returns 0" decision is inside this routine's own logic, and its inputs are the four stack dwords
+  (`0x408863 0x4147ff 0 0x41864c`) - so the next probe goes at the routine's `ret` sites: which one sets
+  eax=0, and which of the four inputs it rejected.
