@@ -7054,3 +7054,34 @@ Two consequences for the next attempt:
 * the "returns 0" decision is inside this routine's own logic, and its inputs are the four stack dwords
   (`0x408863 0x4147ff 0 0x41864c`) - so the next probe goes at the routine's `ret` sites: which one sets
   eax=0, and which of the four inputs it rejected.
+
+### 0.17du Round 125: PEtite - the reference decodes it perfectly, taote misses 14 bytes in page one
+
+0.17ds/0.17dt left "the decompressor returns 0". This round answers which engine is right, by comparing
+BOTH dumps against the original `rrdec.exe` over the whole payload section (0x401000-0x413000):
+
+| engine | bytes matching the original (0x1000-0x18000) | first divergence in the payload |
+|---|---|---|
+| reference | **97.0 %** | **none** - the reference reproduces the payload section exactly |
+| taote | 89.7 % | **0x401054**, and only 14 of the first 256 bytes differ |
+
+The single divergence is a one-byte change: original `10 ba 00 00 83 ec 04 e8`, taote
+`63 ba 00 00 83 ec 04 e8` (the next 5 bytes are identical). That is the signature of a decompressor
+copy/back-reference landing one byte off at a few positions, not of a wrong buffer or a wrong length.
+
+The chain is therefore:
+
+1. the stub decrypts its own store (the source region 0x408863 already differs between the two engines,
+   and both differ from the packed file: 19 % / 14 % unchanged respectively), so the divergence begins in
+   the stub's decrypt step, before the decompressor;
+2. the decompressor's built-in checksum (`not ebx; shr ebx,0x10; xor ebx,eax; jne 0x4181c7` at
+   0x417319-0x417327) then fails, which is the `eax = 0` the stub's `test eax,eax / je 0x4170ce` sees;
+3. the stub takes its error branch, walks into its own table and shows "ERROR!" / "Corrupt Data!";
+4. and because the call target 0x417214 is inside the stub, the OEP pick latches `...214` on every bad
+   row of the family.
+
+Next step, precise: find the FIRST byte the stub writes that differs from the reference's value - the
+payload's first divergence (0x401054) is an *output*, so walk backwards through the decrypt writes with a
+three-way diff (taote memory, reference memory, original) page by page until the first differing write
+appears; that instruction is the emulation-fidelity bug. PEtite at 44 headroom is worth it: the reference
+proves the family is fully solvable.
