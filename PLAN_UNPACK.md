@@ -6642,3 +6642,42 @@ decoder call after CloseHandle and compare the value it tests against the refere
 Round 116 ships only the probe improvement (`[probe]` now also prints `fsbase`, which is what excluded
 the TEB hypothesis) and this record; the preload order stays `ntdll, kernelbase, kernel32` because the
 swapped arm measured worse (Alienyze all-three 43 -> 27).
+
+### 0.17dk Round 117: Alienyze's IAT walk reads a table the emulation never decoded
+
+0.17dj asked which test sends the stub down the shortcut branch. It is not an API answer at all - it
+is the stub's own import-table walk, and the reason is that **taote's emulated memory is still the
+packed image while the artifact is the decoded one.**
+
+The walk (0x450146..0x450199, disassembled from the packed file - plaintext there):
+
+    450150  mov edx,[ebp-8] ; add eax,[ebp-4]   ; base + header[+4]
+    450167  mov eax,[edx]                        ; rec[0x00] -> [ebp-0x88]
+    450175  mov dword [ecx],0                    ; "consume" the record
+    450182  jne 0x450190
+    450184  mov eax,[edx+0x10]                   ; fall back to rec[0x10]
+    450190  cmp [ebp-0x88],0
+    450199  je  0x4502a7                         ; <- empty record: straight to the payload call
+    4501b4  call [ebp-0x84]                      ; else LoadLibraryA(base + rec[0xc] - n*0xfff)
+    ... stride 0x14 (20-byte records)
+
+Probed at the branch:
+
+    [probe] pc=0x450182 eax=0x0 ebx=0x800 ecx=0x409608 edx=0x409608 ...
+    [probe]   [ebp-136]=0x0                      ; rec[0]==0 and rec[0x10]==0 -> exit to 0x4502a7
+
+`[ebp-0x30]` (the record pointer) is **0x409608**, i.e. rva 0x9608 in `.rdata`. In the finished dump
+that address holds `d0 97 00 00 ...`, byte-identical to the original `AccessEnum.exe` .rdata. During
+the emulation it is zero. So the stub is reading its own table out of a section that *nobody has
+decoded yet*: taote's Alienyze recovery is a STATIC post-pass at finalize (its port of the reference's
+`alienyze.cpp`), so the emulation sees the packed (raw-size-0) image, the walk finds an empty record,
+and the stub jumps to the payload without building the IAT - which is exactly the NULL call the
+payload then makes.
+
+This explains the whole shape of the family: the decode is right in the ARTIFACT (code_sim 1.000,
+which is why the rows look like pure-OEP failures) and wrong in the EMULATION.
+
+Next step, now well-founded: **seed the emulated image with the static decode before the stub runs**
+(the recovery already exists; it just runs too late), so the stub's table walk, its IAT build and its
+hand-off all operate on data that exists. That should convert the 18 pure-OEP rows without needing the
+loop accelerator - the stub then only has to *walk*, not *decode*.
