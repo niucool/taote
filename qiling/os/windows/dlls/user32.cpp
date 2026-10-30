@@ -749,23 +749,32 @@ void register_user32_family() {
         (void)api_get_string(ql, get_param(params, "lpText"));
         (void)api_get_string(ql, get_param(params, "lpCaption"));
 
-        const auto utype = api_get_int(get_param(params, "uType"));
+        // Answer IDOK unconditionally, like the reference: its MessageBoxW and
+        // MessageBoxExW both return 1 while MessageBoxA returns 2, the comment
+        // there recording that Themida 3.x loops wsprintfW -> MessageBoxExW ->
+        // ExitProcess 18 times, so a WIDE box must leave the caller's exit path
+        // unchanged. The press table this replaced answered MB_YESNO with IDYES -
+        // the same destructive answer that cost 91 Neolite rows on the A path,
+        // latent here. Every MessageBoxW in this corpus is a payload about/usage
+        // box or Alienyze's "registered version" notice, so 1 is right; the texts
+        // are still logged through the string engine above.
+        return IDOK;
+    };
 
-        const auto buttons = utype & 0x0000000f;
-
-        // we strive to return a positive result when possible. if there is an
-        // "ok", "yes" or "continue" button, press it  (verbatim)
-        static const std::map<std::uint64_t, std::uint64_t> press{
-            {MB_OK, IDOK},
-            {MB_OKCANCEL, IDOK},
-            {MB_ABORTRETRYIGNORE, IDABORT},
-            {MB_YESNOCANCEL, IDYES},
-            {MB_YESNO, IDYES},
-            {MB_RETRYCANCEL, IDCANCEL},
-            {MB_CANCELTRYCONTINUE, IDCONTINUE},
-        };
-        const auto it = press.find(buttons);
-        return it != press.end() ? it->second : 0u;
+    // int MessageBoxExW(HWND hWnd, LPCWSTR lpText, LPCWSTR lpCaption, UINT uType,
+    //                   WORD wLanguageId);
+    // The fifth parameter is ignored - the reference answers MessageBoxExW with 2
+    // (IDCANCEL), the same value as its MessageBoxA.
+    WinsdkApi("MessageBoxExW", WinCc::Stdcall, {
+        {"hWnd", HWND_},
+        {"lpText", LPCWSTR_},
+        {"lpCaption", LPCWSTR_},
+        {"uType", UINT_},
+        {"wLanguageId", WORD_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        (void)api_get_string(ql, get_param(params, "lpText"));
+        (void)api_get_string(ql, get_param(params, "lpCaption"));
+        return IDCANCEL;
     };
 
     // int MessageBoxA(HWND hWnd, LPCSTR lpText, LPCSTR lpCaption, UINT uType);
@@ -923,14 +932,34 @@ void register_user32_family() {
         return 1;
     };
 
-    // HWND FindWindowW(LPCWSTR lpClassName, LPCWSTR lpWindowName); — the
-    // miss rides NULL
+    // the FindWindow answer both variants share. Anti-sandbox hygiene: a real
+    // Windows ALWAYS has these shell windows, and a packed stub cheap-checks
+    // FindWindowA("Shell_TrayWnd", 0) and hibernates forever when it fails (the
+    // reference's comment names Yoda-Protector). Return a synthetic, stable hwnd
+    // for the always-present classes/images and 0 for everything else.
+    const auto find_window_body = [](Qiling& ql, std::uint64_t, const ResolvedParams& params)
+        -> std::optional<std::uint64_t> {
+        static std::uint64_t next_hwnd = 0x00010001;
+        const auto cls = api_get_string(ql, get_param(params, "lpClassName"));
+        const auto name = api_get_string(ql, get_param(params, "lpWindowName"));
+        if (cls == "Shell_TrayWnd" || cls == "Shell_TabWindow" || cls == "Progman" ||
+            cls == "WorkerW" || name == "Program Manager") {
+            return next_hwnd++;
+        }
+        return 0;
+    };
+
+    // HWND FindWindowA(LPCSTR lpClassName, LPCSTR lpWindowName);
+    WinsdkApi("FindWindowA", WinCc::Stdcall, {
+        {"lpClassName", LPCSTR_},
+        {"lpWindowName", LPCSTR_},
+    }) = find_window_body;
+
+    // HWND FindWindowW(LPCWSTR lpClassName, LPCWSTR lpWindowName);
     WinsdkApi("FindWindowW", WinCc::Stdcall, {
         {"lpClassName", LPCWSTR_},
         {"lpWindowName", LPCWSTR_},
-    }) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
-        return 0;
-    };
+    }) = find_window_body;
 
     // SHORT GetAsyncKeyState(int vKey); — no host keyboard state rides the
     // emulator (the keys are up; the low bit stays clear)

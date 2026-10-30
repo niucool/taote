@@ -240,6 +240,21 @@ int main(int argc, char** argv) {
                     sample.filename().string().c_str());
         return 1;
     }
+    // RAII: a synthesized temp tree is removed on the way out. A host abort or
+    // SIGKILL skips this, which is what the stale-tree sweep below exists for -
+    // but the normal path must not leave one tree per sample behind either (a
+    // 2678-sample corpus leaked 1625 dirs before this).
+    struct RootfsCleanup {
+        fs::path p;
+        bool armed = false;
+        ~RootfsCleanup() {
+            if (armed) {
+                std::error_code ec;
+                fs::remove_all(p, ec);
+            }
+        }
+    } rootfs_cleanup;
+
     if (!rootfs.empty()) {
         run_rootfs = fs::path(rootfs);
         // the arch subtree, when the caller pointed at a base directory
@@ -308,6 +323,8 @@ int main(int argc, char** argv) {
         }
         fs::copy_file(run_sample, run_rootfs / "Windows" / sample.filename(),
                       fs::copy_options::overwrite_existing);
+        rootfs_cleanup.p = run_rootfs;
+        rootfs_cleanup.armed = true;
     }
 
     const auto exe_in_rootfs = run_rootfs / "Windows" / sample.filename();

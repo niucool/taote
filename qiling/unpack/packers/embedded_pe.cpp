@@ -684,7 +684,7 @@ public:
             // packed file had zeros (measured on alienyze_pythonw: 4110 bytes of
             // junk, the stub then hopped at 0x1d001395 and import recall fell
             // 1.000 -> 0.386).
-            if (!ok || !restored_in_place_) {
+            if (!ok) {
                 return false;
             }
             ctx.adopted_sections = sub.adopted_sections;

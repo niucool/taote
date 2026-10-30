@@ -5153,13 +5153,25 @@ TEST(WinApiUser32, StubAndClipboardFamiliesRideVerbatimConstants) {
     EXPECT_EQ(*ApiRegistry::instance().find("GetKeyboardType")->handler(ql, 0,
         ResolvedParams{{"nTypeFlag", 5ull}}), 0u);
 
-    // the MessageBoxW press table (the ok/yes/abort walks)
-    EXPECT_EQ(*ApiRegistry::instance().find("MessageBoxW")->handler(ql, 0,
+    // MessageBoxW answers IDOK for EVERY button set, like the reference (its
+    // MessageBoxW/MessageBoxExW return 1; the comment there records Themida 3.x
+    // looping wsprintfW -> MessageBoxExW -> ExitProcess 18 times, so a wide box
+    // must leave the caller's exit path unchanged). The press table this replaced
+    // answered MB_YESNO with IDYES - the destructive answer that cost 91 NeoLite
+    // rows on the A path.
+    for (std::uint64_t buttons : {0ull, 1ull, 4ull, 5ull}) {
+        EXPECT_EQ(*ApiRegistry::instance().find("MessageBoxW")->handler(ql, 0,
+            ResolvedParams{{"hWnd", 0ull}, {"lpText", std::string("m")}, {"lpCaption", std::string("c")},
+                           {"uType", buttons}}),
+                  1u)
+            << "uType buttons=" << buttons;
+    }
+    // MessageBoxExW exists and answers IDCANCEL (the reference's value)
+    ASSERT_NE(ApiRegistry::instance().find("MessageBoxExW"), nullptr);
+    EXPECT_EQ(*ApiRegistry::instance().find("MessageBoxExW")->handler(ql, 0,
         ResolvedParams{{"hWnd", 0ull}, {"lpText", std::string("m")}, {"lpCaption", std::string("c")},
-                       {"uType", 0ull}}), 1u);  // the MB_OK (the windows.h macro rides 0) / IDOK
-    EXPECT_EQ(*ApiRegistry::instance().find("MessageBoxW")->handler(ql, 0,
-        ResolvedParams{{"hWnd", 0ull}, {"lpText", std::string("m")}, {"lpCaption", std::string("c")},
-                       {"uType", 4ull}}), 6u);  // the MB_YESNO (the macro rides 4) / IDYES
+                       {"uType", 4ull}, {"wLanguageId", 0ull}}),
+              2u);
     // MessageBoxA answers IDCANCEL regardless of the button set: a packer's nag is
     // the one dialog whose YES is the destructive answer for one family (NeoLite's
     // demo box: YES -> visit the site -> ExitProcess) and whose NO is destructive for

@@ -3493,6 +3493,24 @@ UnpackResult Unpacker::finalize(Qiling& ql) {
             out << meta.dump(1) << "\n";
             res.metafile = meta_path.string();
         }
+        // The artifact contract: a written dump and meta must be NON-EMPTY. A full
+        // or quota-limited filesystem otherwise produces 0-byte files with rc=0,
+        // which grades as a per-row capability delta in both directions (the
+        // reference's harness hit exactly this and manufactured a fake signal).
+        {
+            std::error_code fec;
+            const auto dsz = fs::file_size(dump_path, fec);
+            const auto d_ok = !fec && dsz > 0;
+            fec.clear();
+            const auto msz = fs::file_size(meta_path, fec);
+            const auto m_ok = !fec && msz > 0;
+            if (!d_ok || !m_ok) {
+                throw QlErrorBase("artifact write failed: " + dump_path.string() + " (" +
+                                  std::to_string(d_ok ? dsz : 0) + " bytes), " +
+                                  meta_path.string() + " (" + std::to_string(m_ok ? msz : 0) +
+                                  " bytes)");
+            }
+        }
         res.imports = imports_;
 
         // ---- the rebuild (§1.8)

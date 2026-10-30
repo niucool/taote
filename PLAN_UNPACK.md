@@ -6748,3 +6748,59 @@ were 85-86 s wall-bound in the 4-worker arm - the parallel-budget flip the harne
 so the capability figure is **1991**. `alienyze_pythonw.exe` is a REAL loss: its stub unpacks a second
 stage at `0x1d001395` and the hop re-bases the result to `0x1d000000` (import recall 1.000 -> 0.386).
 That row is the known cost of the swap; it is one row against 33.
+
+### 0.17dm Round 119: the wide message box, the shell window, and two harness traps
+
+Four changes from the reference-side review, plus the measurements that decided them.
+
+**1. `MessageBoxW` answered as a press table; it is IDOK for every button set.** The old body ran one
+verbatim `qiling` table, so `MB_YESNO` returned `IDYES` - the same destructive answer that cost 91
+Neolite rows on the A path, latent on the W path. It now returns `IDOK` unconditionally, like the
+reference (whose `MessageBoxW`/`MessageBoxExW` return 1; its own comment records Themida 3.x looping
+`wsprintfW -> MessageBoxExW -> ExitProcess` 18 times, so a WIDE box must leave the caller's exit path
+unchanged). The texts are still decoded through the string engine. `MessageBoxExW` did not exist in
+taote at all; it is registered now and answers `IDCANCEL`, the reference's value.
+
+Measured on the four families that use it (Alienyze 126, Neolite 93, Molebox 93, Yoda-Protector 101;
+85 s, 4 workers): **Alienyze 125/108/79/75, Neolite 93/89/93/89, Molebox 93/89/92/89** - every one
+unchanged against its r68 baseline, which is what "every W box in this corpus is a payload about box or
+Alienyze's registered-version notice" predicts.
+
+**2. The A path keeps the blanket `IDCANCEL`.** A 200-run A/B on the reference side (48 rows x return
+2/1/6/7 across Neolite, Molebox, EXpressor, JDPack, Alienyze, plus 25-row per-family confirmations)
+found **zero rows where the answer changed the artifact and zero where 2 is worse**. Explicitly NOT
+adopting the tempting `MB_OK -> IDOK` refinement: the only `MB_OK`-nag families are EXpressor and JDPack
+and both measured answer-insensitive. The one real effect is import purity (at 6, 23 of 24 Neolite rows
+gain `kernel32!ExitProcess`/`shell32!ShellExecuteA`), which the r65 numbers already reflect.
+
+**3. `FindWindowA` added for the always-present shell classes** (`Shell_TrayWnd`, `Shell_TabWindow`,
+`Progman`, `WorkerW`, and the name `Program Manager`) - a synthetic, stable hwnd; 0 for anything else.
+`FindWindowW` now shares the body (`LPCSTR_`/`LPCWSTR_` both resolve through the string engine).
+Measured on **Yoda-Protector: no change at all (0 all-three before and after)**, because those rows
+never ask: a Yoda row makes **zero** API calls and ends `stages=0 reason=fallback_guess` - the stub
+does not run, so an anti-sandbox probe is not what blocks the family. This is parity with the reference
+and free, not a lever; Yoda needs the same treatment FSG needed (get the stub executing at all).
+
+**4. Two harness traps, both closed on the taote side.**
+* A tight filesystem produced **0-byte artifacts with rc=0** (the reference's harness measured it and
+  it manufactures a fake per-row signal in both directions). `Unpacker::finalize` now asserts the dump
+  and the meta are non-empty and raises `QlErrorBase` otherwise, so a quota failure shows up as an
+  error, never as a capability delta.
+* The synthesized temp rootfs was **never removed on the normal path** - a 2678-sample corpus run leaked
+  1625 trees (1.6 GB) and, on a tmpfs `/tmp`, filled the filesystem mid-run until 76 rows aborted with
+  `std::filesystem_error: cannot copy file: Disk quota exceeded`. `tools/taote.cpp` now removes its own
+  temp tree with an RAII guard (the stale-tree sweep stays for host aborts), and corpus runs should set
+  `TMPDIR` to a directory on the big disk.
+* Timeout-adjacent rows must be RE-TESTED, not read as signal: r68's three losses were re-run alone at
+  1 worker and a 200 s budget - `expressor_Everything.exe` passes in 41 s and `nspack_ADInsight.exe` in
+  36 s (both were 85-86 s wall-bound in the 4-worker arm), so the r68 capability figure is **1991**,
+  not 1989. Only `alienyze_pythonw.exe` is a real loss (its stub unpacks a second stage at 0x1d001395
+  and the hop re-bases the result to 0x1d000000; recall 1.000 -> 0.386) - one row against 33.
+
+Corpus (r69, 2678 rows, 85 s, 4 workers) for the three API changes + the seed-gate revert:
+valid PE 2672 / OEP 2112 / imports 2078 / all-three 1986 in-run. Three ASPack rows and
+`mpress_ComIntRep` failed with `timeout: failed to execute process: Permission denied` - the CLI was
+rebuilt WHILE the corpus was running - and all four pass solo at 1 worker / 200 s; `nspack_ADInsight`
+(dur 86, wall-bound, as in r68) passes in 35 s. With those five put back, the capability figure is
+**1991**, identical to r68: the wide-box and FindWindow changes are free, which is what the four family
+arms already said. Lesson for the harness: never rebuild the CLI under a live corpus run.
