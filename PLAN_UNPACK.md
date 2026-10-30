@@ -6267,3 +6267,31 @@ Next concrete step (recorded): dump the claim ledger for 3-5 Neolite rows (every
 its address, section, first bytes and whether the payload decodes there) and compare against truth, so
 the discriminator is derived from data rather than guessed. No code changed this round; suite
 602/602, tree clean, baseline unchanged (r63: all-three 1873/2678).
+
+### 0.17db Round 108: Neolite's dump is a MID-DECODE state - the packed file copied to rva 0x1000
+
+Following the ledger step from 0.17da, one Neolite row was traced end to end
+(`neolite_ProduKey.exe`). The result corrects the previous reading: this is not a picker problem.
+
+| observation | measurement |
+|---|---|
+| run duration | **0.107 s** (budget 150 s) - it ends almost immediately |
+| hop accepted | 1 candidate, `0x41687b` in `.neolit`; the picker then prefers a Borland-shaped entry `0x40d21e` |
+| truth | `0x40d10a` = `6a 70 68 00 e4 40 00 e8 e2 01 00 00` (a CRT entry) |
+| dump at truth rva | `00 eb b8 8b 45 0c 66 3d ...` - not the payload |
+| dump vs original image | 44.4 % identical: headers 93 %, **`.text` head (0x1000-0xd000) 4.1 %**, `.text` tail 88 %, rest 98 % |
+| `dump[0x1000:0x2000]` | **byte-identical to `packed[0:0x1000]`** - the stub copied the packed FILE to rva 0x1000 |
+| `dump[0x1000:]` vs `packed[:]` | 60.8 % identical overall |
+
+So Neolite's artifact is the state *mid-decode*: the stub copies the packed image into the payload
+area and only the tail is ever decrypted. The layout also explains why `TAOTE_UNPACK_SHADOW_ALL=1`
+changes nothing (44.4 % either way) - the head is never written with plaintext at all, so the
+first-write shadow has nothing to restore. Imports are already perfect on the row (recall 1.0000,
+635 pairs) and 80 of 93 family rows, so nothing import-side is at stake.
+
+Next concrete step (recorded, data-first): follow the `.neolit` stub past the copy - log the guest's
+write stream (which ranges get written, in what order) and where it stops, and find what makes the
+run end at 0.1 s. The section table gives the shape to test: only `.neolit` is executable
+(`exec=1`, inplace) while `.text` is file-backed ciphertext (`raw=0xc600`, `exec=0`), so an in-place
+decrypt of a file-backed section is the case the hop detector has to see. No code changed; suite
+602/602, tree clean, baseline unchanged (r63: all-three 1873/2678).
