@@ -7002,3 +7002,32 @@ at 0x4171aa must hold either 0xffffcfce (the caller) or the code address 0x4171x
 whether the stub's own accounting depends on the `pushfw`/`pusha` pair at 0x417125-0x417128 (i.e. whether
 the emulator's `pusha` writes 8 dwords the way the stub counts them) or on the two `VirtualProtect`
 argument counts it pushes around them.
+
+### 0.17ds Round 124b: PEtite's own decompressor returns 0 - and it is also the wrong OEP
+
+0.17dr's stack analysis was a red herring in the good sense: the frame arithmetic is exact. Measured
+directly - `66 9c` (pushfw) moves esp by **2**, `60` (pusha) by **32**, `50` (push eax) by 4, so the
+stub's `mov [ecx+0x2e],esp` store lands exactly where its own accounting expects (0xffffcff4 -> 0xffffcfce
+across the three pushes). Nothing is misaligned there, and the run then goes on to execute ~0x900 bytes
+of the stub (0x417317, 0x4181c7, ...).
+
+The failure is one instruction pair, at the end:
+
+    4171e2  call 0x417214          ; the stub's OWN decompressor
+    4171e7  test eax,eax
+    4171e9  je   0x4170ce          ; decompressor returned 0 -> the ERROR path
+                                   ;   ...which walks into the table and shows "Corrupt Data!"
+
+Probed at the test: `eax=0x408863`, `ebx=0x41864c`, `ecx=edx=0x4147ff`, `edi=0x414000`, and the stack
+holds the four arguments the stub passed (`0x408863 0x4147ff 0 0x41864c`). So the decompressor is
+called with a real buffer and returns failure.
+
+**And that explains the family's OEP signature**: every bad PEtite row in the r70 census claims an OEP
+ending `...214` (0x417214, 0x416214, 0x41b214, 0x40f214). 0x417214 is exactly this `call` target - the
+stub's decompressor - so the pick is latching the address the stub *called*, not the entry it transfers
+to. Fixing the decompressor's return is therefore worth two things at once: the payload actually gets
+decoded, and the `...214` family of wrong OEPs disappears with it.
+
+Next step: probe inside 0x417214 for its failing comparison (the routine is 0x100-ish bytes; the return
+value is set to 0 on some validation of the input buffer at 0x408863/0x4147ff). Diff the same call's
+inputs against the reference, where the stub never reaches the box.
