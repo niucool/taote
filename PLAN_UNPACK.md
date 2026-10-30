@@ -6939,3 +6939,35 @@ decode, never the answer.
 
 Next step for PEtite: find what the stub validates between the second `VirtualProtect` and the box (the
 box's own strings at 0x4170f6/0x4170fd are the error text - read them, they name the failed check).
+
+### 0.17dq Round 123: PEtite executes its own DATA - and heap alignment is not the cause
+
+0.17dp left one question: what ends PEtite's run before the payload starts. Two measurements, both
+narrow, and the second one is the interesting negative.
+
+**The stub ends up executing its own data section.** `TAOTE_LASTPC` on `petite_rrdec.exe` ends at
+**0x4170f3**, which is inside the stub's table area at 0x417000-0x4170bc - the byte right before the
+`"ERROR!"` string at 0x4170f6 and `"Corrupt Data!"` at 0x4170fd. So the "Corrupt Data!" nag is not a
+decision the stub made: control fell into the table, and the adjacent strings are what the box shows.
+The disassembly shows why the region is reached at all - the stub builds its own frame from a **heap**
+pointer:
+
+    417134  call [eax+0x1c]            ; GlobalAlloc(0, 0xbc70)
+    417139  lea  esp,[eax+0xbc70]      ; <- its whole stack IS the returned pointer
+    41713f  mov  [ecx+0x2e],esp        ; ... and it is indexed by BYTE offsets
+    417192  add  BYTE PTR [esp],0x8    ; ... so the frame must be aligned
+    4171aa  mov  ecx,[ebx] ; btr ecx,0x1f ; jae good   ; the branch that decides error vs continue
+
+**Heap alignment tested and REVERTED.** `QlMemoryHeap::alloc`/`alloc_append` advanced the bump by the raw
+requested size, so taote hands out odd pointers (`GlobalAlloc(0,0xbc70)` -> 0x50009ae). Rounding the bump
+to 16 in both functions does change the run - `esp` becomes 0x500c6a4 and the probe at 0x4171aa now fires
+with real values (ecx 0x4147ff, 0x41500b) instead of once with zeros - but the failure is identical
+(MessageBoxA(uType 0x10) -> 2, ExitProcess(0xffffffff)) and the PEtite family arm is **exactly the
+baseline: 73/35/36/29**. Since the change touches every heap allocation in every family, a neutral result
+is not worth carrying; reverted. Recorded because this is the second family (after Neolite) where the
+heap-alignment hypothesis is measurably not the cause.
+
+Next step: stop chasing the frame. The stub's chain after the two `VirtualProtect` calls returns into
+0x4170bb (the prologue probe's `ret` value), i.e. a return address INSIDE the table - so the
+`rep movsd` copy-and-call sequence at 0x417179-0x417188 is what goes wrong, not the arithmetic around it.
+Dump the 8 stack dwords at the `call ebx` (0x417173) and see which return slot the stub overwrites.
