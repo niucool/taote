@@ -7117,3 +7117,31 @@ So the next step is exactly one thing: find the stub's relocation pass - the loo
 it computes from its own entry). The reference computes it correctly; the delta is non-constant in taote,
 which points at the loop reading its delta from a slot that taote's image holds with a different value
 rather than at a constant offset error.
+
+### 0.17dw Round 127: there is no relocation pass in the stub - the divergence is inside the decoder
+
+0.17dv's next step assumed the stub walks every `e8` and patches its rel32. Scanned the stub's whole
+code area (0x417000-0x418800) for the three ways a byte-pattern relocator would test that opcode:
+
+    cmp byte [reg],0xe8   (80 /7 e8)      - none
+    cmp eax,0xe8          (3d e8 00 00 00) - none
+
+so PEtite does **not** relocate by scanning. The `e8`-adjacent changes are therefore an artifact of WHERE
+the decompressed bytes land, not of a fixup pass: the decoder emits code and its copies propagate.
+
+That is confirmed by direct comparison of the two engines' memory:
+
+    store region 0x408863 (the decoder's input):  taote == reference only 869/1024  (85%)
+    payload page 0x401000 (the decoder's output): taote == reference only 3700/4096 (90%)
+
+So taote and the reference disagree about ~15% of the *input* store as well as the output: the divergence
+begins in the stub's own decrypt of the store, and the sparse output errors (5,888 bytes, first at
+0x401054) are its downstream consequence through the LZ copies. Both engines are running the same stub
+code, so this is an emulation-fidelity difference in a loop that copies/decrypts backwards - and the
+stub's decompressor does use the `std` direction-flag idiom (`fd` at 0x4171b6 followed by
+`mov esi,eax; mov edi,eax` and a `rep movs`), which is the first thing to instrument.
+
+**Bounded next step** (needs a write tracer, not more artifact diffing): log taote's first ~64 writes in
+the store region with `(pc, addr, value)` (a `TAOTE_WATCH_ADDR`-style range hook), and check the write
+that produces the first wrong byte; if the pc is inside the `std`/`rep movs` block, compare unicorn's
+`rep movs` semantics with DF=1 there. If the pc is elsewhere, the same log gives the exact instruction.
