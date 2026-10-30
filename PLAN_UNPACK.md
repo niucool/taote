@@ -6526,3 +6526,81 @@ probing the instruction that writes that slot (watch `ebp-0x84` for the first wr
 module it walks, the hash it compares and the name it reconstructs; then compare against the export
 directory taote's synthetic stub dll actually exposes. The suspicion is the export DIRECTORY shape
 (name/ordinal arrays), since the same dlls serve every other family. 18 rows ride on this.
+
+### 0.17di Round 115: Alienyze - the stub's own hash walk, and the module-order trap
+
+Round 114 left one zeroed slot. This round explains it end to end and finds the answer one level
+deeper: **the stub resolves kernel32's imports itself, by walking the export directory by name hash,
+and it picks the module by POSITION in the PEB lists - so the order taote preloads its stub dlls in
+decides whether the packer can find anything at all.**
+
+Measured with the new `TAOTE_WATCH_ADDR` gate (first n writes to a guest address, with the writing
+pc; env-gated, off by default, same class as `TAOTE_LASTPC`/`TAOTE_PROBE`):
+
+    [watch] ... val=0x10010000 pc=0x44f876     ; the module base the export walk uses
+    [watch] ... val=0x0        pc=0x44f95b     ; [ebp-0x84] — one of seven local inits
+
+Disassembling the resolver (from the packed file - the .alien code region is plaintext, only the
+0x6f-filled data run at 0x44f740 is filler) gives the whole mechanism:
+
+    44f7eb  mov eax, fs:0x30            ; PEB
+    44f7fd  mov edx, [ecx+0xc]          ; PEB->Ldr
+    44f809  mov edx, [ecx+0x28]         ; FullDllName.Buffer
+    44f81d  ...                         ; scan the wide path for the last '\'
+    44f84e  mov eax, [ldr+0x14]         ; InMemoryOrderModuleList
+    44f873  mov ecx, [eax+0x10]         ; DllBase
+    44f876  mov [ebp-0xc], ecx          ; the module to walk
+    44f927  mov [ebp-0x2c], base+expdir
+    44f93c  mov ecx, [exp+0x20]         ; AddressOfNames
+    44f94b  mov eax, [exp+0x24]         ; AddressOfNameOrdinals
+    44f9bd  loop i < [exp+0x18]         ; NumberOfNames
+    44f9e5  hash: h = (h*257 + c) ^ (c<<16)
+    44fa1f  cmp h, 0xc5e5447a / 0xeec1e396 / ...  ; eight names, eight slots
+
+The eight hashes are **exactly** `GetProcAddress`, `LoadLibraryA` (-> the slot the earlier round
+found dead), `VirtualAlloc`, `CreateFileMappingA`, `MapViewOfFile`, `UnmapViewOfFile`,
+`CloseHandle`, plus one more: `GetFileAttributesExW` (0x4b1e23db).
+
+Two findings, both measured:
+
+1. **`GetFileAttributesExW` did not exist in taote at all** (only the `A` form did). Registered
+   now, sharing `get_file_attributes_ex_body`.
+2. **The module the walk picks is chosen by list POSITION**: taote preloaded
+   `ntdll, kernelbase, kernel32, mscoree, ucrtbase`, i.e. the third InMemory entry was
+   `kernelbase`, whose synthesized stub dll has **0 export names** (nothing registers API entries
+   for kernelbase). Every hash therefore missed and every slot stayed 0. Swapping the order to
+   `ntdll, kernel32, kernelbase` (Windows loads kernel32 first and then its dependency kernelbase)
+   makes the walk land on kernel32 - and the stub then runs the reference's whole prologue:
+
+       LoadLibraryA(0x42a024) -> user32   ; taote: 0x10050000
+       GetProcAddress(user32, "MessageBoxW")
+       MessageBoxW(0, text, caption, 0x40) -> 1
+       GetFileAttributesExW(<own path>) -> 1
+       CreateFileW -> CreateFileMappingA -> MapViewOfFile -> UnmapViewOfFile -> CloseHandle
+       ... and then jumps to 0x407a98, which IS the reference's exact OEP for this row
+
+3. Related, and needed for (2) to even get past the stat: **the main image's LDR FullDllName lied**.
+   The CLI copies the sample to `rootfs/Windows/<name>` but `add_ldr_data_table_entry` built the name
+   from `winsys()` (`C:\Windows\System32`), so the guest was told its own exe lived in System32.
+   The main image now reports `%WINDIR%`, where the file really is; DLLs keep `winsys()`.
+
+**Measured, and partly rejected.** The Alienyze family arm (126 rows, 85 s, 4 workers):
+
+| arm | valid PE | OEP exact | imports | all-three |
+|---|---|---|---|---|
+| r65 baseline | 125 | 54 | 74 | 43 |
+| path fix + `GetFileAttributesExW` (order unchanged) | 125 | 54 | 74 | **43** (neutral) |
+| all three, **with the dll-order swap** | 125 | **33** | **56** | **27** |
+
+So the dll-order swap is **reverted**: it gets the stub further (to the true payload entry) but the
+payload then dies on `UC_ERR_READ_UNMAPPED` before the packer's own missing step, and the artifact
+ends up worse than the static decode it replaced. The two remaining changes (the LDR main-image path
+and `GetFileAttributesExW`) were then run over the whole corpus (r66, 2678 rows, 85 s, 4 workers)
+against r65: **valid PE 2675 = , OEP exact 2060 = , imports 2076 -> 2077, all-three 1957 -> 1958,
+one gain (nspack_ADInsight.exe) and zero losses** - free, so shipped.
+
+Next step from here (recorded): make the stub's decode COMPLETE before the payload runs. The
+reference calls `VirtualProtect(0x401000, 0xc600, 4)` between `GetFileAttributesExW` and
+`UnmapViewOfFile`; taote's run never calls it, and the stub jumps to the payload without the
+151 297-byte 0x6f XOR having been replayed in emulation, so the payload executes a half-decoded
+image. The gate to port is the reference's `install_alienyze_loopacc_` family accelerator.

@@ -155,7 +155,11 @@ public:
     void init_teb();
     void init_peb();
     void init_ldr_data();
-    void add_ldr_data_table_entry(const std::string& dll_name);
+    // dir_override: the directory the guest should be TOLD the file lives in.
+    // The main image is the empty string (it lives in %WINDIR%, where the
+    // caller really puts it); a dll leaves it empty and takes winsys().
+    void add_ldr_data_table_entry(const std::string& dll_name,
+                                  const std::string& dir_override = {});
 
     // loader/pe.py init_imports — the main-image import walk (the api-ms
     // redirect ladder + the load_dll rides + the IAT slot writes)

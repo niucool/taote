@@ -1302,6 +1302,19 @@ void register_fileapi_family() {
         {"lpFileInformation", LPVOID_},
     }) = get_file_attributes_ex_body;
 
+    // BOOL GetFileAttributesExW(LPCWSTR lpFileName, GET_FILEEX_INFO_LEVELS
+    //                           fInfoLevelId, LPVOID lpFileInformation);
+    // The wide twin. Alienyze's stub resolves its kernel32 imports by walking
+    // the export directory by name hash before it calls anything, so a name
+    // taote does not export is a slot the stub leaves 0 and then calls: the
+    // packer asked for this one (hash 0x4b1e23db) and died on the null call.
+    // Same WIN32_FILE_ATTRIBUTE_DATA image as the A form.
+    WinsdkApi("GetFileAttributesExW", WinCc::Stdcall, {
+        {"lpFileName", LPCWSTR_},
+        {"fInfoLevelId", DWORD_},
+        {"lpFileInformation", LPVOID_},
+    }) = get_file_attributes_ex_body;
+
     // DWORD SetFilePointer(HANDLE hFile, LONG lDistanceToMove,
     //                      PLONG lpDistanceToMoveHigh, DWORD dwMoveMethod);
     WinsdkApi("SetFilePointer", WinCc::Stdcall, {

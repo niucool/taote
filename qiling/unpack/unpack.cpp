@@ -638,6 +638,35 @@ void Unpacker::install(Qiling& ql) {
         }
     }
 
+    // TAOTE_WATCH_ADDR=<hex addr>[:<n>]: print the first n writes (default 8) to that
+    // guest address, with the writing pc and the value. Same debugging class as
+    // TAOTE_LASTPC/TAOTE_PROBE: off by default, no behaviour change.
+    if (const char* wa = std::getenv("TAOTE_WATCH_ADDR"); wa != nullptr && *wa != '\0') {
+        std::string spec(wa);
+        std::size_t want = 8;
+        if (const auto c = spec.find(':'); c != std::string::npos) {
+            want = std::strtoul(spec.c_str() + c + 1, nullptr, 0);
+            spec.resize(c);
+        }
+        const auto watch_addr = std::strtoull(spec.c_str(), nullptr, 0);
+        auto seen = std::make_shared<std::size_t>(0);
+        auto h = std::make_shared<HookRet>(ql.hook_mem_write(
+            [this, &ql, watch_addr, want, seen](int /*access*/, std::uint64_t addr, std::uint32_t size,
+                                                std::int64_t value) -> int {
+                if (addr <= watch_addr && watch_addr + 8 > addr && *seen < want) {
+                    ++*seen;
+                    const auto pc = ql.arch().regs().arch_pc();
+                    std::fprintf(stderr, "[watch] write to 0x%llx (len %d, covers 0x%llx) val=0x%llx pc=0x%llx\n",
+                                 static_cast<unsigned long long>(addr), size,
+                                 static_cast<unsigned long long>(watch_addr),
+                                 static_cast<unsigned long long>(value),
+                                 static_cast<unsigned long long>(pc));
+                }
+                return 0;
+            }));
+        hooks_.push_back(std::move(h));
+    }
+
     // TAOTE_PROBE=<hex pc>: dump the guest registers and the return slot the first
     // time that exact pc executes. A debugging aid (like TAOTE_LASTPC/TAOTE_FSGTRACE):
     // a stub loop that runs away is only diagnosable if you can see which pointer it

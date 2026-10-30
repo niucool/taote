@@ -944,7 +944,12 @@ void QlLoaderPE::run() {
             init_teb();
             init_peb();
             init_ldr_data();
-            add_ldr_data_table_entry(std::filesystem::path(ql_->path()).filename().string());
+            // the MAIN image reports the directory the caller really put it in
+            // (%WINDIR%), not winsys(): a stub that stats or opens its own
+            // module path (Alienyze's GetFileAttributesExW does, before its
+            // decode) otherwise looks for a file that is not there
+            add_ldr_data_table_entry(std::filesystem::path(ql_->path()).filename().string(),
+                                     static_cast<os::windows::QlOsWindows&>(ql_->os()).windir());
         }
 
         // loader/pe.py run: "Stack should not init at the very bottom. Will
@@ -1243,7 +1248,8 @@ void QlLoaderPE::init_ldr_data() {
 // heap with the DllBase, the FullDllName/BaseDllName wide strings and the
 // three-order Flink/Blink chains (the ldr_list-tail walk; the first entry
 // links against the LDR list heads)
-void QlLoaderPE::add_ldr_data_table_entry(const std::string& dll_name) {
+void QlLoaderPE::add_ldr_data_table_entry(const std::string& dll_name,
+                                         const std::string& dir_override) {
     auto& os_win = static_cast<os::windows::QlOsWindows&>(ql_->os());
 
     const Image* image_rec = get_image_by_name(dll_name, true);
@@ -1290,7 +1296,7 @@ void QlLoaderPE::add_ldr_data_table_entry(const std::string& dll_name) {
     put_le(entry, layout.entry_off_dll_base, image_rec->base, ptr);
     ql_->mem().write(entry_addr, entry);
 
-    const std::string full_name = os_win.winsys() + "\\" + dll_name;
+    const std::string full_name = (dir_override.empty() ? os_win.winsys() : dir_override) + "\\" + dll_name;
     populate_unistr(entry_addr, layout.entry_off_full_dll_name, full_name);
     populate_unistr(entry_addr, layout.entry_off_base_dll_name, dll_name);
 
