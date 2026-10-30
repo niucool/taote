@@ -6856,3 +6856,50 @@ not fix the root cause: **running further is not free here**.
 So the data-export path is reverted in full. It stays recorded as a latent correctness gap (a data
 import resolved to a code thunk) together with the measurement that fixing it alone costs more than it
 pays - it needs a budget story, exactly like the rejected post-OEP grace window and the wider rootfs.
+
+### 0.17do Round 121: reference parity on the big families, and PEtite measured twice
+
+**Parity check first, as the directive asks.** The family table from r70, with mean code_sim (whether the
+artifact is decoded at all):
+
+| family | n | valid PE | OEP exact | imports | all-three | headroom | mean code_sim |
+|---|---|---|---|---|---|---|---|
+| Themida | 122 | 122 | 0 | 0 | 0 | 122 | **0.07** |
+| TELock | 116 | 116 | 1 | 0 | 0 | 116 | **0.09** |
+| Yoda-Protector | 101 | 101 | 0 | 1 | 0 | 101 | **0.06** |
+| RLPack | 104 | 104 | 73 | 8 | 7 | 97 | 0.99 |
+| Alienyze | 126 | 125 | 108 | 79 | 75 | 51 | 0.73 |
+| PEtite | 73 | 73 | 35 | 36 | 29 | 44 | 0.92 |
+| Amber | 152 | 152 | 111 | 138 | 110 | 42 | 0.76 |
+
+Themida/TELock/Yoda have `code_sim ~0.07`: nothing is decoded, and they need a family unpacker port, not
+a mechanism. **Measured for Yoda-Protector: the reference does not solve it either.** A single row looked
+solved (meta said `oep 0x460000`, `reason yp_terminal_full_fill`, stages 5, 61 imports), so the whole
+family was run against the reference (101 rows, 120 s budget, 4 workers):
+
+    reference Yoda-Protector:  valid PE 99   OEP exact 1   imports 0   all-three 0
+
+and the one "solved" row is **wrong**: `yoda-protector_ADExplorer.exe` claims 0x460000 with
+`code_sim 0.054`. So Yoda is correctly deprioritised: neither engine decodes it.
+
+**PEtite (44 headroom, `code_sim 0.92`) is reference-solvable** - pegasus returns the true entry on the
+rows I spot-checked (`petite_gzip` 0x401280, `petite_rrdec` 0x401160, `petite_m2cdm` 0x401160, all
+`petite_terminal_full_fill`, stages 3, 73-81 imports), so it is real headroom. Two ports attempted and
+both **reverted**:
+
+* `PetitePacker::static_oep_from_image` implementing the reference's terminal validator (scan the decoded
+  sections, excluding the packed-EP section, for the MSVC prologue `55 8b ec 6a`; and only when the
+  latched hop is not itself a prologue site): **35/29 -> 31/28**. The unconditional version was 31/28
+  too, so the guard was not the problem - the family override bypasses the generic ladder and the scan's
+  first hit is not the entry on 4 rows.
+* excluding the packed-EP section from the picker's "largest written range" fallback scan (the stub's
+  self-writes put its own section into `ever_written_`, so the fallback found a prologue in the STUB's
+  code - measured on `petite_rrdec`: picked 0x417214, truth 0x401160): **31/28** as well.
+
+What the failure chain actually is, now measured: PEtite's hop is a **junk latch** (`hop ledger (1):
+0x417175@2`, write ordinal 2, inside the stub's own section 0x417000-0x4187f0), the generic ladder runs
+and finds nothing (`passA 0, passB 0, boundary 0, C=0` on every section), and the picker then falls back
+to the prologue scan over written ranges - which includes the stub's own section. The next attempt
+should therefore keep the generic ladder and fix the *scan target*, not replace the ladder: on this row
+the decoded payload is section 1 (0x401000, 0x12000 bytes) and the truth is its first `55 8b ec 6a`
+(0x401160 = offset 0x1160).
