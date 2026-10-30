@@ -6018,3 +6018,21 @@ string. `r61` (2678 samples, 85 s, 4 workers, HEAD `8315001`, quiet-ish machine 
 **Zero gains, zero losses, no row changed any of the three criteria.** FSG grades 96/97 inside the
 same run, matching `fsg14` and `fsg15`. So naming the unclassified failure state is corpus-neutral,
 as a diagnostic-only change should be - and it is now measured rather than assumed.
+
+### 0.17ct Round 100: the corrupt-input contract is pinned (suite 601 -> 602)
+
+Round 98 fixed a diagnostic hole - a header the loader refuses outright printed `reason=` with
+nothing after it - but shipped it unpinned, which is exactly the discipline every other FSG
+mechanism got. `UnpackCompat.CorruptSectionCountFailsGracefully` closes that: it reads
+`FSG/fsg_cmd.exe`, sets `NumberOfSections` to `0xffff` (so the section table runs past EOF and no
+image can be built), runs it in-process, and requires a *result* rather than an exception with
+`base == 0`, no imports, and `reason == "init_failed"`.
+
+Verified to be a real lock rather than a formality: with the round-98 fallbacks reverted the CLI path
+prints the empty reason the audit found (see the twelve-variant table in 0.17cr), and the library
+fallback in `Unpacker::finalize` is what turns it into `init_failed` / `no_hop`. Note the layering:
+the test exercises the harness's mirror of the CLI's `else` branch, which is why it keeps passing if
+only `tools/taote.cpp` is reverted - the CLI behaviour itself was verified by the audit, and the
+library fallback by the twelve-variant table. Suite **602/602**, all green; skips cleanly without the
+corpus. Tests-only, so the shipped binary and the corpus figures are unchanged (r61: 1864/2678,
+zero losses).

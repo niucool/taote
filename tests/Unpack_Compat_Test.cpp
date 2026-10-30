@@ -414,6 +414,43 @@ TEST(UnpackCompat, FsgStringShiftIsUndoneAsABlockVote) {
     fs::remove_all(out, ec);
 }
 
+// A header the loader refuses outright (here: NumberOfSections = 0xffff, so the
+// section table runs past the end of the file and LIEF/Qiling refuse to build an
+// image) used to print "reason=" with nothing after it - the most corrupt input
+// class was the least diagnosable one. The run must come back as a result, not an
+// exception, and it must NAME the state: init_failed (the engine never started).
+TEST(UnpackCompat, CorruptSectionCountFailsGracefully) {
+    const auto sample = fixture("FSG/fsg_cmd.exe");
+    if (sample.empty()) {
+        GTEST_SKIP() << "packed corpus not present (set TAOTE_PACKED_DIR)";
+    }
+    std::ifstream in(sample, std::ios::binary);
+    std::vector<char> raw((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    ASSERT_GT(raw.size(), 0x200u) << sample;
+    const auto lfanew = static_cast<std::size_t>(
+        *reinterpret_cast<const std::uint32_t*>(raw.data() + 0x3c));
+    ASSERT_LT(lfanew + 8, raw.size());
+    // NumberOfSections lives at e_lfanew + 6
+    raw[lfanew + 6] = static_cast<char>(0xff);
+    raw[lfanew + 7] = static_cast<char>(0xff);
+
+    const auto out = fs::temp_directory_path() / "taote_unpack_fsg_nsec";
+    std::error_code ec;
+    fs::remove_all(out, ec);
+    fs::create_directories(out, ec);
+    const auto crafted = out / "fsg_nsec_ffff.exe";
+    {
+        std::ofstream o(crafted, std::ios::binary | std::ios::trunc);
+        o.write(raw.data(), static_cast<std::streamsize>(raw.size()));
+    }
+    // must not throw; must name the state
+    const auto res = run_unpack(RunConfig{crafted, out, true});
+    EXPECT_EQ(res.base, 0u) << res.error;
+    EXPECT_TRUE(res.imports.empty()) << res.error;
+    EXPECT_EQ(res.reason, "init_failed") << "reason was: '" << res.reason << "' error: " << res.error;
+    fs::remove_all(out, ec);
+}
+
 // The last FSG row is dead packer output, and the tool must say so GRACEFULLY.
 // fsg_Snap2HTML ships with no "PE\0\0" anywhere (the packer overwrote its header
 // page with the stub), so there is nothing to repair and nothing to load. The
