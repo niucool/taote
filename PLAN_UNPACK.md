@@ -7085,3 +7085,35 @@ payload's first divergence (0x401054) is an *output*, so walk backwards through 
 three-way diff (taote memory, reference memory, original) page by page until the first differing write
 appears; that instruction is the emulation-fidelity bug. PEtite at 44 headroom is worth it: the reference
 proves the family is fully solvable.
+
+### 0.17dv Round 126: PEtite's first divergence is a `call rel32` low byte - the relocation delta
+
+0.17du left "find the first differing write". The answer is more specific than expected, and it is
+visible in the finished artifacts without a write tracer.
+
+Byte-for-byte around the first divergence (0x401040-0x40106f), taote is identical to the original except
+at three positions, and each sits **immediately after an `e8`**:
+
+    0x401053  e8                       (call)
+    0x401054  original 0x10   taote 0x63     <- rel32 low byte
+    0x40105b  e8
+    0x40105c  original 0x20   taote 0x7b
+    0x401060  e8
+    0x401061  original 0x8b   taote 0xeb
+
+Decoded as displacements that is `+0x53`, `+0x5b`, `+0x60` on the call TARGETS (the other three rel32
+bytes are unchanged, so only the low byte - and therefore only the target's low byte - moves). That is a
+**relocation** difference, not a decompression one: PEtite's stub walks the payload's relative calls and
+adds a delta, and under taote the delta it applies (or the value it reads it from) is wrong by a
+non-constant amount (0x53 / 0x5b / 0x60 over three calls only 0x0d apart).
+
+The scale of the problem, over the whole payload section:
+
+    differing bytes taote vs original: 5,888    (89.7 % match; reference 97.0%, first divergence NONE)
+    of those, 2,036 are the rel32 bytes of an `e8` at +1..+4, 3,852 are elsewhere
+
+So the next step is exactly one thing: find the stub's relocation pass - the loop that touches every
+`e8`'s rel32 - and check where its delta comes from (the packed image's stored original base, or a value
+it computes from its own entry). The reference computes it correctly; the delta is non-constant in taote,
+which points at the loop reading its delta from a slot that taote's image holds with a different value
+rather than at a constant offset error.
