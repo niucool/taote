@@ -7145,3 +7145,41 @@ stub's decompressor does use the `std` direction-flag idiom (`fd` at 0x4171b6 fo
 the store region with `(pc, addr, value)` (a `TAOTE_WATCH_ADDR`-style range hook), and check the write
 that produces the first wrong byte; if the pc is inside the `std`/`rep movs` block, compare unicorn's
 `rep movs` semantics with DF=1 there. If the pc is elsewhere, the same log gives the exact instruction.
+
+### 0.17dx Round 128: the copy loop found - `std` + `rep movsd` over 12-byte entries
+
+A range write tracer (`TAOTE_WATCH_RANGE=<lo>-<hi>[:n]`, env-gated) answers 0.17dw's question, and it
+finds the loop that 0.17dv's byte-pattern scan could not:
+
+    TAOTE_WATCH_RANGE=0x401000-0x413000:8
+    [watchr] #1 pc=0x4171c1 addr=0x412ffc len=4 val=0x3d93eb0f
+    [watchr] #2 pc=0x4171c1 addr=0x412ff8 len=4 val=0xfd4f0e8e
+    ...                                        (descending addresses: the copy runs BACKWARDS)
+
+which disassembles to
+
+    4171aa  mov  ecx,[ebx]          ; entry word; bit 31 = "this entry has a copy"
+    4171ac  btr  ecx,0x1f
+    4171b0  jae  0x4171c9           ; bit clear -> the next phase
+    4171b2  mov  eax,[esp+0x18]     ; the payload base
+    4171b6  std                     ; DF = 1
+    4171b7  mov  esi,eax
+    4171b9  mov  edi,eax
+    4171bb  add  esi,[ebx+4]        ; src offset
+    4171be  add  edi,[ebx+8]        ; dst offset
+    4171c1  rep  movsd              ; the overlapping BACKWARD copy
+    4171c3  add  ebx,0xc            ; 12-byte entries
+    4171c6  cld
+    4171c7  jmp  0x4171aa
+
+So the "relocation" is a relocation *table* of 12-byte entries `{flags|count, src, dst}` applied with an
+overlapping backward copy - not a scan for `e8`, which is why looking for the opcode found nothing. The
+`rep movsd` at 0x4171c1 is a separate routine's memcpy (0x4171f5-0x417213, `rep movsd` + `rep movsb`) that
+the tracer also caught at 0x417206, i.e. the stub has both an overlapping-backward move and a plain
+memcpy, and both were exercised.
+
+taote has NO special handling of the string instructions anywhere (grep for MOVSB/MOVSD/STD in the tree
+returns only a comment), so these run through unicorn natively - which means the divergence is either in
+the entry table the loop reads (12 bytes per entry, first word's bit 31) or in unicorn's DF handling on
+one of these two forms. That is now a two-way question with a one-command answer each, and the tracer is
+the tool for both.

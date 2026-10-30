@@ -736,6 +736,39 @@ void Unpacker::install(Qiling& ql) {
         hooks_.push_back(std::move(h));
     }
 
+    // TAOTE_WATCH_RANGE=<hex lo>-<hex hi>[:n]: log the first n writes (default 64)
+    // that land inside [lo, hi) with the writing pc, the address, the width and the
+    // value - the write-only companion of TAOTE_WATCH_ADDR, for finding the first
+    // store that produces a wrong byte in a decoder's scratch region.
+    if (const char* wr = std::getenv("TAOTE_WATCH_RANGE"); wr != nullptr && *wr != '\0') {
+        std::string spec(wr);
+        std::size_t want = 64;
+        if (const auto c = spec.find(':'); c != std::string::npos) {
+            want = std::strtoul(spec.c_str() + c + 1, nullptr, 0);
+            spec.resize(c);
+        }
+        const auto dash = spec.find('-');
+        const auto lo = std::strtoull(spec.substr(0, dash).c_str(), nullptr, 0);
+        const auto hi = dash == std::string::npos
+                            ? lo + 0x1000
+                            : std::strtoull(spec.substr(dash + 1).c_str(), nullptr, 0);
+        auto seen = std::make_shared<std::size_t>(0);
+        auto h = std::make_shared<HookRet>(ql.hook_mem_write(
+            [this, &ql, lo, hi, want, seen](int /*access*/, std::uint64_t addr, std::uint32_t size,
+                                            std::int64_t value) -> int {
+                if (addr >= lo && addr < hi && *seen < want) {
+                    ++*seen;
+                    const auto pc = ql.arch().regs().arch_pc();
+                    std::fprintf(stderr, "[watchr] #%zu pc=0x%llx addr=0x%llx len=%u val=0x%llx\n",
+                                 *seen, static_cast<unsigned long long>(pc),
+                                 static_cast<unsigned long long>(addr), size,
+                                 static_cast<unsigned long long>(value));
+                }
+                return 0;
+            }));
+        hooks_.push_back(std::move(h));
+    }
+
     // TAOTE_PROBE=<hex pc>: dump the guest registers and the return slot the first
     // time that exact pc executes. A debugging aid (like TAOTE_LASTPC/TAOTE_FSGTRACE):
     // a stub loop that runs away is only diagnosable if you can see which pointer it
