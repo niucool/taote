@@ -5850,3 +5850,118 @@ entry stub cannot execute. New work on this family would have to start from evid
 corpus. Measurement hygiene still applies to any future corpus number: quiet machine, no stray
 `pegasus-cli`, and treat `mpress_ComIntRep`, `winupack_Bginfo`, `bero_HDDScan` and `mpress_Bginfo` as
 budget-boundary rows (1863-1864 band) rather than diffs.
+
+### 0.17cq FSG - the per-sample ledger (the "state it per row" proof)
+
+Directive item 3 asked for a per-sample statement rather than a family-level claim. This is that
+ledger: all 97 FSG rows, measured in one 85 s / 4-worker arm (`fsg14`, tree equivalent to HEAD), with
+the load base, the OEP the run claimed (relative to the base), the mechanism that produced it, and
+the grading margins.
+
+Clause first: **96 of 97 pass all three criteria**; the mechanism split is 80 rows
+`stages=1 / section_hop` (the payload decoded and control transferred through a section hop), 16 rows
+`stages=1 / ladder_scan` (the stub's `0f 84` rel32 hand-off is the last-resort ladder), and 1 row
+`unparsable`. Bases: 91 at the default `0x400000`, 4 rebased to `0x1000000` (the stub-rebase rescue),
+1 at `0x4ad00000` (`fsg_cmd`, the truncated block page). The thinnest margins among passing rows are
+`fsg_livekd` (code_sim 0.105, imp_recall 0.973) and `fsg_cmd` (code_sim 0.960, imp_recall 1.000);
+everything else is >= 0.857 code_sim and >= 0.975 recall, so nothing passes by luck.
+
+| row | base | oep rva | stages/reason | code_sim | imp_recall | all-three |
+|---|---|---|---|---|---|---|
+| fsg_ADExplorer | 0x400000 | 0x149ec | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_AccessEnum | 0x400000 | 0x7a98 | 1/ladder_scan | 1.000 | 0.987 | yes |
+| fsg_Autologon | 0x400000 | 0x3980 | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_Autoruns | 0x400000 | 0x51b4a | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_Bginfo | 0x400000 | 0x1b5d42 | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_BlueScreenView | 0x400000 | 0xe78e | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_Cacheset | 0x400000 | 0x24a2 | 1/ladder_scan | 1.000 | 1.000 | yes |
+| fsg_Clockres | 0x400000 | 0x4002 | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_ComIntRep | 0x400000 | 0x2800a | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_Contig | 0x400000 | 0x7f58 | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_Coreinfo | 0x400000 | 0x7474 | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_DarkNamer | 0x400000 | 0xa71e | 1/ladder_scan | 1.000 | 0.988 | yes |
+| fsg_Dbgview | 0x400000 | 0x15757 | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_Desktops | 0x400000 | 0x46c6 | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_DiskView | 0x400000 | 0xc983 | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_Diskmon | 0x400000 | 0xb4b8 | 1/ladder_scan | 1.000 | 0.995 | yes |
+| fsg_DriverView | 0x400000 | 0xa36a | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_ESEDatabaseView | 0x400000 | 0xfeea | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_EventLogChannelsView | 0x400000 | 0xe52e | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_Everything | 0x400000 | 0x145f0d | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_FastHash_kr | 0x400000 | 0x1dffa | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_FileTypesMan | 0x400000 | 0x109f0 | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_FindLinks | 0x400000 | 0x4c99 | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_FolderTimeUpdate | 0x400000 | 0xc3a6 | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_FullEventLogView | 0x400000 | 0x11228 | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_HWMonitorPro_x32 | 0x400000 | 0xcb60b | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_Hash | 0x400000 | 0x532c | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_HashCalc | 0x400000 | 0x11e58 | 1/ladder_scan | 1.000 | 1.000 | yes |
+| fsg_InstalledPackagesView | 0x400000 | 0xd42a | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_LastActivityView | 0x400000 | 0x127f8 | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_Listdlls | 0x400000 | 0x9666 | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_LoadOrd | 0x400000 | 0x4e14 | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_LoadOrdC | 0x400000 | 0x4de2 | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_OpenedFilesView | 0x400000 | 0xfc10 | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_PEview | 0x400000 | 0x1000 | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_PortableWinCDEmu-4.0 | 0x400000 | 0x1216a | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_Procmon | 0x400000 | 0x755cb | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_ProduKey | 0x400000 | 0xd10a | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_PsExec | 0x400000 | 0x9de6 | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_PsGetsid | 0x400000 | 0x7ecb | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_PsInfo | 0x400000 | 0xa0cf | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_PsLoggedon | 0x400000 | 0x5926 | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_PsService | 0x400000 | 0x7f52 | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_RAMMap | 0x400000 | 0x1ab3f | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_RegDelNull | 0x400000 | 0x5426 | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_RegDllView | 0x400000 | 0xc80c | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_ShareEnum | 0x400000 | 0x9013 | 1/ladder_scan | 1.000 | 0.987 | yes |
+| fsg_ShellRunas | 0x400000 | 0x3ba0 | 1/ladder_scan | 1.000 | 0.993 | yes |
+| fsg_Snap2HTML | - | - | unparsable | - | - | **NO** |
+| fsg_Tcpview | 0x400000 | 0x149d8 | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_accesschk | 0x400000 | 0xc429 | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_adrestore | 0x400000 | 0x2471 | 1/ladder_scan | 1.000 | 0.975 | yes |
+| fsg_autorunsc | 0x400000 | 0x408dd | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_calc | 0x1000000 | 0x12d6c | 1/section_hop | 0.973 | 1.000 | yes |
+| fsg_cmd | 0x4ad00000 | 0x829a | 1/section_hop | 0.960 | 1.000 | yes |
+| fsg_cpuz_x32 | 0x400000 | 0xf7c76 | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_ctrl2cap | 0x400000 | 0x221a | 1/ladder_scan | 1.000 | 0.986 | yes |
+| fsg_dfrgui | 0x1000000 | 0x141fa | 1/section_hop | 0.948 | 1.000 | yes |
+| fsg_diskext | 0x400000 | 0x480c | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_du | 0x400000 | 0x68c9 | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_efsdump | 0x400000 | 0x2138 | 1/ladder_scan | 1.000 | 0.986 | yes |
+| fsg_ftp | 0x1000000 | 0x834d | 1/section_hop | 0.919 | 1.000 | yes |
+| fsg_handle | 0x400000 | 0x7336 | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_hex2dec | 0x400000 | 0x47af | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_junction | 0x400000 | 0x64ac | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_ldmdump | 0x400000 | 0x3024 | 1/ladder_scan | 1.000 | 0.986 | yes |
+| fsg_livekd | 0x400000 | 0x9663 | 1/ladder_scan | 0.105 | 0.973 | yes |
+| fsg_logonsessions | 0x400000 | 0x5f5b | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_movefile | 0x400000 | 0x3f4b | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_mtinst | 0x1000000 | 0x3866 | 1/section_hop | 0.858 | 1.000 | yes |
+| fsg_notmyfault | 0x400000 | 0x4f25 | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_notmyfaultc | 0x400000 | 0x5810 | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_ntfsinfo | 0x400000 | 0x46af | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_pagedfrg | 0x400000 | 0x3d50 | 1/ladder_scan | 1.000 | 1.000 | yes |
+| fsg_pendmoves | 0x400000 | 0x4452 | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_pipelist | 0x400000 | 0x550b | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_portmon | 0x400000 | 0x13b0e | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_procdump | 0x400000 | 0x171e7 | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_psfile | 0x400000 | 0x54a0 | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_pskill | 0x400000 | 0x763e | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_pslist | 0x400000 | 0x9bbe | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_psloglist | 0x400000 | 0x9955 | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_pspasswd | 0x400000 | 0x5be3 | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_psping | 0x400000 | 0x115cc | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_psshutdown | 0x400000 | 0x677f | 1/ladder_scan | 1.000 | 1.000 | yes |
+| fsg_pssuspend | 0x400000 | 0x74fe | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_regjump | 0x400000 | 0x4256 | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_rm | 0x400000 | 0xcb7b | 1/ladder_scan | 1.000 | 1.000 | yes |
+| fsg_ru | 0x400000 | 0x570c | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_sdelete | 0x400000 | 0x699f | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_shexview | 0x400000 | 0xef60 | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_shmnview | 0x400000 | 0xb008 | 1/ladder_scan | 1.000 | 0.981 | yes |
+| fsg_sigcheck | 0x400000 | 0x1b7cb | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_streams | 0x400000 | 0x4a16 | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_strings | 0x400000 | 0x58a6 | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_sync | 0x400000 | 0x49fe | 1/section_hop | 1.000 | 1.000 | yes |
+| fsg_sysexp | 0x400000 | 0xacb2 | 1/section_hop | 1.000 | 1.000 | yes |
