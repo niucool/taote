@@ -6208,3 +6208,29 @@ strings were being dropped for the same reason). Recall up on 72 rows and down o
 extra (real, declared-DLL) names, which the grader does not charge for (its import criterion is
 recall >= 0.95; `imp_exact` tracks precision separately). rc distribution 2676 clean, 1 timeout,
 1 non-zero, i.e. no new faults.
+
+### 0.17cz Round 106: RLPack's residual is EMULATION DEPTH, not export tables - measured, no code
+
+The next lead was the "real export tables" idea (pegasus `fb9a14a3`, forwarder-module loads): RLPack
+resolves imports with its own hash walk over a module's export directory, so giving the synthesized
+stub DLLs the real per-DLL export surface should let those walks succeed. Implemented the reverse
+query (`api_exports_of(dll)` from the SDK database, 32 374 names / 405 DLLs) and then measured
+before wiring it in, which killed it:
+
+1. `write_stub_dll` **already** unions the caller's names with `ApiRegistry::names_for_dll()` - the
+   full surface taote can actually serve with a handler. Exporting extra names from the database
+   would let a hash walk find them but leave the call without a handler.
+2. More importantly the premise is wrong for this family: **103 of 104 RLPack rows have
+   `code_sim >= 0.5`** (mean recall on that set 0.373; the one low-decode row,
+   `rlpack_adwcleaner`, 0.47). The payload decodes; what is missing is that RLPack's stub resolves
+   its imports AT RUNTIME and the names materialise only when the payload actually calls them. So the
+   missing 79 % are not strings waiting to be found - they are resolutions that never happen inside
+   the emulated window.
+
+That reframes the residual: RLPack's remaining headroom is **emulation depth/throughput** (how much
+of the application runs before the budget ends), the same lever the rejected grace-window experiment
+pointed at, not an import-mining or export-table mechanism. Reverted (api_db untouched, suite
+602/602, tree clean).
+
+Recorded so the next round does not chase it: a hash-walk packer cannot be helped by exporting more
+names when the names are only ever produced by calls the run never reaches.
