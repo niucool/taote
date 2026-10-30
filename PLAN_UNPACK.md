@@ -6036,3 +6036,24 @@ only `tools/taote.cpp` is reverted - the CLI behaviour itself was verified by th
 library fallback by the twelve-variant table. Suite **602/602**, all green; skips cleanly without the
 corpus. Tests-only, so the shipped binary and the corpus figures are unchanged (r61: 1864/2678,
 zero losses).
+
+### 0.17cu Round 101: FSG is at its CEILING, and the 96 are structurally stable
+
+Two questions remained after the close, and both now have hard numbers.
+
+**Is 96/97 the ceiling?** Yes, by construction. `fsg_Snap2HTML.exe` is the only failing row and it is
+dead packer output (0.17ck), so no FSG row can improve: 96 is the maximum achievable without the
+ground-truth original, which taote must never consult.
+
+**Are the 96 stable, or budget-boundary passes?** Measured from the `fsg15` run's recorded durations:
+97 rows run in **0-19 s** against the 85 s budget - min 0, median **1 s**, max 19 (`fsg_Bginfo`) -
+and **zero** rows fall within 20 s of the cap. Contrast the corpus rows that do flake
+(`mpress_ComIntRep` ~78 s alone, `winupack_Bginfo`, `bero_HDDScan`, `mpress_Bginfo` at 83-86 s): FSG
+has no such rows at all, because its stubs finish their work in milliseconds once the page mapping is
+right. So the family's 96 is not a scheduling artefact - it is the same 96 in every arm, and it would
+be the same 96 on a loaded machine.
+
+That closes the thread: ceiling reached, stability proven, every mechanism pinned, the record is
+authoritative (0.17cp) and per-row (0.17cq). **No further FSG work is planned, because none exists
+that measurement can justify.** A future round touching this family should start only from new
+external evidence - a working `fsg_Snap2HTML`-build sample, or a regression in one of the 96.
