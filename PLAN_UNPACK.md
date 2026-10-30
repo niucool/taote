@@ -6118,3 +6118,43 @@ So the mechanism is reverted (code back to HEAD, suite 602/602 green, no behavio
 recorded here as measured-and-rejected. The real lever for those 40 rows is **instruction
 throughput** (the ~174 ns/insn dispatch cost), not a post-OEP window - stopping earlier cannot help
 a run that never gets far enough.
+
+### 0.17cx Round 104: the UPX EP-repair port does NOT apply to this corpus - measured, not assumed
+
+Second lead from the pegasus review: `d08abb3e` repairs an `AddressOfEntryPoint` that points into a
+section with **no file bytes** by starting emulation at the UPX stub prologue
+(`60 BE ?? ?? ?? ?? 8D BE`) found in a mapped raw section. Before porting, a census of all 2678
+corpus samples:
+
+| | |
+|---|---|
+| rows whose EP bytes are absent from the file (raw 0, or EP offset >= raw size) | **6** |
+| of those, carrying the UPX prologue anywhere in a raw section | **0** |
+
+The six are `Alienyze/alienyze_tinytask.exe` (EP section raw size 0, the exact class, but no UPX
+prologue - it is Alienyze, not UPX) and five NSPack rows whose `nsp0` destination section declares
+3-26 raw bytes while the header EP is `nsp0+0x1b`. Since the reference's gate is the UPX prologue,
+the port would fire on **zero** rows: unmeasurable, so it is not shipped.
+
+The six are still real headroom, so they were probed instead of dismissed:
+
+* `nspack_ldmdump.exe` run from three plausible entries - the entry section's virtual start
+  (`0x1000`), the raw section's start (`0x26000`) and that start plus the EP offset (`0x2601b`) -
+  gives `stages=0 reason=fallback_guess imports=10` in all three, i.e. no hop. What `nsp0` declares
+  as its raw data is a copy of the section table itself (`00 00 ... 2e 74 65 78 74` = ".text"), in
+  the passing rows too, so the entry bytes are not code in either case; the failing rows simply
+  declare even fewer of them.
+* The interesting one is `alienyze_tinytask.exe`, where `file size 0xa101` but the declared sections
+  stop at `0x4000` - about 0x6101 bytes of overlay the section table never describes, which is where
+  an Alienyze stub/payload would live. That is a *generic overlay* gap (map file bytes beyond the
+  section table), not a UPX EP-repair, and it is the next item to measure on the Alienyze family
+  (110 rows of headroom).
+
+Nothing was changed in the tree this round: no code, suite 602/602, corpus baseline unchanged
+(r61: all-three 1864/2678, OEP 1974/2501, imports 2054/2568, valid PE 2675/2678).
+
+Sized before anyone chases it: an overlay census over the Alienyze family finds exactly **one** row
+with more than 0x200 bytes of file beyond its last section (`alienyze_tinytask`: 0x6101 bytes of
+overlay). So the overlay mechanism is worth at most one row, not the family's 110 headroom - the
+Alienyze block is decode/attribution, not layout. That closes both leads from the pegasus review as
+"measured, low value" and leaves the family headroom table as the honest map.
