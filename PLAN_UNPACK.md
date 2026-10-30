@@ -6003,3 +6003,18 @@ was the least diagnosable one. Three small fixes, all text-only:
 **Measured after the change:** `fsg15` (97 rows, 85 s, 4 workers) gives valid PE 96, OEP exact 96,
 imports 96, all-three **96/97**, and **no row's all-three changed** against `fsg14`; `fsg_cmd`
 (341 imports), `fsg_HashCalc` (446) and `fsg_livekd` (368) are bit-identical; suite 601/601.
+
+### 0.17cs Round 99: corpus re-measured after the diagnostic change - bit-for-bit neutral
+
+The corrupt-input audit shipped a change inside `Unpacker::finalize` and `tools/taote.cpp`, so the
+"measure the corpus after every change" rule applied even though the change only writes a reason
+string. `r61` (2678 samples, 85 s, 4 workers, HEAD `8315001`, quiet-ish machine at loadavg 0.8):
+
+| arm | valid PE | OEP exact | imports | all-three |
+|---|---|---|---|---|
+| r60 (FSG close) | 2675 | 1974 | 2054 | 1864 |
+| **r61 (HEAD)** | **2675** | **1974** | **2054** | **1864** |
+
+**Zero gains, zero losses, no row changed any of the three criteria.** FSG grades 96/97 inside the
+same run, matching `fsg14` and `fsg15`. So naming the unclassified failure state is corpus-neutral,
+as a diagnostic-only change should be - and it is now measured rather than assumed.
