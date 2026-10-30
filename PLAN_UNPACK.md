@@ -6057,3 +6057,26 @@ That closes the thread: ceiling reached, stability proven, every mechanism pinne
 authoritative (0.17cp) and per-row (0.17cq). **No further FSG work is planned, because none exists
 that measurement can justify.** A future round touching this family should start only from new
 external evidence - a working `fsg_Snap2HTML`-build sample, or a regression in one of the 96.
+
+### 0.17cv Round 102: is any FSG-packed row hiding outside the family gate? No.
+
+The family-gated mechanisms (stub rebase, block-page map, rel32 hand-off) fire on the stub's
+`bb .. bf .. be ..` prologue rather than on the family name, so a natural question was whether some
+sample filed under another family is actually FSG-packed and would be missed - FSG work, not another
+family's queue, and potentially real gains.
+
+Scanned all 2678 corpus samples for that prologue at their own entry point:
+
+| | |
+|---|---|
+| samples with the FSG prologue at EP | **95** |
+| of those, filed under FSG | **95** (all of them) |
+| of those, failing all three | **0** |
+
+The two FSG rows the scan does not see are exactly the two already characterised: `fsg_livekd.exe`
+(zeroed `MZ`, so the scan's own magic test skips it; taote repairs it and passes) and
+`fsg_Snap2HTML.exe` (headerless, dead packer output). So the gate is complete - no FSG-packed sample
+lives outside the family directory, and no row the mechanisms could help is currently failing.
+
+That is the last cross-cutting check available: the family is at its ceiling (0.17cu), gated
+completely (here), pinned (0.17bv/0.17cn/0.17ct), documented per row (0.17cq) and host-safe (0.17cr).
