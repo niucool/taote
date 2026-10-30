@@ -5160,9 +5160,19 @@ TEST(WinApiUser32, StubAndClipboardFamiliesRideVerbatimConstants) {
     EXPECT_EQ(*ApiRegistry::instance().find("MessageBoxW")->handler(ql, 0,
         ResolvedParams{{"hWnd", 0ull}, {"lpText", std::string("m")}, {"lpCaption", std::string("c")},
                        {"uType", 4ull}}), 6u);  // the MB_YESNO (the macro rides 4) / IDYES
-    EXPECT_EQ(*ApiRegistry::instance().find("MessageBoxA")->handler(ql, 0,
-        ResolvedParams{{"hWnd", 0ull}, {"lpText", std::string("m")}, {"lpCaption", std::string("c")},
-                       {"uType", 2ull}}), 3u);  // the MB_ABORTRETRYIGNORE (the macro rides 2) / IDABORT
+    // MessageBoxA answers IDCANCEL regardless of the button set: a packer's nag is
+    // the one dialog whose YES is the destructive answer for one family (NeoLite's
+    // demo box: YES -> visit the site -> ExitProcess) and whose NO is destructive for
+    // another (Molebox), and 2 is the only value both accept - measured on
+    // neolite_ProduKey (98.4% dump) and molebox_ProduKey/HashCalc (98.5/99.6%). The
+    // reference answers IDCANCEL unconditionally for the same reason.
+    for (std::uint64_t buttons : {0ull, 1ull, 2ull, 4ull, 5ull}) {
+        EXPECT_EQ(*ApiRegistry::instance().find("MessageBoxA")->handler(ql, 0,
+            ResolvedParams{{"hWnd", 0ull}, {"lpText", std::string("m")}, {"lpCaption", std::string("c")},
+                           {"uType", buttons}}),
+                  2u)
+            << "uType buttons=" << buttons;
+    }
 
     // the clipboard cycle: the open -> the format check -> the set (the
     // CF_TEXT read) -> the get -> the close

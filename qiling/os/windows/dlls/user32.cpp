@@ -779,19 +779,18 @@ void register_user32_family() {
         (void)api_get_string(ql, get_param(params, "lpText"));
         (void)api_get_string(ql, get_param(params, "lpCaption"));
 
-        const auto utype = api_get_int(get_param(params, "uType"));
-        const auto buttons = utype & 0x0000000f;
-        static const std::map<std::uint64_t, std::uint64_t> press{
-            {MB_OK, IDOK},
-            {MB_OKCANCEL, IDOK},
-            {MB_ABORTRETRYIGNORE, IDABORT},
-            {MB_YESNOCANCEL, IDYES},
-            {MB_YESNO, IDYES},
-            {MB_RETRYCANCEL, IDCANCEL},
-            {MB_CANCELTRYCONTINUE, IDCONTINUE},
-        };
-        const auto it = press.find(buttons);
-        return it != press.end() ? it->second : 0u;
+        // A packer's nag is the one dialog whose YES is the DESTRUCTIVE answer, and
+        // whose NO is destructive for a different packer: NeoLite's demo box says
+        // "Click the Yes button to visit our web site ... Click No to run the
+        // compressed program" (YES -> ExitProcess), while Molebox's box wants YES.
+        // The reference answers IDCANCEL unconditionally and both families decode, so
+        // do the same - measured on one row of each with a forced answer:
+        //   neolite_ProduKey  ret 7 -> 98.4%  ret 2 -> 98.4%  ret 6 -> 44.4% (exit path)
+        //   molebox_ProduKey  ret 7 -> 35.1%  ret 2 -> 98.5%  ret 6 -> 98.5%
+        //   molebox_HashCalc  ret 7 -> 18.1%  ret 2 -> 99.6%  ret 6 -> 99.6%
+        // i.e. 2 is the only answer both stubs accept. The dialog's texts are still
+        // logged through the string engine above (that is the observable output).
+        return IDCANCEL;
     };
 
     // BOOL GetCursorPos(LPPOINT lpPoint);

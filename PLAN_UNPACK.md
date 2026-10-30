@@ -6408,3 +6408,54 @@ Next step (recorded): get the reference's side of the same six calls (pegasus ha
 own API trace is the oracle) and diff the two sequences answer by answer. The row is provably
 decodable (98.7 %), so this is a semantics bug hunt with a known-good counterpart, not a packer
 mystery. Suite 602/602, tree clean; only the gated trace gate is new code.
+
+### 0.17df Round 112: the packer NAG answer - Neolite 2 -> 89/93, corpus 1873 -> 1960
+
+The Neolite thread paid off, and the mechanism is one line of API semantics found by diffing against
+the reference.
+
+**How it surfaced.** 0.17de established that pegasus decodes `neolite_ProduKey.exe` (oep 0x40d10a
+exact, 98.7 % dump) while taote took its `ExitProcess` path (44.4 %). The reference's API trace
+(`SE_DEBUG_APICTX=1`, which prints every dispatch with its arguments) shows what taote never reached:
+
+    LoadLibraryA("user32.dll") -> GetProcAddress("MessageBoxA")
+    MessageBoxA(0, "This program was compressed with the\r\ndemonstration vesion of NeoLite.\r\n
+                    ...Click the Yes button to visit our web site (www.neoworx.com) to
+                    purchase the full product.\r\n\r\nClick No to run the compressed program.",
+                "C:\\WINDOWS\\system32\\neolite_ProduKey.exe", 0x2134) -> 2
+    VirtualProtect(0x401000, 0xc600, 4) -> the payload runs
+
+So the stub shows a demo nag whose **YES is the destructive answer** ("visit our web site") and whose
+NO runs the program. taote pressed YES (`MB_YESNO -> IDYES` in the press table) and the stub went to
+its give-up path; the reference answers **2 (IDCANCEL)** for every MessageBoxA and the stub proceeds.
+
+**The value matters, and one value satisfies both nags.** Measured by forcing the return on one row of
+each family:
+
+| row | ret 7 (IDNO) | **ret 2 (IDCANCEL)** | ret 6 (IDYES) |
+|---|---|---|---|
+| `neolite_ProduKey` | 98.4 % | **98.4 %** | 44.4 % (exit path) |
+| `molebox_ProduKey` | 35.1 % | **98.5 %** | 98.5 % |
+| `molebox_HashCalc` | 18.1 % | **99.6 %** | 99.6 % |
+
+NeoLite's stub accepts anything but YES; Molebox's accepts anything but NO; **2 is the only value both
+accept**, which is exactly what the reference returns. `MessageBoxA` now answers `IDCANCEL`
+unconditionally (the dialog texts are still logged through the string engine), and the unit test that
+asserted the old `MB_ABORTRETRYIGNORE -> IDABORT` tuple was rewritten to assert the new contract for
+every button set.
+
+**Measured, family first:** Neolite 93 rows - all-three **2 -> 89**, OEP-exact 2 -> 89, imports-ok
+80 -> 93, mean recall 0.871 -> 1.000, zero losses. Molebox (the family the naive IDNO answer broke:
+89 -> 0) stays **89/93, unchanged**.
+
+**Then the corpus** (`r65`, 2678 samples):
+
+| arm | valid PE | OEP exact | imports | all-three |
+|---|---|---|---|---|
+| r63 | 2675 | 1974 | 2066 | 1873 |
+| **r65** | **2675** | **2060** | **2076** | **1957** |
+
++87 Neolite rows, and three rows lost *at the wall* only: `mpress_ComIntRep` (82 -> 85 s), `nspack_ADInsight` (86 s),
+`nspack_procexp` (84 -> 85 s). Re-run alone at a 120 s budget they give 32 s / 34 s / 49 s and **all
+three pass**, so they are the known budget-boundary artefacts, not regressions - the capability figure
+is **1960/2678**. Suite 602/602.
