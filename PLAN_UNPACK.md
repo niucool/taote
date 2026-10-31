@@ -7649,3 +7649,36 @@ ships. Two things are now established for the next attempt: the CONTEXT/resume a
 trap cases, and the remaining failure sits *after* the frame teardown, in the MZ scan at 0x418163 - where
 `[ebp+0x1baf]` supplies the start address and the scan steps down by 0x10000. That value is the thing to log
 next (a `TAOTE_PROBE_EBP_DISP=0x1baf` reading), because the scan can only run off the image if it is wrong.
+
+#### 0.17eh Round 133e: the MZ scan's anchor is kernel32's base, which taote maps INSIDE the scan range
+
+The recorded probe (`TAOTE_PROBE=0x418163 TAOTE_PROBE_EBP_DISP=0x1baf`, run with the 133c surface change so
+the ladder gets there):
+
+    [probe] pc=0x418163 ... ebp=0x41807f esp=0x121ffe0
+    [probe]   @pc= 88 85 99 00 00 00 | 8b 95 af 1b 00 00 | 81 e2 00 00 ff ff | 8b c4 33 e4 8b e0 |
+                   66 81 3a 4d 5a | 74 08 | 81 c2 00 00 ff ff | eb f1
+    [probe]   [ebp+7087]=0x10011000
+
+so the scan is `edx = [ebp+0x1baf]; edx &= 0xffff0000` -> **0x10010000**, then it walks DOWN by 0x10000
+checking `cmp word [edx],0x5a4d` ("MZ"), and in taote the very first test hits: 0x10010000 is the base of the
+**kernel32 stub DLL** that the CLI writes for the run (`map 0x10010000-0x10014000 rwx kernel32.dll`, and
+`[ebp+0x1baf]=0x10011000` is that base + 0x1000, i.e. the stub found kernel32 through the PEB LDR walk and
+used it as the anchor). The ladder then takes the `je` branch and parses *kernel32's* PE header
+(`mov eax,[edx+0x3c]; cmp eax,0x200`) instead of the packed image's.
+
+Confirmed with `--set OS32.dll_address=0x77000000`: the stub DLLs stay at 0x10000000/0x10010000, because
+`QlLoaderPE` takes a DLL's base from the DLL's own `AddressOfImageBase` when it is non-zero
+(`pe.cpp:475`), and the CLI's synthesized stubs declare 0x10000000. So the knob for a "map the DLLs high"
+experiment is the stub-DLL writer in `tools/taote.cpp` (the profile's `dll_address` only supplies the
+fallback for a DLL whose declared base is 0).
+
+**Measured, not kept** (the surface change again): the ladder reaches the scan and dies with the pc pinned on
+0x121ffd8; arms 99 of 101 valid PE for Yoda, TELock 116/1/0/0, PECompact 97/97/92/95/92 - the same result as
+133c/133d, so nothing further shipped from this round.
+
+**Next attempt, precisely framed**: move the synthesized stub DLLs to a high base (0x77000000, the reference's
+kernel32 address) so the downward scan from the kernel32 anchor walks past the DLLs to the packed image at
+0x400000, and measure the TELock arm first. Two things to check before spending the corpus run: that the LDR
+walkers (Alienyze, Amber) do not depend on the 0x10000000 neighbourhood, and that nothing hardcodes
+0x10000000 (it is only the profile's `dll_address` fallback and the stub writer).
