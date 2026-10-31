@@ -8402,3 +8402,30 @@ OpenProcess, VirtualProtectEx, plus a `"GetC..."` chain at slot 0x3d7). The chea
 **count matches per chain** rather than guess: an env-gated counter at the common resolver tail
 (0x41821d's `dec edi`) that prints the slot constant each successful chain pushes, i.e. which of the thirteen
 slots never gets written. That is one gated print, one build, and it names the API exactly.
+
+#### 0.17ff Round 157: TELock's missing API is VirtualProtectEx - the park is gone and the ladder reaches its CRC phase
+
+The chain list was finally read *exactly* rather than probed around: `TAOTE_WATCH_RANGE=0x418000-0x418400`
+prints the decryptor's byte writes with addresses, so the decrypted chain table can be reconstructed offline
+and disassembled. All thirteen targets, in code order, with the payload-IAT slot each fills:
+
+    LoadLibraryA 0x3c3   ExitProcess 0x3c7   VirtualAlloc 0x3cb   VirtualFree 0x3cf
+    CreateMutexA 0x3d3   OpenProcess 0x3db   GetCurrentProcessId 0x3d7   VirtualProtectEx 0x3df
+    CreateFileA 0x3eb    CloseHandle 0x3e3   ReadFile 0x3e7       GetModuleFileNameA 0x3ef
+    GetProcAddress (last chain)
+
+Differencing those against `names_for_dll("kernel32.dll")` leaves exactly **one** absent name:
+**`VirtualProtectEx`** (taote implements `VirtualProtect`, not the Ex form). Implementing it in memoryapi.cpp
+(the sibling's `return 1` body) removes the park outright:
+
+* `TAOTE_PROBE=0x4181c6` **no longer fires** - `push 0xfeeb; jmp esp` is never reached;
+* the ladder runs on into TELock's **CRC-32 integrity phase**: `TAOTE_PROBE=0x4189de` fires with
+  `edi=0xedb88320` (the CRC polynomial), `ebx=0` after `0x400` bytes and `esi=0x418408`, i.e. the block CRC
+  completes and is salted into `[ebp+0x1b5f]`;
+* telock_7z.exe's artifact is still not the payload (`code_sim` 0.078), and a 12-row TELock sample grades
+  0 OEP / 0 imports - so this is a **lock removed, not a row won**.
+
+Corpus **r79** against r78: valid PE 2676, OEP 2122, imports 2082, all-three **1996** vs 2676/2122/2083/1997.
+The single row difference is `winupack_Bginfo.exe`, which hit the 85 s wall (it passes solo in one pass:
+oep 0x5b5d42, imports 2002), so **0 real gains and 0 real losses**. Kept on fidelity grounds: it implements a
+real Windows API taote lacked, and it removes a hard stop in the one family the reference solves.

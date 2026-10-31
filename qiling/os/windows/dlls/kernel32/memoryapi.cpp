@@ -102,7 +102,30 @@ void register_memoryapi_family() {
         return 1;
     };
 
-    // SIZE_T VirtualQuery(
+    // BOOL VirtualProtectEx(
+    //   HANDLE hProcess,
+    //   LPVOID lpAddress,
+    //   SIZE_T dwSize,
+    //   DWORD  flNewProtect,
+    //   PDWORD lpflOldProtect
+    // );
+    //
+    // Round 157: this is the ONE name TELock's ladder was missing. Its resolver
+    // fills thirteen payload-IAT slots from the stub's export table and parks
+    // (`push 0xfeeb; jmp esp`) with edi=1 when a name is absent; the thirteen
+    // targets were read out of the decrypted chain list (see PLAN_UNPACK
+    // 0.17fd/0.17fe) and this was the only one the kernel32 surface did not
+    // implement. The sibling VirtualProtect above answers 1 and the packer only
+    // needs the success.
+    WinsdkApi("VirtualProtectEx", WinCc::Stdcall, {
+        {"hProcess", HANDLE_},
+        {"lpAddress", LPVOID_},
+        {"dwSize", LPVOID_},
+        {"flNewProtect", DWORD_},
+        {"lpflOldProtect", LPVOID_},
+    }) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
+        return 1;
+    };
     //  LPCVOID                   lpAddress,
     //  PMEMORY_BASIC_INFORMATION lpBuffer,
     //  SIZE_T                    dwLength
