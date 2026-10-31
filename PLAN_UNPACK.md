@@ -8526,3 +8526,36 @@ So the question is what unicorn escalates *from*: a #DF means a fault occurred w
 being delivered, i.e. inside the `#UD` handler path at 0x41868a (dispatched for the 0xc000001d at 0x4186a8).
 The next measurement is that handler's continuation - probe 0x41868a forward and read the instruction stream
 it returns into, including whether the CONTEXT it loads points somewhere taote cannot map.
+
+#### 0.17fj Round 161: the stopping instruction is an INVALID OPCODE (`66 f7 f3`), and unicorn escalates it to #DF instead of #UD
+
+`TAOTE_LASTPC=80` on telock_7z.exe gives the exact tail:
+
+    0x418a64 (rep stosd, many) 0x418a66 0x418a6c 0x418a72 0x418a78 0x418a7b 0x418a7c 0x418a82
+    0x418a85 0x418a86 0x418a88 0x418a8b 0x418a8e 0x418aa1 0x418aa1   (then the run ends)
+
+and the live bytes at 0x418aa1 are `66 f7 f3 | 0f 85 5b 01 00 00`. Decoding that:
+
+* `66 f7 f3` would be `not bx`, but `f7` is group 3 and its modrm `f3` encodes **reg = 6 (`/6`)**, which is
+  undefined - so the instruction is an **invalid opcode**, i.e. a deliberate #UD;
+* `0f 85 5b 01 00 00` = `jnz 0x418c05` and is where the obfuscation would continue.
+
+Neither `0x418aa4` (the next instruction) nor `0x418c05` (the branch target) ever executes, and the ring shows
+**0x418aa1 twice** - the instruction faults, the exception is delivered, and the pc comes back to it.
+
+So this is TELock's own anti-debug probe: an invalid opcode behind the SEH frame it re-installed at 0x418a8e,
+which a debugger's or a wrong handler's continuation is supposed to step over. taote *does* deliver #UD
+elsewhere in this same run (`[sehd] code=c000001d fault=4186a8 handler=41868a`), so the dispatcher works - but
+at 0x418aa1 unicorn reports `intno 0x8` (#DF) directly and taote ignores it because 8 is not in its
+hardware-interrupt table.
+
+Also checked and excluded this round: the #UD handler at 0x41868a is inline-`int 0x20` obfuscated
+(`8b 64 24 08 / eb 01 / eb eb / ... / 74 02 cd 20 / ... / eb 02 cd 20 / ...`), and **neither int-0x20 site
+(0x418697, 0x41869e) executes** - the handler takes the skip paths, so the #DF is not caused by an unhandled
+`int 0x20`.
+
+The next question is therefore precise: why does unicorn escalate this invalid opcode to `intno 8` when it
+delivers the earlier 0xc000001d normally - whether the SEH frame the stub just installed makes taote's
+interrupt hook re-enter while an exception is in flight (there is a `seh_retarget_` hand-off between them), or
+whether the #UD arrives while a previous delivery is still staged. The fix will be in taote's #UD/#DF path, not
+in the ladder.
