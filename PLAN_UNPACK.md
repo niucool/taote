@@ -8977,3 +8977,28 @@ imports 2002). So **+1 real gain, 0 real losses**, and the graded baseline moves
 Blast radius, recorded because it is large: 135 rows in r83 used `fallback_guess` (Yoda-Protector 88, Amber 13,
 RLPack 10, Alienyze 8, NSPack 5, PEtite 3, TELock 3, WinUpack 2, ...), so this was measured on the corpus, not on
 an arm.
+
+#### 0.17ga Round 178: the other two 0x1000-truth rows are not picker bugs - their dumps hold a PE header / zeros at the truth
+
+Checked the two remaining "truth = rva 0x1000" rows from 0.17fy. Neither is the same defect as petite_PEview
+(which round 177 fixed in the fallback).
+
+* `winupack_PEview.exe`: `hop ledger (1): 0x41d5a7@7213`, picked 0x41d5a7, run ends
+  `error=emulation error: Invalid memory fetch (UC_ERR_FETCH_UNMAPPED)`. The decoded dump at rva **0x1000 holds
+  `50 45 00 00` = "PE\0\0"** - a nested PE header sits exactly where the original's entry point is - and at the
+  hop target 0x1d5a7 the dump holds `40 00 c7 45 0c 99 dd 40 00 e8`, ordinary code. So the artifact and the truth
+  disagree about what lives at 0x1000, which is a *layout* question, not a candidate-scoring one.
+* `jdpack_PEview.exe`: `hop ledger (1): 0x41502e@1`, picked 0x4155f9, run ends with the same fetch error. The dump
+  at rva **0x1000 is all zeros**, and both hop targets hold ASCII strings (`IICONHTMLM`, `" StampChec"`) - i.e. the
+  hops latched inside a data region.
+
+So for these two the picker is being asked to choose between candidates that are not entries at all, and the truth
+sits where our image has a PE header or zeros. Fixing them means understanding why the decoded image's first
+section does not hold the original's code - the WinUpack one especially, since an embedded "PE\0\0" at the
+original's entry point is exactly the shape of an un-dumped *inner* PE. That belongs with TELock's open question
+(memory state versus the reference's), not with the picker.
+
+Recorded so the next round does not spend itself on a candidate-scoring rule that cannot help either row. The
+remaining picker work is `jdpack_7z.exe` (two startup-shaped frames differing only in the SEH handler they
+install) and the Amber/Alienyze `crt-thunk`/`borland` clusters, all of which need a semantic discriminator rather
+than a score.
