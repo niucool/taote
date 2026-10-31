@@ -8927,3 +8927,25 @@ is a multi-round comparison harness, not a one-round fix, and it should not be s
 Per the standing instruction to keep producing measured rows, the next work item is the recorded alternate
 buckets: the 23-row picker bucket (valid PE, OEP wrong, imports already passing) and the 126-row imports-only
 bucket. Both are enumerated in this plan with per-row evidence.
+
+#### 0.17fy Round 176: the 23-row picker bucket, re-censused on r83 - and three rows whose truth is exactly rva 0x1000
+
+The bucket (valid PE, OEP wrong, imports passing, code_sim >= 0.9) is 23 rows: Alienyze 4, Amber 4, JDPack 4,
+PEtite 4, Neolite 3, WinUpack 3, PECompact 1. By the original's entry shape: **msvc-frame 10, crt-thunk 6,
+borland 4, other 3**; by taote's reason: section_hop 17, ladder_scan 4, fallback_guess 2.
+
+Two observations worth a measurement:
+
+1. **Three rows have their truth at exactly rva 0x1000** - the first byte of the first section:
+   `petite_PEview.exe` (truth 0x1000, claim 0x401005), `winupack_PEview.exe` (truth 0x1000, claim 0x41d5a7) and
+   `jdpack_PEview.exe` (truth 0x1000, claim 0x4155f9). That is a *recurring* location, not a coincidence. (Note
+   the tension with the reference's PEtite terminal fill, which treats a keep at exactly base+0x1000 as junk -
+   0.17do - so a rule here must be gated by something stronger than "the payload section's start", or it will
+   trade these three rows for PEtite's.)
+2. **`petite_PEview.exe` is an off-by-5**: claim 0x401005, truth 0x401000 - the picker landed five bytes into
+   the entry instead of on it, which is a different defect from a wrong candidate (the same section, the same
+   code). Worth checking whether the ladder's candidate list contains the exact 0x401000 and a scoring rule
+   dropped it, before inventing anything.
+
+Neither is implemented: both need an arm measurement (PEtite 73 / WinUpack 97 / JDPack 100) plus the corpus, and
+the first one must be checked against the existing PEtite junk rule before it is written.
