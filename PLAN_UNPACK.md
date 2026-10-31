@@ -7825,3 +7825,48 @@ in the `.alien` store), so it is a family-tuning change with a large blast radiu
 **Where the remaining value is, in order**: (1) the 96-row "OEP exact + decoded -> imports only" bucket minus
 RLPack's 63 blocked rows; (2) the 398-row "OEP wrong + undecoded" mass, which needs family ports and where
 Yoda/Themida are excluded by parity; (3) these 23 rows.
+
+### 0.17em Round 138: the largest remaining single class is IMPORT DLL ATTRIBUTION (19 rows measurable, one bug)
+
+While sizing the 96-row "OEP exact + decoded -> imports only" bucket, the missing pairs were classified by
+whether the *name* is already emitted under a different dll - i.e. taote mined the function but attributed it
+to the wrong module. That test (a missing pair counts as "attribution" when the same name is present under
+another dll) says **19 rows would pass**: Alienyze 10, PEtite 8, Amber 1, JDPack 1.
+
+The dll moves, over all failing rows:
+
+| truth dll | dll taote used | pairs |
+|---|---|---|
+| msvcrt | **crtdll** | 929 |
+| msvcrt | version | 132 |
+| msvcrt | shell32 | 89 |
+| msvcrt | mingwm10 | 69 |
+| msvcrt | user32 | 68 |
+| msvcrt | gdi32 | 56 |
+| msvcrt | ws2_32 | 44 |
+| msvcr90 | kernel32 | 26 |
+
+Two different stories live in that table, and only the first is a simple alias:
+
+1. **`crtdll` for `msvcrt`** (929 pairs) is a *name* problem, not an alignment one: `petite_Hash.exe` emits the
+   whole CRT (`_initterm`, `__getmainargs`, `_acmdln`, `_XcptFilter`, ...) under `crtdll.dll`, which is the
+   dll the PACKED file's own descriptor chain names, while the original imports `msvcrt`. (It also emits
+   `crtdll` and `crtdll.dll` as two separate modules - that duplication is a small bug on its own.)
+2. **`msvcrt` functions under `version` / `shell32` / `mingwm10` / `libgcj-11`** (the rest) is a real
+   attribution defect: `alienyze_dat2file.exe` is a MinGW/GCJ build whose payload imports
+   `mingwm10.dll` + `libgcj-11.dll` + `msvcrt`, and taote emitted the CRT names under `mingwm10.dll` (38)
+   and `libgcj-11.dll` (2) while the truth has 35 in `msvcrt` and 21 in `kernel32`. Names are being assigned
+   to the wrong descriptor, which is the "loose pair" attribution problem the reference solves with anchored
+   runs + `idir_self_evidenced` evidence.
+
+**Why this is the best remaining lead**: 19 rows is more than any other single mechanism left in the census
+(the whole "decoded + OEP wrong" bucket is 23 rows and needs a per-row discriminator; the "imports only"
+bucket's RLPack half is blocked). The first story (crtdll vs msvcrt) is a one-line alias; the second needs
+the in-image IDir's dll attribution to win over the thunk-owner guess - the same "trust the payload's own
+descriptor" mechanism already sketched for RLPack.
+
+**Cheapest first slice, with its measurement plan**: emit `msvcrt` (and `msvcr90`/`msvcr100`...) alongside
+`crtdll` for CRT-shaped names, i.e. treat the legacy CRT dll as an alias of msvcrt in the rebuilt table; that
+alone should move `petite_Hash` (22 missing, all CRT, recall 0.741 -> 1.0) and is exactly the class the
+crtdll/mingwm10 rows belong to. Measure the PEtite arm (73 rows) first - 30 PEtite rows carry such a move -
+then the corpus. Do NOT just accept any dll that carries the name (that is grader-fitting, not a fix).
