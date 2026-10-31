@@ -8239,3 +8239,27 @@ it, yet the run dies with a *read* fault at 0x1 rather than the `UC_MEM_FETCH_PR
 determine whether that branch is entered at all for this fetch - one `TAOTE_SEHDBG` print inside the branch is
 enough - because every other stage of the ladder is measured correct and the ret to the sentinel is exactly the
 hand-off the branch exists for.
+
+#### 0.17ez Round 151: the run ends in a CONTINUE_EXECUTION loop on a read at 0x1 - which real TELock would not do
+
+Reading `seh_on_fault` against the trace closes the loop: its sentinel branch is gated on
+`access == UC_MEM_FETCH_PROT || UC_MEM_FETCH_UNMAPPED` (seh.cpp:287), and this run's fatal access is
+`UC_MEM_READ_UNMAPPED`, so **the branch is correctly not taken** - the fault is dispatched to the guest, as a
+data fault must be. The full chain is then:
+
+1. the stub performs a **read at address 0x1** (`[fault] access=19 addr=0x1`);
+2. `seh_dispatch(address, 0u)` calls TELock's handler at 0x4180c5 with a genuine 0xC0000005 record;
+3. that handler's dispatch (`cmp eax,0xc0000094` / `0x80000004` / `0x80000003`, else `push 1; pop eax`) falls to
+   its "anything else" arm, i.e. **EXCEPTION_CONTINUE_EXECUTION** - and it patches *nothing* in the CONTEXT on
+   that path (only the #DE arm bumps Eip, only the #BP arm arms Dr0-Dr3);
+4. `seh_continue`'s `ret == kExceptionContinueExecution` arm loads the context and retargets at the same Eip;
+5. so the stub re-executes the instruction that reads 0x1, faults again, and the run dies when the repeat guard
+   trips - exactly the observed `UC_ERR_READ_UNMAPPED` at addr 0x1 after the handler's `ret` at 0x418160.
+
+That is self-consistent and it also says where the *real* divergence must be: on real Windows this ladder does
+not read address 0x1 in the first place, because TELock's own handler cannot repair a 0x1 read either - it would
+loop forever there too. So the 0x1 read is a **taote-side state artifact** (a pointer the stub derived that
+should not be 1), not a disposition problem, and the next round should find which register/stack slot the read
+takes its base from by probing the instruction *before* the fault. Note the two experiments this idea has
+already refuted: the sentinel branch is not involved (measured above), and the structures-page protection is
+irrelevant (0.17ey).
