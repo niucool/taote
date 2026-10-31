@@ -8216,3 +8216,26 @@ which is what real Windows guarantees for a heap region, and which no family can
 Measurement plan for the next round: map the arena non-exec (or make the fetch there a fetch-prot fault that
 the existing sentinel branch handles), then judge TELock's 116 rows and Yoda's 101 together - the previous
 global attempt lost exactly one Yoda valid-PE row, so the pair has to be re-measured rather than assumed.
+
+#### 0.17ey Round 150: the fatal fault is the handler's `ret` landing on the sentinel - and the sentinel branch does not take it
+
+`TAOTE_LASTPC=12` names the end exactly:
+
+    4180d3 4180d5 4180da 418100 418105 418107 41810c 41810e 418110 418111 418160 70000000
+
+i.e. TELock's handler runs its tail (`xor eax,eax` ... `mov dword [ecx+0x18],0x155`), executes its `ret` at
+**0x418160**, and the return address it pops is **0x70000000** - the staged SEH sentinel page. The next pc is
+the sentinel, and the run then aborts with `UC_ERR_READ_UNMAPPED` at addr 0x1.
+
+One experiment was run and **reverted**: the per-dispatch structures page (EXCEPTION_POINTERS / record /
+CONTEXT) was mapped `UC_PROT_READ|UC_PROT_WRITE` instead of `UC_PROT_ALL`, on the theory that executing the
+arena was the fault. It changed nothing - `telock_7z.exe` still ends with the same error - which is consistent
+with the sentinel page *already* being RW-only (`seh_map_sentinel`, qiling/os/windows/seh.cpp:86) and with the
+fault being something else.
+
+So the open question is narrow and mechanical: the sentinel page is non-executable, the guest's `ret` targets
+it, yet the run dies with a *read* fault at 0x1 rather than the `UC_MEM_FETCH_PROT` that
+`seh_on_fault`'s sentinel branch (seh.cpp:283, `in_sentinel_page`) is written to intercept. The next round must
+determine whether that branch is entered at all for this fetch - one `TAOTE_SEHDBG` print inside the branch is
+enough - because every other stage of the ladder is measured correct and the ret to the sentinel is exactly the
+hand-off the branch exists for.
