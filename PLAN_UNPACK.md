@@ -7933,3 +7933,24 @@ neither exists on this host, and the reference gets it from System32 at runtime.
 **Net state of the 19-row class**: class 1 is aliasable but flips no row alone; class 2 needs a rebuild
 cross-evidence mechanism (real work, up to 19 rows); class 3 is emulation depth and its only data source here
 would be circular. The class is therefore parked with a clear map rather than a working fix.
+
+**Class 2's cross-evidence mechanism was simulated against the API database before writing any code - it flips
+zero rows, in both phrasings.** The rule "a name the claimed dll does not export but another dll in the row's
+set does should move there", evaluated with `api_db.inc` (32,374 names, 405 dlls - the mingw-w64 export
+database, so the oracle is an SDK export table and not the corpus) over every failing r75 row:
+
+| phrasing | rows affected | pairs moved | rows that would pass |
+|---|---|---|---|
+| relocate whenever the claimed dll is not an exporter of the name | 26 | 129 | **0** |
+| relocate only OFF a dll the database has never heard of (mingwm10/libgcj class) | 24 | 103 | **0** |
+
+So the 19-row estimate in 0.17em was too optimistic: the "name present under another dll" test counted rows
+where the name sits under a dll that *does* export it (so the rule correctly declines to move it), or where
+the database does not know the name at all (the CRT-init class, which 0.17eo closed as circular). The
+mechanism is therefore NOT implemented - a simulation was enough to refute it, which is the cheapest possible
+outcome.
+
+**That closes the whole import-attribution class** with measurements rather than a half-finished change:
+class 1 alias: measured, +0 rows, reverted; class 2 cross-evidence: simulated, +0 rows, not written;
+class 3 CRT-init names: closed, no non-circular data source on this host. The value that IS recorded here is
+the map plus the refutations, so nobody re-derives any of the three.
