@@ -7870,3 +7870,26 @@ descriptor" mechanism already sketched for RLPack.
 alone should move `petite_Hash` (22 missing, all CRT, recall 0.741 -> 1.0) and is exactly the class the
 crtdll/mingwm10 rows belong to. Measure the PEtite arm (73 rows) first - 30 PEtite rows carry such a move -
 then the corpus. Do NOT just accept any dll that carries the name (that is grader-fitting, not a fix).
+
+**The cheapest slice was tried and measured, and it does NOT pay (reverted).** Emitting the `msvcrt` spelling
+alongside `crtdll` for CRT-decorated names (gate: the API database's word, or a leading `_`/`?`) does work -
+`petite_Hash.exe` went from `[unpack] crt alias: +12 msvcrt pairs` to an artifact recall of **0.8588** against
+0.7412 - but the row still fails the 0.95 bar, and the reason corrects the hypothesis in this section: its
+remaining **12** missing pairs are not an aliasing problem at all, they are **absent from the artifact**:
+
+    msvcrt ??2@YAPAXI@Z  ??3@YAXPAX@Z  __dllonexit  __getmainargs  __p__commode  __p__fmode
+           __set_app_type  __setusermatherr  _acmdln  _adjust_fdiv  _beginthreadex  _except_handler3
+
+No dll in the artifact carries any of those names - the payload's CRT-init imports are simply not mined, which
+is the *emulation depth* story again (those slots are resolved by the CRT startup that taote never reaches),
+not a dll-attribution one. So the 19-row "attribution" class is really three classes:
+
+1. **crtdll vs msvcrt naming** (the 929-pair bulk) - alias-able in one line, but no single row flips on it
+   (`petite_Hash` stops at 0.859), so it needs a row whose *only* deficit is that class;
+2. **names emitted under a completely wrong dll** (`alienyze_dat2file`: MinGW/GCJ images whose CRT names land
+   under `mingwm10.dll` / `libgcj-11.dll`) - the real "loose pair" defect, needs the in-image IDir's dll
+   attribution to outrank the thunk-owner guess;
+3. **names not emitted at all** (the CRT-init set above) - emulation depth, same class as RLPack's residual.
+
+The alias patch was reverted (artefact contract unchanged, corpus untouched). Class 2 is where the 19 rows
+actually live, and it is a rebuild-attribution project, not an alias.
