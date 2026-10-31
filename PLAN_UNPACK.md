@@ -9002,3 +9002,50 @@ Recorded so the next round does not spend itself on a candidate-scoring rule tha
 remaining picker work is `jdpack_7z.exe` (two startup-shaped frames differing only in the SEH handler they
 install) and the Amber/Alienyze `crt-thunk`/`borland` clusters, all of which need a semantic discriminator rather
 than a score.
+
+#### 0.17gb Round 179: the 23-row "picker" bucket is really 2 picker rows and 21 DECODE rows
+
+Triage that should have come before any scoring rule: for each bucket row, read 16 bytes at the *truth* entry RVA
+from the original file and from our dumped artifact, and count how many match. (Bytes are read through each
+file's own section table, so an image-style dump and a file-style original are both handled.)
+
+    row                                        truth   match
+    Alienyze/alienyze_EventLogChannelsView      e52e    1/16
+    Alienyze/alienyze_InstalledPackagesView     d42a    0/16
+    Alienyze/alienyze_LastActivityView          127f8   0/16
+    Alienyze/alienyze_LoadOrd                   4e14    0/16
+    Amber/amber_pipelist                        550b    0/16
+    Amber/amber_pspasswd                        5be3    1/16
+    Amber/amber_psshutdown                      677f    **16/16**
+    Amber/amber_ru                              570c    1/16
+    JDPack/jdpack_7z                            ebc5    **16/16**
+    JDPack/jdpack_7za                           55641   1/16
+    JDPack/jdpack_MxdwGc                        8e08    0/16
+    JDPack/jdpack_PEview                        1000    6/16
+    Neolite/neolite_Diskmon                     b4b8    0/16
+    Neolite/neolite_Hasher                      82628   0/16
+    Neolite/neolite_md5summer                   9ec68   1/16
+    PECompact/pecompact_Everything              145f0d  1/16
+    PEtite/petite_HDDScan                       483d20  0/16
+    PEtite/petite_HashCalc                      11e58   0/16
+    PEtite/petite_tinytask                      454c    0/16
+    WinUpack/winupack_FastHash_kr               1dffa   0/16
+    WinUpack/winupack_HashCalc                  11e58   0/16
+    WinUpack/winupack_PEview                    1000    5/16
+
+**Only two rows have the original's entry bytes in our artifact** (`amber_psshutdown` 16/16, `jdpack_7z` 16/16);
+every other row has 0-6 of 16. So the "decoded but OEP wrong" bucket is **not** a picker problem at all for 21 of
+its 23 rows: our dump does not contain the original's code at the original's entry address, and no amount of
+candidate scoring can recover an entry whose bytes are not there. `code_sim >= 0.9` does not contradict this - it
+is a whole-image similarity, and a payload can be 90% right while the entry page is a decoy/stale/relocated copy.
+
+The same round also closed the Alienyze trio empirically: hoisting Pass E (the unique Borland
+`6a <imm8> 68 <imm32> e8 <rel32>` entry) ahead of Pass C for the first-c3 family changed **nothing** on those
+three rows, and scanning their dumps shows why - `.text` contains **zero** such candidates (the only ones in the
+image are in `.rsrc` x3 and `.alien` x1). The truth prologue simply is not in the decoded text, which is the same
+finding as the table above. That change was reverted (no effect, no reason to keep it).
+
+**So the picker bucket is 2 rows**: `amber_psshutdown.exe` (truth bytes present, pick 0x40d869 vs truth 0x40c67e
+earlier census) and `jdpack_7z.exe` (the two-startup-frame row needing a semantic discriminator). Everything else
+in the bucket belongs to the decode/layout class - which is also TELock's open question - and should be worked as
+"why is the entry page not the original's code", not as scoring.
