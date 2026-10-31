@@ -8684,3 +8684,27 @@ the live EFLAGS** (so the trap is not re-raised immediately - a sensible rule fo
 guest's `popf` at 0x418ae0 actually sets TF in taote's EFLAGS image, and whether unicorn then raises the
 single-step trap for the next instruction. If the `popf` result is discarded or TF is masked, the fix belongs in
 the interrupt/flags path - and it would be the first mechanism in this family that is not about decoding at all.
+
+#### 0.17fp Round 167: TF is set (eflags=0x146 at 0x418ae1) and unicorn never raises the single-step trap
+
+The probe now prints `eflags` (a two-line gated addition), which settles the round-166 question in one read:
+
+    [probe] pc=0x418ae1 ... esp=0x121ffd4 eflags=0x146
+
+`0x146` = PF|ZF|**TF(0x100)**|bit1 - so the stub's `or dword [esp],0x100 ; popf` **does** arm the trap flag in
+taote's EFLAGS image, and it is still set when the pc reaches the next instruction. The guest's single-step
+loop is armed correctly.
+
+And yet no `#DB` is ever delivered: `TAOTE_SEHDBG`'s interrupt list ends at `intno=0x6 pc=0x418aa1` and the run
+stops on 0x418ae1. This same run *does* deliver `intno 1` twice earlier (0x419a5d), so taote's #DB path works
+when unicorn raises it - the trap simply is not raised for an instruction executed after a guest `popf`.
+
+So this is not a decode problem, not a mapping problem and not an SEH-disposition problem: **the emulator does
+not emulate TF single-stepping from a guest `popf`**, and TELock's ladder is driven by exactly that. The fix is a
+taote-side TF emulation: while `eflags & 0x100` is set, after each instruction raise the synthetic `#DB`
+(NT 0x80000004) through the existing `seh_dispatch` path - i.e. a one-shot flag set when the code hook sees TF
+and cleared by the dispatch, so the cost is only on the instructions that are actually being single-stepped.
+
+That is the first mechanism in this family that is not about decoding, and it is the last thing between the
+ladder and the payload: every stage before it is measured correct, the guest reaches real API calls
+(`CreateFileA`/`ReadFile`/`CloseHandle` on its own image) and arms TF immediately afterwards.

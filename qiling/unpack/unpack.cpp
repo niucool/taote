@@ -809,12 +809,14 @@ void Unpacker::install(Qiling& ql) {
                 };
                 std::fprintf(stderr,
                              "[probe] pc=0x%llx eax=0x%llx ebx=0x%llx ecx=0x%llx edx=0x%llx esi=0x%llx"
-                             " edi=0x%llx ebp=0x%llx esp=0x%llx ret=0x%llx\n",
+                             " edi=0x%llx ebp=0x%llx esp=0x%llx eflags=0x%llx ret=0x%llx\n",
                              static_cast<unsigned long long>(addr), static_cast<unsigned long long>(rd("eax")),
                              static_cast<unsigned long long>(rd("ebx")), static_cast<unsigned long long>(rd("ecx")),
                              static_cast<unsigned long long>(rd("edx")), static_cast<unsigned long long>(rd("esi")),
                              static_cast<unsigned long long>(rd("edi")), static_cast<unsigned long long>(rd("ebp")),
-                             static_cast<unsigned long long>(rd("esp")), static_cast<unsigned long long>(ret));
+                             static_cast<unsigned long long>(rd("esp")),
+                             static_cast<unsigned long long>(rd("eflags")),
+                             static_cast<unsigned long long>(ret));
                 // an 8-dword window at esp: a stub that corrupts its own return
                 // chain is only diagnosable by seeing the slots it pushes
                 try {
