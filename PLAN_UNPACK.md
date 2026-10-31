@@ -8469,3 +8469,39 @@ every access or record taote's own actions rather than the guest's. Specifically
 
 So (a) is closed as an audit with no finding - the cheapest possible outcome, and worth recording so it is not
 re-audited blind.
+
+#### 0.17fh Round 159: with VirtualProtectEx the anti-tamper gate PASSES - the ladder now re-installs its SEH frame and re-encrypts
+
+Probing forward from the CRC salt (0x4189de) with the code reconstructed from the write trace gives the gate
+and its outcome:
+
+    4189de  xor  [ebp+0x1b5f],eax     ; salt the block CRC
+    4189e4  push 0xc ; pop ecx        ; 12 slots
+    4189e7  lea  esi,[ebp+0x3c3]      ; the payload-IAT slot table
+    4189f0  lods eax,[esi] ; test eax,eax
+    4189f3  je   0x4189fa             ; ANY ZERO SLOT -> the exit path
+    4189f5  loop 0x4189f0
+    4189f7  stc ; jb 0x418a02         ; all 12 resolved -> carry on
+
+**`0x4189fa` (the exit path) fires ZERO times and `0x418a1c` fires**, i.e. the anti-tamper import check now
+passes - that is the direct consequence of implementing `VirtualProtectEx` (0.17ff) and it is the first time
+this gate has been cleared.
+
+The ladder then continues, measured step by step:
+
+* `0x418a1c` - `xor BYTE [ebx],0xcc` over 0x40 bytes at `ebp+0x1ce1` (a keyed decrypt), then
+  `cmp BYTE [eax],0`; `0x418a5b` fires, so the decrypt produced the expected zero and the branch was taken;
+* `0x418a5b` - `mov edi,eax ; not eax ; shr eax,cl ; rep stosd` (a fill of the destination region), then
+  `call $+5`-style self-relocation;
+* `0x418a85`-`0x418a8e` - `push fs:[0] ; mov fs:[eax],esp` : **the stub installs a NEW SEH frame** after the
+  CRC/anti-tamper stage, and `jmp 0x418aa1`;
+* the run now ends cleanly **at 0x418aa1** (no `error=` line, `TAOTE_LASTPC` tail `… 0x418a88 0x418a8b
+  0x418a8e 0x418aa1`), where the live bytes are `66 f7 f3 | 0f 85 5b 01 00 00` = `not bx ; jnz 0x418c05`
+  (`bx=0`, so the jump would be taken) - i.e. taote stops one instruction short of the branch.
+
+So the family has moved from "parks after the resolver" to "passes the import gate, the CRC and the keyed
+decrypt, re-installs its SEH frame, and stops at the next branch". The next question is narrow: why the run
+ends at 0x418aa1 with no fault and no timeout - whether the emulation budget/count is exhausted there (the
+summary reports `stages=1`) or a stop was requested, and what `0x418c05` does. Note the live byte stream there
+differs by one byte from the write-trace reconstruction (`33 66 f7 f3 …` vs `66 f7 f3 …`), so this region is
+being rewritten as it runs and only live reads count.
