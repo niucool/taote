@@ -8183,3 +8183,36 @@ So the family is no longer "the walk cannot find its APIs" and no longer "the st
 finds them and writes the payload IAT. The open question is the single one 0.17ev already narrowed to - what
 taote does at the end of the scan - and it must be answered by probing a **real instruction start** (a 0-hit
 probe on this self-modifying page proves nothing, 0.17ev).
+
+#### 0.17ex Round 149: TELock's run does not stall - it DIES on a fault, and the fault is the sentinel page being executed
+
+`dur=0` on all 116 TELock rows was the clue: the run is not burning a budget, it ends in under a second. The
+summary line names the reason, which no earlier round had read:
+
+    [unpack] telock_7z.exe family=TELock base=0x400000 oep=0x418037 stages=1 reason=section_hop imports=2
+    error=emulation error: Invalid memory read (UC_ERR_READ_UNMAPPED)
+
+So there is no early latch to fix: **taote aborts on a guest fault**. `TAOTE_SEHDBG` localises it:
+
+    [sehd] code=80000003 fault=41808d pc=41808d chain=121ffd8 next=0 handler=4180c5
+    [sehc] ret=0 frames=0 walk=0x121ffd8 ctx=0x70003100 esp=0x121ffc8 eip=0x70000000
+    [sehc] exhausted -> resume 41808e              <- correct, the handler patched CONTEXT.Eip
+    [sehc] ret=0 frames=0 walk=0x121ffd8 ctx=0x70003100 esp=0x121ffd8 eip=0x41808e
+    [sehc] exhausted -> resume 41808e              <- repeats with the context already at 41808e
+    ...
+    [fault] access=19 addr=0x1 pc=0x70000000       <- 19 = READ_UNMAPPED
+    [sehd] code=c0000005 fault=1 pc=70000000 chain=121ffd8 next=0 handler=4180c5
+
+The run ends with the guest **executing the sentinel arena at 0x70000000 as code** (access 19 is a *read*
+fault at address 0x1, i.e. an instruction there dereferenced 0x1) and then the SEH dispatcher handing that
+fault to TELock's own handler, which cannot help.
+
+That makes the remaining TELock blocker a **mapping/permission** question, not a decode one: the sentinel
+arena holds DATA (the CONTEXT at 0x70003100, the exception record at 0x70003010) yet it is executable in the
+emulator, so any resume that lands on the sentinel runs garbage instead of surfacing. This is the same
+sentinel-surface family as 0.17ef (which cost 1 Yoda valid PE when changed globally) - but the framing is now
+sharper: the fix is not "make fetch faults surface", it is "**the sentinel arena must never be executable**",
+which is what real Windows guarantees for a heap region, and which no family can legitimately depend on.
+Measurement plan for the next round: map the arena non-exec (or make the fetch there a fetch-prot fault that
+the existing sentinel branch handles), then judge TELock's 116 rows and Yoda's 101 together - the previous
+global attempt lost exactly one Yoda valid-PE row, so the pair has to be re-measured rather than assumed.
