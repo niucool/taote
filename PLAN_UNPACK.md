@@ -8069,3 +8069,38 @@ address the stub's EAT hands back for `LoadLibraryA` and what the packer does wi
 synthesized stub is a bare `ret` (0xC3) and dispatch happens by address through `hook_winapi`, so a packer that
 *reads the cell bytes* or expects a real function body sees a one-byte stub - that is now the prime suspect and
 it is testable without touching the ladder.
+
+#### 0.17et Round 145: TELock's resolver is real and writes the payload IAT - but its 13-target loop never finishes
+
+Probe at 0x41820a (the resolution step 0.17es named), first two hits: `eax=0x2028 edx=0x10010000`, then
+`eax=0x2028 edx=0x10010000` with `edi` going 0xd -> 0xc, `esi=0x1001241c -> 0x10012438`, `ecx=0xf0 -> 0xe9`.
+The live code is a textbook name -> ordinal -> EAT resolver:
+
+    41820a  03 c2          add   eax,edx            ; AddressOfFunctions (0x2000+0x28 = the stub's real offset)
+    41820c  0f b7 1b       movzx ebx,word [ebx]     ; ordinal
+    41820f  8b 1c 98       mov   ebx,[eax+ebx*4]   ; EAT[ordinal]
+    418212  03 da          add   ebx,edx            ; export VA
+    418214  8b 44 24 04    mov   eax,[esp+4]
+    418218  89 1c 28       mov   [eax+ebp],ebx    ; <- writes the payload IAT slot
+    41821b  5b 58 4f 75 b8 pop ebx; pop eax; dec edi; jnz 0x4181d8
+    418220  0f 84 e5 01 00 00  je 0x41840b
+
+and `0x2028` is exactly the stub's `AddressOfFunctions` RVA (`edata_rva 0x2000 + funcs_off 0x28`), so the
+resolver walks taote's own export tables correctly and **stores resolved addresses into the payload's IAT**.
+
+The loop, however, never completes: `0x418220` (the `je` after `dec edi`) fires **0 times**, as does
+`0x41840b` beyond it, while `edi` is measurably decrementing (0xd -> 0xc across hits). So the 13-target loop
+dies *inside* an iteration - the scan exhausts and parks - not at its exit.
+
+That refutes the obvious "missing name" theory: every plausible TELock target is in the stub's surface
+(`lstrlenW`, `lstrlenA`, `ExitProcess`, `GetProcAddress`, `LoadLibraryA`, `GetSystemTimeAsFileTime`,
+`GetCurrentProcessId`, `IsBadReadPtr`, `UnhandledExceptionFilter`, `GetCommandLineA`, `VirtualAlloc`,
+`GetModuleHandleA`, `GetSystemInfo`, `GetVersion`, `Sleep` - all present, checked offline).
+
+**Next measurement, one round:** the resolver's *requested* name has to be observed, not inferred. The only
+places it can be read are the three-dword comparisons (`"Load"`/`"Libr"`/`"aryA"` at 0x4181e4, `"Exit"` at
+0x418226) or a gated print in the stub's cells, and the page is self-modifying, so this needs an env-gated
+debug line in the emulation (like TAOTE_PROBE) that prints, at the park, the last compared name, the loop
+index `edi` and the IAT slot it had just written - i.e. which of the 13 targets it died on. Everything else
+about this family is now measured: the ladder, the frame teardown, the MZ scan, the module-name check, the
+name-table walk, the ordinal/EAT resolution and the IAT store all behave.
