@@ -8819,3 +8819,24 @@ between the ReadFile and this call. Two possibilities, both testable with the ex
   the 0x400 bytes our `ReadFile` writes with the file's own bytes at that offset), or
 * the decrypt loop never runs because a branch before it reads state taote got wrong (the CRC salt at
   `[ebp+0x1b5f]` is the obvious candidate - it is the value the stub compares the re-read block against).
+
+#### 0.17fu Round 172: the call target is never written and never executed - and the watch cannot see that page
+
+Two measurements narrow 0.17ft:
+
+1. `TAOTE_WATCH_ADDR=0x41802e:3` records **no write at all** during the run: neither the stub's `ReadFile` nor
+   its decryptor loop ever touches the address it later calls. (Caveat, recorded because it has bitten before:
+   the write hook is *muted* for claimed sections, so a missing watch line is only evidence when the page is not
+   muted - this needs one gated print of `muted_` before it is treated as conclusive.)
+2. The decryptor loop at `0x418030` writes the page starting at **0x418041** upward (measured in earlier rounds),
+   i.e. it does not cover 0x41802e either.
+
+So the stub calls into a byte range that, under taote's emulation, holds neither freshly-read file bytes nor
+decrypted code - and the call dies without a fault and without executing its target. That is consistent with the
+region containing whatever the *packed* file has at that offset, which the stub expects to have replaced.
+
+Next step, precise and cheap: read the live bytes at 0x41802e at call time (probe an executed pc whose 48-byte
+window reaches it, or log `muted_` and re-run the watch with the page unmuted) and compare them with
+(a) the packed file's bytes at the same RVA and (b) the decrypted code the earlier rounds saw at 0x418041+.
+If they equal the file's bytes, the missing piece is the stub's own re-decrypt of the self-read block, and the
+question becomes why its loop starts at 0x418041 instead of 0x418008.
