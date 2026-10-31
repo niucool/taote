@@ -256,3 +256,50 @@ or `GetSystemInfo` at all before the run ends, and Alienyze's 110-call trace is 
 **Enigma Virtual Box 122 / Neolite 27 / JDPack 19** for `GetVersionExA` — and EnigmaVB and
 Neolite are already 3/3 at S75. `GetAdaptersInfo` is imported by **14 of 3,001**, so item 4
 is a 14-sample lane, not a 122-row one. Detail: `PLAN_UNPACK.md` §8.3.
+
+---
+
+## Item 4 probe (the 14 `GetAdaptersInfo` importers) — DEAD BY MEASUREMENT, module not written
+
+`grep -rlaF GetAdaptersInfo packed/*/*.exe` finds **14 of 3,001** samples (not the 122 the
+row-value table claimed for Themida). Each was traced solo with `TAOTE_APIDBG=1` (every
+dispatcher hit, printed *before* the `ApiRegistry` lookup, so a call into a registered
+sentinel/import cell prints even when no handler exists), `TAOTE_RUNDBG=1` (every
+`GetProcAddress` result), and graded in this tree at pin 2 / 85 s.
+
+| row | calls it? | how it resolves | where the run stops | grade here |
+|---|---|---|---|---|
+| ASPack/`aspack_adwcleaner_7.2.4.0` | **no** | — | `section_hop` 52 imports, 86 s (budget) | `code_sim` **0.061** → decode |
+| EnigmaVB/`enigmavb_adwcleaner_7.2.4.0` | **no** | — | dies `READ_UNMAPPED`, **0 API calls** | VERIFIED (sim 1.0) |
+| EnigmaVB/`enigmavb_HWMonitorPro_x32` | **no** | — | dies `FETCH_UNMAPPED` | VERIFIED (sim 1.0) |
+| JDPack/`jdpack_HWMonitorPro_x32` | **no** | `GetProcAddress(iphlpapi.dll!GetAdaptersInfo)` → **0x0** | dies `READ_UNMAPPED` after 550 calls | VERIFIED (sim 1.0) |
+| JDPack/`jdpack_WinAudit` | **no** | — | `section_hop` 5 imports | ungradable (no `not-packed/` original) |
+| Neolite/`neolite_HWMonitorPro_x32` | **no** | 25 `GetProcAddress`, none network | dies `READ_UNMAPPED`, 5,033 calls | VERIFIED (sim 1.0) |
+| Neolite/`neolite_WinAudit` | **no** | 25 `GetProcAddress`, none network | dies `READ_UNMAPPED`, 3,437 calls | ungradable |
+| Packman/`packman_adwcleaner_7.2.4.0` | **no** | — | `ladder_scan` 45 imports, 88 s (budget) | sim **1.0**, OEP wrong → pick |
+| PEtite/`petite_ATPad` | **no** | — | `section_hop` 454 imports | ungradable |
+| PEtite/`petite_Fotowall 1.0 Win32` | **no** | — | `section_hop` 10,280 imports, 75 s | ungradable |
+| PEtite/`petite_SysSpec` | **no** | — | `section_hop` 1,334 imports | ungradable |
+| RLPack/`rlpack_adwcleaner_7.2.4.0` | **no** | — | `ladder_passc` 47 imports, 88 s (budget) | sim **0.233** → decode |
+| Themida/`themida_adwcleaner_7.2.4.0` | **no** | — | `section_hop` 69 imports, 17 s | sim **0.051** → decode |
+| UPX/`upx_adwcleaner_7.2.4.0` | **no** | `GetProcAddress(iphlpapi.dll!GetAdaptersInfo)` → **0x100b1000** = the `xor eax,eax; ret` unbound-import stub cell | `section_hop` 1,357 imports, 64 s | VERIFIED (sim 1.0) |
+
+**0 of 14 executes `GetAdaptersInfo`.** The two rows that do *resolve* the pointer never
+call it, and one of them gets `NULL` and still grades VERIFIED — i.e. the answer's absence
+does not veto these payloads. The 9 gradable rows fail for decode (`code_sim` 0.05-0.23,
+budget-bound), for the **pick** (Packman: `code_sim` 1.0 with the wrong OEP), or die inside
+emulation before their startup; none fails for an adapter verdict. 5 of the 14 cannot be
+graded at all — the dataset ships no `not-packed/` original for `WinAudit`, `ATPad`,
+`Fotowall 1.0 Win32` or `SysSpec`, so `build_manifest.py` skips them.
+
+Two facts worth carrying:
+
+* taote already answers an *unregistered* dynamically-resolved name with a **callable**
+  `xor eax,eax; ret` cell (`unpack.cpp:530-554`, `pe.cpp:348`), so "no iphlpapi" is a
+  silent 0, not a crash. A protector that reads the *return value* alone can therefore not
+  distinguish it from a machine with no adapter; only one that reads the record can.
+* the probe site is **reachable** for `adwcleaner` once its decode/pick lands — the UPX row
+  proves the payload walks its import-hint table down to `GetAdaptersInfo`. Re-check then
+  with one `TAOTE_APIDBG` run per row before spending a sweep on it.
+
+**Verdict: item 4 is a 14-sample lane with no measured veto; not written.**
