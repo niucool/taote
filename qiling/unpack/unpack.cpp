@@ -3371,6 +3371,7 @@ UnpackResult Unpacker::finalize(Qiling& ql) {
             fctx.debug = opts_.debug;
             fctx.family = opts_.family;
             fctx.sections = sections_;
+            fctx.reason = reason_;
             fctx.oep_mut = &meta_oep_;
             if (packer_->family_fill(fctx)) {
                 reason_ = "family_fill";

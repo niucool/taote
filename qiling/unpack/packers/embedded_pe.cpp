@@ -635,9 +635,78 @@ public:
     mutable std::size_t restored_bytes_ = 0;
     mutable std::size_t hollow_span_ = 0;
 
+    // The reference's store-EP record (alienyze_unpacker.cpp:90-115): the payload
+    // entry is the dword at `.alien`'s first byte. Measured over the 126-row
+    // Alienyze arm off the packed files themselves: 125 samples carry their
+    // ORIGINAL AddressOfEntryPoint there (the only exception is
+    // alienyze_tinytask.exe, the arm's one invalid-PE row, which holds zero). It
+    // has to be captured BEFORE the stub - or this class's own body restore -
+    // consumes the store: on the terminal artifacts `.alien`'s first dword is
+    // already junk (0x303e62d, 0x3e3eea14, 0x434264bb on the three bucket rows),
+    // so reading it at finalize would find nothing.
+    std::uint32_t store_ep_ = 0;
+
+    bool family_fill(PackerContext& ctx) override {
+        if (ctx.oep_mut == nullptr || ctx.base == 0 || ctx.image_size == 0 || store_ep_ == 0) {
+            return false;
+        }
+        std::uint64_t alien_lo = 0;
+        std::uint64_t alien_hi = 0;
+        for (const auto& s : ctx.sections) {
+            if (s.name == ".alien") {
+                alien_lo = s.start;
+                alien_hi = s.end;
+                break;
+            }
+        }
+        const std::uint64_t oep = *ctx.oep_mut;
+        const bool cur_in_alien = alien_lo != 0 && oep >= alien_lo && oep < alien_hi;
+        const bool cur_stub_ep = ctx.packed_ep_va != 0 && oep == ctx.packed_ep_va;
+        // Gate exactly like the reference: only replace a pick that is JUNK - no
+        // entry, the stub's own code, or a latch inside the store. Rows whose flow
+        // reached the payload carry exact hop picks and must be left alone.
+        // ...and also replace a SCAN pick: a ladder/first-c3 scan never observed a
+        // hand-off, while the store EP is the packer's own record of the payload
+        // entry. An observed section hop is left alone (measured: those picks are
+        // exact).
+        const bool cur_scanned = ctx.reason == "ladder_scan" || ctx.reason == "fallback_guess";
+        if (!(oep == 0 || cur_in_alien || cur_stub_ep || cur_scanned)) {
+            return false;
+        }
+        const std::uint64_t stub_rva =
+            ctx.packed_ep_va >= ctx.base ? ctx.packed_ep_va - ctx.base : 0;
+        if (store_ep_ >= ctx.image_size || (stub_rva != 0 && store_ep_ == stub_rva)) {
+            return false;
+        }
+        if (ctx.debug) {
+            std::fprintf(stderr, "[unpack] alienyze store EP 0x%x -> oep=0x%llx (was 0x%llx)\n",
+                         store_ep_, (unsigned long long)(ctx.base + store_ep_),
+                         (unsigned long long)oep);
+        }
+        *ctx.oep_mut = ctx.base + store_ep_;
+        return true;
+    }
+
     bool transform_image(PackerContext& ctx) override {
         if (ctx.image_mut == nullptr || ctx.image_mut->empty()) {
             return false;
+        }
+        // capture the store-EP record while `.alien` still holds the packed store
+        if (store_ep_ == 0) {
+            for (const auto& s : alienyze::stub_sections(*ctx.image_mut)) {
+                if (s.name != ".alien" || s.va == 0) {
+                    continue;
+                }
+                const std::size_t o = s.va;
+                if (o + 4 <= ctx.image_mut->size()) {
+                    const auto& m = *ctx.image_mut;
+                    store_ep_ = static_cast<std::uint32_t>(m[o]) |
+                                (static_cast<std::uint32_t>(m[o + 1]) << 8) |
+                                (static_cast<std::uint32_t>(m[o + 2]) << 16) |
+                                (static_cast<std::uint32_t>(m[o + 3]) << 24);
+                }
+                break;
+            }
         }
         static thread_local bool in_seed = false;
         if (ctx.seed_mode && !in_seed) {

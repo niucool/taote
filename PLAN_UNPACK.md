@@ -9163,3 +9163,56 @@ and one apparent LOSS, `mpress_geek.exe`. The loss is **not** this change: that 
 (dur=86) in r82, r83 and r84 as well, and a direct A/B - the parent commit built into a separate binary, three
 runs each at the same 85 s budget - gives `oep=0x559760` for *both* builds, three times each. Its r84 truth is a
 parallel-scheduling artifact. So the change is **+4 real graded rows, 0 real losses**.
+
+#### 0.17gg Round 184: the Alienyze STORE-EP record - a checked-in reference mechanism taote never ported
+
+The r85 picker-bucket re-census (19 rows, down from 23 after Amber) was re-triaged layout-aware: **17 of the 19
+carry the original's 16 entry bytes at exactly the truth RVA in our artifact**, so they are picker rows, and the
+Alienyze three are no exception (the 0.17gb "not in the decoded text" reading came from a scan of one debug dump,
+not of the artifact).
+
+`pegasus` gets these rows and has a mechanism taote never had - `src/unpacker/packers/alienyze_unpacker.cpp:90-115`:
+Alienyze keeps the payload's **entry RVA as the first dword of `.alien`**, and the reference reads it (gated on the
+current pick being junk: zero, a latch inside `.alien`, or the stub's own EP). Verified offline against the packed
+files themselves before writing any code: **125 of the 126 Alienyze samples carry exactly their original
+`AddressOfEntryPoint` there**; the only exception is `alienyze_tinytask.exe`, the arm's one invalid-PE row, which
+holds zero.
+
+It must be captured **before** the stub or our own body restore consumes the store - on the terminal artifacts
+`.alien`'s first dword is already junk (`0x303e62d`, `0x3e3eea14`, `0x434264bb` on the three bucket rows), so it is
+read in `transform_image` while the image is still packed and applied in `family_fill`.
+
+One widening was needed and measured: the reference's junk gate keeps a *scan* pick, and taote's three bucket rows
+are `reason=ladder_scan` with a pick outside `.alien` - so the fill also replaces a scan pick (`ladder_scan`,
+`fallback_guess`) and leaves an **observed** `section_hop` pick alone (`PackerContext::reason`, threaded from
+`finalize`).
+
+**Alienyze arm (126 rows): OEP 108 -> 118, +10 gains, 0 losses**, all-four bucket rows won plus six more
+(`DriverView`, `ESEDatabaseView`, `Everything`, `KillPot`, `ProduKey`, `disk2vhd`); ALL 75 -> 79.
+
+Corpus **r86** (2678 rows, 23:38-00:51) confirms it, with the usual MPRESS wall noise:
+
+| | r85 | r86 |
+|---|---|---|
+| valid PE | 2676 | 2676 |
+| OEP exact | 2127/2596 | **2137/2596** |
+| imports | 2083 | 2082 |
+| graded all-three | 2002 | **2005** |
+
+11 OEP gains / 1 loss, and the loss (`mpress_ComIntRep.exe`) plus one of the gains (`mpress_geek.exe`) are the known
+flaky MPRESS wall pair - so the real movement is exactly the **10 Alienyze rows**.
+
+Note what the +10 bought: only +4 all-three, because 6 of the 10 have failing imports. **Alienyze is now 125 valid
+PE / 118 OEP / 79 imports** - 39 rows with a correct entry and a wrong import table, the second-largest import gap
+in the corpus after RLPack (8/104). That is the next target: `pegasus` carries Alienyze import machinery taote has
+never ported (`src/unpacker/alienyze.cpp`: the STATUS-237 decoy-class XOR name salvage with its hint16 guard,
+`al-xormine`, and `idir_self_evidenced_` merging; `packers/alienyze_unpacker.cpp` also mines ordinal records from
+the decoded image).
+
+Also scoped for JDPack while r86 ran - taote lacks BOTH reference hop guards that JDPack joins:
+- the **payload-internal traffic guard** (`unpacker.cpp:7006-7025`, UPX/NSPack/JDPack): a hop whose previous pc is
+  already inside the range is the payload's own runtime writes re-claiming around the executing flow, not a transfer;
+- the **import-quiet hop rejection** (`unpacker.cpp:8160-8180`, UPX/NSPack/Molebox/JDPack): a later hop with
+  `imports < last_accepted_hop_imp + 32` is ignored, keeping the incumbent.
+`imports_.size()` is available at hop time in taote, so the second is a direct port.
+

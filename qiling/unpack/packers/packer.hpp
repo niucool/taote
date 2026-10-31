@@ -70,6 +70,10 @@ struct PackerContext {
     std::uint64_t hop_hint = 0;
     bool is_64 = false;
     bool debug = false;
+    // How the current OEP pick was obtained ("section_hop", "ladder_scan",
+    // "fallback_guess", ...). A family fill may trust an OBSERVED hand-off over
+    // its own record and mistrust a scan.
+    std::string reason;
 
     // True while transform_image() runs as the pre-run seed: the image is STILL
     // PACKED, so only the parts the stub reads may be written back - never the
