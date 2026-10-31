@@ -7954,3 +7954,35 @@ outcome.
 class 1 alias: measured, +0 rows, reverted; class 2 cross-evidence: simulated, +0 rows, not written;
 class 3 CRT-init names: closed, no non-circular data source on this host. The value that IS recorded here is
 the map plus the refutations, so nobody re-derives any of the three.
+
+#### 0.17eq Round 142: TELock's ladder runs to the copy interpreter - the two engines part company INSIDE it
+
+With the (measured-negative) sentinel-surface change applied only to observe, the ladder is now traced well
+past the point where earlier rounds lost it. Probe hits against the reference's own hop sequence:
+
+| pc | reference | taote |
+|---|---|---|
+| 0x41808e (after the int3 handler) | 1 | 1 |
+| 0x4180a9 (after the #DE handler) | 1 | 1 |
+| 0x418163 (MZ scan) | 1 | 1 |
+| 0x418180 (the `cmp word [edx],0x5a4d`) | 1 | 1 |
+| 0x41818a (`je` taken) | 1 | 1 |
+| 0x4181aa (the 12-byte-record copy interpreter) | 1 | 1 |
+| 0x4181ae, 0x4181bf | 1 each | 1 each |
+| **0x4181dc** (one iteration further into the loop) | **1** | **3** |
+
+So both engines follow the identical path - trap ladder, teardown, MZ scan, and into the record interpreter -
+and they part company *inside* the interpreter: the reference passes the loop once, taote executes it three
+times. After that taote's pc ends up on a stack scratch stub the ladder has built (`eb fe` = `jmp $` at
+0x121ffd8) and parks there with payload-like registers (`eax=0x10013991 ebx=0x100129ce esi=0x100127e0 edi=1`
+- all in the synthesized DLL region), i.e. it never transfers to the payload.
+
+**The concrete next measurement** (recorded, not yet taken): dump the record table the interpreter walks -
+`[ebx]`, `[ebx+4]`, `[ebx+8]` for each of the three iterations - under taote, and compare the *count* and
+*values* with what the reference's single pass consumes. A record table with three entries where the
+reference has one means the stub decrypted one table three times or decrypted the wrong table, which is the
+same class as PEtite's decoder divergence and is a *decryption* question, not an SEH one.
+
+**Why the surface change stays reverted**: it is what gets the ladder this far, but alone it measures -1
+(Yoda) with no gains, and the hand-off above shows why one more mechanism (the record interpreter's input)
+is still missing. The two have to land together or not at all.
