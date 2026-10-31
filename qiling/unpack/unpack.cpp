@@ -1088,6 +1088,16 @@ int Unpacker::on_section_write(std::uint64_t /*pc*/, std::uint64_t addr, std::ui
                 claim_end = packed_ep_va_ - 0x100;
             }
         }
+        // a claim covers the WHOLE PAGE WINDOW it starts in (round 183): a
+        // section's declared vsize understates what the stub decrypts into it -
+        // amber_pipelist's .bss claim nominally ends at 0x4053e8 while the true
+        // payload entry is 0x40550b, which is inside the last page the claim
+        // touched. Rounding to the page boundary is the same lesson the ASPack
+        // work taught about clamping a decode window to its section.
+        if (claim_end == ps.end && claim_end % 0x1000 != 0) {
+            const std::uint64_t aligned = (claim_end + 0xfff) & ~static_cast<std::uint64_t>(0xfff);
+            claim_end = std::min<std::uint64_t>(aligned, base_ + image_size_);
+        }
         const auto claim = std::make_pair(claim_start, claim_end);
         ever_written_.insert(claim);
         written_ranges_.insert(claim);

@@ -9117,3 +9117,49 @@ exactly the budget argument the block hook was chosen for.
 
 The probe itself (`TAOTE_HOPDBG`) was reverted with this round's working-tree change; it is two lines and should
 come back with the fix so the A/B is measurable on the same row.
+
+#### 0.17gf Round 183: a claim covers its WHOLE PAGE WINDOW - Amber's four bucket rows fixed
+
+Round 182 established that the hop detector never *sees* `amber_pipelist`'s true entry `0x40550b` (the block hook
+is never entered for it, while `TAOTE_PROBE` proves it executes exactly once). This round answers the next
+question - *was it even claimed?* - with `TAOTE_UNPACK_DEBUG=1`, and the answer is no:
+
+```
+[unpack] claim .bss [0x405000,0x4053e8) write=0x405394 pc=0x4014a3
+...
+```
+`.bss`'s claim ends at `0x4053e8`. The true entry is `0x40550b` - **0x123 bytes past the end of the claim, in the
+same page**. The section's declared `vsize` understates the region the stub decrypts into it, which is the exact
+lesson the ASPack work taught about clamping a decode window to its containing section: the *packed* section
+bounds mean nothing once the payload is decoded.
+
+The fix is three lines: a claim whose end came from the section itself is rounded up to the page boundary it lands
+in (clamped to the image, and *not* applied when the hollow-predecessor cap deliberately ends a claim below the
+stub's entry).
+
+**Amber arm (152 rows): OEP 111 -> 115, +4 gains, 0 losses** - and the four gains are exactly the Amber
+picker-bucket rows: `amber_pipelist.exe`, `amber_pspasswd.exe`, `amber_psshutdown.exe`, `amber_ru.exe`.
+
+Two things were measured and *not* kept, so they are not re-proposed:
+
+- the claim-scoped per-instruction watch designed in 0.17ge. Implemented in full (bound budget, armed at claim,
+  dropped at hand-off) and it produced **exactly the same OEP** as page rounding alone on all runs - the
+  fallthrough theory of 0.17ge was wrong; the truth *is* a block entry, it was simply outside every claim. The
+  machinery was reverted rather than shipped inert.
+- the page rounding is a family-agnostic change on a shared path (claims are used by every family), so it needs the
+  full corpus, which is running as r85.
+
+Corpus **r85** (2678 rows, 85 s budget, 4 workers, 22:01-23:13) closed it:
+
+| | r84 | r85 |
+|---|---|---|
+| valid PE | 2676 | 2676 |
+| OEP exact | 2124/2596 | **2127/2596** |
+| imports | 2082 | **2083** |
+| graded all-three | 1997 | **2002** |
+
+Row diff: four GAINS (`amber_pipelist`, `amber_pspasswd`, `amber_psshutdown`, `amber_ru` - all four to exact OEP)
+and one apparent LOSS, `mpress_geek.exe`. The loss is **not** this change: that row has sat at the 85 s wall
+(dur=86) in r82, r83 and r84 as well, and a direct A/B - the parent commit built into a separate binary, three
+runs each at the same 85 s budget - gives `oep=0x559760` for *both* builds, three times each. Its r84 truth is a
+parallel-scheduling artifact. So the change is **+4 real graded rows, 0 real losses**.
