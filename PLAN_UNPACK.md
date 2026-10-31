@@ -7693,3 +7693,61 @@ correct in all three respects measured (stack sign, #BP resume, #DE dispatch), a
 start from the *surface* problem (a sentinel return that must surface, but currently costs Yoda a row)
 rather than from the family's later stages - without it the ladder never reaches the code that is already
 understood.
+
+### 0.17ei Round 134: the shape vocabulary was missing the CRT entry shapes the payloads actually use (`e8 <rel32> 6a ?? 68`, `e8 <rel32> 85 c0`)
+
+The target this round was the census's cleanest bucket: **29 rows with the payload decoded (code_sim >= 0.9)
+and the imports already passing, where only the claimed entry is wrong**. They are not parity cases - the
+reference gets every one of the six sampled exactly: `winupack_cmd` 0x829a, `winupack_PEview` 0x1000,
+`winupack_HashCalc` 0x11e58, `jdpack_7z` 0xebc5, `molebox_cmd` 0x829a, `amber_pipelist` 0x550b, all matching
+the originals' `AddressOfEntryPoint` byte for byte.
+
+**Where taote loses it** - `TAOTE_UNPACK_DEBUG` on winupack_cmd is unambiguous:
+
+    [unpack] OEP candidate 0x4ad0829a (section_hop)
+    [unpack] hop ledger (1): 0x4ad0829a@2186565          <- the candidate IS the truth
+    [unpack] family=WinUpack base=0x4ad00000 oep=0x4ad01430
+
+The hop that the run itself accepted (write ordinal 2,186,565 - as strong as a hop gets) is the correct
+entry, and the picker then *replaced* it with 0x4ad01430. The replacement is the WinUpack policy gate's
+shape test, `shape_at(lead) >= 1`, and the truth scores **0** there: its bytes are
+
+    truth 0x829a:  e8 ea f9 ff ff 6a 10 68        (`call ...; push 0x10; push imm32`)
+    taote 0x1430:  55 8b ec 8b 45 08 85 c0        (a `push ebp; mov ebp,esp` look-alike)
+
+`shape_at` knew exactly four shapes - `55 8b ec` (3), `6a ?? 68 .... e8` (3), `e8 .. .. .. .. e9` (2),
+`e9` (1) - and a CRT startup entry of the form *call the security-cookie initialiser, then push the
+arguments* is none of them. winupack_PEview's true 0x1000 (`e8 d7 00 00 00 85 c0 75`, *call; test eax,eax*)
+scores 0 for the same reason.
+
+**First attempt (measured, reverted): the reference's statistical test.** pegasus does not test prologue
+patterns at all at that point - its hop acceptance is "not all zero, and at most 12 of the 16 bytes
+printable" (unpacker.cpp:7502, the 12-of-16 cap calibrated on Borland `55 8b ec 6a ff 68 <imm32>` prologues
+measuring 10/16). Ported verbatim into the WinUpack gate it is far too permissive *in taote*: WinUpack
+97 rows went to OEP 43 and all-three 42 against the baseline's 85/77 - **2 gains, 37 losses**. The reason is
+that the reference applies that test to a candidate set its own hop filtering has already pruned; taote's
+gate is the only filter, so "looks like code" accepts ordinary payload hops as entries.
+
+**Second attempt (kept): add the two shapes to the vocabulary.** Narrower, same finding:
+
+    if (p[0] == 0xe8 && p[5] == 0x6a && p[7] == 0x68) return 2;   // call; push imm8; push imm32
+    if (p[0] == 0xe8 && p[5] == 0x85 && p[6] == 0xc0) return 2;   // call; test eax,eax
+
+**Measured** (WinUpack arm, 97 rows): **97 valid PE / 87 OEP exact / 82 imports / 78 all-three** against the
+baseline's 97/85/82/77 - **2 gains, 0 losses**. `winupack_calc` and `winupack_cmd` now report the exact entry
+(0x4ad0829a for cmd, matching the reference). `winupack_Bginfo` failed in-run at the 86 s wall and passes
+solo at 1 worker / 200 s (**49.8 s**, oep 0x5b5d42), so the arm is +2/-0 in capability terms.
+
+**Corpus r75** (2678 rows, 85 s, 4 workers, 71 min):
+
+| run | valid PE | OEP exact | imports | all-three |
+|---|---|---|---|---|
+| r74 | 2676 | 2116 | 2084 | 1992 |
+| **r75 (CRT entry shapes)** | **2676** | **2122** | 2082 | **1996** |
+
+**Six gains, two losses, and both losses are the wall**: `molebox_PEview` (3 s), `molebox_calc` (21 s),
+`molebox_cmd` (7 s), `nspack_calc` (16 s), `winupack_calc` (26 s), `winupack_cmd` (4 s) - the shape class is
+global, so it also repaired rows outside WinUpack (the same `e8 <rel32> 6a ?? 68` CRT entry is what Molebox
+and NSPack payloads use). The two losses are `mpress_ComIntRep` (85 s) and `nspack_ADInsight` (86 s), and both
+pass solo at 1 worker / 200 s (35.1 s and 37.4 s, same entries) - so the graded delivery is **1998/2678**,
++6 on the round and the biggest single-round gain since the Alienyze seed. Suite 602/602 serial.

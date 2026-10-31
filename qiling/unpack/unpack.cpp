@@ -2441,6 +2441,20 @@ std::uint64_t Unpacker::pick_oep(const std::vector<std::uint8_t>& image) const {
         if (p[0] == 0xe8 && p[5] == 0xe9) {
             return 2;
         }
+        // The CRT startup entry shapes WinUpack/JDPack payloads actually use:
+        // `call __security_init_cookie; push 0x10; push imm32` (e8 <rel32> 6a ??
+        // 68 ..) and `call ...; test eax,eax` (e8 <rel32> 85 c0 ..). Both scored 0
+        // here, so the WinUpack policy gate rejected a hop that WAS the true entry
+        // and the ladder then picked a `55 8b ec` look-alike: measured against the
+        // reference, winupack_cmd/molebox_cmd's true entry is 0x829a (e8 ea f9 ff
+        // ff 6a 10 68) and winupack_PEview's is 0x1000 (e8 d7 00 00 00 85 c0 75),
+        // and the reference reports all three exactly while taote missed them.
+        if (p[0] == 0xe8 && p[5] == 0x6a && p[7] == 0x68) {
+            return 2;
+        }
+        if (p[0] == 0xe8 && p[5] == 0x85 && p[6] == 0xc0) {
+            return 2;
+        }
         if (p[0] == 0xe9) {
             return 1;
         }
