@@ -7492,3 +7492,61 @@ Exactly one row moved: `nspack_ADInsight.exe`, which failed at the **86 s wall**
 at 86 s in r72) - it passes solo twice at 1 worker / 200 s (35.3 s and 35.7 s, 776 imports), so the graded
 delivery is unchanged at 1991/2678 and this fix is neutral on the corpus as it was on the arms. Suite
 602/602 serial.
+
+### 0.17ed Round 133: the sentinel return staged a retarget WITHOUT stopping the emulation - a stale `seh_retarget_` was dropping every later CPU exception
+
+Chasing the frame teardown at 0x4180aa (round 132's named next step) ended one level *up* from the ladder.
+`TAOTE_SEHDBG` showed the run reaching the two traps and then, at the ladder's own divide:
+
+    [intr] intno=0x0 pc=0x4180a7 ... ebx=0x0     <- #DE, delivered by unicorn
+    [intr] intno=0x8 pc=0x4180a7 ... ebx=0x0     <- #DF (double fault), one instruction later
+    [unpack] final pc=0x4180a7
+
+`intno 0` is in taote's `kIntrToNt` table (`{0, 0xC0000094}`), so `seh_on_interrupt` should have dispatched
+it - but no `[sehd] code=c0000094` line ever appeared, and the run ended with `[rundbg] emu_start returned
+cleanly`. The reason is `seh_on_interrupt`'s first guard: `seh_retarget_ != 0` means "a dispatch is already
+staged", and it returned false. `seh_retarget_` was **stale**: left over from the sentinel-fetch spin.
+
+`seh_continue` (the "a guest handler returned" path, called from `seh_on_fault`'s sentinel branch) staged
+`seh_retarget_ = resume` and returned true - "handled, keep going" - while the pc was still on the
+non-executable sentinel page. Unicorn re-fetched, so the hook ran again, hundreds of times (572 `[sehc]`
+lines on telock_7z.exe *and* on pecompact_cmd.exe), each iteration re-staging the same retarget. The
+retarget that eventually stuck was never consumed by the run loop, so from that point on every CPU
+exception was silently dropped: `#DE` escalated to `#DF` and the run ended.
+
+**Fix**: `seh_continue` now calls `ql_->emu_stop()` after staging a retarget (both the exhausted branch and
+the CONTINUE_EXECUTION branch), which is the contract `seh_dispatch_cpu` already followed: the run loop then
+does `begin = seh_retarget_; seh_retarget_ = 0;` and the state is consistent again. Measured on
+telock_7z.exe, in order:
+
+| | before | after |
+|---|---|---|
+| `[sehc]` spins at the sentinel | 572 | 1 |
+| `#DE` at 0x4180a7 | dropped (`intno 0` then `#DF`) | `[sehd] code=c0000094` → the guest handler at 0x4180c5 |
+| writes into the stub's section | 34,489 | 34,489 |
+
+so the ladder's second trap is now handled the way the stub intends, and TELock still does not decode (its
+handler answers CONTINUE_SEARCH and the walk continues past 0x70000000 as access violations) - but the
+*mechanism* is now correct, which is what makes the next step readable.
+
+**Measured** (arms, 314 rows):
+
+| family | before | after |
+|---|---|---|
+| PECompact | 97 / 96 PE / 91 OEP / 94 imp / 91 all | **97 / 97 / 92 / 95 / 92** |
+| TELock | 116 / 116 / 1 / 0 / 0 | 116 / 116 / 1 / 0 / 0 |
+| Yoda-Protector | 101 / 101 / 0 / 1 / 0 | 101 / 101 / 0 / 1 / 0 |
+
+The whole PECompact delta is one row: `pecompact_HashCalc.exe` used to spend its **120 s wall** in the spin
+(rc=124, no artifact) and now finishes in **6 s** with the exact OEP and recall 1.000. The spin was pure
+waste - the same 572-iteration loop was running on every row that reached the sentinel.
+
+**Corpus r74** (2678 rows, 85 s, 4 workers, 71 min):
+
+| run | valid PE | OEP exact | imports | all-three |
+|---|---|---|---|---|
+| r72 | 2675 | 2115 | 2083 | 1991 |
+| **r74 (sentinel retarget fix)** | **2676** | **2116** | **2084** | **1992** |
+
+One gain, **zero losses**, and every counter moved by exactly that row: capability **1992/2678**. Suite
+602/602 serial.

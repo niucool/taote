@@ -788,6 +788,18 @@ bool QlOsWindows::seh_continue() {
                     std::fprintf(stderr, "[sehc] exhausted -> resume %llx\n",
                                  static_cast<unsigned long long>(seh_retarget_));
                 }
+                // Stop the emulation so the run loop APPLIES the retarget and
+                // clears it (the seh_dispatch_cpu contract). Without this the
+                // hook returns "handled" while the pc is still on the
+                // non-executable sentinel page: unicorn re-fetches, this runs
+                // again, and the retarget is set over and over - which leaves
+                // `seh_retarget_` non-zero for the rest of the run and makes
+                // seh_on_interrupt's `seh_retarget_ != 0` guard reject every
+                // later CPU exception. Measured on telock_7z.exe: 572 spins at
+                // 0x70000000, then the ladder's own `div ebx` raised intno 0
+                // (#DE) and was dropped, escalating to intno 8 (#DF) and the
+                // run ended one instruction short of the frame teardown.
+                ql_->emu_stop();
                 return true;
             }
             return false;  // the chain is exhausted: the fault is unhandled
@@ -822,6 +834,7 @@ bool QlOsWindows::seh_continue() {
             // and resume
             seh_load_context();
             seh_retarget_ = regs.arch_pc();
+            ql_->emu_stop();  // same contract as the exhausted branch
             return true;
         }
         // EXCEPTION_CONTINUE_SEARCH: the next frame
