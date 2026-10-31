@@ -8796,3 +8796,26 @@ Measured on telock_7z.exe:
 
 Kept for the same reason as the TF trap: it is what the hardware does, the blast radius is exactly "a run that
 would otherwise end standing on an ICEBP", and TELock's anti-debug ladder is built out of these probes.
+
+#### 0.17ft Round 171: the ladder ends calling 0x41802e - inside the region the stub re-read from its own file
+
+Continuing from 0x4192e3. The probe at that pc gives `ebx=ecx=edx=esi=edi=0, eax=0, ebp=0x1220000,
+esp=0x121fffc, eflags=0x2` (a fresh, clean frame - the stub has set up its own stack) and the live bytes are
+`ff 54 24 e0` = **`call [esp-0x20]`**.
+
+The slot it calls through is `0x121ffdc`, and `TAOTE_WATCH_ADDR=0x121ffdc:8` shows it is written with
+`0x418007` and then repeatedly with **0x41802e** - so the call goes to **0x41802e**, inside the stub.
+
+And `0x41802e` **never executes** (probe: 0 hits) and no fault is reported for it: the transfer itself is where
+the run dies. The reason is visible in the earlier measurement: the stub's self-read -
+`ReadFile(handle, 0x418008, 0x400, ...)` - covers `0x418008..0x418407`, and **0x41802e lies inside that range**.
+So the stub re-read its own *packed* file over its own code and then called into that region, expecting it to be
+re-decrypted before the call.
+
+That is the next question, and it is well-posed: the stub must run a decrypt loop over the freshly read block
+between the ReadFile and this call. Two possibilities, both testable with the existing tools:
+
+* the decrypt loop runs but taote's `ReadFile` handed back bytes that differ from what the stub expects (compare
+  the 0x400 bytes our `ReadFile` writes with the file's own bytes at that offset), or
+* the decrypt loop never runs because a branch before it reads state taote got wrong (the CRC salt at
+  `[ebp+0x1b5f]` is the obvious candidate - it is the value the stub compares the re-read block against).
