@@ -75,6 +75,34 @@ inline constexpr std::size_t SYSTEM_INFO_SIZE_32 = 36;
 void write_system_info(char* dst, int bits, std::uint64_t pe_image_address, std::uint64_t dll_upper_bound,
                        std::uint64_t page_size, std::uint64_t allocation_granularity);
 
+// ---- OSVERSIONINFO / OSVERSIONINFOEX (structs.py make_os_version_info(wide)) ----
+// OSVERSIONINFOA: 5*u32 + CHAR[128] = 148 bytes; OSVERSIONINFOW: 5*u32 +
+// WCHAR[128] = 276 bytes (szCSDVersion is the only width-dependent field; the
+// first 20 bytes — size/major/minor/build/platform — are identical). The EX
+// tail is 8 more bytes: wServicePackMajor, wServicePackMinor, wSuiteMask,
+// wProductType, wReserved (156 / 284 total).
+inline constexpr std::size_t OSVERSIONINFOA_SIZE = 148;
+inline constexpr std::size_t OSVERSIONINFOW_SIZE = 276;
+inline constexpr std::size_t OSVERSIONINFOEXA_SIZE = 156;
+inline constexpr std::size_t OSVERSIONINFOEXW_SIZE = 284;
+
+// the fields a real machine answers for both spellings
+struct OsVersionFields {
+    std::uint32_t major = 0;
+    std::uint32_t minor = 0;
+    std::uint32_t build = 0;
+    std::uint32_t platform_id = 2;  // VER_PLATFORM_WIN32_NT
+    std::uint16_t service_pack_major = 0;
+    std::uint16_t service_pack_minor = 0;
+    std::uint16_t suite_mask = 0;
+    std::uint8_t product_type = 1;  // VER_NT_WORKSTATION (0 is not a legal value)
+};
+
+// writes the base record, or the EX record when `extended` is set (a caller
+// that declares OSVERSIONINFOEX's size gets the EX tail instead of zeros — a
+// wProductType of 0 is a value no Windows produces, and a protector reads it)
+void write_os_version_info(char* dst, bool wide, const OsVersionFields& fields, bool extended);
+
 // ---- Mutex (structs.py Mutex) ----
 // the sync-object record the synchapi family parks on the handle: the name,
 // the namespace prefix (''/'Global'), and the locked state. The CreateEvent

@@ -122,6 +122,41 @@ void write_systemtime(char* dst, std::uint16_t year, std::uint16_t month, std::u
     put16(14, milliseconds);
 }
 
+void write_os_version_info(char* dst, bool wide, const OsVersionFields& fields, bool extended) {
+    const std::size_t size = extended ? (wide ? OSVERSIONINFOEXW_SIZE : OSVERSIONINFOEXA_SIZE)
+                                      : (wide ? OSVERSIONINFOW_SIZE : OSVERSIONINFOA_SIZE);
+    std::memset(dst, 0, size);
+
+    const auto put32 = [&dst](std::size_t off, std::uint32_t v) {
+        dst[off] = static_cast<char>(v & 0xff);
+        dst[off + 1] = static_cast<char>((v >> 8) & 0xff);
+        dst[off + 2] = static_cast<char>((v >> 16) & 0xff);
+        dst[off + 3] = static_cast<char>((v >> 24) & 0xff);
+    };
+    const auto put16 = [&dst](std::size_t off, std::uint16_t v) {
+        dst[off] = static_cast<char>(v & 0xff);
+        dst[off + 1] = static_cast<char>((v >> 8) & 0xff);
+    };
+
+    put32(0, static_cast<std::uint32_t>(size));  // dwOSVersionInfoSize
+    put32(4, fields.major);                       // dwMajorVersion
+    put32(8, fields.minor);                       // dwMinorVersion
+    put32(12, fields.build);                      // dwBuildNumber
+    put32(16, fields.platform_id);                // dwPlatformId
+    // szCSDVersion stays zero (the empty service-pack string; CHAR[128] for A,
+    // WCHAR[128] for W)
+
+    if (extended) {
+        // the EX tail rides right after the 128-byte CSD string
+        const std::size_t tail = wide ? OSVERSIONINFOW_SIZE : OSVERSIONINFOA_SIZE;
+        put16(tail + 0, fields.service_pack_major);  // wServicePackMajor
+        put16(tail + 2, fields.service_pack_minor);  // wServicePackMinor
+        put16(tail + 4, fields.suite_mask);          // wSuiteMask
+        dst[tail + 6] = static_cast<char>(fields.product_type);  // wProductType
+        dst[tail + 7] = 0;                                       // wReserved
+    }
+}
+
 void write_system_info(char* dst, int bits, std::uint64_t pe_image_address, std::uint64_t dll_upper_bound,
                        std::uint64_t page_size, std::uint64_t allocation_granularity) {
     const auto put16 = [&dst](std::size_t off, std::uint16_t v) {
@@ -146,17 +181,24 @@ void write_system_info(char* dst, int bits, std::uint64_t pe_image_address, std:
     const auto ps = static_cast<std::size_t>(bits / 8);
     std::memset(dst, 0, ps == 8 ? SYSTEM_INFO_SIZE_64 : SYSTEM_INFO_SIZE_32);
 
-    put32(0, 0);  // dwOemId (the anonymous union dword)
+    // wProcessorArchitecture comes from the guest pointer width: a 64-bit
+    // guest reporting INTEL (0) is a self-contradiction a protector can read
+    // without any host fingerprinting (the pre-fix state). The verbatim
+    // 0x24a/0x6/0x4601 legacy trio claimed a 586-class CPU at level 6, which
+    // is incoherent with an AMD64 answer, so those three ride pegasus's zeros
+    // (kernel32.cpp:3244-3262) instead.
+    put16(0, ps == 8 ? 9 /* PROCESSOR_ARCHITECTURE_AMD64 */ : 0 /* PROCESSOR_ARCHITECTURE_INTEL */);
+    put16(2, 0);  // wReserved (the union dword's high word)
     put32(4, static_cast<std::uint32_t>(page_size));
     put_ptr(8, pe_image_address);
     put_ptr(8 + ps, dll_upper_bound);
     put_ptr(8 + 2 * ps, 0x3);  // dwActiveProcessorMask (the verbatim 0x3)
     const std::size_t off = 8 + 3 * ps;
     put32(off, 0x4);        // dwNumberOfProcessors (verbatim)
-    put32(off + 4, 0x24a);  // dwProcessorType (verbatim)
+    put32(off + 4, 0x0);    // dwProcessorType (pegasus: 0, not the legacy 0x24a)
     put32(off + 8, static_cast<std::uint32_t>(allocation_granularity));
-    put16(off + 12, 0x6);     // wProcessorLevel (verbatim)
-    put16(off + 14, 0x4601);  // wProcessorRevision (verbatim)
+    put16(off + 12, 0x0);   // wProcessorLevel (pegasus: 0, not 6)
+    put16(off + 14, 0x0);   // wProcessorRevision (pegasus: 0, not 0x4601)
 }
 
 std::string make_sid_bytes(std::uint32_t subauthority) {

@@ -24,8 +24,52 @@ namespace {
 // the w() accessor rides the fileapi.cpp definition (the family TUs share
 // one TU via the dlls.cpp include chain)
 
-// the shared __GetVersionEx body (the verbatim 1, no struct write)
-std::optional<std::uint64_t> get_version_ex_body(Qiling&, const ResolvedParams&) {
+// the shared __GetVersionEx body: fill the caller's OSVERSIONINFO[A|W] from
+// the [SYSTEM] profile version (majorVersion/minorVersion/buildNumber) and
+// VER_PLATFORM_WIN32_NT, then answer TRUE. The verbatim port answered a bare
+// 1 with no struct write, so a minimum-OS gate (major >= 5) failed on a
+// *successful* return — the caller read zeros it believed were real.
+//
+// The size field is the caller's input: a caller that declares
+// OSVERSIONINFOEX's size (156 A / 284 W) gets the EX tail as well, because
+// wProductType = 0 is not a legal VER_NT_* value on any real Windows.
+// Deliberate deviation from the kernel: an undersized declared size still
+// answers TRUE (Windows returns FALSE + ERROR_INSUFFICIENT_BUFFER), because
+// flipping the return value would turn a stub that ignores the struct into a
+// new failure mode, and the corpus cannot show us such a stub.
+std::optional<std::uint64_t> get_version_ex_body(Qiling& ql, const ResolvedParams& params, const bool wide) {
+    const auto lp_version_information = api_get_int(get_param(params, "lpVersionInformation"));
+    if (lp_version_information == 0) {
+        return 0;  // ERROR: NULL pointer (the reference answers 0 on NULL)
+    }
+
+    const std::size_t base_size = wide ? OSVERSIONINFOW_SIZE : OSVERSIONINFOA_SIZE;
+    const std::size_t ex_size = wide ? OSVERSIONINFOEXW_SIZE : OSVERSIONINFOEXA_SIZE;
+    const auto declared = static_cast<std::size_t>(ql.mem().read_ptr(lp_version_information, 4));
+    const bool extended = declared >= ex_size;
+
+    OsVersionFields fields{};
+    fields.major = static_cast<std::uint32_t>(ql.profile().get_int("SYSTEM", "majorVersion"));
+    fields.minor = static_cast<std::uint32_t>(ql.profile().get_int("SYSTEM", "minorVersion"));
+    fields.build = static_cast<std::uint32_t>(ql.profile().get_int("SYSTEM", "buildNumber"));
+    fields.service_pack_major =
+        static_cast<std::uint16_t>(ql.profile().get_int("SYSTEM", "VER_SERVICEPACKMAJOR"));
+    fields.product_type = static_cast<std::uint8_t>(ql.profile().get_int("SYSTEM", "productType"));
+
+    std::string buf(extended ? ex_size : base_size, '\0');
+    write_os_version_info(buf.data(), wide, fields, extended);
+    if (declared >= base_size) {
+        // the size field is the caller's own value, as on the real machine
+        const auto put32 = [&buf](std::size_t off, std::uint32_t v) {
+            buf[off] = static_cast<char>(v & 0xff);
+            buf[off + 1] = static_cast<char>((v >> 8) & 0xff);
+            buf[off + 2] = static_cast<char>((v >> 16) & 0xff);
+            buf[off + 3] = static_cast<char>((v >> 24) & 0xff);
+        };
+        put32(0, static_cast<std::uint32_t>(declared));
+    }
+    ql.mem().write(lp_version_information, std::vector<std::uint8_t>(buf.begin(), buf.end()));
+
     return 1;
 }
 
@@ -113,8 +157,14 @@ void register_sysinfoapi_family() {
     // NOT_BUILD_WINDOWS_DEPRECATE DWORD GetVersion(
     // );
     WinsdkApi("GetVersion", WinCc::Stdcall, {}) =
-        [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
-        return (0x0004 << 16) | 0x0004;
+        [](Qiling& ql, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
+        // pack (build << 16) | (minor << 8) | major, so the LOWORD is the
+        // MAKELONG(major, minor) pair and the HIWORD is the build — the same
+        // configured version GetVersionExA/W write, as on a real machine
+        const auto major = static_cast<std::uint64_t>(ql.profile().get_int("SYSTEM", "majorVersion"));
+        const auto minor = static_cast<std::uint64_t>(ql.profile().get_int("SYSTEM", "minorVersion"));
+        const auto build = static_cast<std::uint64_t>(ql.profile().get_int("SYSTEM", "buildNumber"));
+        return ((build << 16) | (minor << 8) | major) & 0xffffffff;
     };
 
     // NOT_BUILD_WINDOWS_DEPRECATE BOOL GetVersionExA(
@@ -123,7 +173,7 @@ void register_sysinfoapi_family() {
     WinsdkApi("GetVersionExA", WinCc::Stdcall, {
         {"lpVersionInformation", LPVOID_},
     }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
-        return get_version_ex_body(ql, params);
+        return get_version_ex_body(ql, params, false);
     };
 
     // NOT_BUILD_WINDOWS_DEPRECATE BOOL GetVersionExW(
@@ -132,7 +182,7 @@ void register_sysinfoapi_family() {
     WinsdkApi("GetVersionExW", WinCc::Stdcall, {
         {"lpVersionInformation", LPVOID_},
     }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
-        return get_version_ex_body(ql, params);
+        return get_version_ex_body(ql, params, true);
     };
 
     // void GetSystemInfo(

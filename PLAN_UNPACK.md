@@ -8708,3 +8708,83 @@ and cleared by the dispatch, so the cost is only on the instructions that are ac
 That is the first mechanism in this family that is not about decoding, and it is the last thing between the
 ladder and the payload: every stage before it is measured correct, the guest reaches real API calls
 (`CreateFileA`/`ReadFile`/`CloseHandle` on its own image) and arms TF immediately afterwards.
+
+---
+
+## 8. T-024 round: the Windows environment probes (item 1: OS version + `SYSTEM_INFO` arch)
+
+Ticket: `tickets/T-024-windows-environment-probes-version-sysinfo-adapters.md`
+(worktree `taote-wt-env`, branch `task/env-probes`, from main `a101eff`).
+
+### 8.1 What changed
+
+`GetVersionExA`/`GetVersionExW` wrote **nothing** into the caller's struct (upstream's
+verbatim `return 1`), `GetVersion` answered the NT 4.0 constant `0x00040004`, and
+`write_system_info` wrote `dwOemId = 0` (= `PROCESSOR_ARCHITECTURE_INTEL`) on a 64-bit
+guest. Now:
+
+* `get_version_ex_body` fills `OSVERSIONINFO[A|W]` from the `[SYSTEM]` profile
+  (`majorVersion`/`minorVersion`/**`buildNumber`** — new key, `19045`), writes
+  `dwPlatformId = 2`, and also fills the `OSVERSIONINFOEX` tail
+  (`wServicePackMajor/Minor`, `wSuiteMask`, `wProductType = 1`) when the caller
+  declares the EX size — a `wProductType` of 0 is not a legal `VER_NT_*` value on any
+  real Windows;
+* `GetVersion` packs the same version: `(build << 16) | (minor << 8) | major`;
+* `write_system_info` writes `wProcessorArchitecture = 9` (AMD64) for a 64-bit guest
+  and 0 (INTEL) for a 32-bit one, and drops the legacy `dwProcessorType 0x24a` /
+  `wProcessorLevel 6` / `wProcessorRevision 0x4601` trio (a 586-class type at level 6
+  is incoherent with an AMD64 answer) for pegasus's zeros.
+
+Suite: **559 passed, 0 failed**; two new locks (`GetVersionExAFillsTheExtendedTail`,
+`SystemInfoReportsIntelArchOn32BitGuest`) plus the rewritten
+`GetVersionAndVersionExAgreeOnProfileVersion` / `GetSystemInfoPacksCtypesLayout`.
+
+### 8.2 Measured (pin 2, budget 85 s, wall 120 s — the other agent sweeps the main tree)
+
+| set | rows | all-three before | all-three after | gains | losses |
+|---|---|---|---|---|---|
+| Themida 122 + TELock 116 + Alienyze 126 | 364 | **75** | **75** | 0 | 0 |
+| S75 (3/family, all 25 families) | 75 | **54** | **54** | 0 | 0 |
+
+Per-sample verdicts (`valid_pe`, `oep_exact`, `imports`, `code_sim`) are **identical on
+all 364 + all 75** rows — not just the totals. 0 wall-timeouts in either sweep (rc 0 on
+every run); the timeout-adjacent Themida rows move by ±15 s on contention alone
+(`themida_Autoruns` 87 → 71 s, `themida_HDDScan` 66 → 88 s) and none of them grades.
+
+### 8.3 Why the 0 — and it is not the fix being inert
+
+`TAOTE_APIDBG=1` traces of the families the ticket attributes items 1+2 to show the
+probe is **never called** before the run ends:
+
+* `themida_7z.exe`: 5 `LoadLibraryA`, 4 `GetModuleHandleA`, 2 `GetProcAddress`,
+  1 `GetCurrentThreadId`. `themida_touch.exe` adds `RtlAllocateHeap`/`GetProcessHeap`/
+  `GetUserDefaultUILanguage`. **No** `GetVersion*`, no `GetSystemInfo`.
+* `telock_7z.exe`: 3 calls total — `GetModuleFileNameA`, `CreateFileA`, `ReadFile`
+  (`CloseHandle`), then the section hop. **No** environment probe.
+* `alienyze_7z.exe`: 110 `GetProcAddress`, 20 `free`, 19 `malloc`, 8 `LoadLibraryA`,
+  the CRT init. **No** environment probe.
+
+So the ticket's row-value table (`Themida 122, TELock 118` for items 1+2) does not hold
+for this corpus: those stubs are VM/decode-limited (`code_sim` 0.052 Themida, 0.072
+TELock in the same sweep) and never read the OS version. The fix is real and pinned by
+unit tests, but it has **no corpus headroom** — it cannot be bought as rows here.
+
+An import-name census over all 3,001 packed samples (`grep -laF`, the name has to be in
+the stub's import table) finds the actual consumers, and none of them is the family the
+ticket named:
+
+| probe | samples importing it (top families) |
+|---|---|
+| `GetVersionExA` | 187 — **Enigma Virtual Box 122**, Neolite 27, JDPack 19, Yoda-Protector 3, PEtite 3, Alienyze 3 |
+| `GetSystemInfo` | 100 — Neolite 27, EnigmaVB 25, JDPack 13, Alienyze 9, Yoda-Protector 5, FSG 5 |
+| `GetNativeSystemInfo` | 168 — EnigmaVB 122, PEtite 13, Neolite 12, JDPack 9 |
+| `GetAdaptersInfo` | **14 — spread thin** (PEtite 3, Neolite 2, JDPack 2, EnigmaVB 2, one each UPX/Themida/RLPack/Packman/ASPack) |
+
+EnigmaVB and Neolite are already **3/3 all-three** at S75 (the S75 rows can't improve),
+and EnigmaVB's stub dies on an unmapped fetch (`enigmavb_ADExplorer.exe`: `PC = 0x5eafe`,
+`UC_ERR_FETCH_UNMAPPED`) before it reaches its environment probes. Consequence for the
+plan: **items 1+2 of T-024 are correctness work, not row work** — the same verdict the
+reference reached (`PLAN_UNPACK.md` §0.2 note: pegasus buys Yoda rows with unpacker work,
+not environment answers). Item 3 (`iphlpapi`) should be scheduled on the strength of
+`GetAdaptersInfo` being imported by **14 of 3,001** samples, i.e. after, not before, the
+decode/OEP mechanisms — unless a measured veto shows up on one of those 14.
