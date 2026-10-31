@@ -8154,3 +8154,32 @@ with `stages=1` and a `section_hop` latch, and the reference's own hop log keeps
 accepted hop on this sample (0.17dc), so the park may simply be where taote's *run* ends rather than what the
 guest executes to. That is the "post-OEP grace window" idea that was rejected earlier for budget reasons, which
 is why it must come back with a TELock-scoped budget story, not as a global change.
+
+#### 0.17ew Round 148: TELock's resolver target list, read straight off the live compare chains
+
+Probing the region after the name walk (each probe prints a 48-byte live window) decodes the dispatcher: for
+every export name it compares three dwords and, on a match, jumps to a resolver that fills one IAT slot. The
+targets so far, with the slot constant each one stores:
+
+| live bytes | name | slot |
+|---|---|---|
+| `81 38 4c 6f 61 64` `75 3a` `81 78 04 4c 69 62 72` `75 31` `81 78 08 61 72 79 41` `75 28` | **LoadLibraryA** | 0x3c3 |
+| `81 38 45 78 69 74` `75 19` `81 78 04 50 72 6f 63` `75 10` `81 78 08 65 73 73 00` `75 07` | **ExitProcess** | 0x3c7 |
+| `81 38 56 69 72 74` ... `75 61 6c 41` ... `6c 6c 6f 63` + `80 78 0c 00` | **VirtualAlloc** | 0x3cb |
+| `81 38 56 69 72 74` ... `75 61 6c 46` ... `72 65 65 00` | **VirtualFree** | 0x3cf |
+| `81 38 43 72 65 61` ... `74 65 4d 75` ... `74 65 78 41` | **CreateMutexA** | 0x3d3 |
+| `81 38 4f 70 65 6e` ... `50 72 6f 63` ... `65 73 73 00` | **OpenProcess** | 0x3db |
+| `81 38 47 65 74 43` ... | **GetC**... (next chain) | ... |
+
+Two facts follow, and they change the picture again:
+
+1. The comparison is **exact, null-terminated, case-sensitive** (`65 73 73 00` = "ess\0"), i.e. the stub's
+   names must match a real kernel32 spelling exactly - and they do, because every one of the names above is in
+   `names_for_dll("kernel32.dll")` (verified offline in 0.17et).
+2. The payload's IAT slots (0x3c3 ... 0x3db, one every 4 bytes) are **being filled**, so the resolver's
+   product exists; what is still unexplained is only where the pass ends.
+
+So the family is no longer "the walk cannot find its APIs" and no longer "the stub lacks the names": the walk
+finds them and writes the payload IAT. The open question is the single one 0.17ev already narrowed to - what
+taote does at the end of the scan - and it must be answered by probing a **real instruction start** (a 0-hit
+probe on this self-modifying page proves nothing, 0.17ev).
