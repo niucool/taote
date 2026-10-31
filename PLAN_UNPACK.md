@@ -8291,3 +8291,28 @@ Two things follow, and they are the next round's whole job:
   guard today (`ret` is read straight from the live eax).
 
 Both are small, and both are the difference between a loop and the ladder's continuation.
+
+#### 0.17fb Round 153: the stale-verdict guard breaks TELock's cycle but the CRT needs its double return (reverted)
+
+Implemented the 0.17fa item 2 guard: a `seh_call_outstanding_` flag set in `seh_call_frame`, cleared in
+`seh_continue`, and the sentinel branch surfacing the fault (`return false`) when it fires with no call
+outstanding.
+
+Measured on telock_7z.exe **it works exactly as predicted**:
+
+* the 15-instruction cycle is gone - `[sehc] sentinel fetch with no call outstanding -> surface` prints twice;
+* the run no longer aborts: the `error=emulation error: Invalid memory read (UC_ERR_READ_UNMAPPED)` line is
+  **gone** from the summary;
+* execution now ends where the previous rounds predicted it would once the loop was broken - `TAOTE_LASTPC`
+  is 12/12 `0x121ffd8`, the deliberate `eb fe` park on the stack.
+
+But the serial suite went **602 -> 601**: `PegasusParity.SehDispatchEnabled` fails, i.e. the `seh_test_x86.exe`
+nested-fault fixture. That fixture's path is the guest CRT returning to the sentinel more than once per staged
+call (its `_except_handler` chain answers filter-then-handler), so "one staged call == one answer" is too
+strict: the flag is cleared by the first return and the second one is surfaced, which changes what the CRT sees.
+
+So the guard is **reverted, not kept** (suite must stay 602/602), and the refinement is precisely specified:
+the flag has to model the *walk*, not the single call - it must stay set until the dispatch that staged it is
+fully unwound (the synthetic frame list drains), so the CRT's own multi-return path keeps working while
+TELock's no-call-in-progress repeat still surfaces. That is the next change to make, and its acceptance test is
+both the 602 suite and telock_7z.exe showing no abort plus the park at 0x121ffd8.
