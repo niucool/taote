@@ -8029,3 +8029,43 @@ finding `lstrlenW` - and the page it runs from is self-modifying, so the mask/cm
 in the SAME run that parks (TAOTE_PROBE at 0x4181ba and 0x4181c6, immediately before the push), not read from
 a terminal dump. That is the next measurement, one round's work, and it is the last thing between the decoded
 ladder and the payload.
+
+#### 0.17es Round 144: the stub is NOT starved - the walk finds LoadLibraryA and moves on to resolve it
+
+Round 143's correction left one question: why does the export walk give up. It does not. Measured, with the
+sentinel-surface change applied only to reach the code (reverted after):
+
+| probe | fires | meaning |
+|---|---|---|
+| `0x4181ba` (`and eax,0x5f5f5f5f`) | yes, `eax=0x6e72656b` | the module name reads back "kern" - the Name RVA is correct |
+| `0x4181dc` (name-table loop tail) | 3x, `esi=0x10012404` `+4`, `ecx=0xf7..0xf5`, `edi=0xd` | it iterates kernel32's **AddressOfNames** table (247 entries) |
+| `0x4181fc` (after `"Load"`/`"Libr"`/`"aryA"`) | **fires** | a name matched all three dwords - `LoadLibraryA` WAS found |
+| `0x418226` (the `jne` target) | fires too | non-matching names take this path |
+
+And the stub is not starved: `ApiRegistry::names_for_dll("kernel32.dll")` returns **247** names, exactly the
+count the walk uses, and `LoadLibraryA` and `GetProcAddress` are both among them (checked offline by linking
+against `libqiling.a` and calling `register_dlls()`). `write_stub_dll` already unions the registry surface with
+the sample's own imports (tests/Pe_Sample_Runner.hpp:174-193, whose comment names this exact walk), so the
+"the stub only exports what the sample imports" hypothesis is **refuted**.
+
+What the walk does after the match is the live code at 0x4181fe:
+
+    4181fc  75 28             jne 0x418226
+    4181fe  68 c3 03 00 00    push 0x3c3
+    418204  58 58             pop eax; pop eax       ; obfuscating no-ops
+    418205  50                push eax
+    418206  83 ec 04          sub  esp,4
+    418209  53                push ebx
+    41820a  03 c2             add  eax,edx
+
+i.e. after finding the name it goes on to **resolve the export's address** (an RVA taken from the EAT/ordinal
+side, 0x3c3, plus the module base) and call it through the stub cell. So the divergence is downstream of the
+name lookup, in address resolution, not in the name table.
+
+**Three hypotheses about this walk were refuted this round and must not be re-derived**: (1) that the stub's
+export directory layout is malformed; (2) that the stub is starved of names; (3) that the name lookup fails.
+The stub is faithful enough for steps 1-3 and the next measurement is the resolution step at 0x41820a - what
+address the stub's EAT hands back for `LoadLibraryA` and what the packer does with it. Note every cell in the
+synthesized stub is a bare `ret` (0xC3) and dispatch happens by address through `hook_winapi`, so a packer that
+*reads the cell bytes* or expects a real function body sees a one-byte stub - that is now the prime suspect and
+it is testable without touching the ladder.
