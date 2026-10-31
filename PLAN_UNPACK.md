@@ -8708,3 +8708,33 @@ and cleared by the dispatch, so the cost is only on the instructions that are ac
 That is the first mechanism in this family that is not about decoding, and it is the last thing between the
 ladder and the payload: every stage before it is measured correct, the guest reaches real API calls
 (`CreateFileA`/`ReadFile`/`CloseHandle` on its own image) and arms TF immediately afterwards.
+
+#### 0.17fq Round 168: the TF emulation advances TELock but costs ten rows - measured, reverted
+
+Implemented the 0.17fp mechanism: in the unpacker's existing per-instruction exec hook, read `eflags` and, when
+TF (0x100) is set, raise the synthetic `#DB` through `seh_on_interrupt(1)` and end the slice so the run loop
+applies the handler's retarget.
+
+It works on the family it was written for:
+
+* `[intr] intno=0x1 pc=0x418ae1` now appears (there was no #DB at all before);
+* the ladder runs **past** the single-step loop into new code (`0x418ddc 0x418de7 0x418de9 0x418dec 0x418def`);
+* the stub then performs the rest of its environment checks - `GetModuleFileNameA`, `CreateFileA`,
+  `ReadFile`, `CloseHandle` and then **`CreateMutexA`** (the single-instance guard);
+* suite 602/602 and throughput unaffected (upx_cmd 0.40 s, mpress_cmd 4.07 s vs 0/4 s before).
+
+But the corpus says no: **r81 = 2676 / 2117 / 2075 / 1988** against r80's 2676 / 2122 / 2083 / 1997, i.e.
+**1 gain, 10 losses** - NSPack 3, MPRESS 2, WinUpack 2, MEW 1, PECompact 1, UPX 1 (e.g. mew_Procmon,
+mpress_ComIntRep, nspack_Sysmon, pecompact_ComIntRep, upx_adwcleaner). So it was **reverted**, tree clean, suite
+602/602.
+
+Why it loses: the trap is raised at the instruction *before* the one it should follow. On real x86 a TF set by
+`popf` traps **after** the next instruction, with the saved pc pointing past it; my first version modelled that
+(`tf_prev_`) but then the hook never fires, because unicorn aborts the run at that instruction instead of calling
+the interrupt hook. Any guest that arms TF transiently (startup code, obfuscated stubs) therefore gets a spurious
+#DB one instruction early and takes a different path.
+
+The refinement, recorded for the next attempt: the trap must be raised after the instruction completes, which
+means catching unicorn's internal #DB at the point the run ends (the run currently stops cleanly with no `[intr]`
+line) rather than synthesising it from the code hook - or, cheaper, dispatching only for families whose stub
+demonstrably single-steps (TELock), where the 1-gain/10-loss trade is replaced by a family-scoped measurement.
