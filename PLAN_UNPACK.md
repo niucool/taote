@@ -8577,3 +8577,30 @@ guard. The remaining candidates are (i) unicorn's own escalation of the invalid 
 stub's freshly installed SEH frame at 0x418a8e changed the guest state the interrupt path reads, and (ii) the
 `seh_retarget_`/context hand-off between the #UD dispatch and the re-entry. Both are testable with the
 existing `TAOTE_SEHDBG` `[intr]`/`[sehd]` lines plus one gated print in taote's #UD arm.
+
+#### 0.17fl Round 163: unicorn escalates an invalid opcode to #DF - dispatch it as the #UD the guest expects
+
+`TAOTE_SEHDBG` on telock_7z.exe lists **every** interrupt the run delivers: `intno 1`, `intno 3`, `intno 0`
+(#DE), then `intno 8` at 0x418aa1. **No `intno 6` is ever delivered in the whole run**, even though the stub
+executes `66 f7 f3` there - group 3 with `reg = /6`, an undefined encoding, i.e. a deliberate #UD behind the SEH
+frame it installed at 0x418a8e. Unicorn escalates the undecodable instruction straight to a double fault; taote
+ignores `intno 8` (not in its hardware table) and the run ends 0.3 s in.
+
+Change: in `seh_on_interrupt`, an `intno 8` is dispatched as the #UD (`intno 6`, NT `0xC000001D`) the guest's
+own handler expects - but **only when the faulting pc is mapped and readable**, i.e. the fetch succeeded and the
+*decode* failed. A genuine double fault escalated from a memory fault has no decodable pc and keeps the old
+behaviour, so the remap cannot swallow real faults.
+
+Measured:
+* `telock_7z.exe` now walks **past** the probe: the pc ring continues `0x418ab6 0x418aba 0x418ac0 0x418ad4
+  0x418ad5 0x418adc 0x418ae0 0x418ae1`, and `[intr] intno=0x6 pc=0x418aa1` appears where before there was only
+  the escalation;
+* serial suite **602/602**;
+* TELock arm (116 rows): 116 valid PE, 1 OEP, 0 imports, 0 all-three - unchanged, i.e. the ladder gets further
+  on the sample but no row flips yet;
+* **corpus r80**: 2676 / 2122 / 2083 / 1997 against r79's 2676 / 2122 / 2082 / 1996. The single row difference is
+  `winupack_Bginfo.exe` - the row that failed at the 85 s wall in r79 and completes at 85 s here - so it is the
+  known flake landing, **0 real gains, 0 real losses**.
+
+Kept because it removes a hard stop on a path the ladder reaches only after four measured stages, and because
+"an invalid opcode must reach the guest as #UD" is a fidelity statement, not a heuristic.

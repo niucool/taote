@@ -430,6 +430,29 @@ void QlOsWindows::seh_intr_trampoline(uc_engine* /*uc*/, std::uint32_t intno, vo
 }
 
 bool QlOsWindows::seh_on_interrupt(std::uint32_t intno) {
+    // Round 163: unicorn escalates an INVALID OPCODE straight to #DF instead of
+    // delivering #UD. Measured on telock_7z.exe: the stub executes `66 f7 f3`
+    // at 0x418aa1 (group 3 with reg=/6, i.e. undefined), the pc ring shows that
+    // address TWICE, no `intno 6` is ever delivered in the whole run, and the
+    // only interrupt reported is `intno 8` - after which taote ignored it and
+    // the run ended 0.3 s in, one stage short of the payload. Dispatching the
+    // escalation as the #UD the guest's own SEH handler expects walks straight
+    // past it (the ladder continues at 0x418ab6..0x418ae1).
+    //
+    // The remap is deliberately narrow: only when the faulting pc is MAPPED AND
+    // READABLE, i.e. the fetch succeeded and it was the decode that failed. A
+    // genuine double fault escalated from a memory fault has no decodable pc
+    // and keeps the old behaviour.
+    if (intno == 8) {
+        bool decodable = false;
+        try {
+            decodable = !ql_->mem().read(ql_->arch().regs().arch_pc(), 1).empty();
+        } catch (...) {
+        }
+        if (decodable) {
+            intno = 6;
+        }
+    }
     if (std::getenv("TAOTE_SEHDBG") != nullptr) {
         auto& dbg_regs = ql_->arch().regs();
         std::fprintf(stderr, "[intr] intno=0x%x pc=0x%llx esi=0x%llx edx=0x%llx esp=0x%llx ebp=0x%llx ebx=0x%llx eax=0x%llx ecx=0x%llx edi=0x%llx\n", intno,
