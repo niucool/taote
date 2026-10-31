@@ -7751,3 +7751,44 @@ global, so it also repaired rows outside WinUpack (the same `e8 <rel32> 6a ?? 68
 and NSPack payloads use). The two losses are `mpress_ComIntRep` (85 s) and `nspack_ADInsight` (86 s), and both
 pass solo at 1 worker / 200 s (35.1 s and 37.4 s, same entries) - so the graded delivery is **1998/2678**,
 +6 on the round and the biggest single-round gain since the Alienyze seed. Suite 602/602 serial.
+
+
+### 0.17ek Round 136: "the last startup frame" for jdpack_7z - tried on the arm, refuted by the corpus
+
+The next row in the "payload decoded, imports passing, OEP wrong" bucket was `jdpack_7z.exe` (truth 0xebc5,
+taote 0xe924). The ladder names both candidates:
+
+    [unpack] ladder passB hits=4 first=0x40e924 last=0x40ebc5
+    [unpack] ladder: unique MSVC frame entry 0x40e924
+
+Pass B's startup override (a three-push `55 8b ec / 6a ff / 68 <handler> / 68 <scope> / 64 a1` frame beats
+the first/last vote) fires only when `startup_count == 1`, and here TWO frames carry that shape, differing in
+nothing but the handler they install:
+
+    0x40e924: 55 8b ec 6a ff 68 f8 14 41 00 68 e2 ec 40 00 64 a1   handler 0x4114f8
+    0x40ebc5: 55 8b ec 6a ff 68 28 15 41 00 68 e2 ec 40 00 64 a1   handler 0x411528  <- the truth
+
+so the override declined and `frames.front()` ("the entry sits before its look-alikes") picked the sibling.
+The change tried was `startup_count >= 1` keeping the last match; on the 407-row ladder arm (NSPack 97,
+RLPack 104, MPRESS 106, JDPack 100) it looked like +3/-0 (`jdpack_7z`, `nspack_procexp`, `nspack_ADInsight`
+gained; the single loss, `mpress_ADInsight`, was the 86 s wall and passes solo in 29.0 s).
+
+**Corpus r76 measured the opposite and the change was REVERTED.** With `startup_count >= 1` (last):
+
+| run | valid PE | OEP exact | imports | all-three |
+|---|---|---|---|---|
+| r75 | 2676 | 2122 | 2082 | 1996 |
+| r76 (last startup frame) | 2676 | **2113** | 2082 | **1987** |
+
+**1 gain, 10 losses**, every loss a fast run (0-9 s, not a wall artifact): PEtite `ctrl2cap`, `efsdump`,
+`gsd`, `ldmdump`, `pagedfrg` and WinUpack `Cacheset`, `ctrl2cap`, `efsdump`, `ldmdump`, `pagedfrg`. The gain
+was `jdpack_7z`. So "the last startup-shaped frame" is wrong far more often than right - the ten losers are
+images where several three-push frames exist and the FIRST is the entry - and `decode_only_packer.cpp` is
+back at `startup_count == 1` with `hit_va = frames.front()`.
+
+**What that means for jdpack_7z**: its two startup frames are byte-identical except for the SEH handler
+address (`1` in the dump: 0x4114f8 vs 0x411528, same scope 0x40ece2), so no ordering heuristic can separate
+them - "first" is right ten times for every time it is wrong here, and the discriminator must be something
+else (which handler is the one the *decoded image's own* data references, or which frame the run's exit path
+reaches). That is the concrete next question for this row; it is one row, so it is a low priority next to the
+remaining buckets.
