@@ -8347,3 +8347,38 @@ and because a run that keeps emulating is the precondition for every remaining T
 
 Cost, recorded honestly: 152 rows now finish at 84-86 s (up from ~110), i.e. the corpus takes ~110 min at
 4 workers instead of ~70.
+
+#### 0.17fd Round 155: the park is a resolver MISS - 13 targets, 12 filled, `edi=1`
+
+With the round-154 guard in place the run survives, so the park site itself can finally be probed. At 0x4181c6
+(the `push 0xfeeb; jmp esp`), the first hit reports:
+
+    eax=0x10013991  ebx=0x100129ce  ecx=0xffffffff  edx=0x10010000  esi=0x100127e0  edi=0x1
+    @eax='lstrlenW............'
+    @pc= 68 eb fe 00 00 ff e4 ...
+
+`ecx=0xffffffff` is the name-table scan **exhausted**, `eax` holds the last name it compared (`lstrlenW`), and
+**`edi=1`** - the counter that started at 13. So the resolver resolved **twelve of its thirteen targets** and
+then ran off the end of the export name table looking for the thirteenth.
+
+That is a much sharper statement than any earlier round could make: TELock's ladder is not failing to start, not
+failing to find its table, and not failing to resolve - it is **one API short**, and that single miss is the
+whole 116-row family.
+
+The chains decoded so far, in order, with the payload-IAT slot each fills (4 bytes apart):
+
+    0x3c3 LoadLibraryA   0x3c7 ExitProcess   0x3cb VirtualAlloc   0x3cf VirtualFree
+    0x3d3 CreateMutexA   0x3db OpenProcess   0x3df VirtualProtectEx   ... (six more)
+
+Every name above is present in `names_for_dll("kernel32.dll")`, so the missing one is very likely a name taote
+does not implement at all. Two ways to identify it, both cheap, recorded for the next round:
+
+1. **The unfilled slot**: the slots are sequential, so after a run the payload's IAT has twelve written entries
+   and exactly one zero, and its index names the target.
+2. **Probing further chains**: the window at 0x418316 already shows `VirtualProtectEx` followed by `"Crea"`
+   (CreateFileA/W? CreateProcessA?), so the list continues past the seven decoded; the remaining probes must
+   use real instruction starts (0x418344/0x418374/0x4183a4 do not fire, so the chain blocks are not laid out on
+   that stride).
+
+Also recorded as a cost: with the guard, every TELock row now spends the full 85 s in this park (r78 shows
+`dur=85` on the family), which is why corpus r78 ran ~110 min instead of ~70.
