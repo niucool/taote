@@ -9095,3 +9095,25 @@ already holds it - i.e. the three ways this code can decline. That is one gated 
 test, and it decides between "the claim for .text was consumed by an earlier hop" (then a consumed-claim re-latch
 rule is the fix) and "the address is inside the *currently running* claim, so it is treated as the stub's own
 code" (then the rule is about transfers between claims).
+
+#### 0.17ge Round 182: the hop hook is per BASIC BLOCK - and the true entry is reached without one firing
+
+The gated probe from 0.17gd (`TAOTE_HOPDBG=<addr>`, printing whether a claim covers the address, how many claims
+are live and whether `dumped_addrs_` already holds it) **never printed for `amber_pipelist.exe` at 0x40550b**,
+while `TAOTE_PROBE=0x40550b` reports exactly one execution. So the execution happens and the hop-detection
+callback is never entered for it.
+
+The reason is in the installation code (unpack.cpp:1015-1026): the section-hop hook is a **`ql.hook_block`**
+(UC_HOOK_BLOCK, "per basic block, like the reference's bundled unicorn whose CODE hook fires once per block"),
+registered over each section's range. A block hook fires when a *block* begins executing - so an address that is
+executed *inside* an already-running block, or in a block whose translation is reused, is never seen. The truth
+address here is reached that way: the stub does not branch to it, it falls into it.
+
+That is a concrete, well-scoped defect and it explains a whole class of near-miss rows (transfers that are not
+basic-block entries). The fix to measure next is a **claim-scoped per-instruction watch**: while a claim is live
+(i.e. between the first write into a section and its hand-off), also hook UC_HOOK_CODE over that section's range,
+and drop that hook at the hand-off - so the cost falls only on the window where a hand-off is expected, which is
+exactly the budget argument the block hook was chosen for.
+
+The probe itself (`TAOTE_HOPDBG`) was reverted with this round's working-tree change; it is two lines and should
+come back with the fix so the A/B is measurable on the same row.
