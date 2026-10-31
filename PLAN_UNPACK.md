@@ -7913,3 +7913,23 @@ that dll really exports the name (dll/name cross-evidence beats a single thunk),
 the API database's own dll lists, which file those CRT names under `crtdll,ucrt,ucrtbase` rather than msvcrt.
 That is a rebuild-attribution project with several moving parts, not a one-line port, and it is the honest
 state of the 19-row class.
+
+**Lead 2 is CLOSED: there is no honest data source for those CRT names on this host.** The API database is
+generated from mingw-w64's import libraries (`tools/gen_api_db.py --libdir /usr/i686-w64-mingw32/lib`), i.e.
+from real Windows export knowledge rather than the corpus - which is what keeps it non-circular. Checked
+against that source, the names class 3 misses are simply not there:
+
+    nm /usr/i686-w64-mingw32/lib/libmsvcrt.a | grep __imp_<name>
+      _initterm          0      __getmainargs      0      _acmdln        0
+      __set_app_type     0      _adjust_fdiv       0      _except_handler3  0
+      _onexit            1
+
+so `_initterm` reaches the database only through `libcrtdll.a` (hence `crtdll,ucrt,ucrtbase`) and the CRT-init
+internals are in no mingw import library at all. Adding them would mean typing in exactly the names the corpus
+happens to miss - measuring against the answer key - so this lead is not taken. What would make it honest is a
+second, independent export source (a real msvcrt.dll export dump, or an MSVC-compiled binary's import table);
+neither exists on this host, and the reference gets it from System32 at runtime.
+
+**Net state of the 19-row class**: class 1 is aliasable but flips no row alone; class 2 needs a rebuild
+cross-evidence mechanism (real work, up to 19 rows); class 3 is emulation depth and its only data source here
+would be circular. The class is therefore parked with a clear map rather than a working fix.
