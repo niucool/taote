@@ -8738,3 +8738,35 @@ The refinement, recorded for the next attempt: the trap must be raised after the
 means catching unicorn's internal #DB at the point the run ends (the run currently stops cleanly with no `[intr]`
 line) rather than synthesising it from the code hook - or, cheaper, dispatching only for families whose stub
 demonstrably single-steps (TELock), where the 1-gain/10-loss trade is replaced by a family-scoped measurement.
+
+#### 0.17fr Round 169: the TF trap caught where the run ends - correct hardware timing, corpus-neutral
+
+0.17fq's version failed because it synthesised the trap *before* the instruction; the faithful attempt never
+fired. The reason turned out to be simple and is now measured: **the emulator already raises the trap itself and
+returns from `uc_emu_start` cleanly** - which the run loop reads as "the program finished" (telock_7z.exe: pc
+stops on 0x418ae1, no `error=`, no `[intr]`, 0.2 s). The guest's SEH frame never sees the #DB.
+
+So the trap is delivered where it is actually observed - in `QlOsWindows::run`, on the clean-return path:
+
+    if ((eflags & 0x100) != 0 && tf_traps < 4096) {
+        ++tf_traps;
+        if (seh_on_interrupt(1)) { apply_continue_context(); begin = seh_retarget_; seh_retarget_ = 0; continue; }
+    }
+
+with a 4096-trap cap so a guest that arms TF and never clears it cannot spin the loop. The saved pc at this
+point is the instruction that has not run yet, which is exactly where the hardware raises the trap.
+
+Measured:
+* `[intr] intno=0x1 pc=0x418ae4` - the pc the *next* instruction, i.e. correct x86 timing (the 0.17fq version
+  raised it at 0x418ae1, one instruction early, which is why it cost ten rows);
+* the ladder continues past the single-step loop into 0x418ddc / 0x418de7 / 0x418de9 / 0x418dec / 0x418def;
+* serial suite **602/602**;
+* TELock arm: 116 valid PE, 1 OEP, 0 imports, 0 all-three (the family still has no row, but it no longer stops
+  at the TF loop);
+* **corpus r82**: 2676 / 2120 / 2079 / **1993** against r80's 2676 / 2122 / 2083 / 1997. All four row
+  differences (bero_ComIntRep, bero_md5summer, expressor_ComIntRep, mpress_ComIntRep) ran at 85-86 s, i.e. at
+  the harness wall; two were re-run solo and pass (bero_md5summer oep 0x49ec68 imports 862, expressor_ComIntRep
+  oep 0x42800a imports 1597), so this is **0 real gains, 0 real losses**.
+
+Kept: it is the correct hardware behaviour, its blast radius is "runs that would otherwise END with TF set"
+(four wall rows, all of which still pass alone), and it is the mechanism TELock's ladder is driven by.

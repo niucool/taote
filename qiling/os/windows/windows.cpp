@@ -994,10 +994,30 @@ void QlOsWindows::run() {
     }
 
     std::uint64_t begin = entry_point;
+    // a cap on the synthetic TF traps above, so a guest that arms TF and never
+    // clears it cannot spin the run loop forever
+    unsigned tf_traps = 0;
     while (true) {
         try {
             ql_->emu_start(begin, exit_point, ql_->timeout(), ql_->count());
             if (seh_retarget_ == 0) {
+                // TF single-stepping (round 169): when a guest arms TF with
+                // `popf`/`iret`, the emulator raises the trap itself and returns
+                // CLEANLY, so the run would simply end here - the guest's own
+                // SEH frame never sees the #DB (measured on telock_7z.exe, whose
+                // anti-debug loop at 0x418ad5 arms TF and then expects a trap
+                // after every instruction). Deliver it: the trap's saved pc is
+                // the instruction that has not run yet, which is exactly
+                // arch_pc() at this point.
+                if ((ql_->arch().regs().read("eflags") & 0x100ull) != 0 && tf_traps < 4096) {
+                    ++tf_traps;
+                    if (seh_on_interrupt(1)) {
+                        apply_continue_context();
+                        begin = seh_retarget_;
+                        seh_retarget_ = 0;
+                        continue;
+                    }
+                }
                 if (std::getenv("TAOTE_RUNDBG") != nullptr) {
                     std::fprintf(stderr, "[rundbg] emu_start returned cleanly pc=0x%llx esp=0x%llx insns=%llu\n",
                                  static_cast<unsigned long long>(ql_->arch().regs().arch_pc()),
