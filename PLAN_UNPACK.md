@@ -8871,3 +8871,33 @@ exactly the observed outcome.
 Next measurement: log DR6 (and DR0-Dr3) at each trap dispatch, and compare with the Windows values above. If DR6
 is zero, setting BS on the TF trap and BD on the ICEBP trap is a two-line fidelity fix whose acceptance test is
 telock_7z.exe no longer calling through 0x41802e.
+
+#### 0.17fw Round 174: correcting the DR6 idea, and a check the stub DOES make (API first byte != 0xCC) that taote passes
+
+Two corrections to 0.17fv, both from reading what TELock's handler actually does rather than what a debugger
+would.
+
+1. **DR6 is not the discriminator.** The handler at 0x4180c5 runs `and dword [ecx+0x14],0xffff0ff0` then
+   `mov dword [ecx+0x18],0x155`, i.e. it *sanitises* DR6 (clearing B0-B3 and bits 8-11) and normalises DR7 to the
+   standard 0x155 - it strips the hardware-breakpoint state its own #BP arm just armed, instead of reading it as a
+   verdict. taote's CONTEXT leaves Dr0-Dr7 zero (seh_build_context never writes them), which is already the
+   "clean" state that sanitising produces. So setting DR6.BS/BD would be *less* like what this handler expects,
+   and the fix I proposed last round is withdrawn before it was written.
+
+2. **The stub does probe an API's first byte for a breakpoint, and taote passes it.** At 0x418a03 the ladder does
+
+       418a03  lea esi,[ebp+0x3d3]   ; the CreateMutexA slot value
+       418a09  mov esi,[esi]
+       418a0b  lodsb                 ; the first byte of that API's code
+       418a0c  add al,0x34
+       418a0e  jne 0x418a1c          ; al+0x34 == 0  <=>  al == 0xCC
+
+   i.e. "does the CreateMutexA implementation start with 0xCC?" - the classic software-breakpoint detection.
+   taote's stub cells are `ret` (0xC3), so 0xC3+0x34 = 0xF7 != 0 and the ladder takes the *normal* path (0x418a1c,
+   confirmed by that probe firing). So this anti-debug test passes and is not the reason for the decoy.
+
+Where that leaves the decoy: the choice between the payload and 0x41802e is made somewhere after the ICEBP series
+(0x418def / 0x418e2c), and the checks measured so far all pass. The next round should read the branch that
+selects the decoy - probe forward from 0x418e2c through the cells that lead to 0x4192e3 and find the conditional
+that decides `[0x121ffdc]`'s value (it is written with 0x418007 first and 0x41802e afterwards, so *something*
+selects 0x41802e specifically).
