@@ -8604,3 +8604,30 @@ Measured:
 
 Kept because it removes a hard stop on a path the ladder reaches only after four measured stages, and because
 "an invalid opcode must reach the guest as #UD" is a fidelity statement, not a heuristic.
+
+#### 0.17fm Round 164: TELock's ladder now reaches real payload API calls (CreateFileA / ReadFile / CloseHandle)
+
+Continuing the forward trace from 0x418ae1 with the round-163 #UD hand-off in place, three things are measured.
+
+1. The #UD at 0x418aa1 is now dispatched to the frame the stub installed at 0x418a8e, and that handler is a
+   **lazy frame restore**: `[sehd] … handler=418a90`, and 0x418a90 is `mov esp,[esp+8] ; mov ebp,[esp+8] ;
+   lea eax,[ebp+0xa31] ; push eax ; ret`, i.e. it pops a saved frame and returns to `ebp+0xa31` = 0x418ab0 -
+   which is exactly where the pc ring resumes (0x418ab6, 0x418aba, 0x418ac0, 0x418ad4 …).
+2. The guest then executes through 0x418ae1 and the run **ends cleanly in 0.2 s** - no `error=`, no further
+   `[intr]`, so it is not a fault and not a budget.
+3. `TAOTE_APIDBG=1` shows what it did just before stopping:
+
+       [api] kernel32.dll!CreateFileA pc=0x100110c0
+       [api] kernel32.dll!ReadFile    pc=0x10011ae0
+       [api] kernel32.dll!CloseHandle pc=0x10011050
+
+That is **new territory for this family**: earlier rounds never got past the stub's own resolver, and the last
+API-driven state anyone measured was the message-box/first-call stage. The stub is now performing real file I/O
+through the payload's IAT slots - i.e. the thirteen resolved imports are being *used*, not just written.
+
+The next question is narrow: why it stops after `CloseHandle`, and the answer is in the call arguments and
+returns, not in the ladder. The candidate is the classic self-read check (the stub opens its own image and
+verifies bytes/CRC); the block CRC at 0x4189de was computed over `[esi..esi+0x400)` with `esi=0x418008` and salted
+into `[ebp+0x1b5f]`, so the stub has its own integrity bookkeeping to compare against whatever it reads back.
+The measurement to take: log `lpFileName`, the file handle, `ReadFile`'s bytes and `lpNumberOfBytesRead` for
+these three calls, and compare the bytes read with the image bytes the CRC covered.
