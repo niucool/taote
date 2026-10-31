@@ -8788,3 +8788,94 @@ reference reached (`PLAN_UNPACK.md` §0.2 note: pegasus buys Yoda rows with unpa
 not environment answers). Item 3 (`iphlpapi`) should be scheduled on the strength of
 `GetAdaptersInfo` being imported by **14 of 3,001** samples, i.e. after, not before, the
 decode/OEP mechanisms — unless a measured veto shows up on one of those 14.
+
+---
+
+## 9. The "Alienyze overlay gap" — probed, measured, and closed as a 1-row artifact
+
+Candidate taken after T-024 was parked (§8): the earlier reading that
+`alienyze_tinytask.exe` is `0xa101` bytes with its declared sections ending at
+`0x4000`, i.e. ~`0x6101` bytes of overlay the section table never describes — read as
+a generic "map file bytes beyond the section table" gap worth Alienyze's ~110 rows.
+
+### 9.1 What the file actually is
+
+```
+alienyze_tinytask.exe   size 0xa101   SizeOfImage 0x15f01   AddressOfEntryPoint 0x105e0
+  .text  va 0x01000 vsz 0x03800 raw 0x00000 rsz 0x00000
+  .rdata va 0x05000 vsz 0x00c00 raw 0x00000 rsz 0x00000
+  .data  va 0x06000 vsz 0x00f7c raw 0x00000 rsz 0x00000
+  .rsrc  va 0x07000 vsz 0x03de0 raw 0x00200 rsz 0x03e00
+  .alien va 0x0b000 vsz 0x0af01 raw 0x00000 rsz 0x00000     <-- the entry lives HERE
+```
+
+`raw_end = 0x4000`, overlay `0x6101`. The entry (`0x105e0`) is inside `.alien`, whose
+`PointerToRawData` **and** `SizeOfRawData` are both zero, so taote maps zeros there and
+the guest executes nothing at all: `stages=0 reason=fallback_guess imports=0
+error="no section hop; OEP guessed; rebuild failed"`, `dur=0`, `eip=0x4105e0` (the entry),
+`eflags=0x2`, zero API calls.
+
+The bytes are *not* missing — they are where `.alien`'s raw data would be if the header
+named it. `.alien` va `0xb000` + entry `0x105e0` → file `0x4000 + 0x55e0 = 0x95e0`, and
+that offset holds the Alienyze stub prologue **byte-identically to the working
+`alienyze_7z.exe`** (whose `.alien` reason is `raw 0x2000 rsz 0x17301`):
+
+```
+55 8b ec 81 ec 60 01 00 00 53 56 64 a1 30 00 00 00 89 85 70 ff ff ff ...
+push ebp; mov ebp,esp; sub esp,0x160; push ebx; push esi; mov eax,fs:[0x30]   (PEB)
+```
+
+`0x4000 + 0x6101 = 0xa101` = the file size exactly, so the payload also *ends* where
+`.alien`'s raw data would. Conclusion: **the sample is a damaged file** — its `.alien`
+`PointerToRawData`/`SizeOfRawData` were zeroed while the bytes stayed in place. The same
+file cannot run on real Windows either (the OS starts at `AddressOfEntryPoint`, which
+then sits in a zero-filled section), so this is not an emulator gap.
+
+### 9.2 Corpus-wide: it is the only row
+
+A header scan of all **3,001** packed samples (`packed/*/*.exe`), checking every entry
+against the section that hosts it:
+
+| measure | rows |
+|---|---|
+| entry point inside a section with `SizeOfRawData == 0` (cannot run anywhere) | **1** (`alienyze_tinytask.exe`) |
+| an overlay of more than `0x100` bytes past the sections | 1,113 — the normal pattern (attached data the loader never maps), no row depends on it |
+| Alienyze rows with an overlay | **1 of 126** |
+| Alienyze rows whose entry is unbacked | **1 of 126** |
+
+So "map file bytes beyond the section table" buys **one** row, and it would have to guess
+the overlay's RVA from a stub signature (`0x4000 + (ep - .alien.va)`) — the exact class of
+guess that can corrupt the 2,000 rows that currently pass. Not shipped.
+
+### 9.3 Where the headroom actually is, for the next pick
+
+Alienyze is **not** an overlay family. Per-row failure classes over its 126 rows (this
+tree, pin 2, budget 85 s; report criterion: 75 all-three, OEP 108, imports 79):
+
+| failure class | rows |
+|---|---|
+| imports only (`code_sim` >= 0.90 and the entry exact) | 15 |
+| imports + `code_sim` | 18 |
+| `code_sim` only | 12 |
+| entry + imports + `code_sim` | 9 |
+| entry + imports | 4 |
+| entry only | 4 |
+| (no valid PE) | 1 |
+
+**~46 of the 51 Alienyze misses involve import coverage**, on rows whose entry is already
+exact and whose `code_sim` median is 1.000.
+
+The same shape holds for RLPack, and it is not "emulation depth" there either — measured
+in this tree on `rlpack_ADExplorer.exe` (entry exact, `code_sim` 1.000): the rebuilt table
+carries **49 entries over 25 dll keys against the original's 314**, and the dll keys are
+**doubly spelled** (`kernel32` *and* `kernel32.dll`, `user32` *and* `user32.dll`, … — 11 of
+the 25 are duplicates of another key), while the dumped image contains only **one**
+plausible `IMAGE_IMPORT_DESCRIPTOR` still naming `kernel32.dll` (at dump offset `0xa2fa0`).
+That is the "which table does the code reference" step (`PET6.md`/`RLP_ANCHOR.md` §2), not
+a decode depth problem: RLPack's `code_sim` is 1.000 and its import recall median is 0.23.
+
+**Import-descriptor *selection* (payload table over stub table) is the one lane that is
+neither TELock, nor the picker/OEP residual, nor the environment probes** — it is worth
+~96 RLPack rows + ~46 Alienyze rows on the same mechanism, and it starts from two measured
+facts that no round has used yet: the doubled dll keys, and that only one descriptor
+survives in the RLPack dump.
