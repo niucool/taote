@@ -8770,3 +8770,29 @@ Measured:
 
 Kept: it is the correct hardware behaviour, its blast radius is "runs that would otherwise END with TF set"
 (four wall rows, all of which still pass alone), and it is the mechanism TELock's ladder is driven by.
+
+#### 0.17fs Round 170: ICEBP (`int1`, opcode 0xF1) has the same shape as the TF trap - deliver it on the clean-return path
+
+Continuing from 0x418def, the run stopped on an instruction whose first live byte is **0xF1 = ICEBP (`int1`)**,
+with no `[intr]` line - the same failure mode as the TF trap in 0.17fr: the emulator raises the trap itself and
+returns cleanly, so the run loop thinks the program finished and the guest's SEH frame never sees the exception.
+
+The clean-return path now checks the byte at the pc as well:
+
+    bool icebp = (mem.read(pc, 1) == {0xf1});
+    if (icebp && seh_on_interrupt(1) && tf_traps < 4096) { ++tf_traps; ...; continue; }
+
+Measured on telock_7z.exe:
+* `[intr] intno=0x1 pc=0x418def` now appears, and so does `intno=0x1 pc=0x418e2c` - the stub walks a **series** of
+  ICEBP anti-debug probes, and each one now reaches its handler instead of ending the run;
+* the ladder advances to 0x4192d6 / 0x4192dc / 0x4192e0 / 0x4192e1 / 0x4192e3, and the summary's `imports`
+  grows 2 -> **3**;
+* serial suite **602/602**;
+* TELock arm: 116 valid PE, 1 OEP, 0 imports, 0 all-three (still no row);
+* **corpus r83**: 2676 / 2122 / 2082 / 1996 against r82's 2676 / 2120 / 2079 / 1993 (3 "gains", all of them the
+  r82 wall flakes returning) and against r80's 2676 / 2122 / 2083 / 1997 only one row differs -
+  `mpress_ComIntRep`, which ran at the 85 s wall here and passes solo (oep 0x42800a, imports 683). So
+  **0 real gains, 0 real losses** versus the clean baseline.
+
+Kept for the same reason as the TF trap: it is what the hardware does, the blast radius is exactly "a run that
+would otherwise end standing on an ICEBP", and TELock's anti-debug ladder is built out of these probes.

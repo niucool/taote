@@ -1009,6 +1009,27 @@ void QlOsWindows::run() {
                 // after every instruction). Deliver it: the trap's saved pc is
                 // the instruction that has not run yet, which is exactly
                 // arch_pc() at this point.
+                // ICEBP (`int1`, opcode 0xF1) is the same shape: a trap the
+                // emulator raises without reaching the interrupt hook, so the
+                // run ends cleanly on the instruction instead of delivering
+                // #DB to the guest's SEH frame (measured on telock_7z.exe: the
+                // run stops on 0x418def, whose first byte is 0xf1, with no
+                // [intr] line).
+                bool icebp = false;
+                if (tf_traps < 4096) {
+                    try {
+                        const auto b = ql_->mem().read(ql_->arch().regs().arch_pc(), 1);
+                        icebp = b.size() == 1 && b[0] == 0xf1;
+                    } catch (...) {
+                    }
+                }
+                if (icebp && seh_on_interrupt(1) && tf_traps < 4096) {
+                    ++tf_traps;
+                    apply_continue_context();
+                    begin = seh_retarget_;
+                    seh_retarget_ = 0;
+                    continue;
+                }
                 if ((ql_->arch().regs().read("eflags") & 0x100ull) != 0 && tf_traps < 4096) {
                     ++tf_traps;
                     if (seh_on_interrupt(1)) {
