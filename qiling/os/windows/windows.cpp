@@ -645,6 +645,39 @@ void QlOsWindows::hook_winapi(std::uint64_t address, std::uint32_t size) {
                      static_cast<unsigned long long>(address),
                      static_cast<unsigned long long>(ql_->arch().regs().read("eax")),
                      static_cast<unsigned long long>(ql_->arch().regs().arch_sp()));
+        // Round 165: the arguments matter as soon as a family reaches real I/O
+        // (TELock's stub now calls CreateFileA/ReadFile/CloseHandle). The first
+        // two dwords above esp, plus an ASCII peek of the first one when it
+        // points at a readable string - the file path in the CreateFile case.
+        try {
+            const auto sp = ql_->arch().regs().arch_sp();
+            const auto words = ql_->mem().read(sp + 4, 16);
+            std::string peek;
+            if (words.size() == 16) {
+                const auto p0 = static_cast<std::uint64_t>(words[0]) |
+                                (static_cast<std::uint64_t>(words[1]) << 8) |
+                                (static_cast<std::uint64_t>(words[2]) << 16) |
+                                (static_cast<std::uint64_t>(words[3]) << 24);
+                std::fprintf(stderr, "[api]   args=%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x p0=0x%llx",
+                             words[3], words[2], words[1], words[0], words[7], words[6], words[5], words[4],
+                             words[11], words[10], words[9], words[8], words[15], words[14], words[13], words[12],
+                             static_cast<unsigned long long>(p0));
+                if (p0 >= 0x1000) {
+                    try {
+                        const auto str = ql_->mem().read(p0, 40);
+                        for (std::size_t i = 0; i < str.size() && str[i] >= 0x20 && str[i] < 0x7f; ++i) {
+                            peek.push_back(static_cast<char>(str[i]));
+                        }
+                    } catch (...) {
+                    }
+                }
+                std::fprintf(stderr, " '%s'\n", peek.c_str());
+            } else {
+                std::fprintf(stderr, "\n");
+            }
+        } catch (...) {
+            std::fprintf(stderr, "\n");
+        }
     }
     const auto* api = ApiRegistry::instance().find(imported->name);
 

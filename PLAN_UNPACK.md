@@ -8631,3 +8631,28 @@ verifies bytes/CRC); the block CRC at 0x4189de was computed over `[esi..esi+0x40
 into `[ebp+0x1b5f]`, so the stub has its own integrity bookkeeping to compare against whatever it reads back.
 The measurement to take: log `lpFileName`, the file handle, `ReadFile`'s bytes and `lpNumberOfBytesRead` for
 these three calls, and compare the bytes read with the image bytes the CRC covered.
+
+#### 0.17fn Round 165: the stub re-reads its own file over its own code, then jumps into that region - and that is where the run ends
+
+`TAOTE_APIDBG` now prints the call arguments (a gated addition to the existing debug line), which names the
+endgame exactly:
+
+    [api] kernel32.dll!CreateFileA  args=00418000 80000000 ... p0=0x418000 'C:/Windows\telock_7z.exe'
+    [api]   ReadFile   args=a000000e 00418008 00000400 00418000
+    [api]   CloseHandle args=a000000e ...
+
+So the stub opens **its own image**, reads **0x400 bytes to 0x418008** and closes it. Those 0x400 bytes are
+exactly the region the block CRC covered (`esi=0x418008`, `ebx=0x400`, salted into `[ebp+0x1b5f]`) - this is
+TELock's self-read integrity/anti-dump step, and 0x418008..0x418407 **contains the code that is running**.
+
+The pc ring's tail after those calls is `0x418ab6 0x418aba 0x418ac0 0x418ad4 0x418ad5 0x418adc 0x418ae0
+0x418ae1`, and then the run ends - and 0x418ae1's live bytes are `eb 01` (`jmp +1`, target 0x418ae4), while the
+window showed `eb f8` (`jmp -8`, target 0x418ade) at 0x418ae4. **Neither 0x418ae4 nor 0x418ade ever executes**
+(probes: 0 hits each), so the transfer itself is where it dies - consistent with the region having been
+rewritten by the `ReadFile` immediately before.
+
+That is the next measurement, and it is a live-bytes question in one run: with `TAOTE_APIDBG=1` (so the API
+order is visible) read the bytes at 0x418ae4 and 0x418ade *after* the ReadFile completes, and compare them with
+what the decrypted ladder had there. If the stub expects to decrypt what it just re-read (which is the standard
+anti-dump shape: read the packed bytes back, decrypt in place, continue), then the missing piece is that
+decrypt - not a mapping or SEH problem.
