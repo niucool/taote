@@ -876,7 +876,14 @@ void QlOsWindows::seh_load_context() {
     if (seh_context_addr_ == 0) {
         return;
     }
-    seh_apply_context(ql_->mem().read(seh_context_addr_, SEH_CONTEXT_SIZE));
+    const auto img = ql_->mem().read(seh_context_addr_, SEH_CONTEXT_SIZE);
+    if (std::getenv("TAOTE_SEHDBG") != nullptr && img.size() >= SEH_CONTEXT_SIZE) {
+        std::fprintf(stderr,
+                     "[ctx] load addr=0x%llx eip=0x%x esp=0x%x ebp=0x%x eflags=0x%x\n",
+                     static_cast<unsigned long long>(seh_context_addr_), get_u32(img, kCtxEip),
+                     get_u32(img, kCtxEsp), get_u32(img, kCtxEbp), get_u32(img, kCtxEFlags));
+    }
+    seh_apply_context(img);
 }
 
 // apply a guest x86 CONTEXT image to the emulated CPU. Shared by the synthetic

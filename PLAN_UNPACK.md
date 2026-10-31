@@ -7612,3 +7612,40 @@ The two facts worth keeping from the attempt:
    `CONTEXT.Eip = 0x4180a9` - so the CONTEXT the #DE handler patches is not the one taote loads afterwards,
    which is the concrete next question (log `CONTEXT.Eip` inside `seh_load_context` and compare it with the
    handler's `[ecx+0xb8]` writes).
+
+#### 0.17eg Round 133d: the CONTEXT is right and the ladder reaches its MZ scan - the surface fix is still net-negative
+
+Round 133c's open question was "the CONTEXT the #DE handler patches is not the one taote loads afterwards".
+It is: a gated `[ctx]` line in `seh_load_context` settles it,
+
+    [sehd] code=80000003 fault=41808d ... chain=121ffd8 handler=4180c5
+    [ctx]  load addr=0x70003100 eip=0x41808e esp=0x121ffd8 ebp=0x41807f eflags=0x46
+    [sehc] exhausted -> resume 41808e
+    [sehd] code=c0000094 fault=4180a7 ... handler=4180c5                 <- the ladder's own div
+    [ctx]  load addr=0x70004100 eip=0x4180a9 esp=0x121ffd8 ebp=0x41807f eflags=0x46
+    [sehc] exhausted -> resume 4180a9                                    <- past `div ebx`, exactly right
+
+i.e. each dispatch gets a fresh page (0x70003100 then 0x70004100) and the handler's `inc dword [ecx+0xb8]`
+(+1 for the trap, +1 more for the #DE branch) lands on 0x41808e and 0x4180a9 - both of which match the
+reference's own hop log. With the 133c surface change in place the ladder then *progresses*:
+
+* `0x4180a9` `64 67 8f 06 00 00` (`pop dword ptr fs:[0]`, 16-bit address size) executes - the frame is
+  uninstalled and esp advances 0x121ffd8 -> 0x121ffdc;
+* `0x4180af` `83 c4 04` (`add esp,4`) executes, and the dword below it is 0x4180c5 (the handler address);
+* the ladder jumps `e9 9c 00 00 00` to **0x418163**, which is:
+  `88 85 99 00 00 00` (`mov [ebp+0x99],al`), `8b 95 af 1b 00 00` (`mov edx,[ebp+0x1baf]`),
+  `81 e2 00 00 ff ff` (`and edx,0xffff0000`), `8b c4`/`33 e4`/`8b e0` (the obfuscation no-op),
+  `66 81 3a 4d 5a` (`cmp word [edx],0x5a4d` = "MZ"), `74 08` (`je`), else
+  `81 c2 00 00 ff ff` (`sub edx,0x10000`) + `eb f1` - **a downward MZ-header scan**, the classic "find my own
+  image base" step.
+
+So the teardown is no longer the blocker: the ladder walks its image base and then dies with the pc pinned on
+0x121ffd8 (the frame address, i.e. it executes the stack), which is a *different* place from where 133c left
+it.
+
+**Still not kept**: the arms are unchanged except for the same Yoda loss (99 of 101 valid PE, TELock
+116/1/0/0, PECompact 97/97/92/95/92), so the surface change is reverted again and only the `[ctx]` diagnostic
+ships. Two things are now established for the next attempt: the CONTEXT/resume arithmetic is correct in both
+trap cases, and the remaining failure sits *after* the frame teardown, in the MZ scan at 0x418163 - where
+`[ebp+0x1baf]` supplies the start address and the scan steps down by 0x10000. That value is the thing to log
+next (a `TAOTE_PROBE_EBP_DISP=0x1baf` reading), because the scan can only run off the image if it is wrong.
