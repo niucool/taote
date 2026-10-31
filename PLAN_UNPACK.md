@@ -8382,3 +8382,23 @@ does not implement at all. Two ways to identify it, both cheap, recorded for the
 
 Also recorded as a cost: with the guard, every TELock row now spends the full 85 s in this park (r78 shows
 `dur=85` on the family), which is why corpus r78 ran ~110 min instead of ~70.
+
+#### 0.17fe Round 156: `IsBadCodePtr` was the obvious candidate for the missing target - measured, it is not
+
+0.17fd left the family one API short (13 targets, 12 filled, `edi=1`). Diffing the registry's 247 kernel32 names
+against the plausible TELock API set left exactly **one** absent name: `IsBadCodePtr` (its siblings
+`IsBadReadPtr`/`IsBadWritePtr` are implemented in winbase.cpp, it was not). So it was added as a WinsdkApi
+answering FALSE, built, and measured:
+
+    [probe] pc=0x4181c6 ... ecx=0xffffffff edi=0x1 ...        <- unchanged
+    [unpack] telock_7z.exe ... oep=0x418037 stages=1 imports=2  <- unchanged
+
+So **`IsBadCodePtr` is not the missing name**, and the addition was reverted rather than shipped unmeasured
+(a stub-surface change needs a corpus run, and this one buys nothing here).
+
+What this narrows: the missing target is a name that is neither in the registry's kernel32 surface *nor* in the
+seven-byte-aligned chains decoded so far (LoadLibraryA, ExitProcess, VirtualAlloc, VirtualFree, CreateMutexA,
+OpenProcess, VirtualProtectEx, plus a `"GetC..."` chain at slot 0x3d7). The cheapest way to name it is now to
+**count matches per chain** rather than guess: an env-gated counter at the common resolver tail
+(0x41821d's `dec edi`) that prints the slot constant each successful chain pushes, i.e. which of the thirteen
+slots never gets written. That is one gated print, one build, and it names the API exactly.
