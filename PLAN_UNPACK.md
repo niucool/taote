@@ -7986,3 +7986,39 @@ same class as PEtite's decoder divergence and is a *decryption* question, not an
 **Why the surface change stays reverted**: it is what gets the ladder this far, but alone it measures -1
 (Yoda) with no gains, and the hand-off above shows why one more mechanism (the record interpreter's input)
 is still missing. The two have to land together or not at all.
+
+#### 0.17er Round 143: TELock's ladder does not fail at all - it PARKS itself, because its export walk cannot see "KERN" in taote's stub kernel32
+
+The recorded measurement was "dump the record table at `[ebx]`". It answered a different and better question.
+The instruction at 0x4181aa is not a record interpreter at all in this image - the live bytes are
+
+    4181aa  8b 74 10 20        mov  esi,[eax+edx+0x20]
+    4181ae  8b 4c 10 18        mov  ecx,[eax+edx+0x18]
+    4181b2  8b 44 10 0c        mov  eax,[eax+edx+0xc]
+    4181b6  03 c2              add  eax,edx
+    4181b8  8b 00              mov  eax,[eax]
+    4181ba  25 5f 5f 5f 5f     and  eax,0x5f5f5f5f      ; uppercase the ASCII
+    4181bf  3d 4b 45 52 4e     cmp  eax,0x4e52454b      ; "KERN"
+    4181c4  74 07              je   0x4181cd          ; found it -> carry on
+    4181c6  68 eb fe 00 00     push 0x0feeb            ; = the two bytes `eb fe`
+    4181cb  ff e4              jmp  esp                ; ...i.e. `jmp $`
+
+and the probe at 0x4181aa reports `eax=0x2000 ebx=0x27e0 edx=0x10010000` - so the reads are at
+0x10012020 / 0x10012018 / 0x1001200c, **inside taote's synthesized kernel32 stub** (0x10010000-0x10013000, the
+dll base the stub found through the PEB LDR walk). The ladder is doing a classic kernel32 **export-directory
+walk**, upper-casing a dword read through an RVA table and looking for "KERN" ("KERNEL32.DLL"); when it does
+not find it, it executes `push 0xfeeb; jmp esp` - the deliberate `eb fe` (`jmp $`) hang, which is exactly the
+stack stub this round's predecessor saw at 0x121ffd8.
+
+So **TELock's ladder is not crashing and not diverging in its SEH handling: it parks itself on purpose**, because
+taote's hand-written stub DLL does not have a real module's export-directory layout where the walk looks. The
+reference does not park because its kernel32 is a real (or real-shaped) module.
+
+That re-frames the whole family: TELock's 116 rows are gated by **stub-DLL shape**, not by the OEP picker, not
+by the trap ladder and not by the imports. The fix direction is `write_stub_dll`'s export directory
+(tests/Pe_Sample_Runner.hpp): a real PE's export directory carries the module name string in its name table at
+the offsets this walk reads, and the synthesized one carries 16-byte `ret` cells. Making the stub's export
+layout real-shaped is a loader-side change with corpus-wide blast radius (every family resolves through these
+stubs), so it needs its own measurement round - and it is the same idea as the "wider stub rootfs" that was
+rejected earlier for PECompact's budget, which is why it must be scoped to the export *directory* rather than
+to the whole stub.
