@@ -8131,3 +8131,26 @@ and `AddressOfFunctions` stays exactly the stub's `0x2028`. TELock itself stays 
 1 OEP / 0 imports / 0 all-three because the ladder still needs the sentinel-surface change to reach the
 resolver at all - that combination (+sort, +surface) is the next experiment, and it must be measured on the
 TELock arm and the corpus because the surface change alone was -1 Yoda valid PE.
+
+#### 0.17ev Round 147: correction - "the 13-target loop never finishes" is NOT established, and the +sort +surface pair does not complete it
+
+Two corrections, both forced by measurement.
+
+1. **0.17et's "the loop never completes" overstated the evidence.** `0x418220` and `0x41840b` were probed and
+   fired 0 times, but `TAOTE_PROBE` fires only on an **instruction start**, and both addresses were derived from
+   a *static* read of a page that is demonstrably self-modifying (two contradictory byte images in one session).
+   An address that is mid-instruction never fires. So the honest statement is: the loop fills IAT slots
+   (`edi` 0xd -> 0xc -> 0xb, `0x2028` = the stub's AddressOfFunctions) and execution **ends on the `eb fe` park
+   stub** (the `TAOTE_LASTPC` ring is 30/30 `0x121ffd8`); *when* it leaves the loop is not known.
+
+2. **Sorting the stub's export names + the sentinel-surface change together still do not complete the
+   resolver.** With both applied (build since reverted), `0x418220` and `0x41840b` still fire 0 times and
+   telock_7z.exe still reports `oep=0x418037 reason=section_hop imports=2` - the packed stub's own imports, not
+   the payload's. So the sort is *not* the missing piece, and the pair was not taken to an arm measurement: the
+   surface change costs 1 Yoda valid PE (measured in round 134's arm) and pays nothing here.
+
+That shifts suspicion away from the export walk entirely and onto **when taote stops emulating**. The run ends
+with `stages=1` and a `section_hop` latch, and the reference's own hop log keeps emulating long past its first
+accepted hop on this sample (0.17dc), so the park may simply be where taote's *run* ends rather than what the
+guest executes to. That is the "post-OEP grace window" idea that was rejected earlier for budget reasons, which
+is why it must come back with a TELock-scoped budget story, not as a global change.
