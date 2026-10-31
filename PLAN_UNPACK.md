@@ -8263,3 +8263,31 @@ should not be 1), not a disposition problem, and the next round should find whic
 takes its base from by probing the instruction *before* the fault. Note the two experiments this idea has
 already refuted: the sentinel branch is not involved (measured above), and the structures-page protection is
 irrelevant (0.17ey).
+
+#### 0.17fa Round 152: the end is a 15-instruction cycle that re-enters the handler from the sentinel - and that corrects 0.17ez
+
+`TAOTE_LASTPC=220` shows the run's last 220 instructions are one **repeating 15-instruction cycle**:
+
+    4180c5 4180c9 4180cd 4180d3 4180d5 4180da 418100 418105 418107 41810c 41810e 418110 418111 418160 70000000 | 4180c5 ...
+
+i.e. TELock's handler entry -> its body -> its `ret` at 0x418160 -> the sentinel 0x70000000 -> **the handler
+entry again**, forever, until the repeat guard aborts the run.
+
+That corrects 0.17ez. The faulting instruction is *not* re-executed by a CONTINUE_EXECUTION disposition: the
+pc that follows the sentinel is the **handler's own entry** (0x4180c5). The mechanism that fits all the
+evidence is that the handler's second instruction pair is
+`mov ecx,[esp+0xc]` (ContextRecord) then `inc dword [ecx+0xb8]` (CONTEXT.Eip) - the bump happens **before** the
+exception-code dispatch, so for the "anything else" arm (0xC0000005 included) the handler answers
+CONTINUE_EXECUTION with Eip = fault_pc + 1. If fault_pc is the byte before the handler (0x4180c4), the resume
+lands exactly on 0x4180c5, the handler re-enters itself, and the loop is closed without the ladder ever
+advancing.
+
+Two things follow, and they are the next round's whole job:
+
+* the value of `fault_pc` for the first dispatch of the cycle has to be read (it decides whether the stub is
+  really faulting one byte before its own handler, or whether the CONTEXT taote builds is off by something);
+* the disposition is only sound if a handler call is *in progress*: when the sentinel fetch is seen with no
+  handler call outstanding, treating eax as the verdict re-applies a stale answer. `seh_continue` has no such
+  guard today (`ret` is read straight from the live eax).
+
+Both are small, and both are the difference between a loop and the ladder's continuation.
