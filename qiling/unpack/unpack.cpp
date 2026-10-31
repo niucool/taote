@@ -3426,10 +3426,44 @@ UnpackResult Unpacker::finalize(Qiling& ql) {
                 }
                 const auto span = std::min<std::uint64_t>(ps.end - ps.start, 0x10000);
                 std::vector<std::uint8_t> body;
-                try {
-                    body = ql.mem().read(ps.start, span);
-                } catch (...) {
+                // Round 177: read the artifact image, not live memory. By this
+                // point the exec-page overlay has already put the FIRST-EXECUTION
+                // view into `image`, while the live page can hold what the stub
+                // re-encrypted (PEtite/JDPack decrypt, run, then re-encrypt). The
+                // guess was scanning zeros and parking the OEP 5 bytes past the
+                // truth: measured on petite_PEview.exe, where the decoded .text
+                // starts `f9 01 0f 84 ...` but live memory read zeros and the
+                // guess landed on 0x401005 instead of the section start 0x401000.
+                const auto off0 = static_cast<std::size_t>(ps.start - base_);
+                if (off0 < image.size()) {
+                    const auto n = std::min<std::size_t>(static_cast<std::size_t>(span), image.size() - off0);
+                    body.assign(image.begin() + static_cast<std::ptrdiff_t>(off0),
+                                image.begin() + static_cast<std::ptrdiff_t>(off0 + n));
+                }
+                if (body.empty()) {
                     continue;
+                }
+                if (opts_.debug) {
+                    std::fprintf(stderr, "[unpack] guess scan sec=0x%llx span=0x%llx first8=",
+                                 (unsigned long long)ps.start, (unsigned long long)body.size());
+                    for (std::size_t k = 0; k < 8 && k < body.size(); ++k) std::fprintf(stderr, "%02x", body[k]);
+                    std::fprintf(stderr, "\n");
+                }
+                // Round 177: the CRT entry shapes BEFORE the loose heuristics.
+                // The non-zero-run fallback below skips a real entry whose rel32
+                // contains a zero byte: measured on petite_PEview.exe, whose
+                // decoded section starts `e8 d7 00 00 00 85 c0 75` (call; test
+                // eax,eax - the shape class added in round 134) and which the
+                // run heuristic parked at +5, five bytes past the truth.
+                for (std::size_t i = 0; i + 8 < body.size(); ++i) {
+                    if (body[i] == 0xe8 && ((body[i + 5] == 0x6a && body[i + 7] == 0x68) ||
+                                            (body[i + 5] == 0x85 && body[i + 6] == 0xc0))) {
+                        guess = ps.start + i;
+                        break;
+                    }
+                }
+                if (guess != 0) {
+                    break;
                 }
                 for (std::size_t i = 0; i + 10 < body.size(); ++i) {
                     if (body[i] == 0x6a && body[i + 2] == 0x68 && body[i + 7] == 0xe8) {

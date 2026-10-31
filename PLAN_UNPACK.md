@@ -8949,3 +8949,31 @@ Two observations worth a measurement:
 
 Neither is implemented: both need an arm measurement (PEtite 73 / WinUpack 97 / JDPack 100) plus the corpus, and
 the first one must be checked against the existing PEtite junk rule before it is written.
+
+#### 0.17fz Round 177: the no-hop fallback skipped a real entry whose rel32 contains a zero - +1 row (PEtite 29 -> 30)
+
+`petite_PEview.exe` is the "off-by-5" row from 0.17fy: `oep=0x401005` against a truth of `0x401000`. The bucket's
+candidate list was not the problem - the *fallback* was, and the debug line added here shows why:
+
+    [unpack] guess scan sec=0x401000 span=0xf000 first8=e8d700000085c075
+
+The decoded section starts `e8 d7 00 00 00 85 c0 75` - a textbook CRT entry (`call rel32 ; test eax,eax`, the
+shape class added in round 134). But the fallback's "first run of >= 4 non-zero bytes" heuristic stops at the
+**zero inside the rel32** (`e8 d7 00` is a 3-byte run), so it skipped the true entry and parked on 0x401005, the
+next non-zero run.
+
+Two fixes, both in the no-hop fallback:
+1. the scan now reads the **artifact image** instead of live memory - by finalize time the exec-page overlay has
+   the first-execution (decoded) view in `image`, while the live page may hold what the stub re-encrypted;
+2. the **CRT entry shapes are tried before the loose heuristics**: `e8 <rel32> 6a ?? 68` and `e8 <rel32> 85 c0`
+   (the same two classes round 134 added to `shape_at`), so a rel32 containing zero bytes no longer hides an
+   entry.
+
+Measured on the full corpus **r84**: valid PE 2676, OEP exact **2124**, imports 2082, all-three **1997** against
+r83's 2676 / 2122 / 2082 / 1996 - PEtite **29 -> 30 all-three** (OEP 35 -> 36), one more MPRESS row than r83 (the
+recurring `mpress_ComIntRep` flake) and `winupack_Bginfo` lost at the 85 s wall (it passes solo: oep 0x5b5d42,
+imports 2002). So **+1 real gain, 0 real losses**, and the graded baseline moves 1998 -> **1999**.
+
+Blast radius, recorded because it is large: 135 rows in r83 used `fallback_guess` (Yoda-Protector 88, Amber 13,
+RLPack 10, Alienyze 8, NSPack 5, PEtite 3, TELock 3, WinUpack 2, ...), so this was measured on the corpus, not on
+an arm.
