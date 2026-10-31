@@ -8104,3 +8104,30 @@ debug line in the emulation (like TAOTE_PROBE) that prints, at the park, the las
 index `edi` and the IAT slot it had just written - i.e. which of the 13 targets it died on. Everything else
 about this family is now measured: the ladder, the frame teardown, the MZ scan, the module-name check, the
 name-table walk, the ordinal/EAT resolution and the IAT store all behave.
+
+#### 0.17eu Round 146: the synthesized stubs now sort their export names (corpus-neutral, TELock resolver advances)
+
+Real DLLs' `AddressOfNames` is sorted - the PE spec's binary-search contract, and what GetProcAddress assumes.
+`write_stub_dll` emitted the names in **registry order**, and TELock's resolver scans the table *advance-only*
+(it keeps `esi`/`ecx` across the 13 targets it fills, measured: `ecx` 0xf7 -> 0xf0 -> 0xe6 while `edi`
+decrements), so a target sitting earlier than the current position could not be seen.
+
+Change: `std::sort(all_names)` in `write_stub_dll` (tests/Pe_Sample_Runner.hpp), which is the shared writer the
+CLI uses. The cell/name/ordinal tables are all built from `all_names` after the sort, so they stay consistent.
+
+Measured on **corpus r77** (2678 rows, 85 s budget, 4 workers, `/home/jim/runs/r77_results.json`,
+`R77_CORPUS.md`):
+
+| | valid PE | OEP exact | imports | all-three |
+|---|---|---|---|---|
+| r75 | 2676 | 2122 | 2082 | 1996 |
+| **r77** | **2676** | **2122** | **2082** | **1996** |
+
+**0 gains, 0 losses, every counter identical** - a free fidelity fix, kept. Suite 602/602 serial.
+
+Its effect on the family it was written for is real but not yet a row: with the sort, TELock's resolver walks
+`edi` 0xd -> 0xc -> 0xb (three probe hits, `esi` +0x1c) where before the sort it died after the second target,
+and `AddressOfFunctions` stays exactly the stub's `0x2028`. TELock itself stays 116 rows / 116 valid PE /
+1 OEP / 0 imports / 0 all-three because the ladder still needs the sentinel-surface change to reach the
+resolver at all - that combination (+sort, +surface) is the next experiment, and it must be measured on the
+TELock arm and the corpus because the surface change alone was -1 Yoda valid PE.

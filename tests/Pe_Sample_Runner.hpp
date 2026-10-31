@@ -191,6 +191,12 @@ inline void write_stub_dll(const fs::path& rootfs, const std::string& dll_name,
         // the registry is optional here (a bare loader run without the dlls
         // linked): keep just the caller's names.
     }
+    // Round 146: real DLLs' AddressOfNames is SORTED (the PE spec's binary-search
+    // contract, and what GetProcAddress assumes). The names arrived in registry
+    // order, so a packer that scans the table advance-only - TELock's resolver
+    // keeps its esi/ecx across the 13 targets it fills - runs off the end and
+    // parks on `eb fe` when a target sits earlier than its current position.
+    std::sort(all_names.begin(), all_names.end());
     const std::size_t cells = std::max<std::size_t>(all_names.size(), 1);
     const std::uint32_t cell_size = 16;
     const std::uint32_t section_align = 0x1000;
