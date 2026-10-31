@@ -8840,3 +8840,34 @@ window reaches it, or log `muted_` and re-run the watch with the page unmuted) a
 (a) the packed file's bytes at the same RVA and (b) the decrypted code the earlier rounds saw at 0x418041+.
 If they equal the file's bytes, the missing piece is the stub's own re-decrypt of the self-read block, and the
 question becomes why its loop starts at 0x418041 instead of 0x418008.
+
+#### 0.17fv Round 173: the call target holds DECOY code - so the stub probably thinks it is being debugged
+
+Probing 0x418029 (which executes and whose 48-byte window covers the call target) shows what is actually at
+0x41802e:
+
+    418029  e8 02 00 00 00      call 0x418030
+    41802e  e8 80 30 06 46      call 0x4658...      <- nonsense target
+    418033  5a eb 01 e9 d4 09 49 7f  e9 67 e3 02 cd 20 ...
+    418040  14 c9 d9 c9 c0 7c 39 03 8e 43 c1 75 ee b5 5f ...
+
+That is **decoy code** - `e9 d4 09 49` jumps into nothing, `cd 20` is DOS-era filler, the bytes are not
+meaningful x86. So the value the stub called through (`[0x121ffdc] = 0x41802e`) points into a decoy region, and
+the run dies fetching it.
+
+A decoy is what TELock does *when it believes it is being debugged*: the anti-debug traps it just walked - #UD at
+0x418aa1, the TF single-step at 0x418ae4, the ICEBP series at 0x418def/0x418e2c - exist to detect a debugger, and
+their outcome decides whether the stub proceeds to the payload or hands control to a decoy. taote delivers all
+three traps to the guest handler now, so the *delivery* is right; the question is whether the **state the
+handler reads** matches what Windows would leave.
+
+The most likely mismatch, and the next thing to check: **DR6**. TELock's #BP arm explicitly arms Dr0-Dr3 and
+masks Dr6 (measured earlier: `and dword [ecx+0x14],0xffff0ff0`, `mov dword [ecx+0x18],0x155`), i.e. it reads the
+debug registers as part of its verdict. On real Windows a single-step trap leaves **DR6.BS (bit 14, 0x4000)** set
+and an ICEBP leaves **DR6.BD (bit 13, 0x2000)** set. If taote leaves DR6 zero, the stub concludes "no debugger";
+if our values differ from Windows in the other direction it concludes "debugger" and takes the decoy - which is
+exactly the observed outcome.
+
+Next measurement: log DR6 (and DR0-Dr3) at each trap dispatch, and compare with the Windows values above. If DR6
+is zero, setting BS on the TF trap and BD on the ICEBP trap is a two-line fidelity fix whose acceptance test is
+telock_7z.exe no longer calling through 0x41802e.
