@@ -7550,3 +7550,32 @@ waste - the same 572-iteration loop was running on every row that reached the se
 
 One gain, **zero losses**, and every counter moved by exactly that row: capability **1992/2678**. Suite
 602/602 serial.
+
+#### 0.17ee Round 133b: the resume target is right, and the divergence is the ladder's own self-modification
+
+Three measurements against the reference's `SE_DEBUG_HOP` log pin where the remaining TELock gap sits,
+without changing any code:
+
+1. **The reference resumes at 0x41808e, not 0x41808d.** Its log has `0x41808c` once (the `int3`), **no**
+   0x41808d (the `nop`), then `0x41808e` once and on to 0x418090/0x418091. So TELock's handler at 0x4180c5
+   is written for `CONTEXT.Eip = int3 address` plus its own `+1`, which lands on 0x41808e - exactly the
+   value taote now computes (round 132's fix). The resume target is therefore correct and is not the gap.
+2. **The reference does reach the frame teardown**: `0x4180a9` (the `pop fs:[0]`) appears exactly once in
+   its log, and `0x418160` (the handler's `ret`) six times - so the trap ladder really is the path to the
+   payload, and it is one pass, not a loop.
+3. **taote's `[fault]` pc is the *branch* instruction, not the fetch address.** After resuming at 0x41808e
+   taote faults with `access=24 addr=0x70000001 pc=0x41808e`, then `addr=0x70000002`, `0x70000003`, ... -
+   i.e. the instruction at 0x41808e is a `ret` that pops successive stack dwords (the sentinel and the
+   handler frames above it), while unicorn reports the fault with eip still on the branch. `seh_on_fault`
+   prints `regs.arch_pc()`, which is why the pc looks pinned.
+
+So in *taote's* image the byte at 0x41808e is a branch, while in the reference's it is `8b c0`
+(`mov eax,eax`) - the ladder decrypts that page as it runs, and the two engines' decrypted bytes differ at
+that point. That is the same class as PEtite's decoder divergence (0.17ds-0.17dz), one level further in: it
+is not the SEH machinery (now demonstrably correct on three separate defects) but the stub's own
+self-modification.
+
+**Next probe**: read the live bytes at 0x41808e with `TAOTE_PROBE=0x41808e` in the run that gets there and
+compare with the reference's `8b c0`; if they differ, diff the *decrypted* page (0x418000-0x418200) against
+the reference's dump at the same moment - the write that first diverges is the instruction to chase, and
+`TAOTE_WATCH_RANGE=0x418000-0x418200:200` names its pc directly.
