@@ -7792,3 +7792,36 @@ them - "first" is right ten times for every time it is wrong here, and the discr
 else (which handler is the one the *decoded image's own* data references, or which frame the run's exit path
 reaches). That is the concrete next question for this row; it is one row, so it is a low priority next to the
 remaining buckets.
+
+### 0.17el Round 137: the remaining "decoded + imports ok + OEP wrong" rows classified by shape pair (no code)
+
+The whole remaining bucket is 23 rows. Classifying the truth's bytes against the claimed ones with the
+picker's own vocabulary (`shape_at` classes, plus `e8 <rel32> 6a ?? 68` / `e8 <rel32> 85 c0` from round 134):
+
+| truth shape | claim shape | rows | what it means |
+|---|---|---|---|
+| 3 `55 8b ec` | 2 `e8 .. .. .. .. e9` | 5 | the claim UNDER-scores a real prologue |
+| 3 `6a ?? 68 ... e8` | 2 `e8 .. e9` | 4 | same, and 3 of these are Alienyze `ladder_scan` |
+| 3 `55 8b ec` | 3 `55 8b ec` | 4 | same shape, wrong instance (jdpack_7z, neolite x2, ...) |
+| 2 `e8 .. e9` | 3 `55 8b ec` | 3 | the claim OVER-scores (amber pspasswd/ru/psshutdown) |
+| 2 `e8 .. 85 c0` | (claim outside the file) | 2 | the claim is in the decoded body, not in file bytes |
+| 2 `e8 .. e9` | 3 `6a/68/e8` | 1 | amber_pipelist - over-scored |
+| others | | 4 | mixed |
+
+So a simple "the bigger shape wins" ranking is contradicted in *both* directions: nine rows want the
+higher-scoring truth over a shape-2 claim, and four rows want a shape-2 truth over the shape-3 claim taote
+made. There is no ordering rule to extract from this bucket - each row needs its own discriminator (and
+`jdpack_7z`, the one same-shape pair with two byte-identical candidates, is the clearest proof: the two
+candidates differ only in which SEH handler they install).
+
+**Why the Alienyze trio is not a cheap fix.** `alienyze_EventLogChannelsView` reports
+`hop ledger (0)`, `passB hits=0`, `.text: C=2 C3=2 valid=0x98ec` and then picks **0x407249** because Alienyze
+sets `ladder_first_c3`, which returns the FIRST c3 hit and *ignores* the validated one. The truth 0xe52e is
+not a c3 hit at all - it carries the Borland `6a ?? 68 <image> e8` shape, i.e. Pass E's answer, and Pass E
+only runs after Pass C has already returned. Reordering would have to beat the round-47 measurement that
+made `ladder_first_c3` the rule (58 Alienyze samples where the first hit is the true EP and the tail hits land
+in the `.alien` store), so it is a family-tuning change with a large blast radius for at most three rows.
+
+**Where the remaining value is, in order**: (1) the 96-row "OEP exact + decoded -> imports only" bucket minus
+RLPack's 63 blocked rows; (2) the 398-row "OEP wrong + undecoded" mass, which needs family ports and where
+Yoda/Themida are excluded by parity; (3) these 23 rows.
