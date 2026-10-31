@@ -8559,3 +8559,21 @@ delivers the earlier 0xc000001d normally - whether the SEH frame the stub just i
 interrupt hook re-enter while an exception is in flight (there is a `seh_retarget_` hand-off between them), or
 whether the #UD arrives while a previous delivery is still staged. The fix will be in taote's #UD/#DF path, not
 in the ladder.
+
+#### 0.17fk Round 162: the round-154 guard is load-bearing - disabling it drops the ladder back to the sentinel abort
+
+A/B on the #DF question (0.17fj): with the walk-outstanding guard's condition forced false (i.e. the old
+behaviour restored), telock_7z.exe reverts **exactly** to the pre-guard state - `TAOTE_LASTPC` ends
+`… 0x418111 0x418160 0x70000000` and the summary carries
+`error=emulation error: Invalid memory read (UC_ERR_READ_UNMAPPED)` again - instead of running on to the
+resolver, the CRC, the keyed decrypt and 0x418aa1.
+
+So the guard is **load-bearing** for TELock's progress, not the cause of the #DF: with it in place the ladder
+clears four stages it never reached before, and the #DF at 0x418aa1 happens *downstream* of a path the guard
+made possible. The A/B was reverted; the tree is unchanged.
+
+That leaves the #DF question exactly where 0.17fj put it, with one suspect removed: it is not the sentinel
+guard. The remaining candidates are (i) unicorn's own escalation of the invalid opcode at 0x418aa1 because the
+stub's freshly installed SEH frame at 0x418a8e changed the guest state the interrupt path reads, and (ii) the
+`seh_retarget_`/context hand-off between the #UD dispatch and the re-entry. Both are testable with the
+existing `TAOTE_SEHDBG` `[intr]`/`[sehd]` lines plus one gated print in taote's #UD arm.
