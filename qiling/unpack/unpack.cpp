@@ -857,6 +857,20 @@ void Unpacker::install(Qiling& ql) {
                 } catch (...) {
                 }
                 std::fprintf(stderr, "[probe]   @eax='%s' @edx='%s'\n", peek(rd("eax")).c_str(), peek(rd("edx")).c_str());
+                // the LIVE bytes at pc: a self-decrypting stub's code cannot be read
+                // from the terminal dump (the page is re-encrypted or the run stops
+                // before the dump), and the disassembly of the instruction that is
+                // about to run is often the whole question.
+                try {
+                    std::string hexbytes;
+                    for (auto b : ql.mem().read(addr, 48)) {
+                        char hb[4];
+                        std::snprintf(hb, sizeof(hb), " %02x", static_cast<unsigned>(b));
+                        hexbytes += hb;
+                    }
+                    std::fprintf(stderr, "[probe]   @pc=%s\n", hexbytes.c_str());
+                } catch (...) {
+                }
                 // TAOTE_PROBE_EBP_DISP=<dec>: also show the dword at [ebp+disp] - the slot an
                 // indirect call is about to use, which is where a pre-resolved API pointer lives
                 if (const char* d = std::getenv("TAOTE_PROBE_EBP_DISP")) {

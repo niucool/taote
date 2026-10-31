@@ -376,6 +376,7 @@ private:
     std::vector<std::uint8_t> continue_context_;
     std::uint64_t continue_context_pc_ = 0;
     bool seh_dispatch_armed_ = false;
+    std::uint64_t seh_trap_pc_ = 0;         // the pc the #BP/#DB trap was reported at
     std::uint64_t seh_fault_pc_ = 0;        // the repeat-guard key (pc)
     std::uint64_t seh_fault_addr_ = 0;      // the repeat-guard key (fault address)
     int seh_repeat_count_ = 0;

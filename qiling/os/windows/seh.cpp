@@ -631,6 +631,7 @@ bool QlOsWindows::seh_dispatch(std::uint64_t fault_addr, std::uint32_t access_ty
     // the repeat guard: an identical (pc, address) fault storm (a handler
     // that resumes without fixing anything) must not spin forever
     const auto pc = regs.arch_pc();
+    seh_trap_pc_ = pc;   // the trap's reported pc, for the #BP resume rule in seh_continue
     if (pc == seh_fault_pc_ && fault_addr == seh_fault_addr_) {
         if (++seh_repeat_count_ > 16) {
             return false;
@@ -769,7 +770,17 @@ bool QlOsWindows::seh_continue() {
                 // Yoda-Protector trap at RVA 0x3063f reads 0xC3 in the terminal
                 // dump while the dispatch that got us here was #BP at that exact
                 // address). An int3 is one byte wide by definition.
-                if (resume != 0 && seh_active_code_ == 0x80000003u) {
+                //
+                // ...but ONLY when the handler left the CONTEXT's Eip on the
+                // trap: a handler that already advanced it (TELock's ladder does
+                // `inc dword [ecx+0xb8]` - CONTEXT.Eip - before answering
+                // CONTINUE_SEARCH) is bumped twice otherwise, which lands
+                // mid-instruction and turns the stub's own decrypt stream into
+                // garbage. Measured on telock_7z.exe: the handler at 0x4180c5
+                // resumes 0x41808e correctly and a second +1 made it 0x41808f
+                // (`sar cl,0x90` in the middle of `8b c0`), after which the stub
+                // walked 0x70000000 upward one fault per byte.
+                if (resume != 0 && seh_active_code_ == 0x80000003u && resume == seh_trap_pc_) {
                     ++resume;
                 }
                 seh_retarget_ = resume;

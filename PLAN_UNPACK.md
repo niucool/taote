@@ -7403,3 +7403,92 @@ unchanged at 116 valid PE / 1 OEP / 0 imports / 0 all-three. Suite 602/602 seria
 
 **Lesson to keep:** a profile edit is a *configure* input. Verify with `TAOTE_STACKDBG`/a probe that the
 value is live BEFORE spending a corpus run on it.
+
+### 0.17ec Round 132: TELock's ladder is a *handler-driven* trap stream - and taote was advancing the resume pc twice
+
+Round 131 left the stub walking taote's synthetic SEH sentinel arena one byte per fault. The live bytes
+(the probe now prints 48 hex bytes at pc - a self-decrypting stub's code cannot be read from the terminal
+dump) name the mechanism completely. `telock_7z.exe`, at 0x418086, is a stretch of deliberate traps:
+
+    418086  64 ff 30            push  dword ptr fs:[eax]     ; eax = 0 -> push the chain head
+    418089  64 89 20            mov   dword ptr fs:[eax],esp ; install the frame (handler = 0x4180c5)
+    41808c  cc                  int3                        ; trap #1  (#BP)
+    41808d  90                  nop
+    41808e  8b c0               mov   eax,eax
+    ...
+    4180a6  33 db               xor   ebx,ebx
+    4180a8  f7 f3               div   ebx                       ; trap #2  (#DE, divide by zero)
+    4180aa  64 67 8f 06 00 00   pop   dword ptr fs:[0]
+    4180b0  83 c4 04            add   esp,4
+
+so the "decryptor" is a sequence of instructions that **must raise exceptions**, and the handler that owns
+them is the guest's own 0x4180c5:
+
+    4180c5  8b 44 24 04         mov  eax,[esp+4]        ; ExceptionRecord
+    4180c9  8b 4c 24 0c         mov  ecx,[esp+0xc]      ; ContextRecord
+    4180cd  ff 81 b8 00 00 00   inc  dword [ecx+0xb8]   ; CONTEXT.Eip += 1      (0xb8 = Eip)
+    4180d3  8b 00               mov  eax,[eax]          ; ExceptionCode
+    4180d5  3d 94 00 00 c0      cmp  eax,0xC0000094     ; #DE?
+    4180da  75 24               jne  0x418100
+    4180dc  ff 81 b8 00 00 00   inc  dword [ecx+0xb8]   ; Eip += 1 again -> past `div ebx`
+    ...
+    418100  3d 04 00 00 80      cmp  eax,0x80000004     ; #DB -> 0x418113
+    418107  3d 03 00 00 80      cmp  eax,0x80000003     ; #BP -> 0x418120
+    41810e  6a 01 / 58 / eb 4d  push 1; pop eax; jmp 0x418160   ; anything else: CONTINUE_EXECUTION
+    418120  8b 81 b4 00 00 00   mov  eax,[ecx+0xb4]     ; CONTEXT.Esp
+    ...                        (Dr0 = Esp+0x24, Dr1 = Esp+0x1f, Dr2 = Esp+0x1a, Dr3 = Esp+0x11)
+    418150  33 c0               xor  eax,eax
+    418152  81 61 14 f0 0f ff ff   and dword [ecx+0x14],0xffff0ff0   ; Dr6
+    418159  c7 41 18 55 01 00 00   mov dword [ecx+0x18],0x155         ; Dr7 (arm the breakpoints)
+    418160  c3                  ret                          ; eax = 0 -> CONTINUE_SEARCH
+
+taote's CONTEXT layout already matches (`kCtxEip = 0xb8`, `kCtxEsp = 0xc4`) and the frame it builds puts
+ExceptionRecord at `[esp+4]` and ContextRecord at `[esp+0xc]`, which is exactly what the handler reads -
+so the dispatch itself was right. The bug was one line of *arithmetic*: after the handler answers
+CONTINUE_SEARCH and no outer frame exists, `seh_continue`'s exhausted path bumped the resume pc by one for
+`#BP` (a rule added for Yoda-Protector's int3 probe) - but TELock's handler had **already** advanced
+`CONTEXT.Eip` itself. The stub was therefore resumed one byte past the instruction the handler pointed at:
+
+| | resume pc | what is there |
+|---|---|---|
+| handler's intent | 0x41808e | `8b c0` (mov eax,eax) |
+| taote, before | **0x41808f** | `c0 f9 90` - the middle of `mov eax,eax` (`sar cl,0x90`) |
+| taote, now | 0x41808e | the instruction boundary the handler chose |
+
+That mid-instruction entry is what produced the 0x70000000 byte-per-fault walk: the "code" from 0x41808f
+onward is garbage that reads the sentinel page.
+
+**The fix** is one condition: bump only when the handler left the CONTEXT's Eip on the trap pc
+(`resume == seh_trap_pc_`), which preserves the Yoda rule for handlers that do not touch the context and
+stops TELock's handler being double-counted. `seh_trap_pc_` is recorded in `seh_dispatch`.
+
+**Also shipped:** `TAOTE_PROBE` now prints 48 hex bytes at pc (`[probe]   @pc= 8b 44 24 04 ...`). Without
+it the ladder was unreadable: the terminal dump of that page is still ciphertext, and the handler is only
+reachable live.
+
+**Measured** (arms, 314 rows: TELock 116 + Yoda-Protector 101 + PECompact 97) - identical to r72 on every
+counter:
+
+| family | r72 | now |
+|---|---|---|
+| PECompact | 97 / 96 PE / 91 OEP / 94 imp / 91 all | 97 / 96 / 91 / 94 / 91 |
+| TELock | 116 / 116 / 1 / 0 / 0 | 116 / 116 / 1 / 0 / 0 |
+| Yoda-Protector | 101 / 101 / 0 / 1 / 0 | 101 / 101 / 0 / 1 / 0 |
+
+So this is a *correctness* fix with no graded row movement: the ladder now resumes where its own handler
+says, and the remaining TELock blocker is the next one in the stream - the handler answers
+CONTINUE_SEARCH (eax = 0) for both traps, so taote's raw-chain continue applies the handler's context, runs
+on to 0x4180a8's `div ebx`, and the same handler handles #DE; what still does not happen is the *third*
+step, the pop of the frame at 0x4180aa and the jump into the payload. Corpus r73 below.
+
+**Corpus r73** (2678 rows, 85 s, 4 workers, 76 min), against r72:
+
+| run | valid PE | OEP exact | imports | all-three |
+|---|---|---|---|---|
+| r72 (stack fix) | 2675 | 2115 | 2083 | 1991 |
+| **r73 (#BP resume fix)** | **2675** | **2115** | **2082** | **1990** |
+
+Exactly one row moved: `nspack_ADInsight.exe`, which failed at the **86 s wall** (the same row that passed
+at 86 s in r72) - it passes solo twice at 1 worker / 200 s (35.3 s and 35.7 s, 776 imports), so the graded
+delivery is unchanged at 1991/2678 and this fix is neutral on the corpus as it was on the arms. Suite
+602/602 serial.
