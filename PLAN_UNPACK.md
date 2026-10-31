@@ -9049,3 +9049,28 @@ finding as the table above. That change was reverted (no effect, no reason to ke
 earlier census) and `jdpack_7z.exe` (the two-startup-frame row needing a semantic discriminator). Everything else
 in the bucket belongs to the decode/layout class - which is also TELock's open question - and should be worked as
 "why is the entry page not the original's code", not as scoring.
+
+#### 0.17gc Round 180: RETRACTING 0.17gb - the bucket triage was layout-blind, and the reference proves these rows are picker rows
+
+0.17gb compared 16 bytes at the *original's* entry RVA between the original file and our artifact and concluded
+that 21 of 23 rows were decode failures. **That conclusion is withdrawn.** The test was layout-blind, and the
+reference run on the same row shows why:
+
+    amber_pipelist.exe
+      original file, rva 0x550b : e8 9b 86 00 00 e9 35 fe ff ff ...
+      taote artifact, rva 0x550b: 7c 24 0c 8b c1 8b d1 03 c6 3b fe ...
+      pegasus artifact, rva 0x550b: 7c 24 0c 8b c1 8b d1 03 c6 3b fe ...   <- IDENTICAL to ours
+
+and **pegasus's artifact carries AddressOfEntryPoint = 0x550b, exactly the original's**. So the reference reaches
+an exact OEP match on a row where the artifact's bytes at that RVA differ from the *not-packed file's* bytes -
+i.e. the artifact is a relocated/rewritten image and "same bytes at the same RVA" is not the test for anything.
+
+A layout-aware re-run of the triage gives the opposite headline: **21 of 23 rows contain the original's 16
+entry bytes SOMEWHERE in the artifact** (only `petite_HDDScan` does not). So the payloads ARE decoded; the bucket
+is a picker problem, as originally thought, and no reclassification of it is warranted.
+
+What *is* worth recording from the round: `amber_pipelist`'s mismatch is small - we claim rva **0x534a**, the
+truth is **0x550b**, 449 bytes apart, both inside `.text` - so the picker/ladder chose a neighbouring candidate
+rather than missing the payload. The next measurement is therefore the original one, done properly: with
+`TAOTE_UNPACK_DEBUG=1`, list the candidates the ladder ledgers for this row and find which rule prefers 0x534a
+(shape score, last-c3, or the incumbent prior) over 0x550b - and check whether 0x550b is in the list at all.
