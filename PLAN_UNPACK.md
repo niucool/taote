@@ -8901,3 +8901,29 @@ Where that leaves the decoy: the choice between the payload and 0x41802e is made
 selects the decoy - probe forward from 0x418e2c through the cells that lead to 0x4192e3 and find the conditional
 that decides `[0x121ffdc]`'s value (it is written with 0x418007 first and 0x41802e afterwards, so *something*
 selects 0x41802e specifically).
+
+#### 0.17fx Round 175: the "decoy" reading is not trustworthy either - and TELock gets parked here
+
+Probing 0x418002 (an executed pc in the same page, earlier in the run) shows the page in its **pre-decryption**
+state: `e8 02 00 00 00 e8 00 e8 00 00 00 00 5e 2b c9 58 74 02 cd 20 ...` - i.e. the same region whose bytes at
+0x41802e I read as "decoy" (0.17fv) is *rewritten* during the run.
+
+That invalidates 0.17fv's conclusion: **reading 0x41802e is not evidence of a decoy**, because the bytes there
+depend on when they are read, and the only reads so far were at a time when the page was still encrypted. The
+honest statement is the one from 0.17ft: the stub calls through `[0x121ffdc]` to a value the run writes there
+(0x418007 first, then 0x41802e), the transfer never completes, and *why* is unresolved.
+
+**TELock is parked here**, deliberately, after sixteen rounds. What is established (all measured, all in this
+plan): the entire ladder up to the call - trap ladder, MZ scan, module check, sorted export walk, the 13-target
+resolver (`VirtualProtectEx` was the missing API), the anti-tamper gate, CRC-32, keyed decrypt, SEH re-install,
+the #UD/ICEBP/TF trap deliveries, the self-read via CreateFileA/ReadFile, CreateMutexA - and seven shipped
+mechanisms that are individually correct. What is not established: the branch after the ICEBP series.
+
+The way to reopen it is **not** another forward probe. It is the reference's own state at the same point: pegasus
+decodes this sample end to end, so a diff of guest memory (the 0x418000 page and the stack slot) at the moment of
+the call would say immediately whether our page holds stale/encrypted bytes where the reference holds code. That
+is a multi-round comparison harness, not a one-round fix, and it should not be started without the budget for it.
+
+Per the standing instruction to keep producing measured rows, the next work item is the recorded alternate
+buckets: the 23-row picker bucket (valid PE, OEP wrong, imports already passing) and the 126-row imports-only
+bucket. Both are enumerated in this plan with per-row evidence.
