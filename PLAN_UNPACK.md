@@ -9074,3 +9074,24 @@ truth is **0x550b**, 449 bytes apart, both inside `.text` - so the picker/ladder
 rather than missing the payload. The next measurement is therefore the original one, done properly: with
 `TAOTE_UNPACK_DEBUG=1`, list the candidates the ladder ledgers for this row and find which rule prefers 0x534a
 (shape score, last-c3, or the incumbent prior) over 0x550b - and check whether 0x550b is in the list at all.
+
+#### 0.17gd Round 181: amber_pipelist - the truth address EXECUTES once and is never latched; the ledger A/B is worse
+
+Following 0.17gc, three measurements on `amber_pipelist.exe` (we claim rva 0x534a, truth 0x550b):
+
+1. **The hop ledger holds four entries and the truth is not among them**:
+   `0x40dbab@188547 0x40534a@188549 0x4062f0@188549 0x404005@188560`. So this is not a picker choice between
+   competing candidates - the picker never saw 0x40550b.
+2. **Both addresses execute exactly once** (`TAOTE_PROBE=0x40550b` -> 1 hit, `TAOTE_PROBE=0x40534a` -> 1 hit).
+   The guest does reach the true entry; the hop detector simply does not record it.
+3. **`TAOTE_CLAIM_LEDGER=0` is not the answer**: it restores the ever-written behaviour and the ledger explodes to
+   **470 candidates** (the reference's own reason for the claim ledger), after which the pick is 0x4092ff - four
+   thousand bytes further from the truth than the current 0x534a. So the conservative ledger is right, and the
+   question is narrower: why is this one execution inside a written section not treated as a hop when it happens.
+
+The next probe is therefore on the hop path itself: log, for the single execution at 0x40550b, whether a claim
+range covers it, whether that claim was already consumed (`written_ranges_` erase), and whether `dumped_addrs_`
+already holds it - i.e. the three ways this code can decline. That is one gated print in the exec hook's claim
+test, and it decides between "the claim for .text was consumed by an earlier hop" (then a consumed-claim re-latch
+rule is the fix) and "the address is inside the *currently running* claim, so it is treated as the stub's own
+code" (then the rule is about transfers between claims).
