@@ -7893,3 +7893,23 @@ not a dll-attribution one. So the 19-row "attribution" class is really three cla
 
 The alias patch was reverted (artefact contract unchanged, corpus untouched). Class 2 is where the 19 rows
 actually live, and it is a rebuild-attribution project, not an alias.
+
+**Class 2's planned fix does not exist: these images have no import descriptors left.** The next step was
+"let the in-image IDir's attribution outrank the thunk-owner guess", the mechanism RLPack's case had pointed
+at. Measured on `alienyze_dat2file.exe`, that data is not there:
+
+* the decoded dump at the ORIGINAL's import RVA (0xc000) holds **strings**, not descriptors -
+  `libgcc_s_dw2-1.dll`, `__reg...` - because the payload is rebuilt at a different layout (dump 0x20000 bytes
+  against the original's 0x8200);
+* scanning the whole dump for 20-byte `IMAGE_IMPORT_DESCRIPTOR` shapes whose `Name` RVA points at a dll
+  string finds **zero** hits, and `kernel32.dll` does not even appear as a string (`msvcrt.dll` at 0x8834,
+  `mingwm10.dll` at 0x7b10, `libgcj-11.dll` at 0x7639 do).
+
+So the payload's imports survive only as *names* (the runtime GetProcAddress surface), with no module
+attribution anywhere in the image - which is why taote falls back to the thunk owner, and why a MinGW/GCJ
+image's CRT names end up under `mingwm10.dll`. The fix therefore is not "prefer the descriptor"; it is a
+name-to-module decision on evidence taote must synthesise: which stub dll the slot resolved through, whether
+that dll really exports the name (dll/name cross-evidence beats a single thunk), and - for the aliasing case -
+the API database's own dll lists, which file those CRT names under `crtdll,ucrt,ucrtbase` rather than msvcrt.
+That is a rebuild-attribution project with several moving parts, not a one-line port, and it is the honest
+state of the 19-row class.
