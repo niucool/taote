@@ -8505,3 +8505,24 @@ ends at 0x418aa1 with no fault and no timeout - whether the emulation budget/cou
 summary reports `stages=1`) or a stop was requested, and what `0x418c05` does. Note the live byte stream there
 differs by one byte from the write-trace reconstruction (`33 66 f7 f3 …` vs `66 f7 f3 …`), so this region is
 being rewritten as it runs and only live reads count.
+
+#### 0.17fi Round 160: the run ends on int 8 (#DF) after a #UD dispatch - not on a timeout and not on the stale-retarget guard
+
+0.17fh asked why telock_7z.exe stops at 0x418aa1 with no `error=` line. `TAOTE_SEHDBG` answers it in one line:
+
+    [sehd] code=c000001d fault=4186a8 pc=4186a8 chain=121ffb8 next=0 handler=41868a   <- #UD dispatched
+    [intr] intno=0x8 pc=0x418aa1 esi=0x10011101 ...                                    <- #DF arrives
+    [unpack] telock_7z.exe ... oep=0x418037 stages=1 imports=2                          <- clean end
+
+and the whole run takes **0.3 s**, so nothing is exhausted: unicorn delivers `intno 8` = **#DF** at 0x418aa1,
+which is not in taote's hardware-interrupt table (that table covers 0, 1, 3, 5, 6, 13, 14, 17), so the
+exception is ignored and emulation ends.
+
+The obvious suspect - the `seh_retarget_ != 0` guard in `seh_on_interrupt` that dropped TELock's `div ebx` in
+round 133 - was checked with a gated print inside the guard: **it does not fire**. `seh_retarget_` is zero at
+that moment, so the guard is not involved.
+
+So the question is what unicorn escalates *from*: a #DF means a fault occurred while another exception was
+being delivered, i.e. inside the `#UD` handler path at 0x41868a (dispatched for the 0xc000001d at 0x4186a8).
+The next measurement is that handler's continuation - probe 0x41868a forward and read the instruction stream
+it returns into, including whether the CONTEXT it loads points somewhere taote cannot map.
