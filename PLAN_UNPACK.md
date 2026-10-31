@@ -8656,3 +8656,31 @@ order is visible) read the bytes at 0x418ae4 and 0x418ade *after* the ReadFile c
 what the decrypted ladder had there. If the stub expects to decrypt what it just re-read (which is the standard
 anti-dump shape: read the packed bytes back, decrypt in place, continue), then the missing piece is that
 decrypt - not a mapping or SEH problem.
+
+#### 0.17fo Round 166: the endgame is TELock's SINGLE-STEP loop (`or [esp],0x100 ; popf`) - and no #DB is delivered there
+
+Probing 0x418ad5 (which executes just before the end) decodes the loop the stub enters after its self-read:
+
+    418ad5  81 0c 24 00 01 00 00   or   DWORD PTR [esp],0x100   ; set TF (trap flag)
+    418adc  75 02                  jne  0x418ae0
+    418ade  cd 20                  int  0x20                  ; jump fodder, never taken
+    418ae0  9d                     popf                        ; load the flags - TF is now ON
+    418ae1  eb 01                  jmp  0x418ae4
+    418ae4  eb f8                  jmp  0x418ade                ; back into the obfuscated pair
+    418ae6  0f 83 1a 01 00 00      jae  ...
+
+So the stub arms the **trap flag** and then runs a two-instruction jump pair: with TF on, every instruction must
+raise a single-step `#DB` (NT 0x80000004), which its own SEH frame - the one it installed at 0x418a8e - handles.
+That is TELock's anti-debug single-stepping and it explains why the earlier rounds saw `intno 1` twice at
+0x419a5d in this same run.
+
+At 0x418ae1, however, **no `intno 1` is delivered at all**: `TAOTE_SEHDBG`'s interrupt list ends at
+`intno=0x6 pc=0x418aa1`, the pc ring stops on 0x418ae1, and the run ends cleanly in 0.2 s. The stub's single-step
+loop therefore never gets its trap.
+
+That makes the next question concrete and it is a taote-side one: when taote dispatches a #DB it **clears TF in
+the live EFLAGS** (so the trap is not re-raised immediately - a sensible rule for the dispatch), and the profile's
+`popf` must set TF again for the guest's loop to work. Two things are worth measuring in one run: whether the
+guest's `popf` at 0x418ae0 actually sets TF in taote's EFLAGS image, and whether unicorn then raises the
+single-step trap for the next instruction. If the `popf` result is discarded or TF is masked, the fix belongs in
+the interrupt/flags path - and it would be the first mechanism in this family that is not about decoding at all.
