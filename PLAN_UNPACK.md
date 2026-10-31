@@ -8014,11 +8014,18 @@ So **TELock's ladder is not crashing and not diverging in its SEH handling: it p
 taote's hand-written stub DLL does not have a real module's export-directory layout where the walk looks. The
 reference does not park because its kernel32 is a real (or real-shaped) module.
 
-That re-frames the whole family: TELock's 116 rows are gated by **stub-DLL shape**, not by the OEP picker, not
-by the trap ladder and not by the imports. The fix direction is `write_stub_dll`'s export directory
-(tests/Pe_Sample_Runner.hpp): a real PE's export directory carries the module name string in its name table at
-the offsets this walk reads, and the synthesized one carries 16-byte `ret` cells. Making the stub's export
-layout real-shaped is a loader-side change with corpus-wide blast radius (every family resolves through these
-stubs), so it needs its own measurement round - and it is the same idea as the "wider stub rootfs" that was
-rejected earlier for PECompact's budget, which is why it must be scoped to the export *directory* rather than
-to the whole stub.
+**Correction (same round, measured): the stub layout is NOT the problem.** The first reading of the park was
+"taote's stub DLL has no real export-directory layout", and that is wrong on inspection. `write_stub_dll`
+(tests/Pe_Sample_Runner.hpp:174-285) writes a genuine `IMAGE_EXPORT_DIRECTORY`: `Name` RVA at +0xc patched to
+`edata_rva + strings_off`, `NumberOfNames` at +0x18, `AddressOfNames` at +0x20, and the *module name is the
+first string* at `strings_off`, so `[Name RVA]` really does read "kernel32.dll" (which the guest's
+`and eax,0x5f5f5f5f` uppercases into "KERN"). A probe at the park site confirms the guest is reading a REAL
+export-name pointer - `eax=0x10013991`, `@eax='lstrlenW'`, i.e. the first entry of kernel32's name table - so
+the walk is iterating export NAMES, not validating the module name, and it parks afterwards.
+
+So the ladder does park itself (that part stands: `push 0xfeeb; jmp esp` is the deliberate `eb fe` hang), but
+not because the stub's export table is malformed. What is left to explain is why its name walk gives up after
+finding `lstrlenW` - and the page it runs from is self-modifying, so the mask/cmp sequence must be dumped live
+in the SAME run that parks (TAOTE_PROBE at 0x4181ba and 0x4181c6, immediately before the push), not read from
+a terminal dump. That is the next measurement, one round's work, and it is the last thing between the decoded
+ladder and the payload.
