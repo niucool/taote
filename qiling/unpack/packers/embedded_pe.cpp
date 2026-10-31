@@ -794,8 +794,15 @@ public:
             if (packed_ep_rva > psrc) {
                 avail = std::min<std::size_t>(avail, static_cast<std::size_t>(packed_ep_rva - psrc));
             }
-            const std::size_t n =
-                std::min<std::size_t>(avail, static_cast<std::size_t>(hollow_end - hollow_start));
+            // Round 158 (the pegasus ASPack lesson, family-agnostic): a packed
+            // source window is NOT bounded by the containing section. Clamping
+            // this copy to the hollow section's virtual size truncated the body
+            // on every sample whose payload is larger than the section the
+            // section table describes - the same assumption that hid the
+            // Alienyze overlay gap (0x6101 bytes the section table never
+            // describes). Copy what the source actually has, bounded only by
+            // the image itself.
+            const std::size_t n = avail;
             if (score >= 20 && psrc >= hollow_end && n > 0x1000) {
                 std::copy_n(mem.begin() + static_cast<std::ptrdiff_t>(psrc),
                             static_cast<std::ptrdiff_t>(n),

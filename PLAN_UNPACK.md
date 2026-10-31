@@ -8429,3 +8429,43 @@ Corpus **r79** against r78: valid PE 2676, OEP 2122, imports 2082, all-three **1
 The single row difference is `winupack_Bginfo.exe`, which hit the 85 s wall (it passes solo in one pass:
 oep 0x5b5d42, imports 2002), so **0 real gains and 0 real losses**. Kept on fidelity grounds: it implements a
 real Windows API taote lacked, and it removes a hard stop in the one family the reference solves.
+
+#### 0.17fg Round 158: two family-agnostic lessons from the reference's ASPack work, audited against taote
+
+**(b) A packed source window is not bounded by its containing section.** Real counter-example from the
+reference: ASPack's `.data` entry sits 0x3400 bytes into a 0xC00 raw window and a `.rsrc` entry 0x74EC0 into
+0x17CC0; clamping the source to the section produced false bails.
+
+taote had exactly one such clamp, in `adopt_embedded_pe`'s Alienyze body copy
+(qiling/unpack/packers/embedded_pe.cpp):
+
+    const std::size_t n = std::min<std::size_t>(avail, hollow_end - hollow_start);
+
+i.e. the copy was truncated to the **hollow section's virtual size** - the same assumption that hid Alienyze's
+own overlay gap (0x6101 bytes the section table never describes). Widened to `n = avail`, which is already
+bounded by the image and by the packed EP.
+
+Measured on the **126-row Alienyze arm** (`/tmp/al.json`): valid PE 125, OEP 108, imports 79, all-three **75** -
+identical to r79's Alienyze numbers, **0 gains, 0 losses**, and `alienyze_dat2file.exe` byte-identical
+(code_sim 0.0784 both ways). So the truncation is real but this corpus never exercises it; kept because it is a
+construction defect with zero measured cost, and the path is gated on an actual `.alien` section, so no other
+family can reach it.
+
+**(a) Never mirror a decorator's one-shot state in a local flag.** The reference kept a local mirror of ASPack's
+one-shot filter byte and got one wrong byte at `.rsrc+0x6502` when a section bailed; the fix is to re-read the
+guest's own byte at every fire.
+
+Audited taote's unpack state for that shape and found none: the run-time caches are either re-validated on
+every access or record taote's own actions rather than the guest's. Specifically:
+
+* `wr_cache_lo_/wr_cache_hi_` (the hot-path claim cache) is negative-cached only - a miss is never remembered -
+  is refreshed on every hit, and is cleared whenever the claim ledger consumes a range (unpack.cpp:1258);
+* `exec_page_seen_` / `dumped_addrs_` / `muted_` are one-shot *by design* (the reference's per-page decrypt
+  tracking and its hook muting), and they latch taote's actions, not the stub's state;
+* no member caches a guest byte, key, shift or filter value: `grep` for `*_(key|shift|filter|count|state) = …
+  mem().read/large u8 reads` returns nothing;
+* the only `static` locals in the hot path are env-read-once switches (`claim_ledger`, `incumbent_rule`), which
+  are configuration, not guest state.
+
+So (a) is closed as an audit with no finding - the cheapest possible outcome, and worth recording so it is not
+re-audited blind.
