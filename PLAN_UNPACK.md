@@ -7569,13 +7569,46 @@ without changing any code:
    handler frames above it), while unicorn reports the fault with eip still on the branch. `seh_on_fault`
    prints `regs.arch_pc()`, which is why the pc looks pinned.
 
-So in *taote's* image the byte at 0x41808e is a branch, while in the reference's it is `8b c0`
-(`mov eax,eax`) - the ladder decrypts that page as it runs, and the two engines' decrypted bytes differ at
-that point. That is the same class as PEtite's decoder divergence (0.17ds-0.17dz), one level further in: it
-is not the SEH machinery (now demonstrably correct on three separate defects) but the stub's own
-self-modification.
+**Correction (same round, measured):** the probe says taote's live bytes at 0x41808e are `8b c0` too -
+
+    [probe] pc=0x41808e ... @pc= 8b c0 f9 90 8d 04 5d 34 12 00 00 f8 90 c1 eb 05 fc ...
+
+so there is NO decode divergence there and the clause above is wrong: the `ret` in the sled was never a byte
+at 0x41808e. The `[fault] ... pc=0x41808e` lines pin the pc on the *staged retarget*, not on the faulting
+instruction, and `TAOTE_WATCH_RANGE=0x418000-0x418200` confirms the whole page is written by one decryptor
+loop at `pc=0x418030` (2,597 single-byte writes) in both engines.
 
 **Next probe**: read the live bytes at 0x41808e with `TAOTE_PROBE=0x41808e` in the run that gets there and
 compare with the reference's `8b c0`; if they differ, diff the *decrypted* page (0x418000-0x418200) against
 the reference's dump at the same moment - the write that first diverges is the instruction to chase, and
 `TAOTE_WATCH_RANGE=0x418000-0x418200:200` names its pc directly.
+
+#### 0.17ef Round 133c: the sentinel hook must SURFACE (return false) - measured, and it is not enough on its own
+
+The `[run] emu_start begin=...` trace added for this round named the mechanism: after
+`[sehc] exhausted -> resume 41808e` there is **no further `[run]` line at all** - the run loop never
+restarts, so the sled happens *inside* one `uc_emu_start` call. The sentinel branch of `seh_on_fault`
+returned `true`, which in unicorn's raw hook contract means "handled, retry this access": unicorn retried
+the STALE translation block, and because the handler's `ret` had already moved the fetch one byte past the
+sentinel, each retry faulted at sentinel+1, +2, +3, ... with the pc pinned on the staged retarget.
+
+`seh_fault_trampoline`'s own comment states the contract the branch was violating: *"Returns false (the
+fault surfaces to uc_emu_start's error) whenever the retarget is armed - the run loop then restarts the
+emulation at the staged target."*
+
+**Measured, and NOT kept.** Making the sentinel branch surface (`seh_continue(); return false;`) does what it
+says on TELock: the `#DE` at 0x4180a7 is now dispatched (`[sehd] code=c0000094`), i.e. the trap stream is
+handled end to end for the first time. But the ladder then executes *the stack* instead - `TAOTE_LASTPC`
+shows the pc pinned on 0x121ffd8 (the frame address) after the resume - so the frame teardown still does not
+reach the payload, and the arms measure a **loss**: Yoda-Protector 101 -> **100** valid PE, TELock and
+PECompact unchanged (PECompact still 97/97/92/95/92). Zero gains, one loss, so the change was reverted and
+the tree is back at f3845d2.
+
+The two facts worth keeping from the attempt:
+1. The sentinel branch of `seh_on_fault` violates its own documented hook contract (returns true while a
+   retarget is staged). Any future attempt on TELock must fix the *resume* side in the same change, or the
+   sled simply relocates from the sentinel page to the stack.
+2. After a surfaced `#DE`, the value the ladder resumes at is the frame address (0x121ffd8), not
+   `CONTEXT.Eip = 0x4180a9` - so the CONTEXT the #DE handler patches is not the one taote loads afterwards,
+   which is the concrete next question (log `CONTEXT.Eip` inside `seh_load_context` and compare it with the
+   handler's `[ecx+0xb8]` writes).
