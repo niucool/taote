@@ -284,6 +284,17 @@ bool QlOsWindows::seh_on_fault(int access, std::uint64_t address) {
                                   address < seh_sentinel_ + 0x1000;
     if ((access == UC_MEM_FETCH_PROT || access == UC_MEM_FETCH_UNMAPPED) &&
         (address == seh_sentinel_ || (in_sentinel_page && seh_frames_.empty()))) {
+        // A fetch at the sentinel is by contract a guest handler returning.
+        // With the dispatch already exhausted there is no answer to read, and
+        // acting on the stale eax re-enters the guest's handler forever
+        // (measured on telock_7z.exe). Surface the fault so uc_emu_start
+        // unwinds and the run loop applies any staged retarget.
+        if (!seh_call_outstanding_) {
+            if (std::getenv("TAOTE_SEHDBG") != nullptr) {
+                std::fprintf(stderr, "[sehc] sentinel fetch with no walk outstanding -> surface\n");
+            }
+            return false;
+        }
         return seh_continue();
     }
 
@@ -595,6 +606,7 @@ bool QlOsWindows::seh_call_frame(std::uint64_t frame) {
 
     seh_walk_frame_ = frame;
     seh_retarget_ = handler;
+    seh_call_outstanding_ = true;
     return true;
 }
 
@@ -784,6 +796,9 @@ bool QlOsWindows::seh_continue() {
                     ++resume;
                 }
                 seh_retarget_ = resume;
+                // the walk is exhausted: nothing is left to answer this
+                // dispatch, so a later sentinel fetch is not a handler return
+                seh_call_outstanding_ = false;
                 if (std::getenv("TAOTE_SEHDBG") != nullptr) {
                     std::fprintf(stderr, "[sehc] exhausted -> resume %llx\n",
                                  static_cast<unsigned long long>(seh_retarget_));

@@ -8316,3 +8316,34 @@ the flag has to model the *walk*, not the single call - it must stay set until t
 fully unwound (the synthetic frame list drains), so the CRT's own multi-return path keeps working while
 TELock's no-call-in-progress repeat still surfaces. That is the next change to make, and its acceptance test is
 both the 602 suite and telock_7z.exe showing no abort plus the park at 0x121ffd8.
+
+#### 0.17fc Round 154: the walk-scoped guard ships - TELock's spurious handler re-entry is gone (corpus-neutral, 0 losses)
+
+The refinement from 0.17fb, implemented: `seh_call_outstanding_` is set in `seh_call_frame` and cleared **only
+on an exhausted walk** (the branch that stages `resume` and prints `[sehc] exhausted`), not on every
+`seh_continue` entry. The sentinel branch then surfaces the fault (`return false`) when a sentinel fetch
+arrives with the flag clear.
+
+Why that lifetime is right: the CRT's filter-then-handler path (`seh_test_x86.exe`) answers *twice* for one
+staged call and both answers arrive through the sentinel, so clearing per call broke it (0.17fb, suite
+602 -> 601). An **exhausted** walk, by contrast, has nothing left to answer, so a later fetch there can only
+be a stale re-entry - which is exactly TELock's loop.
+
+Measured:
+* serial suite **602/602** (the 0.17fb failure is fixed by the narrower lifetime);
+* `telock_7z.exe`: the `error=emulation error: Invalid memory read (UC_ERR_READ_UNMAPPED)` line is **gone**,
+  the 15-instruction handler cycle is gone, and the run ends on the guest's own deliberate `eb fe` park at
+  0x121ffd8;
+* TELock's rows now consume the **full 85 s budget** (`dur=85`) instead of aborting at `dur=0` - the ladder
+  runs on instead of dying, which is a real behavioural change for the family even though it has not yet
+  produced a row;
+* **corpus r78**: valid PE 2676, OEP 2122, imports 2083, all-three **1997** against r77's 2676/2122/2082/1996.
+
+The one row-level difference is `mpress_ComIntRep.exe`, which failed at the wall in r77 and passes in r78:
+it is a **known flake** (passes solo in ~35 s), so the graded +1 is that flake landing rather than a
+capability gain. Diffing against r77 row by row gives **0 gains, 0 losses, 0 real movements**: the guard is
+fidelity, not score. Kept because it removes a defect that was aborting the run on taote's own stale state,
+and because a run that keeps emulating is the precondition for every remaining TELock hypothesis.
+
+Cost, recorded honestly: 152 rows now finish at 84-86 s (up from ~110), i.e. the corpus takes ~110 min at
+4 workers instead of ~70.

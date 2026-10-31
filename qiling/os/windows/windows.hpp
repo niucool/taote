@@ -363,6 +363,14 @@ private:
     uc_hook seh_write_prot_hook_ = 0;  // the RO-page store (MEM_WRITE_PROT)
     std::uint64_t seh_sentinel_ = 0;        // the staged return page (mapped rw-noexec)
     std::uint64_t seh_retarget_ = 0;        // the pending run-loop restart target
+    // True between a staged handler call and the point where the dispatch that
+    // staged it is fully unwound. A sentinel fetch with this clear is not a
+    // handler answer - eax is stale - and acting on it re-enters the guest's
+    // handler forever (telock_7z.exe: `ret` at 0x418160 -> sentinel -> 0x4180c5,
+    // a repeating 15-instruction cycle that ends in an unmapped read). Cleared
+    // only on an exhausted walk, so the CRT's filter-then-handler double return
+    // (seh_test_x86.exe) keeps working.
+    bool seh_call_outstanding_ = false;
     std::uint64_t seh_context_addr_ = 0;    // the mapped CONTEXT (the reload path)
     std::uint64_t seh_walk_frame_ = 0;      // the fs:[0] frame whose handler is running
     std::uint32_t seh_active_code_ = 0;     // the exception code being dispatched
