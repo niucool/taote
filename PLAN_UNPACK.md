@@ -7677,8 +7677,19 @@ fallback for a DLL whose declared base is 0).
 0x121ffd8; arms 99 of 101 valid PE for Yoda, TELock 116/1/0/0, PECompact 97/97/92/95/92 - the same result as
 133c/133d, so nothing further shipped from this round.
 
-**Next attempt, precisely framed**: move the synthesized stub DLLs to a high base (0x77000000, the reference's
-kernel32 address) so the downward scan from the kernel32 anchor walks past the DLLs to the packed image at
-0x400000, and measure the TELock arm first. Two things to check before spending the corpus run: that the LDR
-walkers (Alienyze, Amber) do not depend on the 0x10000000 neighbourhood, and that nothing hardcodes
-0x10000000 (it is only the profile's `dll_address` fallback and the stub writer).
+**Correction (same round): the MZ hit is NOT the divergence.** The reference's own hop log runs the same
+scan exactly once - `0x418163, 0x418169, 0x41816f, 0x418175, 0x41817b, 0x418180`, one hit each, so its loop
+body never repeats either - and then continues `0x41818a -> 0x41818d -> 0x418192 -> ... -> 0x4181aa`, the
+12-byte-record copy interpreter. So "the scan finds an MZ at its anchor" is the *intended* behaviour (any
+loaded module starts with one) and moving the stub DLLs high would change nothing: the anchor is the module
+base, so its first test always succeeds. The 133e framing above is therefore withdrawn; what remains true
+and useful from it is the probe value itself (`[ebp+0x1baf]=0x10011000`, scan anchor 0x10010000, one-byte
+`cmp word [edx],0x5a4d` test, `sub edx,0x10000`, loop) and the fact that the ladder reaches 0x418163 only
+with the (measured-negative) surface change in place.
+
+**Where this leaves TELock**: the ladder is decoded from its entry to the copy interpreter, the SEH side is
+correct in all three respects measured (stack sign, #BP resume, #DE dispatch), and taote dies between
+0x418163 and 0x4181aa in a run that needs the surface change to get there at all. The next attempt should
+start from the *surface* problem (a sentinel return that must surface, but currently costs Yoda a row)
+rather than from the family's later stages - without it the ladder never reaches the code that is already
+understood.
