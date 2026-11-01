@@ -9454,3 +9454,32 @@ grade-neutral within wall noise: valid PE 2676, OEP 2137/2596, imports 2087/2676
 
 Throughput is now closed as a line of work: the per-block hook cannot be made cheap, and narrowing it costs rows.
 The next item is capability again - the remaining picker bucket - plus the recorded RLPack import gap.
+
+#### 0.17gl Round 190: RLPack is the biggest import cluster left (66 rows) - diagnosed, not yet solved
+
+The r91 census puts the picker bucket at **16 rows** (JDPack 4, Neolite 4, PEtite 3, WinUpack 3, MPRESS 1,
+PECompact 1), which is smaller than the RLPack import cluster: **66 RLPack rows have the correct OEP and a failing
+import table** (39 with recall < 0.4), against a family that is 104 rows with only 8 import passes.
+
+Diagnosis on `rlpack_ADExplorer.exe` (oep exact, recall 0.067, 34 pairs against the original's 314):
+
+- the artifact's descriptor walk finds **14 descriptors with the right DLL names** (`kernel32.dll`, `NETAPI32.dll`,
+  `RPCRT4.dll`, `VERSION.dll`, ...) but every `INT` is zero and the `FT` runs are short and interleaved with zeros -
+  the slots hold **resolved stub addresses** (`0x10011950`, `0x10051000`, ...), not name RVAs;
+- the reference's answer to exactly this is `addr_name`: reverse-map each slot through an address -> export index
+  (round 185's finding). taote already HAS that machinery (`iat::SymbolMap` + `IatScanner`, built by the F52 block
+  from every loaded module's guest export directory) - but on this row it holds only **452 symbols over 15 modules**
+  and `scanner.coherent()` keeps **1** hit, because a rebuilt table's slots are scattered and the coherence rule
+  wants runs;
+- a descriptor-anchored variant was implemented and measured (walk each descriptor's FT, reverse-map through
+  `SymbolMap`, emit `(descriptor dll, symbol name)`; the tables interleave zeros so a zero is a hole, not the
+  terminator - the first version stopped after one slot). It resolved **71 slots**, but the later blob-repair stage
+  dedups to **49** pairs and the grader's recall did not move (0.057 -> 0.057). Reverted: measured, not kept.
+- The remaining question is why `SymbolMap` holds 452 exports when 14 DLLs are involved: either the stub modules'
+  guest export directories are mostly name-poor, or most slots point at the *unbound import stubs* (`0x7fb000`,
+  `0x4a4000` in the map list) which that map does not index. Next round must measure which, with a debug print of
+  module base / export count / slot hits per module, before writing another resolution rule.
+
+Picker-bucket note: `jdpack_7z.exe` is NOT a scoring problem - taote's hop ledger is **empty** and its run dies with
+`UC_ERR_READ_UNMAPPED` at 0x4184d1 in the stub, while `pegasus` reports `oep_last_hop = 0x40ebc5` (**the truth**) via a
+section hop. So JDPack's four bucket rows are a run-completion problem like TELock's, not a picker-rule problem.
