@@ -10101,3 +10101,26 @@ Read the reference's WinUpack seam (`src/unpacker/packers/winupack_unpacker.cpp:
 entry. taote's `PackerContext` carries no written-range list, so this is not a small port - it needs the engine to
 pass its `ever_written_` ranges into the family context first. That is the next unit of work, and it is worth it:
 `ever_written_` is also what would let a family seam reproduce the "two stages" behaviour the Neolite rows want.
+
+#### 0.17hd Round 208: the reference's WinUpack prologue scan cannot fire on this corpus (0 of 97)
+
+Implemented the round-207 next step in full: `PackerContext` gained the run's `ever_written_` ranges (copied at
+finalize), and a `WinUpackPacker` seam ported `../pegasus/src/unpacker/packers/winupack_unpacker.cpp:135-199` - gate on
+"the OEP guess is still inside the packed EP section", then scan the written ranges (skipping the stub's own section)
+for `e8 ???????? e9 ???????? 55 8b ec` and take the first hit.
+
+**Measured: it never fires.** Instrumented gate line on `winupack_PEview.exe`:
+
+    [unpack] winupack gate: pick=0x41d5a7 packed_ep=0x401018 ep_sec=[0x401000,0x416000) written=2
+
+- the pick (0x41d5a7) is *outside* the packed EP section, so the gate closes - and across the whole 97-row WinUpack arm,
+  **0 rows** have an `oep_claimed` inside that section. The 97-row arm came out 97/87/83/79 against the r98 baseline's
+  97/87/82/78, with **no row differing** in the row-by-row diff (the +1 is the usual wall flake).
+
+So the reference's scan is not what fixes `winupack_PEview`: that row's pegasus reason is `winupack_terminal_full_fill`,
+a different path (an end-of-run dump whose `keep` was already 0x401000). Reverted both the seam and the context
+plumbing; no capability change.
+
+Rule (az): a ported gate is only worth keeping if the gate's precondition actually occurs in the corpus - check the
+distribution of the quantity the gate tests (here: the claimed OEP against the packed EP section) over the whole family
+BEFORE writing the seam. The same check would have saved rounds 198-199's second variant too.
