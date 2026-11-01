@@ -9924,3 +9924,36 @@ Corpus r98: PE 2676, OEP 2169, imports 2222, all-three **2138** - **47 gains / 0
 Rule (aw): when a stub starts SEEING its imports, every downstream heuristic tuned against a blind stub has to be
 re-examined - the packer's own static records (a store EP here) are a safer anchor than an observed hop, and the data
 to decide it is almost always checkable offline over the whole family before a line of code is written.
+
+#### 0.17gy Round 203: TELock is a stub-side divergence (reference is perfect); the RLPack residual is the 85 s budget
+
+Two diagnoses, no code change; both are now precise enough to act on.
+
+**TELock (116 rows, 1 OEP / 0 imports today).** The reference's log on `telock_7z.exe` is a clean success: five
+`[insn-inv]` skips (`0x419a08 f1`, `0x4186a8 8d`, `0x418def f1`, `0x4196f1 8d`, `0x4197d9 f1`), three tolerated
+`[null-pc] except=0xc0000005` exceptions, then `[oepfromtable] ~K3=0xebc5 -> oep=0x40ebc5` with `meta.imports=109` and
+a `code_sim` of **1.0**. taote's run on the same file:
+
+- ends on `0x4192e3` (`ff 54 24 e0`, `call [esp-0x20]`) with **no** error line - the transfer executes into the stub's
+  farewell path, not the payload;
+- the whole run makes seven API calls: `GetModuleFileNameA`, `CreateFileA` (its own
+  `C:\Windows\telock_7z.exe`), `ReadFile` (0x400 bytes to 0x418008), `CloseHandle`, `CreateMutexA`, then
+  `MessageBoxA(hwnd=0, text=0x419e91, caption=0x419dbc, uType=0x30)` and `ExitProcess(0)` with `ret=0x4192e7`;
+- it takes the two synthetic-sentinel faults (`[fault] addr=0x70000000/0x70000001`) and **no null-pc fault at all**,
+  so a `UC_MEM_FETCH_UNMAPPED`-into-SEH delivery cannot be the difference (a gated probe for exactly that was written,
+  measured inert, and reverted);
+- its artifact has the file's first 0x400 bytes byte-for-byte but a *transformed* `.text` at 0x1000 and 110592 bytes of
+  image against the file's 55808 - i.e. the stub's own file check ran and its decode stopped part-way.
+
+So TELock compresses whole: the stub reads its own file (TELock's file-based decode), then decides the image is not what
+it expects. Next step is a memory diff at that decision: dump the stub's read buffer (0x418008, 0x400 bytes) and the
+mapped image at 0x400000 at the `MessageBoxA` call, and diff both against the packed file.
+
+**RLPack residual is budget, not code.** Only 10 of 104 rows still fail imports on r98, and the biggest -
+`rlpack_ComIntRep.exe`, graded recall 0.047 - is fully recovered when the run is given room: with a 240 s budget it
+emits 618 pairs against the original's 527, **recall 1.000** (precision 0.85, so `imports` passes and `imp_exact` does
+not). `rlpack_Bginfo` (0.65) and `rlpack_HDWScan` (0.09) are the same shape at dur 86. So the family's real state is
+~97% of rows solved; the 85 s corpus budget is what the remaining rows fail on, and it is not a code lever.
+
+Rule (ax): before treating a low recall as a decode/attribution bug, re-run the row SOLO with a long budget - the
+corpus's 85 s x 4 workers cuts rows whose stub is still rebuilding its import table, and a 0.05 recall can be a 1.00.
