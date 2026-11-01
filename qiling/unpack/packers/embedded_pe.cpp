@@ -595,6 +595,12 @@ class AlienyzePacker : public AmberPacker {
 public:
     const char* name() const override { return "Alienyze"; }
 
+    // Alienyze's stub resolves its imports by walking the module's own
+    // AddressOfNames and comparing name bytes, so it needs the stub dlls seeded
+    // with the DLL's real spelling (Packer::hashes_export_names). Measured on the
+    // 126-row arm: import-exact rows 79 -> 126, i.e. every row.
+    bool hashes_export_names() const override { return true; }
+
     // The restored image carries the packer's `.alien` STORE next to the payload.
     // Code-shaped signatures inside it are coincidence, and the shared ladder's
     // boundary-thunk pass happily latches one (measured: alienyze_Clockres picks
@@ -670,9 +676,17 @@ public:
         // entry. An observed section hop is left alone (measured: those picks are
         // exact).
         const bool cur_scanned = ctx.reason == "ladder_scan" || ctx.reason == "fallback_guess";
-        if (!(oep == 0 || cur_in_alien || cur_stub_ep || cur_scanned)) {
-            return false;
-        }
+        // Round 184 gated this to junk/scanned picks because "an observed section
+        // hop is left alone (measured: those picks are exact)". That holds while the
+        // stub MISSES its import lookups; with the case-aware stub surface it now
+        // HITS them, runs further and hops somewhere wrong - and the store EP is the
+        // packer's own record of the payload entry: it equals the original's
+        // AddressOfEntryPoint on 125 of 126 packed files (only the invalid
+        // tinytask row differs), so it may outrank an observed hop too.
+        (void)cur_scanned;
+        (void)cur_in_alien;
+        (void)cur_stub_ep;
+        (void)oep;
         const std::uint64_t stub_rva =
             ctx.packed_ep_va >= ctx.base ? ctx.packed_ep_va - ctx.base : 0;
         if (store_ep_ >= ctx.image_size || (stub_rva != 0 && store_ep_ == stub_rva)) {

@@ -9892,3 +9892,35 @@ to the packed EP, or the reason is ladder_scan/fallback_guess - a section_hop pi
 shape the case-aware runs produce.
 
 No capability change: 2098/2678 (r97). ctest 602/602.
+
+#### 0.17gx Round 202: Alienyze's imports were free all along - the store EP outranks a bad hop (79 -> 118, corpus 2098 -> 2138)
+
+Round 201's negative carried the lead: with the case-aware stub surface Alienyze reached **100% import-exact** (79 ->
+126) while exact OEPs fell 118 -> 81. The two effects were fighting because the stub used to MISS its import lookups,
+which kept the run on a harmless path; once it HITS them it walks further and the section-hop latch fires somewhere
+wrong (`alienyze_ADInsight` claimed 0x3fcd8 against a truth of 0x34dac).
+
+Offline data check first (rule h): the packer's own `.alien` store EP - the first dword of the `.alien` section, which
+`AlienyzePacker::transform_image` already captures before the stub consumes it - equals the original's
+AddressOfEntryPoint on **125 of 126** packed files (only `alienyze_tinytask`, the arm's one invalid-PE row, differs).
+
+So round 184's gate ("replace only a junk or scanned pick; an observed section hop is left alone") was right for a
+*blind* stub and wrong for a seeing one. Two family-local changes:
+
+1. `AlienyzePacker::hashes_export_names() = true` (its stub compares name bytes when it walks AddressOfNames).
+2. The store EP now outranks an observed hop too - the packer's own record of the payload entry beats a hop that the
+   now-seeing stub took into the middle of its own restore.
+
+| Alienyze arm (126) | r97 | now |
+|---|---|---|
+| valid PE | 125 | 125 |
+| OEP exact | 118 | 118 |
+| imports | 79 | **125** |
+| all three | 79 | **118** |
+
+Corpus r98: PE 2676, OEP 2169, imports 2222, all-three **2138** - **47 gains / 0 losses** (46 Alienyze + 1 WinUpack).
+(The raw run read 2135 with three losses; all three sat at dur 86-87 and pass when re-run in place.)
+
+Rule (aw): when a stub starts SEEING its imports, every downstream heuristic tuned against a blind stub has to be
+re-examined - the packer's own static records (a store EP here) are a safer anchor than an observed hop, and the data
+to decide it is almost always checkable offline over the whole family before a line of code is written.
