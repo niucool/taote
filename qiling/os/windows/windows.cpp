@@ -640,9 +640,23 @@ void QlOsWindows::hook_winapi(std::uint64_t address, std::uint32_t size) {
         }
     }
     if (std::getenv("TAOTE_APIDBG") != nullptr) {
-        std::fprintf(stderr, "[api] %s!%s pc=0x%llx eax=0x%llx esp=0x%llx\n",
+        // ret= is the CALLER's address ([esp] at the stub cell): with the arguments
+        // it identifies the call site inside the stub, which is what a forward trace
+        // needs - RLPack's second GetProcAddress passed a garbage name pointer and
+        // ret=0x4a273f was what located the resolver that produced it.
+        std::uint64_t ret_addr = 0;
+        try {
+            const auto rw = ql_->mem().read(ql_->arch().regs().arch_sp(), 4);
+            if (rw.size() == 4) {
+                ret_addr = static_cast<std::uint64_t>(rw[0]) | (static_cast<std::uint64_t>(rw[1]) << 8) |
+                           (static_cast<std::uint64_t>(rw[2]) << 16) | (static_cast<std::uint64_t>(rw[3]) << 24);
+            }
+        } catch (...) {
+            ret_addr = 0;
+        }
+        std::fprintf(stderr, "[api] %s!%s pc=0x%llx ret=0x%llx eax=0x%llx esp=0x%llx\n",
                      imported->dll.c_str(), imported->name.c_str(),
-                     static_cast<unsigned long long>(address),
+                     static_cast<unsigned long long>(address), (unsigned long long)ret_addr,
                      static_cast<unsigned long long>(ql_->arch().regs().read("eax")),
                      static_cast<unsigned long long>(ql_->arch().regs().arch_sp()));
         // Round 165: the arguments matter as soon as a family reaches real I/O
