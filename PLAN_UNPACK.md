@@ -9988,3 +9988,37 @@ the branch that selects the box.
 Rule (ay): when a stub reports a self-check failure, diff what it *read* against what it *compares to* before
 suspecting the emulator - and remember a stub mutates its own buffers (TELock zeroes the PE checksum), so a 3-byte
 difference can be the stub's own edit rather than the harness's.
+
+#### 0.17ha Round 205: TELock's error box hangs off its import-descriptor walk (the two slots are named)
+
+Continuing round 204's probe. `TAOTE_APIDBG` now prints `ebp=` too (one extra word), which makes a stub's own
+`[ebp+disp]` API slots addressable: at the error box `ebp=0xc95e`, so `[ebp+0x40d2d0]` = `[0x419c2e]` and
+`[ebp+0x40bae4]` = `[0x418442]`, both inside `.text`. Dumping those two dwords at the `MessageBoxA` entry gives
+
+    0x419c2e -> 0x10021500 = kernel32!GetModuleHandleA's stub cell
+    0x418442 -> 0x10021950 = kernel32!LoadLibraryA's stub cell
+
+and the code that reaches the box is unambiguous:
+
+```
+41922d  mov  eax,[esi+0xc]        ; the descriptor's Name VA
+419230  and  dword [esi+0xc],0    ; clear it in place
+41923c  add  eax,edx              ; -> the dll-name string
+419240  push eax ; call [ebp+0x40d2d0]   ; GetModuleHandleA(name)
+419247  test eax,eax ; jne 0x419309      ; found -> carry on
+41924f  push ebx ; call [ebp+0x40bae4]   ; LoadLibraryA(name)
+419256  test eax,eax ; jne 0x419309      ; loaded -> carry on
+41925e  ...                              ; both ZERO -> the "CRC error" box -> ExitProcess(0)
+```
+
+So TELock reports a *file-modified* error when it cannot get a module handle for one of its imports - the box is a
+generic error reporter, and the `eax` message index selects one of four texts ([ebp+0x40d32a/2e/3e/42/46]).
+
+The open question is which of the two calls actually runs: the run makes exactly **seven** API calls
+(GetModuleFileNameA, CreateFileA, ReadFile, CloseHandle, CreateMutexA, MessageBoxA, ExitProcess) and neither
+GetModuleHandleA nor LoadLibraryA appears among them, so the descriptor walk must be reaching 0x41925e without
+executing two calls that `TAOTE_APIDBG` (which logs every pc inside a dll range) cannot see. The next probe is a
+watchpoint on the reporter: `TAOTE_APIDUMP` at `ExitProcess` for `0x418000+0x2400` plus a breakpoint-style probe at
+0x419240/0x41924f, to see whether the slots hold something other than the stub cells at the moment of the call (the
+slots are patched by the stub itself, and a stale slot would send the call into whatever the descriptor walk had just
+written).

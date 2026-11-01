@@ -699,11 +699,12 @@ void QlOsWindows::hook_winapi(std::uint64_t address, std::uint32_t size) {
         } catch (...) {
             ret_addr = 0;
         }
-        std::fprintf(stderr, "[api] %s!%s pc=0x%llx ret=0x%llx eax=0x%llx esp=0x%llx\n",
+        std::fprintf(stderr, "[api] %s!%s pc=0x%llx ret=0x%llx eax=0x%llx esp=0x%llx ebp=0x%llx\n",
                      imported->dll.c_str(), imported->name.c_str(),
                      static_cast<unsigned long long>(address), (unsigned long long)ret_addr,
                      static_cast<unsigned long long>(ql_->arch().regs().read("eax")),
-                     static_cast<unsigned long long>(ql_->arch().regs().arch_sp()));
+                     static_cast<unsigned long long>(ql_->arch().regs().arch_sp()),
+                     static_cast<unsigned long long>(ql_->arch().regs().read("ebp")));
         // Round 165: the arguments matter as soon as a family reaches real I/O
         // (TELock's stub now calls CreateFileA/ReadFile/CloseHandle). The first
         // two dwords above esp, plus an ASCII peek of the first one when it
