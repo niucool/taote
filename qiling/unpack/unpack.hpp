@@ -171,13 +171,6 @@ private:
     std::set<std::pair<std::uint64_t, std::uint64_t>> ever_written_;
     std::set<std::pair<std::uint64_t, std::uint64_t>> written_ranges_;
 
-    // claim-scoped hand-off hooks: a block hook over exactly the claimed range,
-    // installed when the claim appears and unregistered when it is consumed (a
-    // section cannot re-claim, so the hook can never fire usefully again)
-    std::vector<std::pair<std::pair<std::uint64_t, std::uint64_t>, std::shared_ptr<HookRet>>> exec_hooks_;
-    std::vector<std::pair<std::pair<std::uint64_t, std::uint64_t>, std::shared_ptr<HookRet>>> write_hooks_;
-    void drop_write_hook(std::uint64_t start, std::uint64_t end);
-
     // The reference's hop ACCEPT guards (unpacker.cpp:7006-7025 and 8160-8180),
     // which UPX, NSPack, Molebox and JDPack all join. A payload's own runtime
     // writes re-claim the range around the flow that is ALREADY executing there,

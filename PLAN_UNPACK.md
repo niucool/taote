@@ -9395,3 +9395,36 @@ invalid-instruction dispatcher and the dyn-map hooks) - bisected so far: the api
 the invalid-insn hook (`TAOTE_NOINV`, 49.8 s) are NOT it. Next round should bisect the GPA sentinel and the dyn-map
 code hooks the same way, and note that `perf` is unusable on this host (`kernel.perf_event_paranoid = 4`) and `gdb`
 is not installed, so bisection by env-gated builds is the only profiler available.
+
+**Corpus r89 (the scoped hooks) was a disaster and was reverted: -176 rows, 176 losses / 2 gains** (all-three fell
+from 2010 to ~1834; ASPack OEP 93 -> 76, Neolite 89 -> 71, Molebox 92 -> 69, Packman 104 -> 81). Two of that
+commit's three parts were responsible and are gone:
+
+- **the claim-scoped exec hook**: restricting the block hook to `[claim_start, claim_end)` instead of the whole
+  section is NOT semantics-preserving, because that hook does more than latch a hop - it also drives the
+  executed-page overlay (`exec_page_seen_`) and the stager bookkeeping, so execs in the section outside the claim
+  stopped feeding the artifact. Reverted to the section-wide hook.
+- **the write-hook drop at mute/claim**: the write hook keeps advancing `last_write_seq_`, which the OEP picker
+  reads (`unpack.cpp:2959`, `:3356`), so dropping it changed picks across every family. Reverted.
+
+What was kept from the round is the part that is purely mechanical and was measured neutral-or-better on its own:
+the **reused scratch buffer in all six dispatchers** (it does not change which hooks fire, only how their list is
+iterated). Corpus r90 is running to confirm the revert restores r88 and to see whether the remaining dispatcher
+speedup alone converts any of the 38 wall rows.
+
+Corpus **r90** (2678 rows, 05:47-06:52) after the revert: **0 row differences against r88** - valid PE 2676, OEP
+2138/2596, imports 2086/2676, all-three **2010** - with the wall population 38 -> **37**. So the six-dispatcher
+scratch buffers are grade-neutral and buy one wall row; the round's honest tally is one small throughput win kept,
+two hook-scoping "optimisations" measured at -176 rows and reverted.
+
+The round's real lesson is now rule (ad): **a hook's scope is not free to change.** Both reverts looked
+behaviour-preserving from the callback's own code and were not, because those callbacks carry side effects beyond
+their name - the exec hook also feeds the executed-page overlay and the stager set, and the write hook also advances
+the per-section write ordinal the OEP picker reads. Anyone touching hook registration must check every reader of the
+side state, not just the callback's return value.
+
+Still open and *not* to be re-attempted blind: `bero_Bginfo` needs ~51 s with hop detection against 34 s under
+`--no-hop`, with both hooks removed from the hot path (write hook fires twice, exec hook under 200k times) and the
+exec body worth 0.7 s. The remaining ~17 s is inside what the `enable_hop` block installs - next candidates to
+bisect are the GPA sentinel and the dyn-map code hooks, using env-gated builds since `perf` is unusable here
+(`kernel.perf_event_paranoid = 4`) and `gdb` is not installed.
