@@ -639,6 +639,51 @@ void QlOsWindows::hook_winapi(std::uint64_t address, std::uint32_t size) {
             }
         }
     }
+    // TAOTE_APIDUMP=<api>:<lo>:<len>[,<lo>:<len>...] writes guest ranges the
+    // FIRST time that API is entered - the probe shape a stub-vs-file diff needs
+    // (TELock reads its own file into a buffer and then decides the image is not
+    // what it expects; the buffer and the mapped image have to be captured at the
+    // decision point, not at finalize, because the run ends inside the stub).
+    if (const char* spec = std::getenv("TAOTE_APIDUMP")) {
+        static std::string done;
+        const std::string s_spec = spec;
+        const auto colon = s_spec.find(':');
+        const std::string want = colon == std::string::npos ? s_spec : s_spec.substr(0, colon);
+        if (want == imported->name && done != want) {
+            done = want;
+            std::size_t pos = colon == std::string::npos ? s_spec.size() : colon + 1;
+            int n = 0;
+            while (pos < s_spec.size() && n < 8) {
+                const auto comma = s_spec.find(',', pos);
+                const auto end = comma == std::string::npos ? s_spec.size() : comma;
+                const std::string part = s_spec.substr(pos, end - pos);
+                const auto c2 = part.find(':');
+                if (c2 != std::string::npos) {
+                    const std::uint64_t lo = std::strtoull(part.substr(0, c2).c_str(), nullptr, 16);
+                    const std::uint64_t len = std::strtoull(part.substr(c2 + 1).c_str(), nullptr, 16);
+                    try {
+                        const auto blob = ql_->mem().read(lo, len);
+                        char path[64];
+                        std::snprintf(path, sizeof path, "/tmp/taote_apidump_%d.bin", n);
+                        if (std::FILE* f = std::fopen(path, "wb")) {
+                            std::fwrite(blob.data(), 1, blob.size(), f);
+                            std::fclose(f);
+                        }
+                        std::fprintf(stderr, "[apidump] %s!%s range %d: 0x%llx+0x%llx -> %s (%zu bytes)\n",
+                                     imported->dll.c_str(), imported->name.c_str(), n,
+                                     (unsigned long long)lo, (unsigned long long)len, path, blob.size());
+                    } catch (...) {
+                        std::fprintf(stderr, "[apidump] range %d unreadable\n", n);
+                    }
+                    ++n;
+                }
+                if (comma == std::string::npos) {
+                    break;
+                }
+                pos = comma + 1;
+            }
+        }
+    }
     if (std::getenv("TAOTE_APIDBG") != nullptr) {
         // ret= is the CALLER's address ([esp] at the stub cell): with the arguments
         // it identifies the call site inside the stub, which is what a forward trace

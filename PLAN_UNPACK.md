@@ -9957,3 +9957,34 @@ not). `rlpack_Bginfo` (0.65) and `rlpack_HDWScan` (0.09) are the same shape at d
 
 Rule (ax): before treating a low recall as a decode/attribution bug, re-run the row SOLO with a long budget - the
 corpus's 85 s x 4 workers cuts rows whose stub is still rebuilding its import table, and a 0.05 recall can be a 1.00.
+
+#### 0.17gz Round 204: TELock's stub is failing its own CRC check - and the file it checks is byte-identical
+
+The round-203 handoff asked for a memory diff at the stub's decision point. New diagnostic does exactly that:
+`TAOTE_APIDUMP=<api>:<lo>:<len>[,<lo>:<len>...]` (qiling/os/windows/windows.cpp, next to TAOTE_APIDBG) writes guest
+ranges to /tmp/taote_apidump_<n>.bin the first time that API is entered - the only place to snapshot a stub's state,
+since the run ends inside the stub.
+
+Captured on `telock_7z.exe` at the `MessageBoxA` the stub calls just before `ExitProcess(0)`:
+
+| range | what it is | result |
+|---|---|---|
+| 0x419e91 | the dialog text | **"CRC error! File content has been modified. If you run a system debugger, clear all breakpoints before running this program"** |
+| 0x419dbc | the caption | "telock_7z.exe" |
+| 0x418008 +0x400 | the stub's own ReadFile buffer | differs from the file in **exactly 3 bytes**: offsets 0x140-0x142, the optional header's **CheckSum** field, zeroed by the stub itself |
+| 0x400000 +0x400 | the mapped image | **identical** to the file, byte for byte |
+
+And the file the stub opened (`C:\Windows\telock_7z.exe` in the per-run rootfs) is byte-identical to the packed sample
+(`cmp` clean), so the check is not failing on a corrupted copy, a wrong path, or a stale file.
+
+So TELock's stub: reads its own first 0x400 bytes, zeroes the PE checksum in its copy, then reports a CRC error. Its
+check is therefore computed over something other than "the file on disk as taote serves it" - the two candidates are
+(a) a CRC over the *mapped image* at that instant (the stub's own decode has already rewritten part of `.text` by then -
+the artifact holds a transformed `.text` at 0x1000 while the 0x400-byte header still matches), or (b) a CRC whose
+expected value is derived from a header field our loader left different. Next probe is to disassemble the compare in
+the runtime image: dump 0x418000+0x2400 at the same API entry and walk back from 0x4192e7 (the `ExitProcess` return) to
+the branch that selects the box.
+
+Rule (ay): when a stub reports a self-check failure, diff what it *read* against what it *compares to* before
+suspecting the emulator - and remember a stub mutates its own buffers (TELock zeroes the PE checksum), so a 3-byte
+difference can be the stub's own edit rather than the harness's.
