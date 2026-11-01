@@ -3060,6 +3060,9 @@ std::uint64_t Unpacker::static_oep_from_image(const std::vector<std::uint8_t>& i
 }
 
 UnpackResult Unpacker::finalize(Qiling& ql) {
+    if (opts_.debug) {
+        std::fprintf(stderr, "[unpack] finalize begin: imports=%zu\n", imports_.size());
+    }
     if (!heap_pages_.empty()) {
         // Walk the recorded pages in runs and look for an MZ/PE pair. The payload a
         // stub decodes into a heap buffer is the only candidate that can never show

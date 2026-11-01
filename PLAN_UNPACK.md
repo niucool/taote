@@ -9652,3 +9652,53 @@ without completing all three (e.g. `rlpack_Diskmon`, `rlpack_ESEDatabaseView`, `
 the next slice of the same cluster: entries now exact, imports still short. RLPack as a family in r92: 104 rows / 100% valid PE / **81% OEP** / **13% imports** / **12% all-three** (the
 104-row ARM measured 83 OEP / 13 imports / 12 all-three; the corpus runs 4-wide and is the authoritative number).
 
+
+#### 0.17gr Round 196: the RLPack residual asks the right questions but gets 149 NULLs back
+
+Re-classifying the RLPack rows after 0.17gq (r92): 104 rows, 83 exact OEPs, and **71 of those still fail imports**
+(55 at recall 0.5-0.95, 16 below 0.5). The pick reason splits **ladder_passc 40 / section_hop 31**, and only 11 of the
+71 carry a run error at all (9 `UC_ERR_READ_UNMAPPED`, 4 `UC_ERR_FETCH_UNMAPPED`, 7 `no section hop; OEP guessed`), so
+most of these rows run clean and still end short.
+
+Tracing one (`rlpack_LastActivityView.exe`: exact OEP via **section_hop**, recall 0.416, 136 pairs against 255) gives
+the whole shape in four measurements:
+
+- the artifact holds **zero** nonzero slots at the ORIGINAL's IAT RVAs (imp_rva 0x175c4) and **none** of the 149
+  missing names appears as ASCII anywhere in it - so nothing left to extract at finalize;
+- the run makes **exactly 255 GetProcAddress calls** - one per original import - so the stub is asking the right
+  questions;
+- of those 255, the loader answers **ok=102, ordinal=4, and fail=149**: 149 resolutions come back NULL, and are
+  answered by our minted sentinels instead;
+- `note_import` is called 529 times for only **149 distinct (dll,name) pairs** (380 duplicates, i.e. the stub re-asks
+  the same names), and the final set is 149 against the original's 255.
+
+Both sides are under-covered per DLL: original user32 87 / msvcrt 48 / kernel32 69 against our 27 / 18 / 56.
+
+So the next question is precise and bounded: **which 149 (dll, name) pairs get a NULL from the loader, and why** - the
+module the stub asked in should carry that name now that the SDK surface is seeded. Instrument the failure branch of
+the GetProcAddress hook to record `(dll, name, hmod)` for the NULL answers, look at the module's export table for a
+sample, and check whether the stub is asking in the wrong module (its own resolver returns `AddressOfNames[esi]+base`
+for the module it passed, so a wrong hmod would produce exactly this pattern).
+
+And the failing calls have a *single* signature, measured with a 12-line probe on the NULL branch of the
+GetProcAddress hook:
+
+```
+[gpanull] hmod=0x10080000 dll=msvcrt.dll name=MZ owners=
+[gpanull] hmod=0x10080000 dll=msvcrt.dll name=MZ owners=
+...
+```
+
+`name="MZ"` means `lpProcName` **is the module's own base address** (0x10080000): the stub's resolver computed
+`AddressOfNames[esi] + base` with `AddressOfNames[esi] == 0`, so the name VA collapsed to the base and
+GetProcAddress read "MZ" (the image signature) and correctly answered NULL. `owners=` is empty, which confirms the
+string is not an API name at all.
+
+So the whole remaining RLPack import shortfall funnels through **a zero entry in a stub module's AddressOfNames**:
+the packer walks the table by index, and a zero RVA there resolves to the module base. The stub DLLs now carry the
+SDK surface (measured on this row: `[salv] module exports: 14 modules, 11099 named, 0 ordinals, symbols=11101` - up
+from 452 before 0.17gq), so the next step is to find WHICH module/index yields a zero name RVA. The prime suspect is
+the LIEF export emission for a large name set (duplicate or empty names, or an entry dropped while the count stays),
+which would be a `write_stub_dll` defect rather than a guest behaviour issue. Probe to add: after building a stub
+dll, parse its own export table back and assert every AddressOfNames entry is non-zero, printing the offenders -
+offline, before any emulation, so it costs one run per dll.
