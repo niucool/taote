@@ -12,11 +12,19 @@ namespace {
 
 #include "qiling/unpack/api_db.inc"
 
-// The blob is "name\tdll\n" per line, sorted by name. Parsed once into a map:
-// 32k lines is a few hundred microseconds and saves a perfect-hash generator.
-const std::unordered_map<std::string_view, std::string_view>& table() {
-    static const std::unordered_map<std::string_view, std::string_view> t = [] {
-        std::unordered_map<std::string_view, std::string_view> m;
+struct ApiRow {
+    std::string name;    // the DLL's own spelling - PE export names are case-sensitive
+    std::string owners;  // comma-separated owning dll stems, best first
+};
+
+// The blob is "<name>\t<dlls>\n" per line, sorted by name. Parsed once into a
+// vector plus a lower-cased index: lookups are case-insensitive, but the *name
+// returned to callers keeps the DLL's spelling. That case is load-bearing - a
+// stub dll seeded with `createcompatiblebitmap` cannot satisfy a packer that
+// hashes the real `CreateCompatibleBitmap` (PLAN_UNPACK 0.17gv).
+const std::vector<ApiRow>& rows() {
+    static const std::vector<ApiRow> v = [] {
+        std::vector<ApiRow> out;
         const char* p = kApiDb;
         const char* end = kApiDb + sizeof(kApiDb) - 1;
         while (p < end) {
@@ -26,42 +34,59 @@ const std::unordered_map<std::string_view, std::string_view>& table() {
             }
             const char* tab = static_cast<const char*>(std::memchr(p, '\t', static_cast<std::size_t>(line_end - p)));
             if (tab != nullptr && tab > p) {
-                m.emplace(std::string_view(p, static_cast<std::size_t>(tab - p)),
-                          std::string_view(tab + 1, static_cast<std::size_t>(line_end - tab - 1)));
+                out.push_back({std::string(p, static_cast<std::size_t>(tab - p)),
+                               std::string(tab + 1, static_cast<std::size_t>(line_end - tab - 1))});
             }
             p = line_end + 1;
         }
+        return out;
+    }();
+    return v;
+}
+
+std::string lower(std::string_view s) {
+    std::string out(s);
+    for (auto& c : out) {
+        c = static_cast<char>((c >= 'A' && c <= 'Z') ? c + 32 : c);
+    }
+    return out;
+}
+
+const std::unordered_map<std::string, std::size_t>& index() {
+    static const std::unordered_map<std::string, std::size_t> idx = [] {
+        std::unordered_map<std::string, std::size_t> m;
+        const auto& r = rows();
+        m.reserve(r.size() * 2);
+        for (std::size_t i = 0; i < r.size(); ++i) {
+            m.emplace(lower(r[i].name), i);
+        }
         return m;
     }();
-    return t;
+    return idx;
 }
 
 }  // namespace
 
 namespace {
 
-const std::string_view* lookup(const std::string& name) {
+const ApiRow* lookup(const std::string& name) {
     if (name.empty() || name.size() > 128) {
         return nullptr;
     }
-    static char low[128];
-    for (std::size_t i = 0; i < name.size(); ++i) {
-        const auto c = static_cast<unsigned char>(name[i]);
-        low[i] = static_cast<char>((c >= 'A' && c <= 'Z') ? c + 32 : c);
-    }
-    const auto& t = table();
-    const auto it = t.find(std::string_view(low, name.size()));
-    return it == t.end() ? nullptr : &it->second;
+    const auto& idx = index();
+    const auto it = idx.find(lower(name));
+    return it == idx.end() ? nullptr : &rows()[it->second];
 }
 
 }  // namespace
 
 std::vector<std::string> api_owners(const std::string& name) {
     std::vector<std::string> out;
-    const auto* v = lookup(name);
-    if (v == nullptr) {
+    const auto* row = lookup(name);
+    if (row == nullptr) {
         return out;
     }
+    const auto* v = &row->owners;
     std::size_t start = 0;
     while (start <= v->size()) {
         const auto comma = v->find(',', start);
@@ -110,20 +135,21 @@ std::vector<std::string> api_names_for(const std::string& dll) {
     }
     const bool want_crt = is_crt_family(want);
     std::vector<std::string> out;
-    for (const auto& [name, owners] : table()) {
+    for (const auto& row : rows()) {
+        const auto& owners = row.owners;
         std::size_t start = 0;
         while (start <= owners.size()) {
             const auto comma = owners.find(',', start);
-            const auto end = comma == std::string_view::npos ? owners.size() : comma;
+            const auto end = comma == std::string::npos ? owners.size() : comma;
             std::string owned(owners.substr(start, end - start));
             for (auto& c : owned) {
                 c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
             }
             if (!owned.empty() && (owned == want || (want_crt && is_crt_family(owned)))) {
-                out.emplace_back(name);
+                out.emplace_back(row.name);
                 break;
             }
-            if (comma == std::string_view::npos) {
+            if (comma == std::string::npos) {
                 break;
             }
             start = comma + 1;
@@ -133,10 +159,11 @@ std::vector<std::string> api_names_for(const std::string& dll) {
 }
 
 const char* api_owner(const std::string& name) {
-    const auto* v = lookup(name);
-    if (v == nullptr) {
+    const auto* row = lookup(name);
+    if (row == nullptr) {
         return nullptr;
     }
+    const auto* v = &row->owners;
     const auto comma = v->find(',');
     const std::string first(v->substr(0, comma == std::string_view::npos ? v->size() : comma));
     // the blob outlives the process: hand back a NUL-terminated copy built once

@@ -43,6 +43,7 @@
 #include "../tests/Pe_Sample_Runner.hpp"
 #include "qiling/const.hpp"
 #include "qiling/unpack/packer_detector.hpp"
+#include "qiling/unpack/packers/factories.hpp"
 #include "qiling/unpack/unpack.hpp"
 
 namespace fs = std::filesystem;
@@ -240,6 +241,13 @@ int main(int argc, char** argv) {
                     sample.filename().string().c_str());
         return 1;
     }
+    // Families whose stub resolves imports by HASHING export names need each
+    // name spelled the way the DLL really spells it (Packer::hashes_export_names);
+    // every other family keeps the lower-case SDK surface, which is what the
+    // corpus was measured with.
+    const std::string det_family = family.empty() ? guess_family(sample) : family;
+    const bool preserve_sdk_case =
+        qiling::unpack::packers::family_hashes_export_names(det_family);
     // RAII: a synthesized temp tree is removed on the way out. A host abort or
     // SIGKILL skips this, which is what the stale-tree sweep below exists for -
     // but the normal path must not leave one tree per sample behind either (a
@@ -295,7 +303,8 @@ int main(int argc, char** argv) {
         fs::create_directories(run_rootfs / "Windows" / "System32");
         fs::create_directories(run_rootfs / "Windows" / "registry");
         for (const auto& [dll, exports] : plan.imports) {
-            write_stub_dll(run_rootfs, dll, exports, plan.is64, /*seed_sdk_surface=*/true);
+            write_stub_dll(run_rootfs, dll, exports, plan.is64, /*seed_sdk_surface=*/true,
+                           preserve_sdk_case);
         }
         // The five key DLLs every guest needs. Round 22 measured a WIDER set
         // here (user32, advapi32, gdi32, shell32, ole32, oleaut32, comctl32,
@@ -318,7 +327,8 @@ int main(int argc, char** argv) {
                         names = exports;
                     }
                 }
-                write_stub_dll(run_rootfs, key_dll, names, plan.is64, /*seed_sdk_surface=*/true);
+                write_stub_dll(run_rootfs, key_dll, names, plan.is64, /*seed_sdk_surface=*/true,
+                               preserve_sdk_case);
             }
         }
         fs::copy_file(run_sample, run_rootfs / "Windows" / sample.filename(),
@@ -351,7 +361,7 @@ int main(int argc, char** argv) {
     uopts.sample_path = run_sample.string();
     uopts.out_dir = out_dir;
     uopts.enable_hop = enable_hop;
-    uopts.family = family.empty() ? guess_family(sample) : family;
+    uopts.family = det_family;
     uopts.rootfs = run_rootfs.string();
     uopts.allow_decoy_dlls = rootfs.empty();  // never write into a caller's tree
     uopts.debug = std::getenv("TAOTE_UNPACK_DEBUG") != nullptr;

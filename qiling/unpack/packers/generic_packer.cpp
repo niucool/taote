@@ -31,6 +31,10 @@ std::string lower_ascii(std::string s) {
 
 // The detection label -> subclass map (the reference's create_unpacker,
 // src/unpacker/packer_detector.cpp:357-386). Anything not listed runs generic.
+bool family_hashes_export_names(const std::string& family) {
+    return make_packer(family)->hashes_export_names();
+}
+
 std::unique_ptr<Packer> make_packer(const std::string& family) {
     const auto f = lower_ascii(family);
     if (f == "mew") return make_mew_packer();

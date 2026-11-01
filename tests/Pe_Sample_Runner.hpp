@@ -175,7 +175,7 @@ inline fs::path repairable_sample(const fs::path& sample) {
 // image, so x86 guests get PE32 and x64 guests get PE32+.
 inline void write_stub_dll(const fs::path& rootfs, const std::string& dll_name,
                            const std::vector<std::string>& exports, bool is64 = false,
-                           bool seed_sdk_surface = false) {
+                           bool seed_sdk_surface = false, bool preserve_sdk_case = false) {
     // The export surface is the sample's own import names UNION the full
     // per-dll surface taote implements (the ApiRegistry names keyed by dll).
     // A packed file's import table is ~2 names (LoadLibraryA/GetProcAddress),
@@ -199,7 +199,18 @@ inline void write_stub_dll(const fs::path& rootfs, const std::string& dll_name,
         // surface makes the table the packer expects; GetProcAddress already answers
         // any api_db name through the sentinel path.
         if (seed_sdk_surface) {
-            for (const auto& name : qiling::unpack::api_names_for(dll_name)) {
+            for (auto name : qiling::unpack::api_names_for(dll_name)) {
+                // The SDK table stores each name the way the DLL spells it; callers
+                // that do NOT pass preserve_sdk_case get the lower-case surface they
+                // always had, so only the families whose resolver hashes names see a
+                // difference (Packer::hashes_export_names).
+                if (!preserve_sdk_case) {
+                    for (auto& c : name) {
+                        if (c >= 'A' && c <= 'Z') {
+                            c = static_cast<char>(c + 32);
+                        }
+                    }
+                }
                 if (std::find(all_names.begin(), all_names.end(), name) == all_names.end()) {
                     all_names.push_back(name);
                 }

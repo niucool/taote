@@ -124,6 +124,18 @@ public:
     // decoded body's own trampolines, so the static ladder outranks the ledger.
     virtual bool decode_only() const { return false; }
 
+    // Does the stub resolve imports by HASHING the module's export names? RLPack's
+    // resolver does (`rol eax,7 / xor al,byte` over each AddressOfNames entry, then
+    // compares), and a hash compares BYTES, so the stub dll it walks must spell each
+    // name the way the DLL really does. taote's SDK surface is stored lower-case, so
+    // for these families the stub is seeded with the real spelling instead
+    // (PLAN_UNPACK 0.17gv: rlpack_puttytel_32 asked gdi32 for CreateCompatibleBitmap
+    // by hash 0x6b3470d5 and got base+0x10000 back because the stub exported
+    // `createcompatiblebitmap`). Everyone else keeps the lower-case surface: the
+    // spelling changes what the guest's own walk finds, which is a behaviour change
+    // (measured: Molebox -92, Themida 71 wall-timeouts when every family got it).
+    virtual bool hashes_export_names() const { return false; }
+
     // A statically parsed OEP, read at install() (before the stub runs).
     virtual std::uint64_t static_oep(const PackerContext& /*ctx*/) const { return 0; }
 

@@ -8,12 +8,17 @@
 #define QILING_UNPACK_PACKERS_FACTORIES_HPP
 
 #include <memory>
+#include <string>
 
 #include "qiling/unpack/packers/packer.hpp"
 
 namespace qiling {
 namespace unpack {
 namespace packers {
+
+// Does this family's stub walk export names by HASH (see Packer::hashes_export_names)?
+// Needed before the run, when the harness seeds the stub dlls.
+bool family_hashes_export_names(const std::string& family);
 
 std::unique_ptr<Packer> make_mew_packer();
 std::unique_ptr<Packer> make_pecompact_packer();

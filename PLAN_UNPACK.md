@@ -9824,3 +9824,42 @@ Rule (ar): widening a stub dll's export surface is not free in either direction 
 library as "the DLL's real export list": tcc's defs carry CRT internals (`_fltused`, `__chkstk`) that no program
 imports from a DLL, and seeding them costs 121 rows. Both changes were reverted (api_db.inc, api_db.cpp and
 gen_api_db.py are back at fc9ffb9); capability stands at 2018/2678.
+
+#### 0.17gv Round 200: the stub surface spelled names in the DLL's own case - 80 RLPack rows (corpus 2018 -> 2098)
+
+The round-199 census left one first-party gap: gdi32 owns `createcompatiblebitmap` in api_db, yet `rlpack_puttytel_32`
+still asked GetProcAddress for `base+0x10000` and got NULL. Reversing the hash the stub pushes into its EAT walk
+(`rol eax,7 / xor al,byte` over each name) against the *original's* gdi32 imports gave exactly one answer:
+
+    0x6b3470d5 -> CreateCompatibleBitmap
+
+and the generated stub exported **`createcompatiblebitmap`**. `gen_api_db.py` lower-cased every name (a convenience
+for case-insensitive lookups), so every SDK-seeded stub table spelled its exports in lower case - which no
+case-sensitive name hash can ever match, and which GetProcAddress (also byte-exact) would not match either.
+
+Two changes:
+
+1. **api_db keeps the DLL's spelling.** The generator collects names from `nm` in their real case and keeps the
+   spelling with the most upper-case letters when a name appears with several (`CreateCompatibleBitmap` beats
+   `createcompatiblebitmap`, which is the mingw internal symbol). `api_db.cpp` now indexes rows by a lower-cased copy
+   and hands `api_names_for` the real spelling; `api_owners`/`api_owner` still look up case-insensitively.
+2. **The choice is a packer trait, not a global switch.** Seeding the real case changes what the *guest's* own walk
+   finds, which is a behaviour change: applied to every family, the corpus went 2018 -> 2000 (Molebox -92, Themida 71
+   rows hitting the 120 s wall) while imports rose. So `Packer::hashes_export_names()` says which families resolve
+   imports by hashing export names, RLPack opts in (its resolver is the one we disassembled), and every other family
+   still gets the byte-identical lower-case surface (`write_stub_dll(..., preserve_sdk_case)`).
+
+| measurement | before | after |
+|---|---|---|
+| rlpack_puttytel_32.exe imports | 92 | **359** (of 295 - over-emitted, recall 1.0) |
+| rlpack_LastActivityView.exe imports | 175 | 286 (of 255) |
+| RLPack arm / corpus row | 86 OEP, 14 IMP, 13 ALL | **98% OEP, 90% IMP, 89% ALL** |
+| corpus r97 PE/OEP/IMP/ALL | 2676/2154/2095/2018 | **2676/2169/2175/2098** |
+
+Row moves: **80 gains, 0 losses** - every RLPack row that gained exact OEP through the round-195 SDK seeding now also
+passes imports. (Three rows looked like losses at dur 86-87; re-run in place they pass, the usual wall flake.)
+
+Rule (au): a stub export table is a data structure a packer *hashes*, so the spelling of every name is part of the
+contract - `nm` gives the real case, so never normalise it away. Rule (av): a change that alters what the guest's own
+export walk finds is family-sensitive; gate it with a `Packer` trait and measure the corpus, because the same change
+that took RLPack from 13% to 89% took Molebox from 99% to 0%.

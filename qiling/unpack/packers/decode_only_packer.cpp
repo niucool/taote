@@ -822,17 +822,22 @@ std::uint64_t ladder_oep(const PackerContext& ctx) {
 // delegating to the shared body).
 class DecodeOnlyPacker : public Packer {
 public:
-    explicit DecodeOnlyPacker(const char* label) : label_(label) {}
+    explicit DecodeOnlyPacker(const char* label, bool hashes_export_names = false)
+        : label_(label), hashes_export_names_(hashes_export_names) {}
     const char* name() const override { return label_; }
     bool decode_only() const override { return true; }
+    bool hashes_export_names() const override { return hashes_export_names_; }
     // the base class default already is the ladder
 
 private:
     const char* label_;
+    bool hashes_export_names_;
 };
 
 std::unique_ptr<Packer> make_nspack_packer() { return std::make_unique<DecodeOnlyPacker>("NSPack"); }
-std::unique_ptr<Packer> make_rlpack_packer() { return std::make_unique<DecodeOnlyPacker>("RLPack"); }
+std::unique_ptr<Packer> make_rlpack_packer() {
+    return std::make_unique<DecodeOnlyPacker>("RLPack", /*hashes_export_names=*/true);
+}
 std::unique_ptr<Packer> make_mpress_packer() { return std::make_unique<DecodeOnlyPacker>("MPRESS"); }
 
 }  // namespace packers
