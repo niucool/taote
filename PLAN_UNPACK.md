@@ -9483,3 +9483,45 @@ Diagnosis on `rlpack_ADExplorer.exe` (oep exact, recall 0.067, 34 pairs against 
 Picker-bucket note: `jdpack_7z.exe` is NOT a scoring problem - taote's hop ledger is **empty** and its run dies with
 `UC_ERR_READ_UNMAPPED` at 0x4184d1 in the stub, while `pegasus` reports `oep_last_hop = 0x40ebc5` (**the truth**) via a
 section hop. So JDPack's four bucket rows are a run-completion problem like TELock's, not a picker-rule problem.
+
+#### 0.17gm Round 191: the module export map is fine - RLPack needs the reference's PROVENANCE-TAGGED import collection
+
+The per-module measurement answers 0.17gl's open question, and it is **not** the symbol map. With
+`TAOTE_SALVDBG2=1` the F52 harvest prints every module it indexes:
+
+```
+[salv2] mod ntdll.dll    base=0x10000000 exp_rva=0x2000 nfuncs=39  nnames=39
+[salv2] mod kernel32.dll base=0x10010000 exp_rva=0x2000 nfuncs=248 nnames=248
+[salv2] mod user32.dll   base=0x10080000 exp_rva=0x2000 nfuncs=71  nnames=71
+[salv2] mod ucrtbase.dll base=0x10040000 exp_rva=0x2000 nfuncs=22  nnames=22
+[salv2] mod netapi32.dll base=0x10050000 exp_rva=0x2000 nfuncs=1   nnames=1
+```
+
+Every module parses, every slot is named, and the export VAs land on a 16-byte grid
+(`0x10010000 + 0x1000 + 0x10*i`), so a slot value like `0x10011950` IS slot 149 of kernel32 and does resolve. The 452
+symbols are simply the whole surface those stub modules carry (39 + 248 + 71 + 22 + ...): no corruption, no missing
+index.
+
+What is actually missing is visible by diffing the family against the reference on the same row,
+`rlpack_ADExplorer.exe` (oep exact in both):
+
+| | imports |
+|---|---|
+| original | 314 |
+| taote | **49** (recall 0.057) |
+| pegasus | **226** |
+
+and `pegasus` names them per dll (`NETAPI32.dll NetUserGetGroups`, `VERSION.dll GetFileVersionInfoSizeW`, ...). Its
+`src/unpacker/packers/rlpack_unpacker.cpp` says how, in a mechanism taote has **no analogue of at all**
+(`grep -rn "prov\|POST_LATCH"` over `qiling/unpack` finds nothing):
+
+- **W4 provenance classification** - the stub's import-rebuild loop is the single call site the GPA hook sees for
+  every real import, and it lives in the packed-EP section; the payload's own CRT late-init (the oleaut32 `Var*` set)
+  calls from the payload image. Each import is tagged by its CALLER's section (`PROV_STUB_LOOP` vs the rest) so the
+  real ones survive a **run-level POST_LATCH drop** that discards post-hand-off noise;
+- plus a bootstrap-slot filter (`decode_only_ntdll_boot_slot`) that drops the stub's own ntdll bootstrap rows.
+
+So the RLPack import residual is a *missing attribution model*, not a missing table. Next round: record the caller pc
+with each resolved pair (taote already notes the pair at GPA/loader resolution, `unpack.cpp:524/549`), classify by the
+caller's section exactly as W4 does, and drop post-hand-off pairs. Family arm first (104 rows), then the corpus -
+predicted ceiling 49 -> ~226 pairs per row on RLPack, which is the 66-row cluster.
