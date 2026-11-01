@@ -9782,3 +9782,45 @@ winupack_Bginfo (86 s wall flake on imports).
 Operational note for future corpus runs: **never rebuild while a corpus is running** - the exec of a half-written binary
 shows up as `dur=0 rc=0` and silently costs rows. TAOTE_GPANULL now prints the failed GetProcAddress with the caller,
 all registers and the 16 bytes at esi/edi/ebx/ebp.
+
+#### 0.17gu Round 199: the .def export lists are measured-NEGATIVE (2 variants, -121 each); the census is the deliverable
+
+The round-198 win (msvcrt had zero names) suggested a wider question: which of the corpus's original imports can our stub
+surface not serve at all? New checked-in tool `tools/api_surface_census.py` (it reuses `unpack_report.parse_pe` so the
+census and the grader can never disagree):
+
+| dll | rows | pairs | unique missing | top missing (rows) |
+|---|---|---|---|---|
+| MSVCRT | 831 | 33562 | 63 | __set_app_type(817), __setusermatherr(759), __p__fmode(677) |
+| KERNEL32 | 2595 | 202451 | 19 | InterlockedDecrement(771), InterlockedIncrement(756), InterlockedExchange(564) |
+| LIBGIMP-2.0-0 | 123 | 2642 | 173 | gimp_main(123), gimp_install_procedure(123) |
+| LIBGTK-WIN32-2.0-0 | 85 | 1650 | 208 | gtk_widget_destroy(82), gtk_widget_show(82) |
+| ULIB / MSVCP60 / LIBGLIB / LIBINTL | 13-123 | up to 757 | 7-148 | third-party, mangled C++ |
+
+The two first-party gaps are **generator artefacts, not missing data**: `InterlockedDecrement` exists in
+`libkernel32.a` only as an `I __imp_` slot (mingw compiles it to an intrinsic, so there is no `T`), and `msvcrt` is in
+gen_api_db.py's SKIP_SUBSTRINGS. The third-party rows (gimp/gtk/glib/intl/ULIB/msvcp) are unreachable by any SDK
+database - drop them from any future "why is this import short" theory.
+
+Fix attempted: teach the generator to union `.def` export lists (pegasus's bundled tcc `lib/*.def` - a real export
+list, same provenance class as the import libraries). It added 602 clean names (the Interlocked*, ntdll's `__chkstk`,
+`__isascii`, `_fltused`).
+
+**Measured: it is a large loss, in both forms.**
+
+| corpus | PE | OEP | imports | all-three |
+|---|---|---|---|---|
+| r93 (before) | 2676 | 2154 | 2095 | **2018** |
+| r94 (def names in api_db) | 2676 | 2153 | 1976 | 1897 |
+| r95 (def names as surface-only, api_owners untouched) | 2676 | 2153 | 1974 | 1897 |
+
+122 losses against 3 gains; on the lost rows the emitted pair count is unchanged (`aspack_calc` 405 -> 405) while both
+recall and precision fall (1.0/0.938 -> 0.911/0.854), i.e. pairs are re-attributed to the wrong DLL - so it is the
+*surface* (the names a stub exports, which also feed the F52 symbol map) and not `api_owners` alone. Splitting the
+blob so attribution never sees the def names (r95) changed **nothing**, which is what rules out the attribution theory.
+
+Rule (ar): widening a stub dll's export surface is not free in either direction - it changes the symbol map, so
+`api_names_for` is a precision lever as much as a recall one. And a .def file is NOT interchangeable with an import
+library as "the DLL's real export list": tcc's defs carry CRT internals (`_fltused`, `__chkstk`) that no program
+imports from a DLL, and seeding them costs 121 rows. Both changes were reverted (api_db.inc, api_db.cpp and
+gen_api_db.py are back at fc9ffb9); capability stands at 2018/2678.
