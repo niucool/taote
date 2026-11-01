@@ -1179,6 +1179,8 @@ void Unpacker::poll_dyn_maps() {
 // The reference's on_section_exec (unpacker.cpp:5520-5810): a written section
 // that starts executing is the payload hand-off.
 int Unpacker::on_section_exec(std::uint64_t addr) {
+    const std::uint64_t prev_exec = prev_exec_addr_;
+    prev_exec_addr_ = addr;
     if (opts_.debug) {
         static int fires = 0;
         ++fires;
@@ -1257,8 +1259,37 @@ int Unpacker::on_section_exec(std::uint64_t addr) {
     static const bool claim_ledger = std::getenv("TAOTE_CLAIM_LEDGER") == nullptr ||
                                      std::string(std::getenv("TAOTE_CLAIM_LEDGER")) != "0";
     if (claim_ledger) {
+        // The two hop-accept guards (the reference's UPX/NSPack/Molebox/JDPack
+        // set). Both only ever DROP a candidate, so they are measured as a gate
+        // on the families that use them rather than on every family.
+        const bool hop_guarded = opts_.family == "UPX" || opts_.family == "NSPack" ||
+                                 opts_.family == "Molebox" || opts_.family == "JDPack";
         for (const auto& r : written_ranges_) {
             if (addr >= r.first && addr <= r.second) {
+                if (hop_guarded && have_hop_) {
+                    // payload-internal traffic: the previous executed block was
+                    // ALREADY inside this range, so this is the payload's own
+                    // runtime writes re-claiming around the executing flow, not a
+                    // transfer into it
+                    if (prev_exec >= r.first && prev_exec <= r.second) {
+                        if (opts_.debug) {
+                            std::fprintf(stderr,
+                                         "[unpack] hop skip self-traffic %s (prev %s in range)\n",
+                                         hex(addr).c_str(), hex(prev_exec).c_str());
+                        }
+                        continue;
+                    }
+                    // import-quiet landing: a genuine OEP transfer carries the
+                    // import jump; a post-OEP landing does not
+                    if (last_hop_imp_ + 32 > imports_.size()) {
+                        if (opts_.debug) {
+                            std::fprintf(stderr,
+                                         "[unpack] hop skip import-quiet %s (imp %zu vs still %zu)\n",
+                                         hex(addr).c_str(), imports_.size(), last_hop_imp_);
+                        }
+                        continue;
+                    }
+                }
                 if (dumped_addrs_.insert(addr).second && stages_ < opts_.max_stages) {
                     dump_module(*ql_, addr, "section_hop");
                     // consume the claim (the reference erases written_ranges_
@@ -1269,6 +1300,10 @@ int Unpacker::on_section_exec(std::uint64_t addr) {
                         written_ranges_.erase(r);
                         wr_cache_lo_ = wr_cache_hi_ = 0;
                     }
+                    // the guards below judge against the LAST ACCEPTED hop
+                    last_hop_addr_ = addr;
+                    last_hop_imp_ = imports_.size();
+                    have_hop_ = true;
                 }
                 break;
             }

@@ -171,6 +171,17 @@ private:
     std::set<std::pair<std::uint64_t, std::uint64_t>> ever_written_;
     std::set<std::pair<std::uint64_t, std::uint64_t>> written_ranges_;
 
+    // The reference's hop ACCEPT guards (unpacker.cpp:7006-7025 and 8160-8180),
+    // which UPX, NSPack, Molebox and JDPack all join. A payload's own runtime
+    // writes re-claim the range around the flow that is ALREADY executing there,
+    // so the next instruction fires a "hop" with no control transfer - and a
+    // post-OEP landing inside another section then replaces a correct incumbent
+    // pick while carrying no import growth. Both are skipped here.
+    std::uint64_t prev_exec_addr_ = 0;
+    std::uint64_t last_hop_addr_ = 0;
+    std::size_t last_hop_imp_ = 0;
+    bool have_hop_ = false;
+
     std::uint64_t base_ = 0;
     std::uint64_t image_size_ = 0;
     std::uint64_t packed_ep_va_ = 0;

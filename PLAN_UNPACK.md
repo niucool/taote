@@ -9263,3 +9263,71 @@ prerequisite taote lacks is the **ordinal half of that index**: our stub surface
 originals import by ordinal precisely because the packer resolved them that way. Next step therefore has two parts:
 (1) record real export ordinals alongside the names in the stub surface (or a side table) so a reverse lookup can
 answer `ordinal_<N>`; (2) reverse-map the payload IAT cells through it, additively.
+
+#### 0.17gi Round 186: the ordinal gap is host data we do not have; the reference's two hop guards land +2 NSPack rows
+
+**The Alienyze ordinal path is blocked, and by exactly what it says on the tin.** `pegasus` gets its ordinals from
+`addr_name` -> `addr_index_`, which `build_addrres_index_` fills from the emulator's runtime modules' export tables
+(`unpacker.cpp:13095+`, using `e.ordinal`). Those synthetic modules only carry REAL ordinals because
+`loaders.cpp:693-717` asks `host_dll_name_ordinals(name_)` - which parses `C:\Windows\SysWOW64\<dll>.dll` under
+`#ifdef _WIN32` and returns empty on this host. So the reference's ordinal answers here are *fabricated slots*, not
+host truth. Taote's own equivalent sources are absent too: the mingw-w64 import libraries are name-only
+(`nm libws2_32.a` shows `__imp__accept@12`, no ordinals) and the only `.def` files on the box
+(`pegasus/third_party/tcc/lib/*.def`) list plain names with no `@ordinal`. Recording it as blocked, not as a
+missing port: no evidence on this host maps `ws2_32`'s 116 ordinals to names.
+
+**The two hop guards did port, and they pay.** `unpacker.cpp:7006-7025` (payload-internal traffic) and
+`unpacker.cpp:8160-8180` (import-quiet landing) are now implemented for the same four families the reference gates
+them to - UPX, NSPack, Molebox, JDPack: a hop whose PREVIOUS executed block was already inside the range is the
+payload's own runtime writes re-claiming around the executing flow, and a later hop that arrives with
+`imports < last_accepted_hop_imp + 32` does not displace the incumbent.
+
+Measured on all four arms at once, because the gate spans four families:
+
+| arm | before (r86) | after |
+|---|---|---|
+| JDPack (100) | 100 PE / 96 OEP / 99 imp / 95 all | **identical** |
+| UPX (108) | 108 / 108 / 108 / 108 | **identical** |
+| Molebox (93) | 93 / 92 / 92 / 92 | **identical** |
+| NSPack (97) | 97 / 91 / 88 / 88 | 97 / 91 / **90 / 90** |
+
+The only row movement anywhere is `nspack_ADInsight.exe` and `nspack_procexp.exe`, both imports False -> True with
+an unchanged OEP - a landed-quiet hop was polluting the candidate ledger's import harvest. Corpus r87 is running.
+
+Corpus **r87** (2678 rows, 01:18-02:31) graded **0 row differences** against r86: valid PE 2676, OEP 2137/2596,
+imports 2082, all-three **2005** - the guards are fidelity-neutral at corpus scale, and the arm's two NSPack gains
+did **not** materialise because both rows sit at the 85 s wall in every corpus run (`dur=85/86` in r86, r87 and the
+arm alike; `nspack_procexp.exe` finished at 70 s in the quieter arm run and only then did its imports resolve).
+Keep the port - it is the reference's behaviour, 0 losses - but the graded effect is arm-only.
+
+**That exposed the real population to attack next.** 41 rows in r87 finish at the 83-86 s wall and **31 of them are
+not all-three** (BeRoEXEPacker 5, MEW 5, MPRESS 5, RLPack 5, NSPack 4, ASPack 1, EXpressor 1, Eronana 1, ...). They
+are not capability failures: sampled four of them solo with a 300 s budget and **all four complete** -
+`bero_Bginfo` oep 0x5b5d42 imports 1957, `mew_diskext` 0x40480c / 299, `nspack_ADInsight` 0x434dac / 776,
+`rlpack_adwcleaner_7.2.4.0` 0x5468ca / 464. So up to ~31 rows are throughput casualties, which makes per-row speed
+the largest mapped prize left - the same ground as the round-13 "LEVER 2" dispatch restructure (174 ns/insn of
+~190 ns/insn overhead). Next round should profile ONE of these rows for its instruction rate and hook cost rather
+than starting the restructure blind, and must keep every other family's results identical.
+
+Profiling one of them sharpened the diagnosis and changed the target. `bero_Bginfo.exe` at a **20 s** budget is
+already at 27.2M block executions with pc inside the *payload* (`0x6ec175`), only 2 claims, `oep=0x404dec`
+(`ladder_scan`) and **imports=2** - while the 300 s run reports imports **1957**. So these rows are not slow at
+decoding: the entry is reached and the payload then runs, and the **import set grows with runtime** (2 -> 1957). The
+harvest is runtime-driven, and the 85 s wall truncates it. The next round's question is therefore not "make the
+emulator faster" but "is the import table recoverable STATICALLY from the artifact" - i.e. whether taote's
+`iat/import_rebuilder.cpp` can reconstruct the same 1957 pairs from the decoded image without the payload having to
+execute them. If it can, the wall population is fixed by a correctness change, not by a throughput restructure.
+
+One debug run on `bero_Bginfo.exe` (120 s budget) localised the cost precisely, and it is **not** the import
+harvest - the harvest is already static at finalize ("image import table harvest: 1 descriptors -> 894 imports",
+"import-string scan: 1160 names", "salvage: 862 hits -> 856 slots", "blob repair: 908 pairs re-attributed
+(2813 -> 1957)"). What the row is waiting for is the hand-off itself: `hop ledger (1): 0x5b5d42@11770764` - the
+payload entry is latched only after ~**11.77M** executed instructions, and the run takes ~62 s to get there. That
+is ~5 us per instruction of *hook* time, not emulation time, which points at the exec hook (a UC_HOOK_BLOCK over
+every watched section) firing for the stub's own decode loop for the whole run.
+
+So the next experiment is a **hook-mute after the hand-off**, the same doctrine the reference already applies to the
+write hook ("one claim per section per run: the write hook is disabled on first fire"): once a section's claim has
+been consumed by an accepted hop, drop that section's exec hook (or gate it on `hop_guarded || !have_hop_`). It is
+cheap, testable on this exact row's solo wall time (62 s baseline), and must leave every grade identical - if it
+does, the wall population is fixed by removing wasted work rather than by any change to what taote computes.
