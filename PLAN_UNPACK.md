@@ -9578,3 +9578,34 @@ decoder reaches it. That is TELock-class work (a multi-round forward trace of th
 not a resume. Also verified this round: the pegasus per-fire `getenv` hoist (6d17602c) has **no counterpart** in
 taote - there is no `getenv` inside `on_section_exec` or `on_section_write` (the only env read on that path is the
 `claim_ledger` static bool, already cached), so there is nothing to hoist.
+
+#### 0.17gp Round 194: RLPack's stub dies on a DERIVED name pointer - the trace start point
+
+Tracing the RLPack stub stop (round 193's open question) with the two run-end probes plus `TAOTE_RUNDBG=1` gives the
+death in three lines:
+
+```
+[rundbg] VirtualAlloc(hint=0x0 size=0xc2000 prot=0x40) -> 0x5001446
+[rundbg] GetProcAddress(netapi32.dll!NetUserGetGroups) -> 0x10051000     <- RESOLVES
+[rundbg] GetProcAddress(netapi32.dll!) -> 0x0                            <- name pointer 0x75730000
+[rundbg] pc==0 after error 'emulation error: Invalid memory fetch (UC_ERR_FETCH_UNMAPPED)' esp=0x1220004
+```
+
+with `TAOTE_APIDBG` showing the second call's arguments as `10050000 75730000 004502e4 ...`: the module handle is
+right (`0x10050000`, netapi32's stub module) but the NAME pointer is **0x75730000**, a derived value, not an in-image
+RVA - so GetProcAddress reads nothing, returns 0, and the stub stores/jumps through it: pc=0, fetch fault, run over.
+That is why the run ends after ~5 s with no `[intr]` line and no `error=` line in the normal summary (the fault
+happens at address 0, which the SEH layer discards as a null dispatch).
+
+So the stub IS resolving imports (the loop exists and works for one entry); what breaks is the *name pointer* it
+computes for the second. That makes the next step concrete and bounded, not open-ended: trace where the stub computes
+`0x75730000` - which register/memory it loads the name RVA from, and what our run holds there versus what the packed
+store should hold. The name list itself is real: the first entry (`netapi32!NetUserGetGroups`) proves the stub's
+import store decodes correctly at least at its head.
+
+Also established this round (kept knowledge, no code): the heap region the stub executes in 0x4a2xxx is a **range
+decoder** (objdump of a mid-run snapshot at fire 3000 shows `cmp eax,0x1000000 ; shr ebx,0xb ; shl ecx,0x4 ; add
+ecx,esi ; lea edi,[edx+ecx*4]` - an LZMA-style range coder), so the 5 s is decompression, not a stall, and the region
+is recycled (a run-end dump of it is junk, which is why `TAOTE_HEAPSNAP` snapshots mid-run).
+
+Probes (`TAOTE_DUMPRANGE`, `TAOTE_HEAPSNAP`) reverted with the round; both ~15 lines.
