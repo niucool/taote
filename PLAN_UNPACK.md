@@ -8879,3 +8879,83 @@ neither TELock, nor the picker/OEP residual, nor the environment probes** — it
 ~96 RLPack rows + ~46 Alienyze rows on the same mechanism, and it starts from two measured
 facts that no round has used yet: the doubled dll keys, and that only one descriptor
 survives in the RLPack dump.
+
+---
+
+## 10. Alienyze imports-by-ordinal: the numbers ARE in the artifact, in the table taote walked past
+
+Round 185 (`fb34667` in the main tree) concluded the Alienyze ordinal gap was closed: the store's INT
+arrays emitted 0 ordinals, an ordinal-shaped dword scan of the packed file and of the artifact found 0
+hits, and the recovery was described as needing an address→export index plus the export *ordinals*, which
+`api_db.inc` (names only) cannot supply. Two of those three readings are wrong, and the third is not needed.
+
+### 10.1 The measurements
+
+`alienyze_HWMonitorPro_x32.exe` (entry exact, `code_sim` 1.000, `imp_recall` 0.941): 27 of the original's
+458 pairs are missing and **all 27 are ordinals** — 11 `oleaut32` (`#2,#6,#7,#8,#9,#12,#18,#25,#77,#149,
+#150`) and 16 `ws2_32`. The rebuilt PE dropped nothing (0 of the 27 appear in the meta), so the pairs were
+never recorded.
+
+In the artifact, immediately at the offset the packer already computes (`idt_end`, from `alienyze::find_idt`)
+there is a **477-dword table**: 431 name RVAs + **27 `0x8000|N` ordinal slots** + 19 zero terminators. The
+27 ordinals' multisets are *exactly* the 27 missing ones — 11 in one block, 16 in another:
+
+```
+idt_end 0x37335c  [+0x434 .. ] ord 2,150,149,6,12,9,8,7,18,25,77      <- oleaut32's whole import set
+                  [+0x7dc .. ] ord 9,2,13,101,4,23,22,1,16,3,116,115,52,8,111,19  <- ws2_32's
+```
+
+`alienyze_Everything.exe` has the same shape with one block of 20 ordinals (all `ws2_32`), and
+`alienyze_Dbgview.exe` one of 15.
+
+Why round 185 missed them: the values live in the table the port's own `hinted_store` *skips* — its leading
+loop advances over every `v & 0x80000000` slot before the record walk starts (`embedded_pe.cpp`, the
+"skip the leading RVA table" `while`), so nothing downstream could ever see them. The dword-shape scan that
+reported 0 hits scanned `.alien`, and on the samples measured here the table sits past it.
+
+What is *not* needed is the export-ordinal index: the ordinal numbers are literal, in the artifact.
+
+### 10.2 The mechanism (shipped)
+
+`qiling/unpack/packers/alienyze_ordinals.cpp` — `store_ordinal_pairs()`:
+
+1. read the table as **zero-separated blocks** (the per-DLL INT arrays concatenated, one block per DLL, in
+   the same order as the store's DLL markers; measured 14 blocks/14 markers and 12/12);
+2. a block with **no name slot** is a DLL the payload imported *exclusively* by ordinal — such a DLL leaves
+   no name record, so its marker group is empty as well;
+3. pair the pure-ordinal blocks with the name-less marker groups **in store order**, and emit `(dll,
+   ordinal_<N>)` for every slot. The two counts must agree, or nothing is emitted.
+
+The positional block→marker map is *not* usable (measured: the ordinal blocks sit at table positions 5 and
+12 against marker indices 11 and 12 — an off-by-one would have attributed 11 oleaut32 ordinals to gdi32);
+the coarser pure-block ↔ name-less-DLL rule is the one that holds. Deliberately conservative: a mixed
+block, or a count mismatch, yields no pairs, because a wrong `(dll, ordinal)` pair is an import the rebuilt
+image cannot load. The rebuilder already turns `ordinal_<N>` into a real `0x80000000|N` thunk
+(`iat/import_rebuilder.cpp:26`), so the emitted pair lands in the PE's import directory, not as a
+hint/name string.
+
+Regression lock: `UnpackCompat.AlienyzeStoreOrdinalBlocksMapToNameLessDlls` (synthetic table: the pairing,
+the mixed-block refusal, the count-mismatch refusal).
+
+### 10.3 Measured
+
+Family first — Alienyze, all 126 rows, `--pin 2`, budget 85 s, wall 120, **1 m 08 s** wall for the sweep:
+
+| | before | after | delta |
+|---|---|---|---|
+| valid PE | 125 | 125 | 0 |
+| OEP exact | 108 | 108 | 0 |
+| imports ok (`recall >= 0.95`) | **79** | **94** | **+15** |
+| **all three (plan rubric)** | **75** | **88** | **+13** |
+| all three (strict: `code_sim >= 0.90` too) | 63 | 70 | +7 |
+
+Zero losses on every column. Seven rows cross the all-three line — `Bginfo` (recall 0.938 → 0.999),
+`HWMonitorPro_x32` (0.941 → 1.000), `Procmon` (0.912 → 0.954), `Sysmon` (0.905 → 0.977), `logonsessions`
+(0.936 → 1.000), `portmon` (0.931 → 0.986), `webhttrack` (0.812 → 0.986).
+
+Corpus — S75 (3/family), `--pin 2`, 7 m 46 s: **54 → 54** all-three, no per-family column changed except
+one row, `nspack_ADInsight.exe`, which reads `imports 27.1%` at `dur=86` (the 85 s budget) under the sweep
+and **1.000 at 42 s, twice, when re-run solo** — a contention artifact, not a regression (the rule this
+repo learned in round 20: never believe a timeout-adjacent row without a solo re-run).
+
+Suite: **560 passed, 0 failed.**

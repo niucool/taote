@@ -20,6 +20,7 @@
 #include "../tests/Pe_Sample_Runner.hpp"
 #include "qiling/const.hpp"
 #include "qiling/core.hpp"
+#include "qiling/unpack/packers/alienyze_ordinals.hpp"
 #include "qiling/unpack/unpack.hpp"
 
 namespace fs = std::filesystem;
@@ -317,6 +318,52 @@ TEST(UnpackCompat, FsgOrdinalRecordsAreMined) {
     EXPECT_TRUE(has_import(res, "wldap32.dll", "ordinal_155"));
     EXPECT_TRUE(has_import(res, "oleaut32.dll", "ordinal_8"));
     fs::remove_all(out, ec);
+}
+
+// The Alienyze store's ordinal table (PLAN_UNPACK.md §10): the per-DLL INT
+// arrays concatenated behind the descriptor run, zero-separated. A block with no
+// name slot is a DLL imported exclusively by ordinal (its marker group carries no
+// name records), and its 0x8000|N slots are that DLL's ordinal imports - the only
+// place those numbers exist in the artifact.
+TEST(UnpackCompat, AlienyzeStoreOrdinalBlocksMapToNameLessDlls) {
+    // idt_end 0x100: [name,name] 0 [ord2,ord150] 0 [name] 0 [ord9] 0 <end>
+    std::vector<std::uint8_t> img(0x2000, 0);
+    const auto put = [&img](std::size_t off, std::uint32_t v) {
+        img[off] = static_cast<std::uint8_t>(v & 0xff);
+        img[off + 1] = static_cast<std::uint8_t>((v >> 8) & 0xff);
+        img[off + 2] = static_cast<std::uint8_t>((v >> 16) & 0xff);
+        img[off + 3] = static_cast<std::uint8_t>((v >> 24) & 0xff);
+    };
+    const std::uint32_t slots[] = {0x1800, 0x1810, 0, 0x80000002u, 0x80000096u, 0,
+                                   0x1820, 0, 0x80000009u, 0, 0x123};
+    std::size_t off = 0x100;
+    for (const auto v : slots) {
+        put(off, v);
+        off += 4;
+    }
+
+    // blocks: [2 names] [2 ordinals] [1 name] [1 ordinal] -> the ordinal blocks
+    // pair with the marker groups that have no names, in store order
+    const auto pairs = qiling::unpack::alienyze::store_ordinal_pairs(
+        img.data(), img.size(), 0x100, {"A.dll", "B.dll", "C.dll", "D.dll"}, {2, 0, 1, 0});
+    ASSERT_EQ(pairs.size(), 3u);
+    EXPECT_EQ(pairs[0].first, "B.dll");
+    EXPECT_EQ(pairs[0].second, 2u);
+    EXPECT_EQ(pairs[1].first, "B.dll");
+    EXPECT_EQ(pairs[1].second, 150u);
+    EXPECT_EQ(pairs[2].first, "D.dll");
+    EXPECT_EQ(pairs[2].second, 9u);
+
+    // a mixed block (names AND ordinals) is not a pure-ordinal block: with the
+    // same data but B's group claiming a name, the counts no longer line up and
+    // nothing is emitted (a wrong (dll, ordinal) pair is a broken import)
+    EXPECT_TRUE(qiling::unpack::alienyze::store_ordinal_pairs(
+                    img.data(), img.size(), 0x100, {"A.dll", "B.dll", "C.dll", "D.dll"}, {2, 1, 1, 0})
+                    .empty());
+    // ... and so is a degraded table that does not end where a block does
+    EXPECT_TRUE(qiling::unpack::alienyze::store_ordinal_pairs(
+                    img.data(), img.size(), 0x100, {"A.dll", "B.dll"}, {2, 0})
+                    .empty());
 }
 
 // The stub is written for a 0x400000 load: `mov ebx,0x4001d0` and

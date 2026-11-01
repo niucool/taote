@@ -6,6 +6,7 @@
 // therefore the stub itself, and the payload is found by scanning every non-image
 // map for a second PE image (MZ + a valid optional header) and adopting the
 // largest one.
+#include "qiling/unpack/packers/alienyze_ordinals.hpp"
 #include "qiling/unpack/packers/factories.hpp"
 
 #include <algorithm>
@@ -840,20 +841,51 @@ public:
                 alienyze::hinted_store(mem, idt_end, std::min<std::size_t>(a_hi, mem.size()),
                                        dll_names, fn_names, group_ends);
                 std::size_t emitted = 0;
+                std::vector<std::size_t> group_counts;
                 for (std::size_t g = 0; g < dll_names.size() && g < group_ends.size(); ++g) {
                     const std::size_t gbegin = g == 0 ? 0 : group_ends[g - 1];
+                    std::size_t kept = 0;
                     for (std::size_t j = gbegin; j < group_ends[g] && j < fn_names.size(); ++j) {
                         if (fn_names[j].empty() || fn_names[j].find('?') != std::string::npos) {
                             continue;
                         }
                         ctx.imports_out->emplace_back(dll_names[g], fn_names[j]);
                         ++emitted;
+                        ++kept;
+                    }
+                    group_counts.push_back(kept);
+                }
+                // The store's leading table is the same INT concatenation: a
+                // DLL imported exclusively by ordinal leaves no name record, so
+                // its block is all ordinals and its marker group is empty. That
+                // is the only place the ordinal numbers exist (measured: 27 of
+                // 27 on alienyze_HWMonitorPro_x32, 20 of 20 on
+                // alienyze_Everything) - see PLAN_UNPACK.md §10.
+                std::size_t ord_pairs = 0;
+                for (const auto& op :
+                     qiling::unpack::alienyze::store_ordinal_pairs(mem.data(), mem.size(), idt_end, dll_names,
+                                                  group_counts)) {
+                    const std::string fn = "ordinal_" + std::to_string(op.second);
+                    // dedup against what this store already emitted (the
+                    // engine's note_import dedups the final list; this keeps
+                    // the packer's own contribution idempotent)
+                    bool dup = false;
+                    for (const auto& have : *ctx.imports_out) {
+                        if (have.first == op.first && have.second == fn) {
+                            dup = true;
+                            break;
+                        }
+                    }
+                    if (!dup) {
+                        ctx.imports_out->emplace_back(op.first, fn);
+                        ++ord_pairs;
                     }
                 }
                 if (ctx.debug) {
                     std::fprintf(stderr,
-                                 "[unpack] alienyze: store idt_end=0x%zx dlls=%zu fns=%zu -> %zu pairs\n",
-                                 idt_end, dll_names.size(), fn_names.size(), emitted);
+                                 "[unpack] alienyze: store idt_end=0x%zx dlls=%zu fns=%zu -> %zu pairs "
+                                 "(+%zu ordinals)\n",
+                                 idt_end, dll_names.size(), fn_names.size(), emitted, ord_pairs);
                 }
             } else if (ctx.debug) {
                 std::fprintf(stderr, "[unpack] alienyze: store IDT not found\n");
