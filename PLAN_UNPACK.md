@@ -9331,3 +9331,42 @@ write hook ("one claim per section per run: the write hook is disabled on first 
 been consumed by an accepted hop, drop that section's exec hook (or gate it on `hop_guarded || !have_hop_`). It is
 cheap, testable on this exact row's solo wall time (62 s baseline), and must leave every grade identical - if it
 does, the wall population is fixed by removing wasted work rather than by any change to what taote computes.
+
+#### 0.17gj Round 187: the per-block hook dispatch copied a vector per callback - reuse the buffer
+
+The wall-row diagnosis from 0.17gi was tested and corrected twice, both by measurement:
+
+1. **Hook-mute after the hand-off** (drop a section's exec hook once its claim is consumed - the section can never
+   re-hand-off because `claimed_` blocks a re-claim). Implemented and measured on `bero_Bginfo.exe`: **64.4 s and
+   62.5 s against a 62-64 s baseline - no change**. Reverted. The reason is visible in the same debug log: that row
+   latches its hop at the very END (`hop ledger (1): 0x5b5d42@11770764`), so there is no post-hand-off payload
+   execution to save. A no-op rule is not worth its blast radius.
+2. **The dispatcher's per-callback vector copy.** `QlCoreHooks::dispatch_trace` runs once per BASIC BLOCK and did
+   `const auto hooks_list = it->second;` - a fresh `std::vector<std::shared_ptr<Hook>>` per callback, i.e. one heap
+   allocation + free per block (the copy exists because a hook may remove itself; core_hooks.py's verbatim note).
+   A reused `thread_local` buffer with `assign()` keeps the semantics (and the shared_ptr lifetime guarantee that
+   makes an in-callback `remove()` safe) without the allocation.
+
+Measured on `bero_Bginfo.exe` solo: **62-64 s -> 55-57 s**, and the hop-free control (`--no-hop`, 34 s) also drops
+from **42.9 s -> 34.2 s**, so the win is in the dispatch path itself and not in the hop code. Grades unchanged on
+that row (oep 0x5b5d42, imports 1957). Serial ctest 602/602. Corpus r88 is running to see how many of the 41
+83-86 s rows convert.
+
+Corpus **r88** (2678 rows, 03:03-04:10) - the dispatcher fix converts wall rows, which is exactly what it was for:
+
+| | r87 | r88 |
+|---|---|---|
+| valid PE | 2676 | 2676 |
+| OEP exact | 2137/2596 | **2138/2596** |
+| imports | 2082 | **2086** |
+| graded all-three | 2005 | **2010** |
+| rows at the 83-86 s wall | 41 | **38** |
+
+5 gains / 0 losses: `mew_procexp`, `mpress_ComIntRep` (dur 71, off the wall), `mpress_cpuz_x32`, `nspack_ADInsight`,
+`nspack_procexp` (dur 81) - and one MOVE (`mpress_geek`, still imports-failing). Note `nspack_procexp` and
+`nspack_ADInsight` are the two rows the round-186 hop guards had won on the quiet arm and lost to the wall: they are
+now graded, which closes that loop as predicted.
+
+Capability 2005 -> **2010/2678**. Next: the same dispatch path still pays a `std::map` lookup and a
+`bound_check` per block; the remaining slowest row is 55 s solo against a 85 s wall, so a further ~25% would clear
+the rest of the wall population.

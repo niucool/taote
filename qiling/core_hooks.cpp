@@ -266,9 +266,17 @@ void QlCoreHooks::dispatch_trace(std::uint64_t hook_type, std::uint64_t address,
     trace_blocked_ = false;
     const auto it = hook_.find(hook_type);
     if (it != hook_.end()) {
-        const auto hooks_list = it->second;
+        // The hooks list might change from within a hook method, so it is
+        // iterated over a COPY (core_hooks.py's verbatim note). Keep that
+        // semantics but reuse the buffer: this runs once per basic block, and a
+        // fresh vector per call (one heap allocation + free per block) dominated
+        // the cost on the slowest samples - bero_Bginfo.exe needs 11.7M blocks
+        // and 62 s wall. `assign` on a thread-local keeps the capacity AND the
+        // shared_ptr lifetime guarantee that makes an in-callback remove safe.
+        static thread_local std::vector<std::shared_ptr<Hook>> scratch;
+        scratch.assign(it->second.begin(), it->second.end());
 
-        for (const auto& hook : hooks_list) {
+        for (const auto& hook : scratch) {
             if (hook->bound_check(address, size)) {
                 const int ret = hook->trace ? hook->trace(address, size) : 0;
 
