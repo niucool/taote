@@ -324,7 +324,10 @@ int main(int argc, char** argv) {
         fs::copy_file(run_sample, run_rootfs / "Windows" / sample.filename(),
                       fs::copy_options::overwrite_existing);
         rootfs_cleanup.p = run_rootfs;
-        rootfs_cleanup.armed = true;
+        // TAOTE_KEEP_ROOTFS: leave the generated stub-dll rootfs on disk so the
+        // synthesized export tables can be inspected (the stub modules are built
+        // per run and deleted at exit otherwise).
+        rootfs_cleanup.armed = std::getenv("TAOTE_KEEP_ROOTFS") == nullptr;
     }
 
     const auto exe_in_rootfs = run_rootfs / "Windows" / sample.filename();
