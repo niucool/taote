@@ -9553,3 +9553,28 @@ ordinal rule can recover names that were never materialised. The one mechanism w
 picked OEP (fresh stack, SEH re-install) so it resolves its own imports and the ordinary harvest sees them. Gate it
 to RLPack first (family arm, 104 rows), then measure the corpus. Probes used above (`TAOTE_IATPROBE`,
 `TAOTE_DUMPRANGE`) were reverted with the round; both are ~10 lines and worth re-adding when the resume lands.
+
+#### 0.17go Round 193: resume-at-payload-entry measured on RLPack - negative, reverted
+
+The mechanism from 0.17gn was built and measured, and it is a **measured negative**:
+
+- `Unpacker::resume_at_entry()`: after `ql->run()` returns, family-gated to RLPack, run the decode-only ladder on the
+  LIVE image (install sees the still-packed image, so `static_oep_` is 0 there - measured: `static_oep=0x0`), then set
+  `esp -= 4` with a zero return address and `set_arch_pc(entry)`, and call `ql->run()` again. It fires correctly:
+  `[unpack] resume at payload entry 0x4149ec (imports=1)`.
+- **RLPack arm (104 rows): 96 valid PE / 68 OEP / 7 imports / 6 all-three**, against the baseline's
+  **104 / 73 / 8 / 7**. So it loses 8 valid-PE rows, 5 OEP rows and one graded row: the payload started at its entry
+  with an EMPTY IAT, faulted immediately, and the second run left the artifact in a worse state than the stub's own
+  end-of-run memory. Reverted in full (`unpack.cpp`, `unpack.hpp`, `taote.cpp`), tree clean, ctest 602/602.
+
+Why it cannot work as a standalone step, measured: the stub resolves **only ~16 imports** (`TAOTE_IATSNAP`: the first
+store of a stub-module address is `0x4a2fd5 <- 0x10011950`; a snapshot of 0x4a1000..0x4a5000 at that instant holds
+**3** stub-module pointers and **no** import names - the buffer is being decrypted, not filled with names). So the
+payload's import table is never built, and jumping to the payload without it just faults.
+
+The honest state of the 66-row cluster: **RLPack needs the stub's import-rebuild loop traced** - the packer must know
+all 314 imports to rebuild them, so the data exists in the packed file in some encoded form, and only the stub's own
+decoder reaches it. That is TELock-class work (a multi-round forward trace of the stub), not an import extractor and
+not a resume. Also verified this round: the pegasus per-fire `getenv` hoist (6d17602c) has **no counterpart** in
+taote - there is no `getenv` inside `on_section_exec` or `on_section_write` (the only env read on that path is the
+`claim_ledger` static bool, already cached), so there is nothing to hoist.
