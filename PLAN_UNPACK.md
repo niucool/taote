@@ -9370,3 +9370,28 @@ now graded, which closes that loop as predicted.
 Capability 2005 -> **2010/2678**. Next: the same dispatch path still pays a `std::map` lookup and a
 `bound_check` per block; the remaining slowest row is 55 s solo against a 85 s wall, so a further ~25% would clear
 the rest of the wall population.
+
+Corpus **r89** is running with three further dispatch/hook changes, all measured on `bero_Bginfo.exe` first
+(baseline 62-64 s -> 51 s, grades identical: oep 0x5b5d42, imports 1957):
+
+1. **The other four dispatchers got the same scratch buffer** (`dispatch_mem`, `dispatch_intr`, `dispatch_addr`,
+   `dispatch_insn_invalid`, `dispatch_insn`): 52 s -> 49.8 s.
+2. **The exec hook is claim-scoped, not section-scoped.** It used to be a block hook over the whole section
+   [start,end); the only place an exec can find a claim is inside the claim itself, so the hook is now installed
+   over exactly `[claim_start, claim_end)` when the claim appears, and unregistered when the claim is consumed.
+   Measured: 55 s -> 52 s, identical grades; and it is semantically identical because `on_section_exec` already
+   required claim coverage.
+3. **A section's WRITE hook is dropped the moment the section becomes terminal** - muted (the stub writing its own
+   code) or claimed (the reference's own doctrine: "the write hook is disabled on first fire"; taote had kept it
+   alive only to keep advancing that section's write ordinal, which the claim already stamps). Measured on that row:
+   `writes=11771393` -> **`writes=2`**.
+
+One measurement is left **unexplained and therefore recorded rather than acted on**: with everything above,
+`bero_Bginfo` takes 51 s with hop detection and 34 s under `--no-hop`, even though the write hook now fires twice
+and the exec hook fires fewer than 200k times (the debug counter prints every 200k and never printed). Emptying the
+exec callback's body saves 0.7 s, so it is not the callback either. The remaining ~17 s must be something
+`--no-hop` skips wholesale (the enable_hop block also installs the GPA sentinel, the api observer, the
+invalid-instruction dispatcher and the dyn-map hooks) - bisected so far: the api observer (`TAOTE_NOPOLL`, 52 s) and
+the invalid-insn hook (`TAOTE_NOINV`, 49.8 s) are NOT it. Next round should bisect the GPA sentinel and the dyn-map
+code hooks the same way, and note that `perf` is unusable on this host (`kernel.perf_event_paranoid = 4`) and `gdb`
+is not installed, so bisection by env-gated builds is the only profiler available.

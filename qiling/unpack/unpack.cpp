@@ -1006,6 +1006,7 @@ void Unpacker::install(Qiling& ql) {
                 return on_section_write(0, addr, size, static_cast<std::uint64_t>(value));
             }, start, end));
         if (write_hook->obj() != nullptr) {
+            write_hooks_.emplace_back(std::make_pair(start, end), write_hook);
             hooks_.push_back(std::move(write_hook));
         }
 
@@ -1016,12 +1017,24 @@ void Unpacker::install(Qiling& ql) {
         // the claimed section — a block entry — and firing per instruction
         // re-runs the written-range scan on every instruction of the payload's
         // hot code.
-        auto code_hook = std::make_shared<HookRet>(
-            ql.hook_block([this](std::uint64_t addr, std::uint32_t /*size*/) -> int {
-                return on_section_exec(addr);
-            }, start, end));
-        if (code_hook->obj() != nullptr) {
-            hooks_.push_back(std::move(code_hook));
+        // NO section-wide exec hook: it fires once per basic block for the whole
+        // section, and on the slowest samples the stub spends ~27M blocks running
+        // inside a watched section while only a few thousand of those blocks are
+        // inside the CLAIM that can hand off (measured on bero_Bginfo.exe: the
+        // empty-body A/B saved 0.7 s of 55 s, so the cost is the fire COUNT, not
+        // the callback body). The block hook is installed per CLAIM instead - see
+        // on_section_write - and dropped at the hand-off.
+    }
+}
+
+// unregister a section's write hook (safe from inside the callback: the
+// dispatcher iterates its own scratch copy of the shared_ptr list)
+void Unpacker::drop_write_hook(std::uint64_t start, std::uint64_t end) {
+    for (auto& wh : write_hooks_) {
+        if (wh.second && wh.first.first == start && wh.first.second == end) {
+            wh.second->remove();
+            wh.second.reset();
+            break;
         }
     }
 }
@@ -1069,6 +1082,8 @@ int Unpacker::on_section_write(std::uint64_t /*pc*/, std::uint64_t addr, std::ui
                              hex(pc).c_str(), hex(addr).c_str(), hex(packed_ep_va_).c_str());
             }
             muted_.insert(ps.start);
+            // a muted section can never be claimed: its write hook is dead weight
+            drop_write_hook(ps.start, ps.end);
             return 0;
         }
         // hollow-predecessor cap (unpacker.cpp:5324-5350): a raw==0 section
@@ -1107,6 +1122,18 @@ int Unpacker::on_section_write(std::uint64_t /*pc*/, std::uint64_t addr, std::ui
         // first fire): the stub's own traffic in a claimed section cannot
         // re-claim it, but the write ordinals keep flowing for the OEP pick
         claimed_.insert(ps.start);
+        // nor can a claimed section be re-claimed (the reference disables the
+        // write hook on first fire for exactly this reason)
+        drop_write_hook(ps.start, ps.end);
+        // the claim-scoped hand-off hook: a block hook over exactly the claimed
+        // range, which is the only place an exec can land on a written section
+        auto claim_hook = std::make_shared<HookRet>(ql_->hook_block(
+            [this](std::uint64_t a, std::uint32_t /*size*/) -> int { return on_section_exec(a); },
+            claim_start, claim_end));
+        if (claim_hook->obj() != nullptr) {
+            exec_hooks_.emplace_back(std::make_pair(claim_start, claim_end), claim_hook);
+            hooks_.push_back(std::move(claim_hook));
+        }
         if (opts_.debug) {
             std::fprintf(stderr, "[unpack] claim %s [%s,%s) write=%s pc=%s\n", ps.name.c_str(),
                          hex(claim_start).c_str(), hex(claim_end).c_str(), hex(addr).c_str(),
@@ -1299,6 +1326,15 @@ int Unpacker::on_section_exec(std::uint64_t addr) {
                     if (opts_.family != "MPRESS") {
                         written_ranges_.erase(r);
                         wr_cache_lo_ = wr_cache_hi_ = 0;
+                        // the section can never hand off again (claimed_ blocks a
+                        // re-claim), so its claim hook has nothing left to find
+                        for (auto& eh : exec_hooks_) {
+                            if (eh.second && addr >= eh.first.first && addr <= eh.first.second) {
+                                eh.second->remove();
+                                eh.second.reset();
+                                break;
+                            }
+                        }
                     }
                     // the guards below judge against the LAST ACCEPTED hop
                     last_hop_addr_ = addr;

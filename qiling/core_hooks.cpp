@@ -243,9 +243,10 @@ void QlCoreHooks::dispatch_intr(int intno, std::uint64_t hook_type) {
     if (it != hook_.end()) {
         // the hooks list might change from within a hook method; iterating
         // over a copy is the safer practice (core_hooks.py, verbatim note)
-        const auto hooks_list = it->second;
+        static thread_local std::vector<std::shared_ptr<Hook>> scratch;
+        scratch.assign(it->second.begin(), it->second.end());
 
-        for (const auto& hook : hooks_list) {
+        for (const auto& hook : scratch) {
             if (hook->check(static_cast<std::uint64_t>(intno))) {
                 handled = true;
                 const int ret = hook->intr ? hook->intr(static_cast<std::uint32_t>(intno)) : 0;
@@ -295,9 +296,10 @@ bool QlCoreHooks::dispatch_mem(std::uint64_t hook_type, int access, std::uint64_
 
     const auto it = hook_.find(hook_type);
     if (it != hook_.end()) {
-        const auto hooks_list = it->second;
+        static thread_local std::vector<std::shared_ptr<Hook>> scratch;
+        scratch.assign(it->second.begin(), it->second.end());
 
-        for (const auto& hook : hooks_list) {
+        for (const auto& hook : scratch) {
             if (hook->bound_check(address, size)) {
                 handled = true;
                 const int ret = hook->mem ? hook->mem(access, address, size, value) : 0;
@@ -322,9 +324,10 @@ bool QlCoreHooks::dispatch_insn_invalid(std::uint64_t hook_type) {
 
     const auto it = hook_.find(UC_HOOK_INSN_INVALID);
     if (it != hook_.end()) {
-        const auto hooks_list = it->second;
+        static thread_local std::vector<std::shared_ptr<Hook>> scratch;
+        scratch.assign(it->second.begin(), it->second.end());
 
-        for (const auto& hook : hooks_list) {
+        for (const auto& hook : scratch) {
             handled = true;
             const int ret = hook->invalid_insn ? hook->invalid_insn() : 0;
 
@@ -344,9 +347,10 @@ bool QlCoreHooks::dispatch_insn_invalid(std::uint64_t hook_type) {
 void QlCoreHooks::dispatch_insn(std::uint64_t insn_type, const std::vector<std::uint64_t>& args) {
     const auto it = insn_hook_.find(insn_type);
     if (it != insn_hook_.end()) {
-        const auto hooks_list = it->second;
+        static thread_local std::vector<std::shared_ptr<Hook>> scratch;
+        scratch.assign(it->second.begin(), it->second.end());
 
-        for (const auto& hook : hooks_list) {
+        for (const auto& hook : scratch) {
             if (hook->bound_check(pc_reader_ ? pc_reader_() : 0)) {
                 if (hook->insn) {
                     // _hook_insn_cb: the callback may return a (block, retval)
@@ -367,9 +371,10 @@ void QlCoreHooks::dispatch_addr(std::uint64_t address, std::uint32_t size) {
     (void)size;
     const auto it = addr_hook_.find(address);
     if (it != addr_hook_.end()) {
-        const auto hooks_list = it->second;
+        static thread_local std::vector<std::shared_ptr<Hook>> scratch;
+        scratch.assign(it->second.begin(), it->second.end());
 
-        for (const auto& hook : hooks_list) {
+        for (const auto& hook : scratch) {
             const int ret = hook->addr_cb ? hook->addr_cb() : 0;
 
             if ((ret & QL_HOOK_BLOCK) != 0) {
