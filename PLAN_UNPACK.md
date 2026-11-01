@@ -10022,3 +10022,41 @@ watchpoint on the reporter: `TAOTE_APIDUMP` at `ExitProcess` for `0x418000+0x240
 0x419240/0x41924f, to see whether the slots hold something other than the stub cells at the moment of the call (the
 slots are patched by the stub itself, and a stale slot would send the call into whatever the descriptor walk had just
 written).
+
+#### 0.17hb Round 206: TELock's error box is a stub self-integrity compare at 0x41904e
+
+Walked the five branches that reach the reporter (`0x418a55`, `0x418c63`, `0x41904e`, `0x41905e`, `0x419665`) with
+`TAOTE_PROBE`: only **0x41904e** fires (6 times; 0x418c63 also executes its instruction but its `jne` is NOT taken -
+ZF=1 there), and the probe shows the register state at that instant
+
+    pc=0x41904e eax=0x401000 ebx=0x7bd45c94 ecx=0x8a00 edx=0xfd62f97a esi=0x3 edi=0xc95e ebp=0xc95e
+    esp=0x121ffe0 eflags=0x17 (CF PF AF, ZF clear) ret=0x0
+
+i.e. `.text`'s VA (0x401000), its size (0x8a00) and two checksum-shaped values, with ZF clear - the branch to the box.
+The code that sets those flags is an obfuscated three-slot compare:
+
+```
+419031  pop  edi
+419032  not  eax
+419034  xor  eax,[edi+0x40d38e]
+41903a  xor  eax,0x3ce43761
+41903f  xor  eax,[ebp+0x40d3fe]
+419045  not  eax
+419047  sub  eax,[ebp+0x40d382]     ; ZF decides
+41904d  popa
+41904e  jne  0x41927b              ; mismatch -> the error box -> ExitProcess(0)
+419054  push eax ; push ecx ; call 0x419075   ; the success path: process the section
+```
+
+So TELock compares a value it computed while decoding against two of its own patched slots (plus the constant
+0x3ce43761). The remaining question is no longer "what is the dialog" but "why does the computed value differ" - which
+is upstream in the stub's own decode, i.e. the same place the reference's three tolerated `[null-pc]` exceptions and
+five `[insn-inv]` skips live.
+
+Next probe: dump `[edi+0x40d38e]`, `[ebp+0x40d3fe]`, `[ebp+0x40d382]` and the pre-`popa` EAX at 0x41904e (edi=0xc95e,
+ebp=0xc95e make the addresses 0x418cec / 0x41975c / 0x4196e0 statically known), then run the same probe on pegasus
+(which passes this check) to see which of the three differs.
+
+Round note: TELock has now cost three diagnosis rounds without a capability change. It is well-localised but it is a
+deep stub-semantics arc; the cheap measured levers should be taken first (the picker bucket is ~16 rows and the
+round-203 budget finding covers RLPack).
