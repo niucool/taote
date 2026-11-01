@@ -9428,3 +9428,29 @@ Still open and *not* to be re-attempted blind: `bero_Bginfo` needs ~51 s with ho
 exec body worth 0.7 s. The remaining ~17 s is inside what the `enable_hop` block installs - next candidates to
 bisect are the GPA sentinel and the dyn-map code hooks, using env-gated builds since `perf` is unusable here
 (`kernel.perf_event_paranoid = 4`) and `gdb` is not installed.
+
+#### 0.17gk Round 189: the per-block hook is inherently ~650 ns/fire - stop chasing throughput on it
+
+The open measurement from 0.17gj is now explained, and it is not an inefficiency in taote's code:
+
+- `TAOTE_UNPACK_DEBUG=1` on `bero_Bginfo.exe` (30 s budget) prints **45.6M exec-hook fires** - 1.5M/s, ~650 ns per
+  fire. With a UC_HOOK_BLOCK covering a hot section, unicorn cannot chain translation blocks, so every block pays a
+  C call; that is the 17 s difference against `--no-hop` (34 s vs 51 s), and the reference pays it too.
+- The callback BODY is not the cost (empty-body A/B: 0.7 s of 55 s), the list copy is not the cost (single-hook fast
+  path below: 51.2 s -> 50.1 s), and neither the api observer nor the invalid-instruction hook is (both bisected to
+  no change).
+- Narrowing the hook to the claim range DOES cut the fires, but that hook also feeds the executed-page overlay and
+  the stager set, which is why it measured -176 corpus rows last round. There is no free version of this.
+
+So the wall population is bounded by how many blocks the *stub* executes, and the only honest lever left is to run
+fewer of them - not to make hook dispatch cheaper. Kept from the round: the single-hook fast path in
+`dispatch_trace` (a local shared_ptr instead of the list copy when one hook is registered; still safe against an
+in-callback remove). Corpus r91 validates it.
+
+Corpus **r91** (2678 rows, 07:10-08:11): 2 row differences against r90, both the chronic MPRESS wall pair
+(`mpress_cpuz_x32` lost its OEP at dur 86, `mpress_geek` gained imports at dur 85), so the fast path is
+grade-neutral within wall noise: valid PE 2676, OEP 2137/2596, imports 2087/2676, all-three 2009 (r90 2010), wall rows
+37 -> 36.
+
+Throughput is now closed as a line of work: the per-block hook cannot be made cheap, and narrowing it costs rows.
+The next item is capability again - the remaining picker bucket - plus the recorded RLPack import gap.

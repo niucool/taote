@@ -274,7 +274,20 @@ void QlCoreHooks::dispatch_trace(std::uint64_t hook_type, std::uint64_t address,
         // the cost on the slowest samples - bero_Bginfo.exe needs 11.7M blocks
         // and 62 s wall. `assign` on a thread-local keeps the capacity AND the
         // shared_ptr lifetime guarantee that makes an in-callback remove safe.
+        // One hook is the common case (a per-section block hook), so keep the
+        // single-hook path free of the list copy: a local shared_ptr is enough to
+        // keep the hook alive if it removes itself mid-callback.
         static thread_local std::vector<std::shared_ptr<Hook>> scratch;
+        if (it->second.size() == 1) {
+            const std::shared_ptr<Hook> only = it->second.front();
+            if (only->bound_check(address, size)) {
+                const int ret = only->trace ? only->trace(address, size) : 0;
+                if ((ret & QL_HOOK_BLOCK) != 0) {
+                    trace_blocked_ = true;
+                }
+            }
+            return;
+        }
         scratch.assign(it->second.begin(), it->second.end());
 
         for (const auto& hook : scratch) {
