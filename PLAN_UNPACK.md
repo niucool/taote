@@ -9216,3 +9216,50 @@ Also scoped for JDPack while r86 ran - taote lacks BOTH reference hop guards tha
   `imports < last_accepted_hop_imp + 32` is ignored, keeping the incumbent.
 `imports_.size()` is available at hop time in taote, so the second is a direct port.
 
+
+#### 0.17gh Round 185: Alienyze's import gap is ORDINALS - and the store is not where they live
+
+The 39 Alienyze rows with a correct entry and a failing import table were diagnosed by diffing the grader's own
+pairs against taote's meta: what is missing is almost entirely **original-side ordinals** -
+`alienyze_Everything.exe` lacks shell32 `#16` plus 19 `ws2_32` ordinals, `HWMonitorPro_x32` lacks 27 `oleaut32`
+ordinals, `Dbgview` lacks `ws2_32 #1,#11,#111,#115,...`. The rows are not shy of names (out = 1668 pairs against
+292) and the criterion is recall-only, so `imp_precision` being 0.16 is irrelevant; the recall shortfall is the
+ordinal set.
+
+Two mechanisms were implemented and **measured, then reverted** - do not rebuild either shape without new evidence:
+
+1. An **ordinal arm over the store's INT arrays** (`0x8000xxxx` → `ordinal_<N>`, the reference's
+   alienyze.cpp:1264-1290 shape, with its F44 fill-dword and zero-slot guards). On
+   `alienyze_Everything.exe` it emitted **0** ordinals. The reason is measurable with one debug print: the
+   descriptor run taote's `find_idt` latches has `oft`/`ft` pointing into the **name string stream** - its
+   "slots" read as ASCII `0x57746547`, `0x6f646e69`, `0x72685477` - so it is a plausible-looking descriptor run
+   inside string data, not a real IDT. There is nothing ordinal-shaped to read there.
+2. A scan of the packed file and of the terminal artifact for ordinal-shaped dwords in `.alien`
+   (`(v >> 16) == 0x8000`, ordinal < 0x1000): **0 hits in both**. The packed file does not carry the ordinal list.
+
+The reference's own diagnostics show where its 293 pairs come from: with `SE_DEBUG_RECON=1`, `pegasus` prints
+`[alienyze] IDT block not found` … `[recon] Alienyze: 0 slots, imports=293` - i.e. it also fails to find the store
+IDT, and its import set (which contains `ws2_32.dll ordinal_23/19/111/116/9/52/11/1`) comes from the **payload's own
+import directory in the restored image**, decoded by its `struct_form` branch where an INT slot with the `0x8000`
+flag is an ordinal. That is the missing mechanism: find the descriptor run whose INT slots are in-image RVAs in the
+*restored body*, and read names and ordinals from the INT rather than from the name stream.
+
+Next step, in order: locate that descriptor run in the artifact image (the run must be rejected if its INT slots do
+not resolve to name RVAs inside the image - the failure mode of attempt 1), mine `(dll, name)` and
+`(dll, ordinal_<N>)`, and merge additively into `imports_out` (recall-only criterion, so extras are free).
+Predicted ceiling on the arm: Alienyze 79 → ~110 import rows if the payload IDT is intact on those 39 samples.
+
+Two more measurements point at the actual reference mechanism. A structural scan of the r86 artifact for descriptor
+runs - 20-byte records whose `nm` resolves to a printable `.dll`-suffixed string *and* whose INT slot 0 looks like a
+name RVA or an ordinal - finds **zero runs in the whole image**, so the payload's own import directory is not in our
+artifact to be read. And pegasus's `addr_name` (alienyze.cpp:739-758) is the source of its ordinals: it builds an
+**address -> export index** over the loaded modules (`build_addrres_index_`, `addr_index_`, `addrres_mods_`), looks
+each resolved FT/IAT slot value up in it, and emits `ordinal_<N>` when the matched export has no name.
+
+So the true mechanism is a *reverse* mapping: after the run, the stub has written resolved API addresses into the
+payload's IAT, and the import set is recovered by resolving those addresses back to `(module, name | ordinal)`. The
+prerequisite taote lacks is the **ordinal half of that index**: our stub surfaces are built from an API name table
+(`qiling/unpack/api_db.inc`), so a resolved address maps to a name and the export's ordinal is unknown - the corpus
+originals import by ordinal precisely because the packer resolved them that way. Next step therefore has two parts:
+(1) record real export ordinals alongside the names in the stub surface (or a side table) so a reverse lookup can
+answer `ordinal_<N>`; (2) reverse-map the payload IAT cells through it, additively.
