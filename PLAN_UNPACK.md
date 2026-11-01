@@ -10060,3 +10060,44 @@ ebp=0xc95e make the addresses 0x418cec / 0x41975c / 0x4196e0 statically known), 
 Round note: TELock has now cost three diagnosis rounds without a capability change. It is well-localised but it is a
 deep stub-semantics arc; the cheap measured levers should be taken first (the picker bucket is ~16 rows and the
 round-203 budget finding covers RLPack).
+
+#### 0.17hc Round 207: the picker bucket on r98 is 16 rows and the reference solves 10 of the 12 sampled
+
+Re-censused on r98 (valid PE, **oep_exact is False**, import recall >= 0.95, code_sim >= 0.9 - note `oep_exact` is
+None, not False, on the 84 managed rows, so a naive `not oep_exact` filter reports 56 and is wrong):
+
+| family | n | rows |
+|---|---|---|
+| JDPack | 4 | jdpack_7z, jdpack_7za, jdpack_MxdwGc, jdpack_PEview |
+| Neolite | 4 | neolite_Diskmon, neolite_HDDScan, neolite_Hasher, neolite_md5summer |
+| PEtite | 3 | petite_HDDScan, petite_HashCalc, petite_tinytask |
+| WinUpack | 3 | winupack_FastHash_kr, winupack_HashCalc, winupack_PEview |
+| MPRESS | 1 | mpress_geek (dur 87 = the wall) |
+| PECompact | 1 | pecompact_Everything |
+
+Ran the reference on 12 of them. It is exact on **10** (all but jdpack_PEview and petite_HashCalc):
+
+| row | truth RVA | pegasus | pegasus reason | taote claim |
+|---|---|---|---|---|
+| jdpack_7z | 0xebc5 | 0x40ebc5 | section_hop, 1 stage | 0x40e924 |
+| jdpack_7za | 0x55641 | 0x455641 | section_hop | 0x43f1d9 |
+| jdpack_MxdwGc | 0x8e08 | 0x1008e08 | section_hop | 0x1010890 |
+| neolite_Diskmon | 0xb4b8 | 0x40b4b8 | **section_hop, 2 stages** | 0x406a90 |
+| neolite_Hasher | 0x82628 | 0x482628 | section_hop | 0x45d6db |
+| neolite_md5summer | 0x9ec68 | 0x49ec68 | section_hop | 0x4933ad |
+| petite_tinytask | 0x454c | 0x40454c | section_hop | 0x401000 |
+| winupack_FastHash_kr | 0x1dffa | 0x41dffa | section_hop | 0x420627 |
+| winupack_HashCalc | 0x11e58 | 0x411e58 | section_hop | 0x45a9c2 |
+| winupack_PEview | 0x1000 | 0x401000 | **winupack_terminal_full_fill** | 0x41d5a7 |
+
+So the bucket is not a "which frame" rule problem: on nine of ten the reference gets there by an *observed* section hop
+that taote's run either never takes (it dies in the stub first - jdpack_7z is the known `UC_ERR_READ_UNMAPPED` at
+0x4184d1) or takes at a different place, and neolite_Diskmon shows the reference needing **two** stages where taote
+stops at the first.
+
+Read the reference's WinUpack seam (`src/unpacker/packers/winupack_unpacker.cpp:135-199`) since `winupack_PEview` is a
+`terminal_full_fill` row: when the guess lies inside the packed EP section and the loop is hot it scans the run's
+`ever_written_` ranges for `e8 ???????? e9 ???????? 55 8b ec` (call + jmp + push-ebp prologue) and takes that as the
+entry. taote's `PackerContext` carries no written-range list, so this is not a small port - it needs the engine to
+pass its `ever_written_` ranges into the family context first. That is the next unit of work, and it is worth it:
+`ever_written_` is also what would let a family seam reproduce the "two stages" behaviour the Neolite rows want.
