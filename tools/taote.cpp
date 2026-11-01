@@ -246,8 +246,29 @@ int main(int argc, char** argv) {
     // every other family keeps the lower-case SDK surface, which is what the
     // corpus was measured with.
     const std::string det_family = family.empty() ? guess_family(sample) : family;
-    const bool preserve_sdk_case =
-        qiling::unpack::packers::family_hashes_export_names(det_family);
+    // TAOTE_STUB_CASE=<fam,fam|all>: measure the case-aware surface on a family
+    // that does not (yet) declare Packer::hashes_export_names.
+    bool preserve_sdk_case = qiling::unpack::packers::family_hashes_export_names(det_family);
+    if (const char* sc = std::getenv("TAOTE_STUB_CASE")) {
+        const std::string list = sc;
+        if (list == "all") {
+            preserve_sdk_case = true;
+        } else {
+            std::size_t pos = 0;
+            while (pos <= list.size()) {
+                const auto comma = list.find(',', pos);
+                const auto end = comma == std::string::npos ? list.size() : comma;
+                if (list.compare(pos, end - pos, det_family) == 0) {
+                    preserve_sdk_case = true;
+                    break;
+                }
+                if (comma == std::string::npos) {
+                    break;
+                }
+                pos = comma + 1;
+            }
+        }
+    }
     // RAII: a synthesized temp tree is removed on the way out. A host abort or
     // SIGKILL skips this, which is what the stale-tree sweep below exists for -
     // but the normal path must not leave one tree per sample behind either (a

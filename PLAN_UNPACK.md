@@ -9863,3 +9863,32 @@ Rule (au): a stub export table is a data structure a packer *hashes*, so the spe
 contract - `nm` gives the real case, so never normalise it away. Rule (av): a change that alters what the guest's own
 export walk finds is family-sensitive; gate it with a `Packer` trait and measure the corpus, because the same change
 that took RLPack from 13% to 89% took Molebox from 99% to 0%.
+
+#### 0.17gw Round 201: only RLPack hashes export names - five candidate families measured, 0 gains
+
+Round 200 left `Packer::hashes_export_names()` as a one-line opt-in, so the obvious question was who else wants it. New
+dev switch `TAOTE_STUB_CASE=<fam,fam|all>` forces the case-aware surface for a family that does not declare the trait,
+and one 529-row arm covered the five candidates (Alienyze 126, TELock 116, NSPack 97, WinUpack 97, Neolite 93):
+
+| family | PE | OEP | IMP | all-three | vs r97 |
+|---|---|---|---|---|---|
+| Alienyze | 125 | 118 -> **81** | 79 -> **126** | 79 -> **76** | -3 |
+| NSPack | 97 | 92 -> 92 | 91 -> 91 | 91 -> 91 | 0 |
+| Neolite | 93 | 89 -> 89 | 93 -> 93 | 89 -> 89 | 0 |
+| TELock | 116 | 1 -> 1 | 0 -> 0 | 0 -> 0 | 0 |
+| WinUpack | 97 | 87 -> 87 | 82 -> 82 | 78 -> 78 | 0 |
+
+So the trait stays RLPack-only: no other family in this corpus resolves imports by hashing export names, and the
+case-aware surface is exactly neutral for four of them.
+
+**Alienyze is the interesting negative**: with the case-aware surface every one of its 126 rows reaches an EXACT
+import table (79 -> 126) while exact OEPs fall 118 -> 81, i.e. the two effects fight. The stub normally looks up
+names, misses, and hops somewhere harmless; when the lookup SUCCEEDS it walks further and the section-hop latch fires
+earlier/elsewhere - `alienyze_ADInsight` claims 0x3fcd8 against a truth of 0x34dac, `alienyze_Autologon` 0x8490
+against 0x3980. Net -3 all-three, so it was not kept, but it says Alienyze's ceiling is the picker, not the imports:
+126 import-exact rows are available for free if the pick under a name-resolving stub can be made right. Prime suspect
+for the next round is the round-184 `AlienyzePacker` store-EP fill: it fires when the pick is 0, inside `.alien`, equal
+to the packed EP, or the reason is ladder_scan/fallback_guess - a section_hop pick bypasses it, which is exactly the
+shape the case-aware runs produce.
+
+No capability change: 2098/2678 (r97). ctest 602/602.
