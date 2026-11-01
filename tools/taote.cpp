@@ -295,7 +295,7 @@ int main(int argc, char** argv) {
         fs::create_directories(run_rootfs / "Windows" / "System32");
         fs::create_directories(run_rootfs / "Windows" / "registry");
         for (const auto& [dll, exports] : plan.imports) {
-            write_stub_dll(run_rootfs, dll, exports, plan.is64);
+            write_stub_dll(run_rootfs, dll, exports, plan.is64, /*seed_sdk_surface=*/true);
         }
         // The five key DLLs every guest needs. Round 22 measured a WIDER set
         // here (user32, advapi32, gdi32, shell32, ole32, oleaut32, comctl32,
@@ -318,7 +318,7 @@ int main(int argc, char** argv) {
                         names = exports;
                     }
                 }
-                write_stub_dll(run_rootfs, key_dll, names, plan.is64);
+                write_stub_dll(run_rootfs, key_dll, names, plan.is64, /*seed_sdk_surface=*/true);
             }
         }
         fs::copy_file(run_sample, run_rootfs / "Windows" / sample.filename(),

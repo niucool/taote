@@ -34,6 +34,8 @@
 #include <set>
 #include <string>
 #include <utility>
+
+#include "qiling/unpack/api_db.hpp"
 #include <vector>
 
 #include <LIEF/PE.hpp>
@@ -172,7 +174,8 @@ inline fs::path repairable_sample(const fs::path& sample) {
 // F52 guest-EAT walk, PLAN_UNPACK §0.15/§0.17) sees no exports on a PE32+
 // image, so x86 guests get PE32 and x64 guests get PE32+.
 inline void write_stub_dll(const fs::path& rootfs, const std::string& dll_name,
-                           const std::vector<std::string>& exports, bool is64 = false) {
+                           const std::vector<std::string>& exports, bool is64 = false,
+                           bool seed_sdk_surface = false) {
     // The export surface is the sample's own import names UNION the full
     // per-dll surface taote implements (the ApiRegistry names keyed by dll).
     // A packed file's import table is ~2 names (LoadLibraryA/GetProcAddress),
@@ -185,6 +188,21 @@ inline void write_stub_dll(const fs::path& rootfs, const std::string& dll_name,
         for (const auto& name : qiling::os::ApiRegistry::instance().names_for_dll(dll_name)) {
             if (std::find(all_names.begin(), all_names.end(), name) == all_names.end()) {
                 all_names.push_back(name);
+            }
+        }
+        // ...and the SDK database's surface too (qiling/unpack/api_db.inc). The
+        // registry only knows the handlers taote IMPLEMENTS, which is 1 name for
+        // netapi32 against 407 in the SDK table; a packer that walks a module's own
+        // AddressOfNames by name/hash (RLPack's resolver, 0x4a2747) runs off the end
+        // of the short table and computes a garbage name pointer (measured:
+        // 0x75730000), after which it jumps to 0 and the run dies. Seeding the SDK
+        // surface makes the table the packer expects; GetProcAddress already answers
+        // any api_db name through the sentinel path.
+        if (seed_sdk_surface) {
+            for (const auto& name : qiling::unpack::api_names_for(dll_name)) {
+                if (std::find(all_names.begin(), all_names.end(), name) == all_names.end()) {
+                    all_names.push_back(name);
+                }
             }
         }
     } catch (...) {

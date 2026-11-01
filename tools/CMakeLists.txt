@@ -6,7 +6,9 @@ target_link_libraries(gap_census PRIVATE qiling LIEF::LIEF)
 # directory has to be on the include path.
 add_executable(parity_trace parity_trace.cpp)
 target_include_directories(parity_trace PRIVATE ${CMAKE_SOURCE_DIR})
-target_link_libraries(parity_trace PRIVATE qiling LIEF::LIEF)
+# the sample runner seeds stub dlls from the unpacker's SDK database
+# (qiling/unpack/api_db.cpp), which lives in the separate qiling_unpack target
+target_link_libraries(parity_trace PRIVATE qiling qiling_unpack LIEF::LIEF)
 
 find_program(TAOTE_PYTHON3 NAMES python3 python)
 if(TAOTE_PYTHON3)

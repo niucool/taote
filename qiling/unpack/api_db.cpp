@@ -77,6 +77,37 @@ std::vector<std::string> api_owners(const std::string& name) {
     return out;
 }
 
+std::vector<std::string> api_names_for(const std::string& dll) {
+    std::string want = dll;
+    for (auto& c : want) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    if (const auto dot = want.rfind('.'); dot != std::string::npos) {
+        want.resize(dot);
+    }
+    std::vector<std::string> out;
+    for (const auto& [name, owners] : table()) {
+        std::size_t start = 0;
+        while (start <= owners.size()) {
+            const auto comma = owners.find(',', start);
+            const auto end = comma == std::string_view::npos ? owners.size() : comma;
+            std::string owned(owners.substr(start, end - start));
+            for (auto& c : owned) {
+                c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            }
+            if (!owned.empty() && owned == want) {
+                out.emplace_back(name);
+                break;
+            }
+            if (comma == std::string_view::npos) {
+                break;
+            }
+            start = comma + 1;
+        }
+    }
+    return out;
+}
+
 const char* api_owner(const std::string& name) {
     const auto* v = lookup(name);
     if (v == nullptr) {

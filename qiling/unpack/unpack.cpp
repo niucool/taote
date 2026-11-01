@@ -332,11 +332,34 @@ bool Unpacker::materialize_decoy_dll(const std::string& dll_name) {
     const auto dir = fs::path(opts_.rootfs) / "Windows" / "System32";
     const auto path = dir / name;
     std::error_code ec;
+    // A decoy cached by an older build carries the single `decoy_export` name; it
+    // is stale - regenerate it with the dll's full surface.
+    if (fs::exists(path, ec)) {
+        try {
+            std::ifstream in(path, std::ios::binary);
+            std::string blob((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            if (blob.find("decoy_export") != std::string::npos) {
+                fs::remove(path, ec);
+            }
+        } catch (...) {
+        }
+    }
     if (!fs::exists(path, ec)) {
         try {
             fs::create_directories(dir, ec);
+            // A decoy that exports a SINGLE name is not enough for a stub that walks
+            // the module's own export table: RLPack's resolver scans AddressOfNames
+            // by name/hash, runs off the end of a one-entry table and computes a
+            // garbage name pointer (measured: 0x75730000), after which the stub jumps
+            // to 0 and the run dies. Seed the dll's FULL export surface from the SDK
+            // database instead - every name gets its own `ret` cell.
+            std::vector<std::string> surf = api_names_for(name);
+            if (surf.empty()) {
+                surf.emplace_back("decoy_export");
+            }
+            const std::size_t cell = 16;
+            std::vector<std::uint8_t> code(std::max<std::size_t>(16, surf.size() * cell), 0xC3);
             auto factory = LIEF::PE::Factory::create(LIEF::PE::PE_TYPE::PE32_PLUS);
-            std::vector<std::uint8_t> code(16, 0xC3);
             LIEF::PE::Section text(".text", code);
             factory->add_section(text);
             auto bin = factory->get();
@@ -346,7 +369,12 @@ bool Unpacker::materialize_decoy_dll(const std::string& dll_name) {
                     text_rva = sec.virtual_address();
                 }
             }
-            LIEF::PE::Export exp(name, {LIEF::PE::ExportEntry("decoy_export", text_rva)});
+            std::vector<LIEF::PE::ExportEntry> entries;
+            entries.reserve(surf.size());
+            for (std::size_t i = 0; i < surf.size(); ++i) {
+                entries.emplace_back(surf[i], static_cast<std::uint32_t>(text_rva + i * cell));
+            }
+            LIEF::PE::Export exp(name, entries);
             bin->set_export(exp);
             LIEF::PE::Builder::config_t cfg;
             cfg.exports = true;

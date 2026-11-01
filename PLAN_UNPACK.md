@@ -9609,3 +9609,46 @@ ecx,esi ; lea edi,[edx+ecx*4]` - an LZMA-style range coder), so the 5 s is decom
 is recycled (a run-end dump of it is junk, which is why `TAOTE_HEAPSNAP` snapshots mid-run).
 
 Probes (`TAOTE_DUMPRANGE`, `TAOTE_HEAPSNAP`) reverted with the round; both ~15 lines.
+
+#### 0.17gq Round 195: seed stub DLLs from the SDK export surface - RLPack's resolver stops dying
+
+Tracing 0.17gp's garbage name pointer to its origin finished the diagnosis and produced the fix. The stub's own
+resolver (decompressed into the heap at 0x4a2747) walks a module's `AddressOfNames` with a name/hash compare
+(`cmp eax,[esp+0x28]`, `inc esi`, `cmp esi,[ebx+0x18]`) and returns `AddressOfNames[esi] + base`. When the name is
+not in the table the walk runs off the end and `esi` lands on `NumberOfNames`, so `[edi+esi*4]` reads PAST the table:
+that is where **0x75730000** came from - not a decode failure at all.
+
+Why the name was missing: the stub DLLs are generated per run by `write_stub_dll`, which seeded a dll's export surface
+from the sample's own imports UNION `ApiRegistry::names_for_dll` - the handlers taote IMPLEMENTS. For `netapi32.dll`
+that is **1 name** (NetUserGetGroups) against **407** in the SDK table (`qiling/unpack/api_db.inc`). The stub asked
+for its second import, the walk fell off the end, GetProcAddress got a garbage pointer, returned 0, and the stub
+jumped to 0 -> `pc==0 ... UC_ERR_FETCH_UNMAPPED`, which is the "ends after 5 s with no error" of round 194.
+
+The fix: new `qiling::unpack::api_names_for(dll)` (the reverse of the existing `api_owners`) and `write_stub_dll` now
+seeds that surface too, behind an explicit `seed_sdk_surface` flag that only the unpack CLI's call sites pass (the
+parity fixtures keep the old surface - seeding there broke `PegasusParity.DllEmulationRunsX86/X64`, which pin a
+hand-authored DLL's exports). `tools/CMakeLists.txt` gains `qiling_unpack` for `parity_trace`, which now calls
+`write_stub_dll`.
+
+Measured, `rlpack_ADExplorer.exe`: `GetProcAddress(netapi32.dll!...)` stops failing, the run goes deep, and the row
+goes **imports 49 -> 240** (original 314, pegasus 226) with its OEP moving from `ladder_passc` to a real
+**`section_hop`**.
+
+**RLPack arm (104 rows): valid PE 104 (unchanged) / OEP 73 -> 83 / imports 8 -> 13 / all-three 7 -> 12.**
+Corpus r92 is running (this changes every run's rootfs, so it must be measured corpus-wide).
+
+Corpus **r92** (2678 rows, 08:59-10:05) - the SDK-surface seeding pays corpus-wide, with no losses:
+
+| | r91 | r92 |
+|---|---|---|
+| valid PE | 2676 | 2676 |
+| OEP exact | 2137/2596 | **2148/2596** |
+| imports | 2087/2676 | **2092/2676** |
+| graded all-three | 2009 | **2014** |
+
+5 gains / 0 losses, and 15 rows moved in total - the ten other moves are RLPack rows whose OEP or import set improved
+without completing all three (e.g. `rlpack_Diskmon`, `rlpack_ESEDatabaseView`, `rlpack_FastHash_kr`,
+`rlpack_HashCalc`, `rlpack_ShellView`... each going from `(True, False, False)` to `(True, True, False)`), so they are
+the next slice of the same cluster: entries now exact, imports still short. RLPack as a family in r92: 104 rows / 100% valid PE / **81% OEP** / **13% imports** / **12% all-three** (the
+104-row ARM measured 83 OEP / 13 imports / 12 all-three; the corpus runs 4-wide and is the authoritative number).
+

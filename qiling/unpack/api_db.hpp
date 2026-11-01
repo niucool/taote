@@ -24,6 +24,13 @@ const char* api_owner(const std::string& name);
 // what api_owner returns). Empty when the name is unknown.
 std::vector<std::string> api_owners(const std::string& name);
 
+// The reverse direction: every export name the SDK database attributes to `dll`
+// (case-insensitive, no extension). Used to seed a fabricated module with the
+// dll's FULL export surface, so a stub that walks a module's export table by
+// name/hash finds what it looks for instead of running off the end of a
+// single-export decoy.
+std::vector<std::string> api_names_for(const std::string& dll);
+
 }  // namespace unpack
 }  // namespace qiling
 
