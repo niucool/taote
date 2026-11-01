@@ -9525,3 +9525,31 @@ So the RLPack import residual is a *missing attribution model*, not a missing ta
 with each resolved pair (taote already notes the pair at GPA/loader resolution, `unpack.cpp:524/549`), classify by the
 caller's section exactly as W4 does, and drop post-hand-off pairs. Family arm first (104 rows), then the corpus -
 predicted ceiling 49 -> ~226 pairs per row on RLPack, which is the 66-row cluster.
+
+#### 0.17gn Round 192: RLPack's 66-row import cluster is NOT import-shaped - the payload never runs
+
+Classification of the 66 RLPack rows that have an exact OEP and a failing import table (r91):
+
+| property | measurement |
+|---|---|
+| code decoded | **62 of 66 at code_sim >= 0.99** (the other 4 at 0.5-0.9) |
+| entry | exact by construction (the rows are filtered on `oep_exact`) |
+| missing pairs | **87% by NAME, 13% ordinals** (10 rows: 2266 named vs 344 ordinal missing) |
+| artifact holds the names? | **no** - of `rlpack_ADExplorer`'s 285 named imports only **19** appear anywhere in our artifact |
+| artifact holds the IAT? | **no** - at the ORIGINAL's IAT RVAs (imp_rva 0x5e090) the artifact is **zeros** |
+| where the stub DOES write resolved addresses | a guest heap buffer at 0x4a2fd5, ~8-16 slots only, and it is **gone by run end** (a `TAOTE_DUMPRANGE=0x4a0000-0x4a4000` snapshot at finalize is junk) |
+| run behaviour | **8 API calls in the entire run** (1 LoadLibraryA, 2 GetProcAddress, 2 VirtualAlloc, 2 VirtualProtect), run ends in **5 s** with the last pcs inside heap code (0x4a24xx-0x4a27xx) and no error |
+| reference comparison | same row, same OEP: taote 49 pairs, **pegasus 226 pairs** - and pegasus's artifact holds the SAME 19/285 names, so its 226 do not come from the dump either |
+
+Conclusion: there is **no FSG-like or Alienyze-like store** in RLPack's decoded image - the import evidence is not in the
+artifact at all. The names are not in the image, the payload's IAT is never filled, and the run makes 8 API calls and
+stops inside the stub's heap-resident code. So the imports are short because **the payload never executes**, which is
+the emulation-depth diagnosis of round 106, now localised: the stub decodes the payload, the ladder finds the true
+entry statically (0x4149ec), and execution then wanders in the stub's heap buffer instead of transferring there.
+
+That rules out the whole "import-shape" family of fixes for these 66 rows: no scanning, shift-vote, blob-repair or
+ordinal rule can recover names that were never materialised. The one mechanism worth building is the reference's
+**resume-at-payload-entry**: when the stub stops making progress after a validated decode, start the payload at the
+picked OEP (fresh stack, SEH re-install) so it resolves its own imports and the ordinary harvest sees them. Gate it
+to RLPack first (family arm, 104 rows), then measure the corpus. Probes used above (`TAOTE_IATPROBE`,
+`TAOTE_DUMPRANGE`) were reverted with the round; both are ~10 lines and worth re-adding when the resume lands.
