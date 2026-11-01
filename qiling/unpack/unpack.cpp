@@ -548,6 +548,45 @@ void Unpacker::install_gpa_sentinel(Qiling& ql) {
         }
         dll = sanitize_ascii(dll);
         name = sanitize_ascii(name);
+        if (!(retval.has_value() && *retval != 0) && std::getenv("TAOTE_GPANULL") != nullptr) {
+            static std::size_t n = 0;
+            if (n++ < 2) {
+                auto &r = q.arch().regs();
+                const auto pc = r.arch_pc();
+                std::fprintf(stderr,
+                             "[gpn] pc=0x%llx eax=0x%llx ebx=0x%llx ecx=0x%llx edx=0x%llx esi=0x%llx edi=0x%llx"
+                             " ebp=0x%llx esp=0x%llx nameptr=0x%llx\n",
+                             (unsigned long long)pc, (unsigned long long)r.read("eax"),
+                             (unsigned long long)r.read("ebx"),
+                             (unsigned long long)r.read("ecx"),
+                             (unsigned long long)r.read("edx"),
+                             (unsigned long long)r.read("esi"),
+                             (unsigned long long)r.read("edi"),
+                             (unsigned long long)r.read("ebp"),
+                             (unsigned long long)r.read("esp"),
+                             (unsigned long long)name_ptr);
+                const auto sp = r.read("esp");
+                try {
+                    // The resolver's own state lives in the registers it was
+                    // called with, so dump what they point at: a packer's
+                    // import-rebuild loop keeps its descriptor/cursor there.
+                    for (const char* reg : {"esi", "edi", "ebx", "ebp"}) {
+                        const auto va = r.read(reg);
+                        auto b = q.mem().read(va, 16);
+                        std::fprintf(stderr, "[gpn] [%s]=0x%llx:", reg, (unsigned long long)va);
+                        for (auto ch : b) std::fprintf(stderr, " %02x", ch);
+                        std::fprintf(stderr, "\n");
+                    }
+                    for (int i = 0; i < 6; ++i) {
+                        auto b = q.mem().read(sp + 4 * i, 4);
+                        std::uint32_t v = 0;
+                        std::memcpy(&v, b.data(), 4);
+                        std::fprintf(stderr, "[gpn]   [esp+%2d] = 0x%08x\n", 4 * i, v);
+                    }
+                } catch (...) {
+                }
+            }
+        }
         if (retval.has_value() && *retval != 0) {
             note_import(dll, name);  // the loader really resolved it
             return std::nullopt;

@@ -9738,3 +9738,47 @@ stub retries the same entry - which is why the run loops and why only 149 of 255
 Next probe, precise: find the caller of that resolver for this entry (the stub's store walk) and dump the store entry
 it read - the value should decode to a small ordinal, and ours decodes to exactly 0x10000. That is a decode/data
 question inside the packer's own algorithm, not an export-surface question, and it is the last mile for this cluster.
+
+#### 0.17gt Round 198: the CRT family is ONE surface - msvcrt had no names at all (corpus 2014 -> 2018)
+
+Chasing the round-197 `0x10000` led straight into the payload, and the payload's resolver is the payload's own
+import-rebuild thunk, dumped live at the failing call:
+
+```
+43f87d: (decoded thunk)
+43f891: xor  eax,0x80000000
+43f896: cmp  eax,0x10000
+43f89b: jbe  0x43f8b9        ; <= 0x10000 -> push the value itself as lpProcName (ORDINAL path)
+43f89d: xor  eax,0x80000000  ; otherwise undo the flag: a name RVA
+43f8a5: call 0x43f8ca        ; EAT walk: rol eax,7 / xor al,byte over each name, cmp to the pushed hash
+43f8b9: push eax ; push [esi] ; call [ebp+0xc6d]   ; GetProcAddress(hmod, name)
+```
+
+So `nameptr=0x10090000` was `msvcrt_base + 0x10000`, the value the EAT walk returns when it runs off the end of
+`AddressOfNames` - the packer looked for a name hash that our stub module does not export. Which name? Not recoverable
+by hash alone (neither 0x96390321 nor 0x050c317a is in api_db's 32374 names), but the *reason* was structural:
+
+**`api_db` contains no `msvcrt` rows at all.** The host SDK files the whole C runtime under `ucrt`, `ucrtbase` and
+`crtdll`, so `api_names_for("msvcrt.dll")` returned only the 66 CRT handlers taote implements - and a packer that
+resolves CRT imports the way the loader does (walking the module's own export names) found ~none of them.
+
+Fix: `api_names_for` now treats the C runtime as one family (`crtdll`, `ucrt`, `ucrtbase`, `msvcrt`, `msvcr*`,
+`api-ms-win-crt-*`), so a stub msvcrt carries the family's full surface (~2600 names). Family correctness is not a
+heuristic: these dlls really do export the same names.
+
+| measurement | before | after |
+|---|---|---|
+| rlpack_LastActivityView.exe imports | 149 | **175** (of 255), `[gpanull]` loop gone |
+| RLPack arm (104) PE/OEP/IMP/ALL | 104/83/13/12 | **104/86/15/14** |
+| corpus r93 PE/OEP/IMP/ALL | 2676/2148/2092/2014 | **2676/2154/2095/2018** |
+
+Corpus row moves (rerun-corrected; the raw r93 had four ASPack rows at `dur=0` because a rebuild landed under the
+running corpus, plus two 85 s+ wall flakes - both re-run and restored): **9 gains / 2 losses** -
++ amber_netcfg, bero_geek, mpress_cpuz_x32, nspack_Bginfo, packman_adwcleaner_7.2.4.0, rlpack_AccessEnum,
+rlpack_calc, rlpack_geek (all gaining exact OEP) and rlpack_mtinst (all-three); - amber_mdbx_dump (its r92 "exact" came
+from a shadow-base claim 0x500a847; taote now picks a low-base ladder answer 0x401661, 0x400 short of 0x1a67) and
+winupack_Bginfo (86 s wall flake on imports).
+
+Operational note for future corpus runs: **never rebuild while a corpus is running** - the exec of a half-written binary
+shows up as `dur=0 rc=0` and silently costs rows. TAOTE_GPANULL now prints the failed GetProcAddress with the caller,
+all registers and the 16 bytes at esi/edi/ebx/ebp.

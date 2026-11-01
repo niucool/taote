@@ -77,6 +77,29 @@ std::vector<std::string> api_owners(const std::string& name) {
     return out;
 }
 
+namespace {
+
+// The host SDK files the C-runtime surface under ucrt/ucrtbase/crtdll and gives
+// msvcrt (and the versioned msvcr*'s) NO names at all, so a stub msvcrt was
+// created with only the handful of handlers taote implements - while a packer
+// resolving CRT imports the way the loader does walks the module's own export
+// name table and finds nothing. Treat the whole CRT as one family: all of these
+// dlls really do export (nearly) the same names.
+bool is_crt_family(std::string_view n) {
+    if (n == "crtdll" || n == "ucrt" || n == "ucrtbase" || n == "msvcrt" || n == "msvcr") {
+        return true;
+    }
+    if (n.rfind("msvcr", 0) == 0) {  // msvcr70/71/80/90/100/110/120...
+        return true;
+    }
+    if (n.rfind("api-ms-win-crt", 0) == 0) {
+        return true;
+    }
+    return false;
+}
+
+}  // namespace
+
 std::vector<std::string> api_names_for(const std::string& dll) {
     std::string want = dll;
     for (auto& c : want) {
@@ -85,6 +108,7 @@ std::vector<std::string> api_names_for(const std::string& dll) {
     if (const auto dot = want.rfind('.'); dot != std::string::npos) {
         want.resize(dot);
     }
+    const bool want_crt = is_crt_family(want);
     std::vector<std::string> out;
     for (const auto& [name, owners] : table()) {
         std::size_t start = 0;
@@ -95,7 +119,7 @@ std::vector<std::string> api_names_for(const std::string& dll) {
             for (auto& c : owned) {
                 c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
             }
-            if (!owned.empty() && owned == want) {
+            if (!owned.empty() && (owned == want || (want_crt && is_crt_family(owned)))) {
                 out.emplace_back(name);
                 break;
             }
