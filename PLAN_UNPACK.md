@@ -11897,3 +11897,44 @@ bytes at `[ebp+8]`. Two candidate explanations, both cheap to test with a probe 
 
 Block 6 matters because it is what stops the payload from ever running (0.17is), and only then does PEtite expose a
 runtime hand-off to read the OEP from - the family's 37 OEP-wrong rows hang off this one block.
+
+#### 0.17iu block 6 fails the 16-bit complement guard - and its source cannot satisfy it
+
+The predecessor diagnostic settles which edge of the shared failure exit was taken. New tool: `TAOTE_PROBE_PREV=1`
+records the pc that LED to a probe hit (a second code hook that skips the probe address itself), because PEtite's
+failure exit at 0x4181c7 has ten edges and the register state alone cannot name the check. With it:
+
+    [probe] pc=0x4181c7 ... ebx=0x6ca5 edi=0x20 esi=0x3 eax=0x905a
+    [probe]   prev_pc=0x417327
+
+0x417327 is the jne of the **16-bit complement guard**:
+
+    417319  mov  eax,ebx
+    41731b  not  ebx
+    41731d  and  eax,0xffff
+    417322  shr  ebx,0x10
+    417325  xor  ebx,eax
+    417327  jne  0x4181c7        ; fail unless high16 == ~low16
+
+which is the same guard recorded for this family in the parked PEtite notes - now localised to block 6 and to an
+exact instruction. Correcting 0.17im/0.17it: **the header block does not fail on the chunk-type dispatch**; it
+reaches this guard first and fails there (`ebx` is the post-xor residual 0x6ca5).
+
+Why it fails: at 0x417302-0x417317 the guard fills a 32-bit reservoir from `[ebp+8]`, which is 0x400005, and the
+image there is `00 00 00 04` (dump == packed file byte for byte, only the MZ is zeroed, and `TAOTE_WATCH` proves
+nothing ever writes to 0x400005). So W = 0x04000000, low16 = 0x0000, ~low16 = 0xffff, high16 = 0x0400 - not equal.
+Scanning the first 0x2000 bytes of BOTH the packed file and the dump for any 4-byte window that satisfies
+`high16 == ~low16` finds only trivial ones (0xffff / 0xffff0000 at offsets 0xa-0xc), so the header block's stream is
+simply not in the header page the stub is reading.
+
+Conclusion: in taote's emulation the header block is handed `src = base + 5` - a pointer at the packed DOS header -
+and the complement guard rejects it. Two candidate explanations, and they are distinguishable:
+
+  1. the stub computes that pointer from the descriptor's src field, which reads 0 for this record, so an addition
+     of 5 somewhere turns "unset" into "the DOS header" - i.e. the loop is iterating one record past the real table
+     and block 6 is a bogus iteration (the real table's last useful entry is block 5);
+  2. the stream really is at the DOS header but must first be decrypted in place, which our run never does (no
+     writes in the region except the MZ zeroing).
+
+Either way the payload is decoded correctly and then never runs, which is why PEtite has no runtime hand-off to read
+its OEP from. Parked here with the exact instruction, the exact edge, the exact bytes and the two candidates.

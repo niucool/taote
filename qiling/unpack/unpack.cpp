@@ -919,8 +919,22 @@ void Unpacker::install(Qiling& ql) {
             const char* nmax = std::getenv("TAOTE_PROBE_N");
             const int maxhits = nmax != nullptr ? std::atoi(nmax) : 3;
             const bool only_zero = std::getenv("TAOTE_PROBE_FAIL") != nullptr;
+            // TAOTE_PROBE_PREV records the pc executed immediately before a probe hit:
+            // a shared failure exit (PEtite's 0x4181c7 has ten edges, each a different
+            // format check) is only diagnosable if the predecessor names which check it
+            // was. Costs a second code hook, so it is opt-in.
+            auto prev_pc = std::make_shared<std::uint64_t>(0);
+            if (std::getenv("TAOTE_PROBE_PREV") != nullptr) {
+                auto ph = std::make_shared<HookRet>(ql.hook_code([prev_pc, want](std::uint64_t a, std::uint32_t) -> int {
+                    if (a != want) {  // keep the pc that LED here, not the probe pc itself
+                        *prev_pc = a;
+                    }
+                    return 0;
+                }));
+                hooks_.push_back(std::move(ph));
+            }
             auto hits = std::make_shared<int>(0);
-            auto h = std::make_shared<HookRet>(ql.hook_code([this, &ql, want, hits, maxhits, only_zero](std::uint64_t addr,
+            auto h = std::make_shared<HookRet>(ql.hook_code([this, &ql, want, hits, maxhits, only_zero, prev_pc](std::uint64_t addr,
                                                                                   std::uint32_t) -> int {
                 if (addr != want || *hits >= maxhits) {
                     return 0;
@@ -983,6 +997,10 @@ void Unpacker::install(Qiling& ql) {
                     }
                     std::fprintf(stderr, "[probe]   stack[esp..+32]:%s\n", win.c_str());
                 } catch (...) {
+                }
+                if (std::getenv("TAOTE_PROBE_PREV") != nullptr) {
+                    std::fprintf(stderr, "[probe]   prev_pc=0x%llx\n",
+                                 static_cast<unsigned long long>(*prev_pc));
                 }
                 try {
                     std::fprintf(stderr, "[probe]   fs_base=0x%llx\n",
