@@ -98,8 +98,56 @@ void register_memoryapi_family() {
         {"dwSize", LPVOID_},
         {"flNewProtect", DWORD_},
         {"lpflOldProtect", LPVOID_},
-    }) = [](Qiling&, std::uint64_t, const ResolvedParams&) -> std::optional<std::uint64_t> {
-        return 1;
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        // Honouring the request matters for exactly one family: PEtite's stub makes
+        // its PE-header fragment READ-ONLY and the decoder's 4th emit writes a byte to
+        // the IMAGE BASE, which natively FAULTS into the stub's exception-driven
+        // decryptor (../pegasus/docs/PETITE_ROOTCAUSE.md). Answering 1 without applying
+        // the protection swallows that fault and sends the stub down its corrupt-image
+        // path ("Corrupt Data!" -> ExitProcess, 0x4170ce-0x4170f3 on petite_rrdec).
+        // TAOTE_PROT_ENFORCE=1 arms it; the write-prot fault is then handled by the
+        // existing seh_on_write_prot dispatch (which completes the write when no
+        // handler takes the AV, so an unhandled protect cannot kill a run).
+        const auto addr = static_cast<std::uint64_t>(api_get_int(get_param(params, "lpAddress")));
+        const auto size = static_cast<std::uint64_t>(api_get_int(get_param(params, "dwSize")));
+        const auto prot = static_cast<std::uint32_t>(api_get_int(get_param(params, "flNewProtect")));
+        const auto oldp = static_cast<std::uint64_t>(api_get_int(get_param(params, "lpflOldProtect")));
+        if (std::getenv("TAOTE_PROT_ENFORCE") == nullptr) {
+            return 1;
+        }
+        std::uint32_t perms = 0;
+        if ((prot & 0x02) != 0 || (prot & 0x04) != 0 || (prot & 0x08) != 0 || (prot & 0x20) != 0 ||
+            (prot & 0x40) != 0 || (prot & 0x80) != 0) {
+            perms |= UC_PROT_READ;  // PAGE_READONLY / READWRITE / WRITECOPY / EXECUTE_READ*
+        }
+        if ((prot & 0x04) != 0 || (prot & 0x08) != 0 || (prot & 0x40) != 0 || (prot & 0x80) != 0) {
+            perms |= UC_PROT_WRITE;  // everything except READONLY / EXECUTE / EXECUTE_READ
+        }
+        if ((prot & 0x10) != 0 || (prot & 0x20) != 0 || (prot & 0x40) != 0 || (prot & 0x80) != 0) {
+            perms |= UC_PROT_EXEC;
+        }
+        if ((prot & 0x01) != 0) {
+            perms = 0;  // PAGE_NOACCESS
+        }
+        const auto page = addr & ~static_cast<std::uint64_t>(0xfff);
+        const auto span = ((addr + size + 0xfff) & ~static_cast<std::uint64_t>(0xfff)) - page;
+        bool ok = true;
+        try {
+            if (size != 0 && span != 0) {
+                ql.mem().protect(page, span, perms);
+            }
+            if (oldp != 0) {
+                ql.mem().write(oldp, std::vector<std::uint8_t>{0x04, 0x00, 0x00, 0x00});
+            }
+        } catch (...) {
+            ok = false;  // the API contract: failure is a 0, never a crash
+        }
+        if (std::getenv("TAOTE_PROT_DBG") != nullptr) {
+            std::fprintf(stderr, "[prot] VirtualProtect(0x%llx, 0x%llx, 0x%x) -> perms=0x%x ok=%d\n",
+                         static_cast<unsigned long long>(addr), static_cast<unsigned long long>(size),
+                         static_cast<unsigned>(prot), static_cast<unsigned>(perms), static_cast<int>(ok));
+        }
+        return ok ? 1 : 0;
     };
 
     // BOOL VirtualProtectEx(

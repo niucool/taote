@@ -12075,3 +12075,32 @@ Work order for the next session, in dependency order:
   d. port the section-transition trail + backward walk for the OEP.
 Each step is separately measurable on the family, and step (a) alone is a one-line change with an immediate
 observable: the write at 0x417217 must start producing a guest AV instead of succeeding.
+
+#### 0.17iz shipped as an opt-in harness: enforcing VirtualProtect puts PEtite on the reference's path, and the next link derails
+
+Implemented step (a) of 0.17iy: `VirtualProtect` now honours the request when `TAOTE_PROT_ENFORCE=1` (it maps
+PAGE_* to uc perms, computes the page span, writes PAGE_READWRITE into `lpflOldProtect`, returns 0 instead of 1 on
+failure, and never throws). Default OFF - with the variable unset the handler returns 1 exactly as before.
+
+The immediate observable the blueprint predicted:
+
+    gate off : [watch] pc=0x417217 addr=0x400000 value=0x0 ; oep=0x417214 reason=section_hop
+    gate on  : [prot] VirtualProtect(0x400780, 0x880, 0x4) -> perms=0x3
+               [prot] VirtualProtect(0x400780, 0x880, 0x2) -> perms=0x1
+               pc trace 0x417214 -> 0x417217 -> **0x40d07c** -> 0x40d0d0 ... -> read fault
+               oep=0x40d07c reason=section_hop error=Invalid memory read (UC_ERR_READ_UNMAPPED)
+
+0x40d07c is EXACTLY the reference's first EP-exit transition (`[pet-epexit] t[0] from=2 to=3 addr=0x40d07c`), so
+honouring the protection moves taote off the corrupt-image path and onto the reference's decode path. It then dies
+after ~10 instructions in the second-stage code at 0x40d0db - the same place the reference's own notes describe
+("the second stage derails") for the link after the fault.
+
+Family A/B (73 PEtite rows, 4 workers, 85 s budget), same binary:
+
+    control (default off) : n=73 PE=73 OEP=36 IMP=36 ALL=30      <- identical to r106, so the new code is inert
+    TAOTE_PROT_ENFORCE=1  : n=73 PE=73 OEP=23 IMP=36 ALL=23      <- 13 OEP flips, 7 all-three losses, 0 gains
+
+which reproduces the reference's own warning that enabling the fault dispatch alone makes PEtite worse. So the code
+ships DEFAULT OFF as a measurement harness (the project's established pattern), the shipped baseline is unchanged,
+and the next unit is the link that turns this into a win: the SEH chain seed (self-referential frame, context cell =
+image base) plus the int1/TF storm, per 0.17iy steps (b) and (c), then the transition trail for the OEP.
