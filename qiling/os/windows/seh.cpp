@@ -307,7 +307,36 @@ bool QlOsWindows::seh_on_fault(int access, std::uint64_t address) {
         return seh_dispatch(address, 1u);
     }
     if (access == UC_MEM_READ_UNMAPPED) {
-        return seh_dispatch(address, 0u);
+        if (seh_dispatch(address, 0u)) {
+            return true;
+        }
+        // A stub walking its own probe table reads straight through an unmapped
+        // NULL region and expects the platform to survive it (the reference logs
+        // [null-pc] except=0xc0000005 and carries on). Bounded hard so a runaway
+        // stub still dies fast: only faults in the first megabyte - a real pointer
+        // into a heap or image is never there - and at most 8 of them per run.
+        // Measured (corpus r98 -> r102): 9 gains / 0 losses, and every row that an
+        // unbounded version slowed past the 120 s wall (mew/nspack/expressor
+        // *_Everything) now finishes FASTER than it did without this - the stub
+        // skips its retry loop instead of spinning to the wall. The cap is what
+        // keeps a runaway stub dying fast: a cap of 16 cost 104-115 s on those rows.
+        static std::size_t null_reads = 0;
+        if (address < 0x10000000 && null_reads < 8) {
+            ++null_reads;
+            try {
+                const auto page = address & ~0xfffull;
+                ql_->mem().map(page, 0x1000, UC_PROT_ALL);
+                ql_->mem().write(page, std::vector<std::uint8_t>(0x1000, 0));
+                if (std::getenv("TAOTE_SEHDBG") != nullptr) {
+                    std::fprintf(stderr, "[sehc] null read at 0x%llx -> mapped a zero page (%zu)\n",
+                                 static_cast<unsigned long long>(address), null_reads);
+                }
+                return true;
+            } catch (...) {
+                return false;
+            }
+        }
+        return false;
     }
     // An execute on a no-exec page (#PF on instruction fetch) is only a guest
     // exception when the image is mapped with real section permissions. taote

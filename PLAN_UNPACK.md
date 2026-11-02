@@ -10534,3 +10534,32 @@ stack because main's round-202 Alienyze work (the store EP outranking a bad hop,
 already lifted Alienyze to 125/126 import-exact and 118/126 all-three; the branch's ordinal reader and band miner were
 measured against the *pre*-round-202 baseline (79 all-three) and reach the same rows. Both implementations are now
 present and agree; the ordinal reader is the one that would matter if a future Alienyze row keeps a short INT table.
+
+#### 0.17hf Round 210: surviving a null READ, bounded to 8 faults - corpus 2138 -> 2144
+
+Round 209 measured the mechanism (+9 rows on 18 sampled rows) but rejected it because an unbounded version pushed three
+`*_Everything` rows past the 120 s wall (r99 2141, r100 2139 with a 16-fault cap). The cap was the variable, not the
+mechanism: at **8** faults those same rows come out *faster* than they were without it - the stub skips its retry loop
+instead of spinning to the wall:
+
+| row | r98 dur | cap 16 | cap 8 |
+|---|---|---|---|
+| mew_Everything | 43 s | 113 s | **28 s** |
+| nspack_Everything | 48 s | 110 s | **26 s** |
+| expressor_Everything | 46 s | 115 s | **30 s** |
+
+The implemented rule: after `seh_dispatch` finds no handler for a `UC_MEM_READ_UNMAPPED`, if the fault address is below
+0x10000000 and fewer than 8 such faults have been survived, map a zero page there and retry, so the load yields 0.
+Everything else still fails exactly as before.
+
+| corpus | PE | OEP | imports | all-three |
+|---|---|---|---|---|
+| r98 (before) | 2676 | 2169 | 2175 | **2138** |
+| r102 (cap 8) | 2676 | 2174 | 2223 | **2144** |
+
+Six gains (Neolite 3, MPRESS 1, RLPack 1, BeRo 1) and two losses, both at dur 86 and both restored when re-run in
+place. On the targeted 18-row sweep it is 9 gains / 0 losses and *every* row is faster than baseline - the rows that
+lose a second of wall clock are the ones that used to spin.
+
+Rule (ba): when a "survive the fault" change looks like a speed regression, vary the CAP before abandoning the
+mechanism - the cost was the runaway path being taken to its (large) limit, not the survival itself.
