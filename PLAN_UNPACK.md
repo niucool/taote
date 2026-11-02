@@ -11315,3 +11315,31 @@ survive in the decoded image with its 0x80000000-flagged thunks? A blind scan is
 discriminator has to be structure (a contiguous run of flagged thunks after a DLL name), which is what the existing
 orphan-descriptor scan already does for named imports. Verify that the runs exist before writing a seam (rule h), and
 check whether `mtinst` is only a decode problem (code_sim 0.88) rather than an import one.
+
+#### 0.17ib WinUpack's ordinal spelling is CLOSED by evidence: three independent sources are empty
+
+Checked every plausible source for the missing ordinals (Diskmon: oleaut32 #2..#25, comctl32 #17; ShareEnum: oleaut32
+#2..#202, ws2_32 #1..#116):
+
+1. **The decoded image.** A structural scan for the payload's original INT - runs of consecutive 0x80000000-flagged
+   dwords with plausible ordinal lows - finds only noise: Diskmon 18 runs of >=3, ShareEnum 72, and their ordinal sets
+   overlap the missing set by 0-1 members with values like 3995, 3840, 3700 that cannot be ordinals. No structure, no
+   source.
+2. **The packed file's own import table**: `import_names()` on the packed sample returns **0 pairs** for both rows (the
+   stub keeps no caller-side table to read).
+3. **The runtime resolution lane**: `GetProcAddress` is called **zero times** on Diskmon (TAOTE_APIDBG), so the stub
+   resolves the payload's imports itself from its own encoded table and writes resolved ADDRESSES into the IAT. There is
+   no (dll, ordinal-or-name) pair to intercept.
+
+So the ordinal spelling of a given slot is destroyed at pack time and cannot be reconstructed from this corpus: the only
+thing left at run time is the address, which identifies the function but not how the original binary spelled it. Per-DLL
+majority voting cannot help either - Diskmon's table is a genuine mix (recall 0.94 with ~11 oleaut32 pairs matched and 11
+missing), so the choice is per-slot.
+
+CLOSED. The two remaining levers for these rows are (a) recover the ordinal-carrying table from the stub's encoded data
+(a format-reading job with no evidence yet that the ordinals are even stored), or (b) accept them. Do not re-run the
+"alias names to ordinals" idea: it inflates recall by duplicating imports in the rebuilt table and was rejected in 0.17ia.
+WinUpack stays at 81/97; its OEP work (round 229) is unaffected.
+
+Next unit: back to the PEtite byte-level differential (37 OEP-wrong rows with the true entry decoded, and the reference
+byte-exact at 0/47896), which is the largest measurable pool left that is not blocked on destroyed information.
