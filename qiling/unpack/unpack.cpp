@@ -844,10 +844,19 @@ void Unpacker::install(Qiling& ql) {
     if (const char* probe = std::getenv("TAOTE_PROBE")) {
         const auto want = static_cast<std::uint64_t>(std::strtoull(probe, nullptr, 0));
         if (want != 0) {
+            // TAOTE_PROBE_N raises the 3-hit cap; TAOTE_PROBE_FAIL logs only hits
+            // where eax == 0, which is how a stub's own "corrupt input" verdict is
+            // localised to the exact call that returned it.
+            const char* nmax = std::getenv("TAOTE_PROBE_N");
+            const int maxhits = nmax != nullptr ? std::atoi(nmax) : 3;
+            const bool only_zero = std::getenv("TAOTE_PROBE_FAIL") != nullptr;
             auto hits = std::make_shared<int>(0);
-            auto h = std::make_shared<HookRet>(ql.hook_code([this, &ql, want, hits](std::uint64_t addr,
+            auto h = std::make_shared<HookRet>(ql.hook_code([this, &ql, want, hits, maxhits, only_zero](std::uint64_t addr,
                                                                                   std::uint32_t) -> int {
-                if (addr != want || *hits >= 3) {
+                if (addr != want || *hits >= maxhits) {
+                    return 0;
+                }
+                if (only_zero && ql.arch().regs().read("eax") != 0) {
                     return 0;
                 }
                 ++*hits;

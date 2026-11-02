@@ -10789,3 +10789,40 @@ Consequence for the work order: PEtite's 41 clean-exit rows are NOT reachable by
 problem RLPack already has - i.e. a shared root cause across two families, worth attacking once rather than twice.
 TELock (113 rows) is the other clean-exit pool and has a byte-exact oracle (the round-213 CRC), so it is the better next
 target: an offline-checkable decode, no picker involved.
+
+#### 0.17ho Round 217: PEtite's failure is an explicit "ERROR! Corrupt Data!" from its header-block decode
+
+The in-run signal the earlier rounds lacked. Every missing PEtite row sampled ends with a MessageBoxA whose caption/text are
+`ERROR!` / `Corrupt Data!` and then `ExitProcess(0xffffffff)`:
+
+    petite_rrdec    MessageBoxA(uType 0x10) ret=0x4170f1   ExitProcess(-1)   claim 0x417214
+    petite_gzip     MessageBoxA(uType 0x10) ret=0x4650f1   ExitProcess(-1)   claim 0x403b2d
+    petite_7za      MessageBoxA(uType 0x10) ret=0x47e0f1   ExitProcess(-1)   claim 0x43f1d9
+    petite_HashCalc MessageBoxA(uType 0x10) ret=0x4820f1   ExitProcess(-1)   claim 0x462bf8
+
+So the family's 41 clean-exit missing rows are one root cause, and it is a SELF-CHECK failure, not a picker choice - the
+same shape as TELock's CRC box (round 213), which makes the two biggest clean-exit pools one class of problem.
+
+The reporter is at `<stub section base>+0xce`: `mov esp,[esp+0x24]; mov eax,[esp]; lea edx,[eax+0xfd]; push 0x10;
+push eax+0xf6; push edx; push 0; mov ebx,[ebx]; call [ebx]; push -1; call [ebx+0xc]`, i.e. MessageBoxA(0, text, caption,
+MB_ICONERROR) then ExitProcess(-1), with the strings stored at stub_base+0xf6/0xfd. Exactly one branch reaches it: the
+`jcc` at 0x4171e9 (`test eax,eax; je reporter`), immediately after `call 0x417214`.
+
+0x417214 - taote's claimed OEP on rrdec - is the stub's DECOMPRESS routine (`push ebp; mov ebp,esp; sub esp,0xbad8`,
+bit-reservoir at [ebp+8], output at [ebp+0x10], state tables at ebp-0xb658/-0xa240, inner worker `call 0x418575`, and
+the exit `cmp [ebp-0x14],0; jge ok; xor eax,eax`): a negative status becomes eax=0 and the caller reports Corrupt Data.
+Its arguments come from a descriptor table walked at 0x4171aa (`mov ecx,[ebx]; btr ecx,0x1f` = relocation block via
+`std; rep movs`, else `mov edx,[ebx-0xc]` size, `[ebx-8]` dst RVA, ecx src RVA), so the stub decompresses block by block
+and one block's decode fails.
+
+Localised the failing block with the new `TAOTE_PROBE_N` / `TAOTE_PROBE_FAIL` (below): on petite_rrdec the successes are
+src/0x7ff->0x414000, src/0xb->0x415000, src/0x40cb14->0x401000, and the FAILING one is
+**src RVA 5 -> dst 0x400000, size 0x6a4** - the ORIGINAL HEADERS' block. Our memory at 0x400000 differs from the packed
+file there (byte 0 is 0x00 instead of 'M' - the routine's partial output - and 0x400..0x6a4 is zeros where the file has
+section raw bytes), and the compressed stream is read from image RVA 5, i.e. the stub expects its header-block input in
+the header page.
+
+Open question for the next unit, now precise: does the stub expect a FLAT FILE VIEW at the image base (the packed file's
+bytes 0x5.. at VA 0x400005) - a mapping taote does not create - or is the decode itself diverging? The discriminating
+test is to map the packed file flat at base for PEtite only (env-gated) and see whether the header block's status turns
+non-negative; if it does, that single mapping is the family's fix.
