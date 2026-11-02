@@ -11073,3 +11073,30 @@ Remaining untested discriminators: the bytes AT the candidate in the packed file
 the stub wrote over is payload; one the packed file already had is stub code), and whether the stub's rel32 hand-off or
 the decode target's first written block points at the candidate. Those need per-row packed/decoded byte comparisons -
 still offline, no C++.
+
+#### 0.17hw Round 225: static ranking cannot solve the 89-row picker pool - the two candidates are the same code shape
+
+Tested the last two offline discriminators and then looked at an individual row, which is what settles it.
+
+- **Packed-vs-decoded bytes at the candidate** (a candidate the stub wrote over is payload; one the packed file already
+  carried is stub code): across the 53 rows the truth's 16-byte window differs from the packed file on 36 of 38
+  resolvable rows (95%), but the ladder's pick differs on 31 of 39 (79%) - the feature is nearly universal, so it cannot
+  separate them. WEAK, not usable as a rule.
+- **Address order**: already ruled out (first 0, last 13, middle 19, bimodal quantiles).
+
+Then `petite_7z.exe`, side by side:
+
+    0x40e924 (the ladder's pick)  55 8b ec 6a ff 68 f8 14 41 00 68 e2 ec 40 00 64 a1 00 00 00 00 50 64 89
+    0x40ebc5 (the TRUTH)          55 8b ec 6a ff 68 28 15 41 00 68 e2 ec 40 00 64 a1 00 00 00 00 50 64 89
+
+Both are complete MSVC SEH prologues - identical except the first pushed constant (0x4114f8 vs 0x411528) and both
+pushing the SAME exception handler 0x40ece2. They are two `__try`-framed functions of the payload; nothing in the bytes
+distinguishes the entry point from the inner function except the PE header's AddressOfEntryPoint, which is exactly what
+the packed file destroyed.
+
+CONCLUSION, and it closes the ranking line opened in 0.17hv: the 89-row picker pool is NOT statically solvable by a
+better prologue ranking, because the competing candidates are the same code shape. The reference resolves it at runtime
+(its `stages=3` sequence: record section transitions over a full run, keep the last transition whose target section the
+execution never leaves again, then terminal full fill) - i.e. the answer is "where execution actually arrived", not
+"which bytes look like an entry". Any row-moving change for this pool must therefore be a RUNTIME change, and PEtite's
+37 OEP-wrong rows are the place to measure it (smallest blast radius of the big contributors: 73 rows).
