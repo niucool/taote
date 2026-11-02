@@ -10744,3 +10744,30 @@ slate scan - its EP-exit tracker (`ep_exit_pending_`, the watched section-to-sec
 `dump_module` when the stub leaves its own section) and the `keep_is_junk` validator that decides whether the slate is
 needed at all. Those two are the real port; the pattern classes are the fallback. Round 208's lesson repeats one level
 down: identify which *stage* of a reference mechanism carries the answer before porting the mechanism.
+
+#### 0.17hm Round 216: the PEtite EP-exit walk needs a transition history taote does not have
+
+Third measurement in the same investigation. Implemented the reference's `sec_trans_hist_` reader as an env-gated
+recorder (`TAOTE_SEC_TRANS=1`, qiling/unpack/unpack.cpp `on_section_exec` + the write hook, printing every
+section-to-section transition with its exec ordinal and each section's last-write ordinal at finalize) so the reference's
+backward walk could be prototyped against real per-row data before any picker change.
+
+Result: **every PEtite row records exactly ONE transition** (`petite_rrdec` 1 of 5 sections, `petite_7z` 1 of 3,
+`petite_AkelAdmin` 1 of 3), because taote's hop is TERMINAL - `dump_module` on the first accepted section hop ends the
+run (`stages=1 reason=section_hop`), so there is no ongoing execution to record. The single recorded entry is the stub's
+own section entry (`from=-1 to=2 addr=0x47e10b` on 7za), not the payload hand-off.
+
+The reference's walk (petite_unpacker.cpp:245-300) needs the opposite: a full run history, walked BACKWARD for the last
+transition whose target section the execution never leaves again, skipping targets that kept receiving writes after a
+64-instruction grace. Its own comment names two of taote's missing rows as coming out "directly" from that walk (gsd
+0x402d4e, 7za 0x455641 - and 7za is exactly taote's 0x43f1d9 miss).
+
+So the port order is forced and is NOT a picker change:
+  (1) give PEtite a non-terminal hop: keep executing past the first section hop, record transitions
+      (the recorder above is already written), and pick in finalize instead of at the hop;
+  (2) then port the backward walk over that history (it is ~20 lines: skip a target whose section was written after the
+      transition, take the last one, fall back to the slate scan when the history is empty).
+Family-gated to PEtite, so the blast radius is its 73 rows.
+
+This also explains round 207's picker-bucket observation one level deeper: the reference is right on those rows because
+its runs do not stop at the first hop, not because it ranks frames differently.

@@ -201,6 +201,13 @@ private:
     std::uint64_t write_seq_ = 0;
     std::map<std::uint64_t, std::uint64_t> last_write_seq_;   // section start -> seq
     std::vector<std::uint64_t> hop_write_seq_;                // parallel to hop_ledger_
+    // TAOTE_SEC_TRANS: the reference's sec_trans_hist_ (unpacker.h sec_trans_hist_,
+    // consumed by the PEtite EP-exit walk). Recorded only when the env var is set,
+    // because it costs a section lookup on every exec-hook fire.
+    struct SecTrans { int from_sec, to_sec; std::uint64_t addr, seq; };
+    std::vector<SecTrans> sec_trans_;
+    std::set<int> sec_written_;                               // sections that ever saw a write
+    bool sec_trans_on_ = false;                               // TAOTE_SEC_TRANS
     // sections already claimed: the write hook stays armed for the sequence
     // stamps but never re-claims
     std::set<std::uint64_t> claimed_;

@@ -623,6 +623,7 @@ void Unpacker::install_gpa_sentinel(Qiling& ql) {
 }
 
 void Unpacker::install(Qiling& ql) {
+    sec_trans_on_ = std::getenv("TAOTE_SEC_TRANS") != nullptr;
     ql_ = &ql;
     classify_sections(ql);
 
@@ -1122,6 +1123,11 @@ int Unpacker::on_section_write(std::uint64_t /*pc*/, std::uint64_t addr, std::ui
         // for this even after the claim; the reference's YODA_PLATEAU stamp)
         ++write_seq_;
         last_write_seq_[ps.start] = write_seq_;
+        if (sec_trans_on_) {
+            for (std::size_t k = 0; k < sections_.size(); ++k) {
+                if (sections_[k].start == ps.start) { sec_written_.insert((int)k); break; }
+            }
+        }
         if (claimed_.count(ps.start) != 0) {
             return 0;  // already claimed: only the ordinal is interesting now
         }
@@ -1248,6 +1254,22 @@ void Unpacker::poll_dyn_maps() {
 int Unpacker::on_section_exec(std::uint64_t addr) {
     const std::uint64_t prev_exec = prev_exec_addr_;
     prev_exec_addr_ = addr;
+    // TAOTE_SEC_TRANS: record section-to-section transitions (the reference's
+    // sec_trans_hist_, which its PEtite EP-exit walk reads backward). Off unless
+    // the env var is set: it is a diagnostic, not a shipped mechanism (yet).
+    if (sec_trans_on_) {
+        const auto idx_of = [&](std::uint64_t a) -> int {
+            for (std::size_t k = 0; k < sections_.size(); ++k) {
+                if (a >= sections_[k].start && a < sections_[k].end) return (int)k;
+            }
+            return -1;
+        };
+        const int from = idx_of(prev_exec);
+        const int to = idx_of(addr);
+        if (to >= 0 && from != to) {
+            sec_trans_.push_back({from, to, addr, (std::uint64_t)exec_fires_});
+        }
+    }
     if (opts_.debug) {
         static int fires = 0;
         ++fires;
@@ -3080,6 +3102,22 @@ std::uint64_t Unpacker::static_oep_from_image(const std::vector<std::uint8_t>& i
     // TAOTE_WRITTEN_RANGES: print the run's ever_written_ ranges at finalize, so a
     // family seam's candidate scan can be prototyped offline against exactly the
     // regions the reference scans (PLAN_UNPACK 0.17hk).
+    if (sec_trans_on_) {
+        std::fprintf(stderr, "[sectrans] %zu transitions, %zu sections\n", sec_trans_.size(),
+                     sections_.size());
+        for (std::size_t k = 0; k < sections_.size(); ++k) {
+            std::fprintf(stderr, "[sectrans] sec %zu start=0x%llx end=0x%llx written=%d seq=%llu\n", k,
+                         (unsigned long long)sections_[k].start, (unsigned long long)sections_[k].end,
+                         (int)(sec_written_.count((int)k) > 0),
+                         (unsigned long long)(last_write_seq_.count(sections_[k].start)
+                                                  ? last_write_seq_.at(sections_[k].start)
+                                                  : 0));
+        }
+        for (const auto& t : sec_trans_) {
+            std::fprintf(stderr, "[sectrans] t from=%d to=%d addr=0x%llx seq=%llu\n", t.from_sec, t.to_sec,
+                         (unsigned long long)t.addr, (unsigned long long)t.seq);
+        }
+    }
     if (std::getenv("TAOTE_WRITTEN_RANGES") != nullptr) {
         std::fprintf(stderr, "[written] %zu ranges\n", ever_written_.size());
         for (const auto& r : ever_written_) {
