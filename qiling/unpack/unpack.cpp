@@ -1556,6 +1556,34 @@ void Unpacker::dump_module(Qiling& ql, std::uint64_t addr, const std::string& re
     // hook is needed (that version cost a TB boundary per instruction: Bginfo 53 s -> 75-85 s
     // and it flipped at the 85 s budget): scan the window HERE, at the event that already
     // exists, and let the finalize pick validate the candidates against the decoded image.
+    // TAOTE_HOPSNAP: at every accepted hop, print the in-image dwords of the stack window, so
+    // whether a packer parks its payload entry in the frame can be measured per family (the
+    // WinUpack win came from exactly this reading).
+    if (std::getenv("TAOTE_HOPSNAP") != nullptr) {
+        std::uint64_t sp0 = 0;
+        try {
+            sp0 = ql.arch().regs().read("esp");
+        } catch (...) {
+        }
+        std::string win;
+        for (int k = 0; k < 48; ++k) {
+            std::uint64_t v = 0;
+            try {
+                const auto b = ql.mem().read(sp0 + 4 * static_cast<std::uint64_t>(k), 4);
+                if (b.size() != 4) {
+                    break;
+                }
+                v = static_cast<std::uint64_t>(b[0]) | (static_cast<std::uint64_t>(b[1]) << 8) |
+                    (static_cast<std::uint64_t>(b[2]) << 16) | (static_cast<std::uint64_t>(b[3]) << 24);
+            } catch (...) {
+                break;
+            }
+            if (v >= base_ && v - base_ < image_size_) {
+                win += " [" + std::to_string(k) + "]=" + hex(v);
+            }
+        }
+        std::fprintf(stderr, "[hopsnap] hop=%s esp=%s inimage:%s\n", hex(addr).c_str(), hex(sp0).c_str(), win.c_str());
+    }
     if (opts_.family == "WinUpack" || std::getenv("TAOTE_STACK_OEP_ALL") != nullptr) {
         std::uint64_t sp = 0;
         try {

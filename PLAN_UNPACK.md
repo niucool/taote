@@ -11489,3 +11489,27 @@ Corpus r105 (2678 rows, 4 workers, 85 s budget): **2146 all-three, 0 losses** ag
 aspack_Bginfo, nspack_Bginfo, rlpack_geek, all at dur 86 - came back solo at 14.7 s, 46.2 s and 66.7 s), WinUpack
 93/83/81 identical. So the refactor is row-neutral and strictly simpler: one stack read at an event that already exists,
 instead of a code hook that costs a translation-block boundary per instruction.
+
+#### 0.17ii The hop-time parked slot does NOT generalise: 0 of 16 rows across eight families
+
+The WinUpack win came from reading the stack window at an accepted hop, so the obvious next question was whether other
+packers park their payload entry the same way. Added `TAOTE_HOPSNAP` (prints the in-image dwords of the stack window at
+every accepted hop) and ran the first two OEP-wrong rows of every family where an OEP is still wrong, comparing the
+window against the row's true entry:
+
+    family          rows  hops seen  truth in window
+    Amber              2       0            no
+    Exe32pack          2       1,1          no
+    NSPack             2       0            no
+    PEtite             2       1,1          no
+    TELock             2       1,1          no
+    JDPack             2       0,1          no
+    Themida            2       1,1          no
+    Yoda-Protector     2       0            no
+
+So WinUpack's hand-off record is a property of THAT packer (its stub builds a frame holding
+[image base+0x1000, page-end scratch, payload entry]) and not a general packer idiom. `TAOTE_HOPSNAP` stays in the tree
+as the cheap way to re-ask the question if a family ever becomes interesting again; the WinUpack gate stays as it is.
+
+This also explains why the per-family "no section hop; OEP guessed" rows (Amber 13-ish, Yoda 88) cannot be fixed the same
+way: they never accept a hop at all, so there is no frame to read.
