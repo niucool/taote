@@ -12235,3 +12235,51 @@ seq=3433439`), and the walk rejects it - but on the whole family the change is e
 (n=73 PE=73 OEP=65 IMP=66 ALL=61, identical to r108), so it was reverted rather than shipped as dead weight. The
 next attempt on these 8 rows needs a different signal for "mid-decode entry" than write stamps (the reference's own
 note about HDDScan's early-ending stamps says the same).
+
+#### 0.17je TELock: the stub RUNS - it is the decryptor's key stream that is wrong, and the reference's
+#### decode is the ground truth
+
+The family sits at 0 valid PE 116, OEP 1, imports **0** of 116. Until now the working theory was "the stub derails
+early". It does not. With `TAOTE_APIDBG=1` on telock_7z.exe the stub executes its whole prologue correctly:
+
+    kernel32.GetModuleFileNameA(0x400000, 0x418000, 0x104)   ret=0x18
+    kernel32.CreateFileA("C:/Windows\telock_7z.exe", ...)    handle 0xa000000e
+    kernel32.ReadFile(0xa000000e, 0x418008, 0x400, 0x418000) 0x400 bytes read
+    kernel32.CloseHandle(0xa000000e)                         ret=0x1
+    kernel32.CreateMutexA(0, 1, 0x418c7b)                    name "uMYxP9u8"
+    user32.MessageBoxA(...)  ->  kernel32.ExitProcess
+
+The 0x400 bytes the stub reads are **byte-identical to the packed file's own header**, and the mutex name is
+**byte-identical to the reference's** ("uMYxP9u8"), which closes the self-read and every path/name-derived value as
+candidate causes - pegasus fabricates a different path (`C:\WINDOWS\system32\telock_7z.exe`, 33 chars, vs taote's
+`C:/Windows\telock_7z.exe`, 24) yet derives the same name, so the path is not in the derivation.
+
+The failure is one step later. At the in-place decryptor (0x418fb7) the stub has
+
+    eax=0x1000 (.text RVA)  ecx=0x8a00 (length)  esi=edi=0x401000  ebx=0x6d8fd7d6  edx=0xfd62f97a
+
+and after it runs, the CRC32 (poly 0xedb88320) over `crc(0x401000, 0x8a00)` at 0x419047 yields eax=0x23884536,
+which does not match the stub's expected value, so the stub takes its MessageBoxA reporter (last pc 0x4192e3) and
+exits. That is why imports is 0 on all 116 rows: the payload is never decoded, so nothing ever fills an IAT.
+
+**The decode itself is garbage, not slightly off.** Comparing taote's in-place .text (dumped at the MessageBoxA)
+against the reference's decode of the same row (pegasus writes real 7z code: `33 c0 39 05 e8 61 41 00 0f 9f c0 c3
+55 8b ec 51` at .text+0): 35180 of 35328 bytes differ (99.6%). Recovering the key stream where the packed .text is
+non-zero (`ct ^ pt` from pegasus's decode) shows taote's stream matching at 0.42% with no shift (-2/-1/+1/+2, +0x400,
++0x1000 all ~0.5% = random), i.e. a **different key from the very first byte** - a seed/PRNG problem, not a
+one-instruction arithmetic slip.
+
+The reference's path, for the hand-off: it passes the CRC, `VirtualAlloc(0x8a10)` = .text size + 0x10, then rebuilds
+its IAT with ~90 GetProcAddress calls (that storm IS where its `image_import_functions: 109` comes from) and runs
+7z's own startup for 8.57M instructions.
+
+Next unit: pin the PRNG. Both seeds are computed by stub code before 0x418fb7, and the identical mutex name proves
+every derived input before them agrees, so the remaining candidates are (a) the two seed computations, (b) the
+self-referential loop body (`xor al,cl / mov [edi],al / ror al,cl / xor al,bl / add bl,[edi] / adc bl,cl /
+test cl,1 / shr/rol/lea ebx,[ebx+ebx*8]`, which reads back the byte it just stored and chains through ADC's carry -
+flag-sensitive by construction). The documented loop plus the recovered true key stream makes this checkable
+offline: model it from the seeds and see whether it reproduces pegasus's decode.
+
+One incidental engine wart found on the way (not a TELock cause): `host_to_virtual_path` normalizes the body but not
+the anchor, so the guest sees `C:/Windows\telock_7z.exe` - a forward slash in the drive anchor - even though the
+default `PATH.current_dir` is `C:\Windows\system32`.
