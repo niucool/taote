@@ -12484,3 +12484,29 @@ Next: the import half. The reference's 109 imports come from the payload's own t
 section and reports `image_import_descriptors: 6, image_import_functions: 109`), and taote's `.rdata`/`.idata` are the
 wiped sections - so the harvest has to read the same first-write shadow the entry point now comes from, or the stub's
 GetProcAddress storm has to run (it is still skipped: [0x413bc4] reads 0, 0.17jh).
+
+#### 0.17jl TELock: the OEP half is solved; the import half is a DECODE-COVERAGE gap, not a harvest bug
+
+With 0.17jk's table read in place, telock_7z.exe now produces the right *header* too: the artifact's section table is
+the original one (`.text 0x1000 vs 0x10000 raw 0x10000`, `.rdata`, `.data`, `.rsrc`, `0x18000`, `.pgimp`) and
+`ep = 0xebc5`, identical to the reference's artifact. So the remaining difference is inside the image, and it is one
+number: **`.pgimp` is 0x97 bytes with imp_sz 60 in taote against 0x8eb with imp_sz 140 in the reference**
+(`image_import_descriptors: 6, image_import_functions: 109`).
+
+Three measurements say this is decode coverage, not an import-recovery bug:
+
+1. `TAOTE_WATCH_RANGE` counts **12,555 bytes written into .text (0x401000-0x411000) and 13,205 into .rdata
+   (0x411000-0x415000)** during the gate-on run - so the sections ARE written, and the "all zeros at VirtualProtectEx"
+   of 0.17ji/0.17jj was a *timing* artefact (that API runs before the bulk of the decode). 0.17ji's "a later stage
+   leaves .text zeroed" is WITHDRAWN; the decode happens after that point.
+2. `TAOTE_WATCH=0x413bc4` - the dword whose zero skips the IAT rebuild - records **no write at all**, and
+   `TAOTE_PROBE=0x419234` fires exactly **once** with `eax=0`. So the stub reads a value it never writes, i.e. one it
+   expects to have decoded there, and the skip path is taken once for good.
+3. A dll-string census of the artifacts: taote holds **2** dll-like strings (`kernel32.dll`, `user32.dll`) and no
+   `GetProcAddress`; the reference holds **6** (`advapi32`, `kernel32`, `msvcrt`, `ole32`, `oleaut32`, `user32`) plus
+   `GetProcAddress` and `LoadLibraryA`. Those strings are the payload's own, so the reference's decoded image contains
+   the payload where taote's does not - which is also why its harvest finds 109 functions and taote's finds 60 bytes'
+   worth.
+
+So the work order for the import half is now: get the stub's block decode to cover the payload (the reference ends
+with the payload's strings present), after which the import harvest and `.pgimp` fill in on their own.
