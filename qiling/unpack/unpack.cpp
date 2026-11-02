@@ -721,6 +721,40 @@ void Unpacker::install(Qiling& ql) {
             hooks_.push_back(std::move(h));
         }
     }
+    // TAOTE_WATCH=lo:len[:max]: log every write inside [lo,lo+len) with the pc and the
+    // value being stored. A stub's descriptor/table fields are consumed and rewritten
+    // as a loop advances, so the only way to name the code that produced a bad entry is
+    // to catch the store itself.
+    if (const char* wt = std::getenv("TAOTE_WATCH"); wt != nullptr) {
+        unsigned long long wlo = 0, wlen = 0;
+        int wmax = 64;
+        const int nf = std::sscanf(wt, "%llx:%llx:%d", &wlo, &wlen, &wmax);
+        if (nf >= 2 && wlen != 0) {
+            auto whits = std::make_shared<int>(0);
+            auto h = std::make_shared<HookRet>(ql.hook_mem_write(
+                [this, &ql, wlo, wlen, wmax, whits](int /*access*/, std::uint64_t addr, std::uint32_t size,
+                                                    std::int64_t value) -> int {
+                    if (addr < wlo || addr >= wlo + wlen) {
+                        return 0;
+                    }
+                    if (*whits >= wmax) {
+                        return 0;
+                    }
+                    ++*whits;
+                    std::uint64_t pc = 0;
+                    try {
+                        pc = ql.arch().regs().arch_pc();
+                    } catch (...) {
+                    }
+                    std::fprintf(stderr, "[watch] pc=0x%llx addr=0x%llx size=%u value=0x%llx\n",
+                                 static_cast<unsigned long long>(pc), static_cast<unsigned long long>(addr),
+                                 size, static_cast<unsigned long long>(value));
+                    return 0;
+                },
+                1, 0));
+            hooks_.push_back(std::move(h));
+        }
+    }
     if (std::getenv("TAOTE_HEAPSCAN") != nullptr) {
         auto h = std::make_shared<HookRet>(ql.hook_mem_write(
             [this](int /*access*/, std::uint64_t addr, std::uint32_t /*size*/, std::int64_t /*value*/) -> int {

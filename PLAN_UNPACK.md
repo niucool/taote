@@ -10933,3 +10933,34 @@ decoder accepts; the accepted offset names the correct descriptor value, hence t
 
 Method note worth keeping: this trace needed no reference run at all - a stub that fails its own check can be read
 directly, and "does it fail slowly or immediately" is answered by instruction count (here 118 instructions, first symbol).
+
+#### 0.17ht Round 222: the failing check is a 16-bit complement invariant, and the block's stream start does not satisfy it
+
+Added `TAOTE_WATCH=lo:len[:max]` (logs every write in a range with pc + value) to test the "the stub rebuilds the
+descriptor table" hypothesis. Result: during the whole run there are **zero writes** in 0x418680-0x4186c0, and the table
+there is byte-identical to the packed file (VA 0x4186a8 == file 0x1aa8), so the descriptor `{src 0, size 0x6a4, dst 0}`
+the loop reads for the header block is the PACKER's own static data, not something our run computed. The table-rebuild
+hypothesis is dead.
+
+Then disassembled the exact failing check (0x417319-0x417327):
+
+    417319 mov eax,ebx          ; ebx = the 32-bit bit reservoir just loaded from the stream
+    41731b not ebx
+    41731d and eax,0xffff       ; low 16 bits
+    417322 shr ebx,0x10         ; ~reservoir >> 16
+    417325 xor ebx,eax
+    417327 jne 0x4181c7         ; FAIL unless  high16(reservoir) == ~low16(reservoir)
+
+so PEtite guards the stream start with a 2-byte complement: the first four bytes must satisfy `hi16 == ~lo16`. Our run
+loads 0x0300905a (bytes 5a 90 00 03 from 0x400001) -> lo16 0x905a, hi16 0x0300, ~lo16 0xfcff -> mismatch -> immediate
+rejection, exactly as the trace showed on the first symbol.
+
+Scanning for 4-byte windows that satisfy the invariant: the packed file has only 5 (offsets 0xa, 0xb, 0xc, 0x71e, 0x9464);
+the dumped image has 92. The routine consumes from src+1, so a src of 0x9/0xa/0xb would pass - while the descriptor's
+src is 0. That is the whole bug in one line: **the header block's stream pointer is ~9 bytes early**.
+
+Where the 9 could come from is the next question (the descriptor field is 0 in the file, so either the stub adds
+something we do not, or the stage that copies the stream into the header page writes it at the wrong offset - the routine
+itself clobbers 0x400000 with AL before reading, which is the one place the start can shift). The decisive test is now
+cheap and offline: compute which of 0x400000+k (k=0..0x20) the invariant accepts on the *live* page, and then find the
+store that placed the stream there.
