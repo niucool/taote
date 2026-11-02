@@ -11968,3 +11968,26 @@ is dead, and no complement-valid stream exists in the image. The next step has t
 different family. Everything about PEtite's DECODE is settled (0.17iq-0.17ir: the payload is byte-exact on 43 of 73
 rows, and the family's 30 all-three rows come from the 17 that already pick the truth plus the ones whose claim is
 accepted).
+
+#### 0.17iw REFERENCE RUN of petite_rrdec: taote is 4 bytes from the reference, and block 6 is not a defect
+
+A prebuilt reference exists on this machine (`../pegasus/build/cli/pegasus-cli`) and settles three open questions
+at once. `pegasus-cli -t packed/PEtite/petite_rrdec.exe --unpack` produces a same-sized (0x19000) memory dump.
+
+  * **Decode**: the reference's `.text` at RVA 0x1000 is byte-identical to the not-packed original (0 of 47896
+    differ). taote's is 4 bytes off, and those 4 are the known end-of-section copy overrun (0xbb14-0xbb17). So the
+    shipped fixup (0.17ir) puts taote within four trailing bytes of the reference on this row - it is no longer an
+    "approximation of an unknown transform".
+  * **Block 6**: the reference's dump carries the PACKED header as well - `e_lfanew = 0xa8`, MZ restored, i.e. it
+    does NOT decode the original headers either. So block 6's complement-guard failure (0.17iu/0.17iv) is NOT a
+    taote defect: both implementations end up with the packed header. That line is closed, not parked.
+  * **OEP**: the reference reports `oep = 0x401160` (the truth), `oep_last_hop = 0x401160`, `stages = 3`,
+    `reason = petite_terminal_full_fill`. `oep_last_hop` equal to the entry means its emulation **does** reach a
+    hand-off into the payload, three stages deep, whereas taote's run executes only stub addresses and stops at
+    `stages = 1 reason = section_hop`. So there IS a divergence to chase, and it is after the decode: the stub runs
+    further in the reference and hops to 0x401160.
+
+Next unit, with a working oracle for the first time: get the reference to explain that hop (its `SE_DEBUG_RECON=1`
+output does not include hop lines for this row - only `[petite-iat]` - so the next step is to find the reference's
+hop/stage logging switch or read `src/unpacker` for where `petite_terminal_full_fill` sets `oep_last_hop`), then
+compare taote's stage-1 stop against it. The 37 OEP-wrong PEtite rows are all downstream of that one difference.
