@@ -11135,3 +11135,37 @@ Next: with the reference byte-exact, the differential has a golden target per by
 format is reachable from 0x417214/0x418575 and the tables at 0x417000-0x4170c0: the 0x8000 window at [ebp-4], the 3-bit
 class read at 0x4172a1, the 0x27/8-bit reservoir refill at 0x4172f7-0x417317) and compare the literal sequence until the
 first wrong one, then check the bit-reader instruction there against Unicorn's semantics.
+
+#### 0.17hy Round 227: the reference's PEtite SEH seed is MEASURED INERT here (73 rows, row-for-row identical)
+
+Found the reference mechanism this family was missing, ported it, and measured it away.
+
+The mechanism (pegasus src/windows/win32.cpp:250-300, 400-500): `seh_seed_enabled_for()` auto-engages an SEH seed for
+any image carrying a `.petite` section, because PEtite's decryptor is EXCEPTION-DRIVEN - it captures `push fs:[0]` when
+installing its own frame and later WALKS the captured chain (`mov ebx,[frame]; lea esp,[ebx-0x26]; mov ebp,[ebx+8]`),
+so with an empty or garbage chain the second decode stage derails. The seed is a synthetic native-style frame in a
+private RWX window: Handler H returns ExceptionContinueExecution (`B8 01 00 00 00 C2 10 00`), F is self-referential
+(the walker re-derives its popal slot from `[[fs:[0]]]`), `[Q-4]` carries the image base, `[PIVOT]` the stub base.
+
+taote's state: the loader leaves the TEB ExceptionList at 0 (loader/pe.cpp:1233 "stays 0 like the reference"), and the
+measured `fs:[0]` at the first API is 0xd000 - a value the stub wrote, not a frame at all. So the premise for the port
+was real.
+
+Ported it (map 0x6ffc0000, write H/F/Q/PIVOT/F2, set fs:[0]=F) with the write deferred to the first section-exec because
+`regs.read("fs_base")` throws - the register is spelled **"fsbase"** in taote's x86 table (qiling/arch/x86.cpp:58) and
+`UC_X86_REG_FS_BASE` is an x64-only register here (windows.cpp:131). With the right name the seed went live:
+
+    [unpack] seh seed fs:[0] <- 0x6ffe0100 (base 0x6000)
+
+Measured on the whole family (73 rows, 4 workers, 60 s budget, 90 s wall):
+
+    PEtite   n=73  PE=73  OEP=36  IMP=36  ALL=30     (r102 identical)
+    rows changed: 0   (row-for-row diff against r102)
+
+and on the exemplar `petite_rrdec` nothing moves either (still MessageBoxA "Corrupt Data!" -> oep 0x417214). So the seed
+is inert for this corpus's PEtite variants: the exception-driven decryptor the reference describes (0x4144f9+) is not
+the code path these stubs take - their guard is the 16-bit complement on the stream start (0.17ht), reached by an
+ordinary call from the descriptor loop at 0x4171aa.
+
+Reverted the whole port (git checkout of qiling/unpack/unpack.cpp and unpack.hpp); nothing was kept. Recorded here so it
+is not re-run without a new mechanism: the SEH seed was measured, not assumed.
