@@ -11371,3 +11371,31 @@ family gate stays. The env switch is kept as a measurement hook.
 
 Current standing after all corrections: **2146/2678**, 416 strict OEP-wrong rows, biggest pools Themida 122 and TELock
 100 (both decode-bound) and PEtite 37 (decode-bound but with a byte-exact golden target).
+
+#### 0.17id The corrected pool: 416 OEP-wrong rows, of which only 7 are picker-shaped - everything else is DECODE
+
+Re-ran the "is the true entry already decoded in the artifact" test with the strict filter (`oep_exact is False`) and
+per-row bases:
+
+    family        strict OEP-wrong   true entry decoded
+    Amber                15                 0
+    Exe32pack            15                 0
+    NSPack                5                 0
+    JDPack                4                 4
+    PECompact             4                 3
+    Alienyze              0                 0   <- its 8 "misses" were managed rows
+
+So after removing the managed-row contamination: **Alienyze has no OEP headroom at all** (118/126, the 8 are .NET), Amber
+15 / Exe32pack 15 / NSPack 5 are pure DECODE problems (the artifact does not even contain the true entry's bytes), and
+only **JDPack 4 + PECompact 3 = 7 rows** are picker-shaped.
+
+Tested the WinUpack stack-slot idea on JDPack too (`TAOTE_STACK_OEP_ALL=1`): the harvest fires on none of its 4 rows
+(they end with `reason=section_hop` / `ladder_scan` and `UC_ERR_READ_UNMAPPED`), so the parked-slot hand-off really is a
+WinUpack property. The picker lane is therefore closed at 7 rows - it is not worth another mechanism.
+
+CONSEQUENCE for the work order: the remaining headroom is decode, in this order of tractability:
+  1. PEtite 37 - decode-bound BUT with a byte-exact golden target (the reference produces the original's `.text` with 0
+     of 47896 bytes differing, ours differs in 4790).
+  2. TELock 100 - decode-bound with a CRC oracle (needed value 0x311634a8) but no per-byte golden image.
+  3. Amber 15 / Exe32pack 15 / NSPack 5 - decode-bound with neither.
+  4. Themida 122 / Yoda 100 - decode-bound, and the reference fails them too.
