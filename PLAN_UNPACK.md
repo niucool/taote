@@ -11684,3 +11684,30 @@ Next unit, sharpened: block 3 decodes 85% of its output from 100% of its input, 
 counter rather than its input pointer - find the iteration where the output advance stops and dump the bit-model /
 window state there (the frame is 0xbad8 with the 0x8000-byte window at [ebp-0x8078] and the probability array from
 [ebp-0x78]); block 6 gives the same harness a failure verdict (chunk type >= 2 => `xor eax,eax` at 0x4181c7).
+
+#### 0.17io PEtite emits in 0x8000 chunks through one scratch buffer - and every row decodes imperfectly
+
+Two more facts, both needed before any decoder work:
+
+**The output path.** `TAOTE_PROBE=0x417206` (the `rep movsd`) shows the destination is never written by the decoder
+itself; every byte arrives through ONE scratch buffer at **0x5004572** and the stub runs with its own relocated
+frame (`ebp=0x5000aee`), not the main stack. `.text` is copied in **0x8000-byte chunks** (`ecx=0x2000` dwords,
+`[esp]=0x8000`):
+
+    block 3 chunk 1: esi=0x5004572 -> edi=0x401000, 0x8000 bytes   (clean)
+    block 3 chunk 2: esi=0x5004572 -> edi=0x40a000, 0x3b14 bytes   (0x1f14 real, 0x1c00 stale)
+
+So the stale region 0.17il/0.17im measured is exactly the tail of the SECOND chunk: 0x8000+0x1f14 = 0x9f14, matching
+the observed boundary. Combined with 0.17in (the decoder consumed 100% of its input and still returned success), the
+decoder stops on a CONDITION inside chunk 2 while its produced prefix is byte-correct - it is not diverging
+arithmetically, so a "find the bad opcode" differential would be looking in the wrong place.
+
+**How big the job is.** Scanning all 73 PEtite rows' `.text` against their originals:
+
+    rows where `.text` is byte-identical: 0 of 73  (so no row is "decoded but mis-picked")
+    rows with a continuous garbage tail:  44 of 73  (tail length: median 6 bytes, max 1785)
+    first-section differing bytes:        2252 (petite_RegDelNull) ... 60730 (petite_7z)
+
+`petite_rrdec` is therefore a GOOD row (its 0x1c00 tail is atypical); the family's divergence is per-row and
+stream-dependent, and it is uniformly present. That retires the hope that some PEtite rows are picker-bound: the
+whole pool is decode-bound, exactly as 0.17ii concluded, and the OEP work cannot start until `.text` is exact.
