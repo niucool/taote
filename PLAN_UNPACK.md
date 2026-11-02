@@ -10964,3 +10964,31 @@ something we do not, or the stage that copies the stream into the header page wr
 itself clobbers 0x400000 with AL before reading, which is the one place the start can shift). The decisive test is now
 cheap and offline: compute which of 0x400000+k (k=0..0x20) the invariant accepts on the *live* page, and then find the
 store that placed the stream there.
+
+#### 0.17hu Round 223: the reference does NOT prove PEtite's stub decodes - its win is picker-side (reason: petite_terminal_full_fill)
+
+Checked the premise the last four rounds were built on. pegasus's `petite_rrdec.exe_dump.bin.meta.json` says:
+
+    reason = "petite_terminal_full_fill", stages = 3, oep = 0x401160
+    imports still include USER32 MessageBoxA and KERNEL32 ExitProcess
+
+so the reference did NOT hand off from the stub's successful decode - it full-filled at end of emulation and its OEP came
+from its own runtime stages, with MessageBoxA/ExitProcess still in the picture (i.e. the stub very likely showed the same
+"Corrupt Data!" box there). Its right answer is a PICKER answer, not a decode answer.
+
+And the picker is not the plain slate scan either: running the round-215 candidate machine over the reference's TERMINAL
+dump gives 0x408abf (not the truth 0x401160), and over taote's mid-run artifact the same 0x408abf - the two images agree,
+so the answer is not in the image at all. It comes from the run: the reference's stages=3 sequence, i.e. its EP-exit
+tracker plus the terminal full fill.
+
+That reconciles everything measured this block and points back to round 216's finding from the other side: the missing
+ingredient is run-stage bookkeeping (transitions/hops recorded over a full run), not decode fidelity, and not image
+scanning. It also means the "TELock + PEtite are one decode problem" framing (0.17hp) must be narrowed: TELock's CRC
+check runs on a successful decode path, while PEtite's guard is hit by the stub in the emulator too.
+
+Still valid and useful from this block: the guard itself (16-bit complement on the stream start), the descriptor being
+static packer data, the trace method, and the shipped diagnostics.
+
+Next unit for PEtite, corrected: give the family the reference's three-stage runtime (EP-exit tracker over a full run ->
+terminal full fill -> pick), which needs `written_ranges`/transition state in the finalize pick - the same plumbing twice
+proposed and never measured with a working consumer. Measure it on PEtite's 73 rows only.
