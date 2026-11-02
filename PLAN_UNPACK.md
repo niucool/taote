@@ -12534,3 +12534,37 @@ produce RVA 0x13bc4", after which the stub rebuilds its own IAT and the imports 
 fixup loop that should cover it is the one ending at 0x41920c (`jg`) with `ecx=0xa00` iterations over the descriptor
 table at 0x413bb8 (`{0x13c54, 0, 0, 0, 0x11010, 0x13df0, ...}` in the reference's decode), and in taote that loop's
 table entry for 0x13bc4 is absent.
+
+#### 0.17jn TELock: taote's .text holds a KEY STREAM, and the loop at 0x418fb7 is not its producer
+
+The cleanest discriminator yet. On telock_7z.exe the packed `.text` raw begins with **0xc00 zero bytes**, so for
+that stretch the ciphertext is exactly zero and any content there is the decryptor's raw key stream. Comparing the two
+artifacts over those bytes:
+
+    taote  .text+0 : da 9a af e6 9b 52 bd ef 98 89 36 98 d1 e2 6a 5c ...
+    reference     : 33 c0 39 05 e8 61 41 00 0f 9f c0 c3 55 8b ec 51 ...
+
+Taote's bytes are the key stream, not code - which is why 0.17je's "different key from byte 0" reading was right and
+must NOT stay withdrawn (0.17ji's withdrawal was about a *different* dump: at VirtualProtectEx the barew span is
+pre-decode; the artifact is post-decode). So the family's blocker is exactly: the key stream taote computes is wrong
+from the first byte, and it is short.
+
+Per-page nonzero census (the reference's decode vs taote's artifact):
+
+    .text   taote: 0xffe 0x1000 0x1000 0xfff 0x1000 0x1000 0x1000 0x1000 0xa00 0 0 0 0 0 0 0
+    .text   ref  : 0xdaf 0xddc 0xdf5 0xe0a 0xdc1 0xe2a 0xe22 0xde6 0xe4b 0xe5a 0xe51 0xeb9 0xef4 0xea6 0xf67 0x4a8
+    .rdata  taote: 0xfff 0 0 0            .rdata ref: 0x77c 0x691 0x60b 0
+    .data   taote: 0xc65 0xab             .data  ref: 0xbf4 0x146
+
+i.e. taote covers .text pages 0-8 (the 0x8a00 raw span) with high-entropy bytes and leaves the virtual tail zero, and
+covers only .rdata page 0 where the reference covers three. The reference's density is code-like (~0xdb0-0xf70 per
+page) throughout.
+
+Two hand models of the loop have now failed: the first (0.17ji) against the reference's decode, and a fresh one against
+**taote's own output** - deriving `bl_old = out ^ ror(al, cl)` from taote's key stream and chaining it through the
+odd-cl iterations matches 1 of 199. So the loop at 0x418fad-0x418fe2 is not the (only) producer of that page, and
+further algebraic modelling is a dead end; the next unit should compare registers instruction by instruction at that
+loop (or find which other decryptor writes .text page 0), not re-derive its algebra.
+
+Method note recorded for the family in general: 41,984 executions of 0x418fb7 against a 0x8a00 span means the loop is
+entered more than once with different counters, so "the loop's first entry" is not the whole story either.
