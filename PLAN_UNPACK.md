@@ -11399,3 +11399,19 @@ CONSEQUENCE for the work order: the remaining headroom is decode, in this order 
   2. TELock 100 - decode-bound with a CRC oracle (needed value 0x311634a8) but no per-byte golden image.
   3. Amber 15 / Exe32pack 15 / NSPack 5 - decode-bound with neither.
   4. Themida 122 / Yoda 100 - decode-bound, and the reference fails them too.
+
+#### 0.17ie Unicorn authenticity spot-checks: shl-by-0, btr and std/rep movsd are all faithful
+
+Before sinking time into a bit-reader differential, tested the primitives a self-checking decoder actually depends on,
+directly against the pinned engine (unicorn 2.1.4, a 20-line harness):
+
+    mov eax,1 / mov ecx,0 / stc / shl eax,cl   -> eax=1, CF stays 1     (flags UNTOUCHED for cl=0, correct)
+    mov ecx,1 / shl eax,cl                     -> eax=2, CF=0           (correct)
+    mov ecx,0x80000000 / btr ecx,0x1f          -> ecx=0, CF=1           (correct)
+    std / rep movsd x3 (downward)              -> memory layout correct (a downward copy looks identical to a
+                                                  forward one for non-overlapping ranges - my first "mismatch"
+                                                  was my own bad expectation, not an engine bug)
+
+So none of the classic authenticity gaps explains PEtite's 4790-byte divergence, and these three are settled: do not
+re-test them. The differential has to come from the arithmetic itself (the bit reservoir and the match/literal tables),
+which means the offline decoder comparison remains the only route.
