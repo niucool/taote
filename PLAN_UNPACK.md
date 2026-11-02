@@ -12204,3 +12204,34 @@ Corpus r108 (2678 rows, same harness parameters):
 
 That is +31 over the session's PEtite starting point and +2 over 0.17jb's shipment, with the family now at 61 of 73
 and no row anywhere regressing relative to r106.
+
+#### 0.17jd PEtite's last 15 rows: 8 OEP (all mid-decode entries) and 7 imports (the ordinal wall)
+
+Census of what the shipped chain still misses, now that the family sits at 61 of 73.
+
+**8 rows with the wrong OEP, every one fully decoded (`code_sim = 1.0`)**, and every claim LATER than the truth:
+
+    7za        0x474800 vs 0x455641      Hasher     0x484884 vs 0x482628
+    DarkNamer  0x40e87f vs 0x40a71e      PEViewer   0x529200 vs 0x401504
+    Everything 0x57e207 vs 0x545f0d      HashCalc   0x4714d3 vs 0x411e58
+    HDDScan    0x891630 vs 0x883d20      md5summer  0x4a0a40 vs 0x49ec68
+
+HDDScan's numbers are the case the reference's own notes call out verbatim ("the full-slate scan's
+boundary-passing C3 at 0x883d20 wins" - 0x883d20 IS the truth, and our 0x891630 is the mid-decode .petite
+workspace entry), so this is a known-shaped residual, not a new failure mode: the trail's write test accepts a
+mid-decode transition whose stub writes stopped early.
+
+**7 rows with short import tables, and the misses are 100% ORDINALS** - the same unrecoverable spelling the
+WinUpack lane closed: adrestore 7 (wldap32 #118/#14/#145/#155/#73/#88 + oleaut32 #8), FileTypesMan 13 (ws2_32),
+ShareEnum 19 (oleaut32 10 + ws2_32 9), shexview 14 (ws2_32 13 + comctl32 #6), plus DarkNamer/Everything/PEViewer
+which are OEP-wrong anyway. Four of them are 0.91-0.946 recall, i.e. a handful of pairs short, but every missing
+pair is an ordinal: the payload imported ordinal N, taote reverse-maps the slot to export N's NAME, and aliasing
+every named export as `ordinal_<N>` stays rejected as metric gaming.
+
+One experiment measured and REVERTED this round: a separate "external write" stamp for the trail (record the
+section's last write only when the writer pc is outside that section, so the payload's own self-modification cannot
+veto the hand-off). Motivation was concrete - 7za's trail DOES contain the truth (`t3 2->0 addr=0x455641
+seq=3433439`), and the walk rejects it - but on the whole family the change is exactly neutral
+(n=73 PE=73 OEP=65 IMP=66 ALL=61, identical to r108), so it was reverted rather than shipped as dead weight. The
+next attempt on these 8 rows needs a different signal for "mid-decode entry" than write stamps (the reference's own
+note about HDDScan's early-ending stamps says the same).
