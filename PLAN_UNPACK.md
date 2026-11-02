@@ -11527,3 +11527,32 @@ Two invariants checked on the code shipped this block (a7f6660 / a840b48), becau
 With the corpus at 2146/2678 (r105) and every lane closed by measurement, the remaining work is the decoder
 differential described in 0.17ie/0.17hq: PEtite's 37 rows are the only pool with a byte-exact golden target, and
 TELock's CRC oracle (0x311634a8) can score the same fix on another 100 rows.
+
+#### 0.17ik api_db cannot cover the C++ mangled misses: the host SDK doesn't carry them
+
+Followed up the imports-only pool (34 rows in r105) by looking at WHAT is missing rather than how many. Two distinct
+classes, and only one of them looked fixable:
+
+    amber_chglogon / jdpack_chglogon   5 kernel32 names: RegCloseKey, RegCreateKeyExW, RegOpenKeyExW,
+                                       RegQueryValueExW, RegSetValueExW
+    rlpack_calc                       25 names, 23 of them msvcrt C++ mangled (??0bad_cast@@QAE@ABV0@@Z, ?terminate@@YAXXZ,
+                                       __setusermatherr, _acmdln, __pctype_func, _ftol2, sprintf_s, __CxxFrameHandler3)
+    rlpack_Hash                        5 names: ??2@YAPAXI@Z, ??3@YAXPAX@Z, __setusermatherr, _acmdln, _adjust_fdiv
+
+The mangled class looked like a generator bug: `tools/gen_api_db.py`'s `SYMBOL_RE` starts names with `[A-Za-z_]`, so NO
+`?`-prefixed name could ever enter api_db (grep: 0 occurrences of `"?'` in the committed file). Widened it to
+`[?A-Za-z_]` and regenerated: 460 new names (32,374 -> 32,834), all genuine C++ mangles ... and **0 of them cover a
+single corpus miss**, because the names our rows need (`??0exception`, `?terminate`, `__setusermatherr`, `_acmdln`,
+`__pctype_func`) are simply not in mingw-w64's import libraries at all:
+
+    newly covered corpus pairs by the regenerated DB: 0 (across all 34 imports-only rows)
+
+So the mangled gap is a property of the HOST's SDK tables, not of taote's generator, and widening the regex buys nothing.
+Generator change reverted (nothing kept); the corpus run this would have cost was avoided by checking coverage first -
+the same discipline as 0.17hk, and worth repeating for any "regenerate the data table" idea.
+
+Remaining explanation for rlpack_calc/rlpack_Hash: those CRT names are only obtainable from the payload's own name
+strings with DLL attribution from the stub's INT order - i.e. the same destroyed-information wall as the WinUpack
+ordinals, not a table gap. The Reg* class (chglogon) is the same shape: the original imported them from KERNEL32 while
+the host's tables file Reg* under advapi32/rapi/clusapi, so attribution by name alone cannot reproduce that caller-side
+choice.
