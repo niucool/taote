@@ -11653,3 +11653,34 @@ Note the addressing coincidence worth checking first next round: the stub reads 
 file offset and RVA differ by exactly 0xc00 - the same constant that appeared in 0.17il's per-site E8/E9 delta. If
 taote maps the packed file by RVA, the stream the stub reads is offset by 0xc00 from what the packer meant, which
 would explain BOTH an under-filled block and an invalid chunk type downstream.
+
+#### 0.17in PEtite's .text block consumes its WHOLE input and still decodes short
+
+Probing the decompressor's entry (`TAOTE_PROBE=0x417214`, stack window shows the cdecl args at [esp+4..0xc]) gives
+each block's arguments exactly, and they chain: every block's `src` is the previous block's `src_end`.
+
+    #  src        dst        size     src_end (table)   decoder returned
+    1  0x4085a1   0x414000   0x7ff    0x8863            0x408863  ok
+    2  0x408863   0x415000   0xb      0x8873            0x408873  ok
+    3  0x40ba5c   0x401000   0xbb14   0x11596           0x411596  ok   <- .text
+    4  0x411596   0x40d000   0x3e0    0x11875           0x411875  ok
+    5  0x411875   0x40e000   0x37f3   0x12ffd           0x412ffd  ok
+    6  0x400005   0x400000   0x6a4    0x4005            0x400005  FAIL (returns 0)
+
+The decisive number is block 3: its input is 0x11596-0xba5c = **0x5b3a bytes and the decoder consumed ALL of it**
+(it returned exactly the table's src_end), yet it produced only **0x9f14 of the 0xbb14** bytes the caller asked for.
+So the stream ran out before the output did - this is not a mid-stream desync that leaves input unread.
+
+Worse, the shortfall is silent: the decoder fills a stack buffer, and the stub's memcpy (`0x4171f5`, `rep movsd` at
+`0x417206`) then copies the FULL declared 0xbb14 bytes, so the missing 0x1c00 bytes become stale stack memory.
+`TAOTE_WATCH=0x401004` and `=0x40af14` both report that the ONLY writer of `.text` is `pc=0x417206` - the decoder
+itself never writes the destination - which is why the corruption looks like random data rather than zeros.
+
+The golden tail is not the answer either: over rva 0xc000-0xcb18 the original holds 630 zeros of 2840 bytes plus real
+data (import strings `libgcc_s_dw2-1.dll`, `__register_frame_info`, and pointer tables), against 208 zeros in our
+artifact, so a "zero the remainder" step cannot manufacture it. The tail must come out of the stream.
+
+Next unit, sharpened: block 3 decodes 85% of its output from 100% of its input, so instrument the decoder's OUTPUT
+counter rather than its input pointer - find the iteration where the output advance stops and dump the bit-model /
+window state there (the frame is 0xbad8 with the 0x8000-byte window at [ebp-0x8078] and the probability array from
+[ebp-0x78]); block 6 gives the same harness a failure verdict (chunk type >= 2 => `xor eax,eax` at 0x4181c7).
