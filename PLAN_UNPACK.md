@@ -10992,3 +10992,50 @@ static packer data, the trace method, and the shipped diagnostics.
 Next unit for PEtite, corrected: give the family the reference's three-stage runtime (EP-exit tracker over a full run ->
 terminal full fill -> pick), which needs `written_ranges`/transition state in the finalize pick - the same plumbing twice
 proposed and never measured with a working consumer. Measure it on PEtite's 73 rows only.
+
+#### 0.17hv Round 224: 89 of the 504 OEP misses already have the TRUE ENTRY DECODED - and the ladder, not the hop, is what picks
+
+Corpus-wide measurement of the r102 misses, split properly (`oep_exact is True` for imports-only, `is False` for OEP), and
+then testing whether the artifact already contains the ORIGINAL's first 8 bytes at the true entry:
+
+    family          oep-wrong  imports-only  true-entry-decoded
+    Themida              122             0            0
+    TELock               115             1            0
+    Yoda-Protector       100             1            1
+    Amber                 37             1            0
+    PEtite                37             6           35
+    Exe32pack             32             0           13
+    Eronana Packer        14             0           13
+    WinUpack              10             8            8
+    Alienyze               8             0            7
+    NSPack                 5             1            0
+    PECompact              5             0            3
+    ------------------------------------------------------------------
+    TOTALS               504            30           89
+
+So 89 rows are pure PICKER wins: the payload is decoded correctly at the true entry, the image is fine, and only the
+chosen address is wrong. That is the largest actionable pool found this session, and it is dominated by PEtite (35).
+
+Then asked the question that decides the fix: does taote OBSERVE the true hop and discard it? Ran 13 of the pool with
+`TAOTE_UNPACK_DEBUG=1` and compared the candidate ledger against the truth:
+
+    petite_7z            truth 0x40ebc5   candidates [0x418175]   final pick 0x40e924   (delta 0x2a1)
+    petite_7zFM          truth 0x422ce2   candidates [0x43d175]   final pick 0x422b65   (delta 0x17d)
+    petite_7zFMn         truth 0x420bf2   candidates [0x43a175]   final pick 0x420a75   (delta 0x17d)
+    petite_7za           truth 0x455641   candidates [0x47e175]   final pick 0x43f1d9
+    petite_AccessEnum    truth 0x407a98   candidates [0x42a175]   final pick 0x403a53
+    winupack_Diskmon     truth 0x40b4b8   candidates [0x44bf1b]   final pick 0x406a90
+    winupack_Everything  truth 0x545f0d   candidates [0x618c13]   final pick 0x4bf150
+    pecompact_Hasher     truth 0x482628   candidates [0x401016]   final pick 0x47c6ed
+
+Two facts: (1) taote sees exactly ONE section-hop candidate per row, and it is the stub-section entry, never the payload
+entry - so no correct candidate is being discarded; (2) the final address comes from the LADDER (`pick OEP X (was Y)`),
+which overrides the hop, and on the PEtite rows the ladder's pick is only 0x17d-0x2a1 away from the truth while the
+section-hop is far off. So for this pool the lever is a better LADDER ranking / a hop-to-ladder join, not more hops.
+
+Next unit: on the 35 PEtite rows + 13 Exe32pack + 13 Eronana, ask which prologue the ladder SHOULD prefer. The data
+needed is already cheap: for each row, the ladder's candidate list (it scans prologues) plus the distance to the truth,
+so a rule (e.g. "prefer the first prologue after the decode target's first written block" or "prefer the prologue whose
+preceding bytes are a ret/padding AND which the stub's rel32 hand-off pointed at") can be tested OFFLINE over all 89
+rows before any code change. Side note: `pecompact_Everything` writes 226 MB of debug lines under
+TAOTE_UNPACK_DEBUG, so batch scans should cap or filter its stderr.
