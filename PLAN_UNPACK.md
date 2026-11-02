@@ -10708,3 +10708,26 @@ taote's side of the same row: `petite_rrdec`'s ladder yields **zero** candidates
 0x417175 adjusted to 0x417214 - i.e. taote never even enumerates the candidates the reference ranks. Porting that
 machine is the next unit of work, and unlike the WinUpack seam (round 208) its precondition - a decoded image with
 code-shaped candidates - is present on 41 rows.
+
+#### 0.17hk Round 215: the PEtite candidate classes alone reproduce taote's WRONG picks (2/43 offline)
+
+Before porting the reference's PEtite machine, ran it as an offline prototype over taote's existing r102 artifacts -
+the six pattern classes exactly as `petite_unpacker.cpp:354-419` defines them (C1 `55 8b ec 6a ff`, h1 `6a ?? 68 ?????
+e8`, e8e9 `e8 ???????? e9`, C2 `55 89 e5 83 (ec|c4) ??`, C3 `55 8b ec 83 (ec|c4) ??`, C4 `e8 ???????? 6a ?? 68`), the
+>=8-nonzero-in-16 density guard, the boundary rule (preceded by C3/C2/CC/90 or two zeros), last-per-class, the
+C1->h1->e8e9->C2->C3->C4 chain order and the boundary-passing override - scanning the artifact image with file
+offsets mapped through the section table, skipping the packed-EP section.
+
+Result over the 43 missing PEtite rows: **2 correct, 41 wrong**, and the wrong answers are the ones taote already
+produces (`petite_AccessEnum` 0x403a53, `petite_AkelAdmin` 0x401082 - exactly taote's claims), not the reference's
+(`7z` truth 0x40ebc5 vs prototype 0x40ea18; `7za` truth 0x455641 vs 0x45b889).
+
+So the classes are not what makes the reference right: it scans the run's **`ever_written_` ranges** (live decoded
+regions, EP section excluded), not the artifact image, and its pick is gated by the earlier `keep_is_junk` validator
+and the EP-exit tracker. A faithful port therefore needs the written-range list in `PackerContext` - the plumbing that
+round 208 added and then reverted with the WinUpack seam.
+
+That is the plan for the next unit: re-add `written_ranges` to the context (it is cheap and this time the consumer
+exists), then port the machine against those ranges rather than against the image. Rule (bc): prototype a ported
+pattern machine against the rows it is meant to fix BEFORE writing C++ - here it turned a "big port" into a precisely
+scoped one (the classes are right; the input was wrong) for ten minutes of work.
