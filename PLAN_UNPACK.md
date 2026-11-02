@@ -11100,3 +11100,38 @@ better prologue ranking, because the competing candidates are the same code shap
 execution never leaves again, then terminal full fill) - i.e. the answer is "where execution actually arrived", not
 "which bytes look like an entry". Any row-moving change for this pool must therefore be a RUNTIME change, and PEtite's
 37 OEP-wrong rows are the place to measure it (smallest blast radius of the big contributors: 73 rows).
+
+#### 0.17hx Round 226: the reference DOES decode PEtite byte-exactly (0 of 47896) - round 223's inference was wrong, and the chain to our wrong byte is now complete
+
+Correction first, because it re-opens the decode line. In 0.17hu I argued from pegasus's meta that "the reference does not
+prove the stub decodes" because MessageBoxA/ExitProcess appear in its import list. That was a bad inference: those are
+STATIC imports of the payload (the error reporter is in the payload's own import table), not evidence of execution. The
+measurement that settles it:
+
+    .text (47896 bytes) of pegasus's terminal dump vs the not-packed original: 0 differing bytes (0.0%)
+    .text of taote's image at the stub's error box vs the original:            58 of 64 bytes differ
+
+So the reference's decoder runs to completion and produces the payload BYTE-EXACTLY, while ours diverges. PEtite is a
+decode-fidelity problem after all - the same class as TELock - and the "picker" framing from 0.17hv stands only for the
+choice of address, not for the reason the code is wrong.
+
+Then walked our wrong bytes back to their producer, which is now a complete chain:
+
+1. `.text` differs at 0x401054 (`e8 63 ba 00 00`, expected `e8 10 ba 00 00`).
+2. `TAOTE_WATCH=0x401054:4` fires ONCE, from pc 0x417206 - which disassembles to a `rep movs DWORD` inside the stub's
+   memcpy helper (0x4171f5: `push esi/edi; mov edi,[esp+0xc]; mov esi,[esp+0x10]; mov ecx,[esp+0x14]; sar ecx,2;
+   rep movs`). So .text is not written by the decoder directly: the decoder fills a STACK buffer and the stub copies it
+   into the section.
+3. The copy for that region runs from esi=0x50045b2 to edi=0x401040 (ecx=0x1ff0 dwords), so the wrong dword came from
+   stack 0x50045be -> .text 0x40104c.
+4. `TAOTE_WATCH=0x50045c6:4` then names the producers: 0x417aa4 writes 0x63 (the divergent literal) and 0x417926 writes
+   ba 00 00. The expected bytes are 10 ba 00 00, i.e. the decoder emitted the literal 0x63 where 0x10 belongs.
+
+So the divergence is one literal byte out of the bit reservoir, ~0x400 bytes into the output - deep in the bit-level
+arithmetic, not in a match-copy distance as 0.17hq guessed. That correction matters: it is a bit-reader problem (one
+literal takes the wrong bits), which is why the damage is scattered single bytes rather than shifted runs.
+
+Next: with the reference byte-exact, the differential has a golden target per byte. Decode the same block offline (the
+format is reachable from 0x417214/0x418575 and the tables at 0x417000-0x4170c0: the 0x8000 window at [ebp-4], the 3-bit
+class read at 0x4172a1, the 0x27/8-bit reservoir refill at 0x4172f7-0x417317) and compare the literal sequence until the
+first wrong one, then check the bit-reader instruction there against Unicorn's semantics.
