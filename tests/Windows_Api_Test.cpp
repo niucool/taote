@@ -1858,7 +1858,7 @@ TEST(WinApiLibloader, ResourceAndDefaultDirsBodies) {
         QlErrorNotImplemented);
 }
 
-TEST(WinApiSysinfo, GetVersionAndVersionExVerbatim) {
+TEST(WinApiSysinfo, GetVersionAndVersionExAgreeOnProfileVersion) {
     register_dlls();
     Qiling ql(win_test_options());
 
@@ -1866,20 +1866,74 @@ TEST(WinApiSysinfo, GetVersionAndVersionExVerbatim) {
     ASSERT_NE(ver, nullptr);
     const auto r = ver->handler(ql, 0, {});
     ASSERT_TRUE(r.has_value());
-    EXPECT_EQ(*r, ((0x0004ull << 16) | 0x0004ull));
+    // (build << 16) | (minor << 8) | major over the [SYSTEM] profile
+    // (10.0 / 19045) — not the verbatim NT 4.0 0x00040004
+    EXPECT_EQ(*r, ((19045ull << 16) | (0ull << 8) | 10ull));
+    const auto major = (*r) & 0xff;
+    const auto minor = ((*r) >> 8) & 0xff;
 
-    // the GetVersionEx pair: the verbatim 1 (no struct write, verbatim)
+    // GetVersionExA fills a zeroed OSVERSIONINFOA (148 bytes)
     const auto* vex_a = ApiRegistry::instance().find("GetVersionExA");
     ASSERT_NE(vex_a, nullptr);
+    ql.mem().write(kCells, std::vector<std::uint8_t>(276, 0));
     const auto ra = vex_a->handler(ql, 0, ResolvedParams{{"lpVersionInformation", kCells}});
     ASSERT_TRUE(ra.has_value());
     EXPECT_EQ(*ra, 1u);
+    EXPECT_EQ(ql.mem().read_ptr(kCells + 0, 4), 148u);    // dwOSVersionInfoSize
+    EXPECT_EQ(ql.mem().read_ptr(kCells + 4, 4), major);   // dwMajorVersion
+    EXPECT_EQ(ql.mem().read_ptr(kCells + 8, 4), minor);   // dwMinorVersion
+    EXPECT_EQ(ql.mem().read_ptr(kCells + 12, 4), 19045u); // dwBuildNumber
+    EXPECT_EQ(ql.mem().read_ptr(kCells + 16, 4), 2u);     // dwPlatformId = WIN32_NT
 
+    // GetVersionExW fills a zeroed OSVERSIONINFOW (276 bytes)
     const auto* vex_w = ApiRegistry::instance().find("GetVersionExW");
     ASSERT_NE(vex_w, nullptr);
+    ql.mem().write(kCells, std::vector<std::uint8_t>(276, 0));
     const auto rw = vex_w->handler(ql, 0, ResolvedParams{{"lpVersionInformation", kCells}});
     ASSERT_TRUE(rw.has_value());
     EXPECT_EQ(*rw, 1u);
+    EXPECT_EQ(ql.mem().read_ptr(kCells + 0, 4), 276u);  // dwOSVersionInfoSize
+    EXPECT_EQ(ql.mem().read_ptr(kCells + 16, 4), 2u);   // dwPlatformId
+}
+
+TEST(WinApiSysinfo, GetVersionExAFillsTheExtendedTail) {
+    // A caller that declares OSVERSIONINFOEXA's size (156) gets the EX tail:
+    // zero there is wProductType = 0, which no real Windows produces
+    // (VER_NT_WORKSTATION = 1), and a protector reads it.
+    register_dlls();
+    Qiling ql(win_test_options());
+    const auto* vex_a = ApiRegistry::instance().find("GetVersionExA");
+    ASSERT_NE(vex_a, nullptr);
+
+    std::vector<std::uint8_t> zeroed(284, 0);
+    // stage dwOSVersionInfoSize = 156 (OSVERSIONINFOEXA) in the guest
+    zeroed[0] = 156;
+    ql.mem().write(kCells, zeroed);
+    const auto ra = vex_a->handler(ql, 0, ResolvedParams{{"lpVersionInformation", kCells}});
+    ASSERT_TRUE(ra.has_value());
+    EXPECT_EQ(*ra, 1u);
+    EXPECT_EQ(ql.mem().read_ptr(kCells + 0, 4), 156u);   // the caller's own size, echoed
+    EXPECT_EQ(ql.mem().read_ptr(kCells + 16, 4), 2u);    // dwPlatformId
+    // the EX tail: CHAR[128] szCSDVersion ends at 148
+    EXPECT_EQ(ql.mem().read_ptr(kCells + 148, 2), 0u);   // wServicePackMajor (profile 0)
+    EXPECT_EQ(ql.mem().read_ptr(kCells + 150, 2), 0u);   // wServicePackMinor
+    EXPECT_EQ(ql.mem().read_ptr(kCells + 152, 2), 0u);   // wSuiteMask
+    EXPECT_EQ(ql.mem().read_ptr(kCells + 154, 1), 1u);   // wProductType = VER_NT_WORKSTATION
+    EXPECT_EQ(ql.mem().read_ptr(kCells + 155, 1), 0u);   // wReserved
+
+    // the base-size caller (148) gets 148 bytes and no EX tail beyond it
+    ql.mem().write(kCells, std::vector<std::uint8_t>(284, 0xAA));
+    ql.mem().write(kCells, std::vector<std::uint8_t>{148, 0, 0, 0});
+    const auto rb = vex_a->handler(ql, 0, ResolvedParams{{"lpVersionInformation", kCells}});
+    ASSERT_TRUE(rb.has_value());
+    EXPECT_EQ(*rb, 1u);
+    EXPECT_EQ(ql.mem().read_ptr(kCells + 0, 4), 148u);
+    EXPECT_EQ(ql.mem().read_ptr(kCells + 148, 1), 0xAAu);  // past the 148-byte record: untouched
+
+    // a NULL pointer answers 0 (not a struct write to a null page)
+    const auto rn = vex_a->handler(ql, 0, ResolvedParams{{"lpVersionInformation", std::uint64_t{0}}});
+    ASSERT_TRUE(rn.has_value());
+    EXPECT_EQ(*rn, 0u);
 }
 
 TEST(WinApiSysinfo, GetSystemInfoPacksCtypesLayout) {
@@ -1892,18 +1946,19 @@ TEST(WinApiSysinfo, GetSystemInfoPacksCtypesLayout) {
     ASSERT_TRUE(r.has_value());
     EXPECT_EQ(*r, 0u);  // the void body rides the 0 return
 
-    // the x64 SYSTEM_INFO layout (48 bytes): the verbatim values
-    EXPECT_EQ(ql.mem().read_ptr(kCells + 0, 4), 0u);        // dwOemId
+    // the x64 SYSTEM_INFO layout (48 bytes): the arch now rides the guest
+    // pointer width (9 = AMD64) instead of the verbatim 0 (INTEL)
+    EXPECT_EQ(ql.mem().read_ptr(kCells + 0, 4), 9u);        // dwOemId union: arch 9, wReserved 0
     EXPECT_EQ(ql.mem().read_ptr(kCells + 4, 4), 0x1000u);   // dwPageSize
     // the shellcode mode: the pe_image_address rides 0 (the loader never
     // loaded an image); the PE-mode rides the real base
     EXPECT_EQ(ql.mem().read_ptr(kCells + 8, 8), 0ull);  // lpMinimumApplicationAddress
     EXPECT_EQ(ql.mem().read_ptr(kCells + 24, 8), 0x3ull);   // dwActiveProcessorMask
     EXPECT_EQ(ql.mem().read_ptr(kCells + 32, 4), 0x4u);     // dwNumberOfProcessors
-    EXPECT_EQ(ql.mem().read_ptr(kCells + 36, 4), 0x24au);   // dwProcessorType
+    EXPECT_EQ(ql.mem().read_ptr(kCells + 36, 4), 0x0u);     // dwProcessorType (pegasus: 0)
     EXPECT_EQ(ql.mem().read_ptr(kCells + 40, 4), 0xa000u); // dwAllocationGranularity (the pagesize*10)
-    EXPECT_EQ(ql.mem().read_ptr(kCells + 44, 2), 0x6u);     // wProcessorLevel
-    EXPECT_EQ(ql.mem().read_ptr(kCells + 46, 2), 0x4601u);  // wProcessorRevision
+    EXPECT_EQ(ql.mem().read_ptr(kCells + 44, 2), 0x0u);     // wProcessorLevel (pegasus: 0)
+    EXPECT_EQ(ql.mem().read_ptr(kCells + 46, 2), 0x0u);     // wProcessorRevision (pegasus: 0)
 
     // the lpMaximumApplicationAddress = the dll_address + the dll_size
     auto& loader = static_cast<loader::QlLoaderPE&>(ql.loader());
@@ -1912,6 +1967,21 @@ TEST(WinApiSysinfo, GetSystemInfoPacksCtypesLayout) {
 
     // the native sibling shares the body
     EXPECT_NE(ApiRegistry::instance().find("GetNativeSystemInfo"), nullptr);
+}
+
+TEST(WinApiSysinfo, SystemInfoReportsIntelArchOn32BitGuest) {
+    // the writer's x86 column: wProcessorArchitecture @0 stays INTEL (0) — the
+    // AMD64 answer (9) must only ride the 64-bit guest (pinned by
+    // GetSystemInfoPacksCtypesLayout). The x64 column rides the API path; this
+    // covers the 32-bit column the API test cannot reach without a 32-bit
+    // Qiling instance.
+    std::string buf(qiling::os::win::SYSTEM_INFO_SIZE_32, '\0');
+    qiling::os::win::write_system_info(buf.data(), 32, 0x400000, 0x10000000, 0x1000, 0xa000);
+
+    EXPECT_EQ(static_cast<unsigned char>(buf[0]), 0u);  // wProcessorArchitecture low byte
+    EXPECT_EQ(static_cast<unsigned char>(buf[1]), 0u);  // wProcessorArchitecture high byte
+    EXPECT_EQ(static_cast<unsigned char>(buf[2]), 0u);  // wReserved low byte
+    EXPECT_EQ(static_cast<unsigned char>(buf[3]), 0u);  // wReserved high byte
 }
 
 TEST(WinApiSysinfo, GetLocalTimeAndTickCount) {

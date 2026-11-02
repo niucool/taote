@@ -10148,3 +10148,357 @@ Gains are real (Neolite 4, MPRESS 1-2, PECompact 1, RLPack 1, BeRo 1) but the th
 (expressor/mew/nspack) cross the wall because surviving the faults makes them run much longer, and the net is +1 with
 hangs - not worth it. Reverted. What it *does* prove is that several family residuals share one cause: the stub is
 killed by a fault the reference survives, and the decode is otherwise complete.
+
+---
+
+## 8. T-024 round: the Windows environment probes (item 1: OS version + `SYSTEM_INFO` arch)
+
+Ticket: `tickets/T-024-windows-environment-probes-version-sysinfo-adapters.md`
+(worktree `taote-wt-env`, branch `task/env-probes`, from main `a101eff`).
+
+### 8.1 What changed
+
+`GetVersionExA`/`GetVersionExW` wrote **nothing** into the caller's struct (upstream's
+verbatim `return 1`), `GetVersion` answered the NT 4.0 constant `0x00040004`, and
+`write_system_info` wrote `dwOemId = 0` (= `PROCESSOR_ARCHITECTURE_INTEL`) on a 64-bit
+guest. Now:
+
+* `get_version_ex_body` fills `OSVERSIONINFO[A|W]` from the `[SYSTEM]` profile
+  (`majorVersion`/`minorVersion`/**`buildNumber`** — new key, `19045`), writes
+  `dwPlatformId = 2`, and also fills the `OSVERSIONINFOEX` tail
+  (`wServicePackMajor/Minor`, `wSuiteMask`, `wProductType = 1`) when the caller
+  declares the EX size — a `wProductType` of 0 is not a legal `VER_NT_*` value on any
+  real Windows;
+* `GetVersion` packs the same version: `(build << 16) | (minor << 8) | major`;
+* `write_system_info` writes `wProcessorArchitecture = 9` (AMD64) for a 64-bit guest
+  and 0 (INTEL) for a 32-bit one, and drops the legacy `dwProcessorType 0x24a` /
+  `wProcessorLevel 6` / `wProcessorRevision 0x4601` trio (a 586-class type at level 6
+  is incoherent with an AMD64 answer) for pegasus's zeros.
+
+Suite: **559 passed, 0 failed**; two new locks (`GetVersionExAFillsTheExtendedTail`,
+`SystemInfoReportsIntelArchOn32BitGuest`) plus the rewritten
+`GetVersionAndVersionExAgreeOnProfileVersion` / `GetSystemInfoPacksCtypesLayout`.
+
+### 8.2 Measured (pin 2, budget 85 s, wall 120 s — the other agent sweeps the main tree)
+
+| set | rows | all-three before | all-three after | gains | losses |
+|---|---|---|---|---|---|
+| Themida 122 + TELock 116 + Alienyze 126 | 364 | **75** | **75** | 0 | 0 |
+| S75 (3/family, all 25 families) | 75 | **54** | **54** | 0 | 0 |
+
+Per-sample verdicts (`valid_pe`, `oep_exact`, `imports`, `code_sim`) are **identical on
+all 364 + all 75** rows — not just the totals. 0 wall-timeouts in either sweep (rc 0 on
+every run); the timeout-adjacent Themida rows move by ±15 s on contention alone
+(`themida_Autoruns` 87 → 71 s, `themida_HDDScan` 66 → 88 s) and none of them grades.
+
+### 8.3 Why the 0 — and it is not the fix being inert
+
+`TAOTE_APIDBG=1` traces of the families the ticket attributes items 1+2 to show the
+probe is **never called** before the run ends:
+
+* `themida_7z.exe`: 5 `LoadLibraryA`, 4 `GetModuleHandleA`, 2 `GetProcAddress`,
+  1 `GetCurrentThreadId`. `themida_touch.exe` adds `RtlAllocateHeap`/`GetProcessHeap`/
+  `GetUserDefaultUILanguage`. **No** `GetVersion*`, no `GetSystemInfo`.
+* `telock_7z.exe`: 3 calls total — `GetModuleFileNameA`, `CreateFileA`, `ReadFile`
+  (`CloseHandle`), then the section hop. **No** environment probe.
+* `alienyze_7z.exe`: 110 `GetProcAddress`, 20 `free`, 19 `malloc`, 8 `LoadLibraryA`,
+  the CRT init. **No** environment probe.
+
+So the ticket's row-value table (`Themida 122, TELock 118` for items 1+2) does not hold
+for this corpus: those stubs are VM/decode-limited (`code_sim` 0.052 Themida, 0.072
+TELock in the same sweep) and never read the OS version. The fix is real and pinned by
+unit tests, but it has **no corpus headroom** — it cannot be bought as rows here.
+
+An import-name census over all 3,001 packed samples (`grep -laF`, the name has to be in
+the stub's import table) finds the actual consumers, and none of them is the family the
+ticket named:
+
+| probe | samples importing it (top families) |
+|---|---|
+| `GetVersionExA` | 187 — **Enigma Virtual Box 122**, Neolite 27, JDPack 19, Yoda-Protector 3, PEtite 3, Alienyze 3 |
+| `GetSystemInfo` | 100 — Neolite 27, EnigmaVB 25, JDPack 13, Alienyze 9, Yoda-Protector 5, FSG 5 |
+| `GetNativeSystemInfo` | 168 — EnigmaVB 122, PEtite 13, Neolite 12, JDPack 9 |
+| `GetAdaptersInfo` | **14 — spread thin** (PEtite 3, Neolite 2, JDPack 2, EnigmaVB 2, one each UPX/Themida/RLPack/Packman/ASPack) |
+
+EnigmaVB and Neolite are already **3/3 all-three** at S75 (the S75 rows can't improve),
+and EnigmaVB's stub dies on an unmapped fetch (`enigmavb_ADExplorer.exe`: `PC = 0x5eafe`,
+`UC_ERR_FETCH_UNMAPPED`) before it reaches its environment probes. Consequence for the
+plan: **items 1+2 of T-024 are correctness work, not row work** — the same verdict the
+reference reached (`PLAN_UNPACK.md` §0.2 note: pegasus buys Yoda rows with unpacker work,
+not environment answers). Item 3 (`iphlpapi`) should be scheduled on the strength of
+`GetAdaptersInfo` being imported by **14 of 3,001** samples, i.e. after, not before, the
+decode/OEP mechanisms — unless a measured veto shows up on one of those 14.
+
+---
+
+## 9. The "Alienyze overlay gap" — probed, measured, and closed as a 1-row artifact
+
+Candidate taken after T-024 was parked (§8): the earlier reading that
+`alienyze_tinytask.exe` is `0xa101` bytes with its declared sections ending at
+`0x4000`, i.e. ~`0x6101` bytes of overlay the section table never describes — read as
+a generic "map file bytes beyond the section table" gap worth Alienyze's ~110 rows.
+
+### 9.1 What the file actually is
+
+```
+alienyze_tinytask.exe   size 0xa101   SizeOfImage 0x15f01   AddressOfEntryPoint 0x105e0
+  .text  va 0x01000 vsz 0x03800 raw 0x00000 rsz 0x00000
+  .rdata va 0x05000 vsz 0x00c00 raw 0x00000 rsz 0x00000
+  .data  va 0x06000 vsz 0x00f7c raw 0x00000 rsz 0x00000
+  .rsrc  va 0x07000 vsz 0x03de0 raw 0x00200 rsz 0x03e00
+  .alien va 0x0b000 vsz 0x0af01 raw 0x00000 rsz 0x00000     <-- the entry lives HERE
+```
+
+`raw_end = 0x4000`, overlay `0x6101`. The entry (`0x105e0`) is inside `.alien`, whose
+`PointerToRawData` **and** `SizeOfRawData` are both zero, so taote maps zeros there and
+the guest executes nothing at all: `stages=0 reason=fallback_guess imports=0
+error="no section hop; OEP guessed; rebuild failed"`, `dur=0`, `eip=0x4105e0` (the entry),
+`eflags=0x2`, zero API calls.
+
+The bytes are *not* missing — they are where `.alien`'s raw data would be if the header
+named it. `.alien` va `0xb000` + entry `0x105e0` → file `0x4000 + 0x55e0 = 0x95e0`, and
+that offset holds the Alienyze stub prologue **byte-identically to the working
+`alienyze_7z.exe`** (whose `.alien` reason is `raw 0x2000 rsz 0x17301`):
+
+```
+55 8b ec 81 ec 60 01 00 00 53 56 64 a1 30 00 00 00 89 85 70 ff ff ff ...
+push ebp; mov ebp,esp; sub esp,0x160; push ebx; push esi; mov eax,fs:[0x30]   (PEB)
+```
+
+`0x4000 + 0x6101 = 0xa101` = the file size exactly, so the payload also *ends* where
+`.alien`'s raw data would. Conclusion: **the sample is a damaged file** — its `.alien`
+`PointerToRawData`/`SizeOfRawData` were zeroed while the bytes stayed in place. The same
+file cannot run on real Windows either (the OS starts at `AddressOfEntryPoint`, which
+then sits in a zero-filled section), so this is not an emulator gap.
+
+### 9.2 Corpus-wide: it is the only row
+
+A header scan of all **3,001** packed samples (`packed/*/*.exe`), checking every entry
+against the section that hosts it:
+
+| measure | rows |
+|---|---|
+| entry point inside a section with `SizeOfRawData == 0` (cannot run anywhere) | **1** (`alienyze_tinytask.exe`) |
+| an overlay of more than `0x100` bytes past the sections | 1,113 — the normal pattern (attached data the loader never maps), no row depends on it |
+| Alienyze rows with an overlay | **1 of 126** |
+| Alienyze rows whose entry is unbacked | **1 of 126** |
+
+So "map file bytes beyond the section table" buys **one** row, and it would have to guess
+the overlay's RVA from a stub signature (`0x4000 + (ep - .alien.va)`) — the exact class of
+guess that can corrupt the 2,000 rows that currently pass. Not shipped.
+
+### 9.3 Where the headroom actually is, for the next pick
+
+Alienyze is **not** an overlay family. Per-row failure classes over its 126 rows (this
+tree, pin 2, budget 85 s; report criterion: 75 all-three, OEP 108, imports 79):
+
+| failure class | rows |
+|---|---|
+| imports only (`code_sim` >= 0.90 and the entry exact) | 15 |
+| imports + `code_sim` | 18 |
+| `code_sim` only | 12 |
+| entry + imports + `code_sim` | 9 |
+| entry + imports | 4 |
+| entry only | 4 |
+| (no valid PE) | 1 |
+
+**~46 of the 51 Alienyze misses involve import coverage**, on rows whose entry is already
+exact and whose `code_sim` median is 1.000.
+
+The same shape holds for RLPack, and it is not "emulation depth" there either — measured
+in this tree on `rlpack_ADExplorer.exe` (entry exact, `code_sim` 1.000): the rebuilt table
+carries **49 entries over 25 dll keys against the original's 314**, and the dll keys are
+**doubly spelled** (`kernel32` *and* `kernel32.dll`, `user32` *and* `user32.dll`, … — 11 of
+the 25 are duplicates of another key), while the dumped image contains only **one**
+plausible `IMAGE_IMPORT_DESCRIPTOR` still naming `kernel32.dll` (at dump offset `0xa2fa0`).
+That is the "which table does the code reference" step (`PET6.md`/`RLP_ANCHOR.md` §2), not
+a decode depth problem: RLPack's `code_sim` is 1.000 and its import recall median is 0.23.
+
+**Import-descriptor *selection* (payload table over stub table) is the one lane that is
+neither TELock, nor the picker/OEP residual, nor the environment probes** — it is worth
+~96 RLPack rows + ~46 Alienyze rows on the same mechanism, and it starts from two measured
+facts that no round has used yet: the doubled dll keys, and that only one descriptor
+survives in the RLPack dump.
+
+---
+
+## 10. Alienyze imports-by-ordinal: the numbers ARE in the artifact, in the table taote walked past
+
+Round 185 (`fb34667` in the main tree) concluded the Alienyze ordinal gap was closed: the store's INT
+arrays emitted 0 ordinals, an ordinal-shaped dword scan of the packed file and of the artifact found 0
+hits, and the recovery was described as needing an address→export index plus the export *ordinals*, which
+`api_db.inc` (names only) cannot supply. Two of those three readings are wrong, and the third is not needed.
+
+### 10.1 The measurements
+
+`alienyze_HWMonitorPro_x32.exe` (entry exact, `code_sim` 1.000, `imp_recall` 0.941): 27 of the original's
+458 pairs are missing and **all 27 are ordinals** — 11 `oleaut32` (`#2,#6,#7,#8,#9,#12,#18,#25,#77,#149,
+#150`) and 16 `ws2_32`. The rebuilt PE dropped nothing (0 of the 27 appear in the meta), so the pairs were
+never recorded.
+
+In the artifact, immediately at the offset the packer already computes (`idt_end`, from `alienyze::find_idt`)
+there is a **477-dword table**: 431 name RVAs + **27 `0x8000|N` ordinal slots** + 19 zero terminators. The
+27 ordinals' multisets are *exactly* the 27 missing ones — 11 in one block, 16 in another:
+
+```
+idt_end 0x37335c  [+0x434 .. ] ord 2,150,149,6,12,9,8,7,18,25,77      <- oleaut32's whole import set
+                  [+0x7dc .. ] ord 9,2,13,101,4,23,22,1,16,3,116,115,52,8,111,19  <- ws2_32's
+```
+
+`alienyze_Everything.exe` has the same shape with one block of 20 ordinals (all `ws2_32`), and
+`alienyze_Dbgview.exe` one of 15.
+
+Why round 185 missed them: the values live in the table the port's own `hinted_store` *skips* — its leading
+loop advances over every `v & 0x80000000` slot before the record walk starts (`embedded_pe.cpp`, the
+"skip the leading RVA table" `while`), so nothing downstream could ever see them. The dword-shape scan that
+reported 0 hits scanned `.alien`, and on the samples measured here the table sits past it.
+
+What is *not* needed is the export-ordinal index: the ordinal numbers are literal, in the artifact.
+
+### 10.2 The mechanism (shipped)
+
+`qiling/unpack/packers/alienyze_ordinals.cpp` — `store_ordinal_pairs()`:
+
+1. read the table as **zero-separated blocks** (the per-DLL INT arrays concatenated, one block per DLL, in
+   the same order as the store's DLL markers; measured 14 blocks/14 markers and 12/12);
+2. a block with **no name slot** is a DLL the payload imported *exclusively* by ordinal — such a DLL leaves
+   no name record, so its marker group is empty as well;
+3. pair the pure-ordinal blocks with the name-less marker groups **in store order**, and emit `(dll,
+   ordinal_<N>)` for every slot. The two counts must agree, or nothing is emitted.
+
+The positional block→marker map is *not* usable (measured: the ordinal blocks sit at table positions 5 and
+12 against marker indices 11 and 12 — an off-by-one would have attributed 11 oleaut32 ordinals to gdi32);
+the coarser pure-block ↔ name-less-DLL rule is the one that holds. Deliberately conservative: a mixed
+block, or a count mismatch, yields no pairs, because a wrong `(dll, ordinal)` pair is an import the rebuilt
+image cannot load. The rebuilder already turns `ordinal_<N>` into a real `0x80000000|N` thunk
+(`iat/import_rebuilder.cpp:26`), so the emitted pair lands in the PE's import directory, not as a
+hint/name string.
+
+Regression lock: `UnpackCompat.AlienyzeStoreOrdinalBlocksMapToNameLessDlls` (synthetic table: the pairing,
+the mixed-block refusal, the count-mismatch refusal).
+
+### 10.3 Measured
+
+Family first — Alienyze, all 126 rows, `--pin 2`, budget 85 s, wall 120, **1 m 08 s** wall for the sweep:
+
+| | before | after | delta |
+|---|---|---|---|
+| valid PE | 125 | 125 | 0 |
+| OEP exact | 108 | 108 | 0 |
+| imports ok (`recall >= 0.95`) | **79** | **94** | **+15** |
+| **all three (plan rubric)** | **75** | **88** | **+13** |
+| all three (strict: `code_sim >= 0.90` too) | 63 | 70 | +7 |
+
+Zero losses on every column. Seven rows cross the all-three line — `Bginfo` (recall 0.938 → 0.999),
+`HWMonitorPro_x32` (0.941 → 1.000), `Procmon` (0.912 → 0.954), `Sysmon` (0.905 → 0.977), `logonsessions`
+(0.936 → 1.000), `portmon` (0.931 → 0.986), `webhttrack` (0.812 → 0.986).
+
+Corpus — S75 (3/family), `--pin 2`, 7 m 46 s: **54 → 54** all-three, no per-family column changed except
+one row, `nspack_ADInsight.exe`, which reads `imports 27.1%` at `dur=86` (the 85 s budget) under the sweep
+and **1.000 at 42 s, twice, when re-run solo** — a contention artifact, not a regression (the rule this
+repo learned in round 20: never believe a timeout-adjacent row without a solo re-run).
+
+Suite: **560 passed, 0 failed.**
+
+---
+
+## 11. Alienyze: the XOR name band (pegasus b3e412a8) — the mechanism works, the beneficiary rows are blocked elsewhere
+
+### 11.1 What was probed first (cdf57121, the decoy-class 0x0b salvage)
+
+cheapest first, per the ticket order. Reproduced pegasus's own scope census exactly: XOR the terminal
+dump with the hardcoded 0x0b and count the ".dll" tokens — **only KillPot** materializes one
+(`KERNEL32.dll`); `Cacheset`, `notepad`, `WinList`, `dat2file` carry none. One row, and in this tree that
+row is OEP-blocked (`oep_exact=false`, claimed entry off by a section-hop residue), so the port would earn
+**0 rows**. Not written; recorded here so nobody rebuilds the 0x0b-only shape.
+
+### 11.2 The mechanism (shipped)
+
+`qiling/unpack/packers/alienyze_names.cpp` — `mine_name_band()`, ported from b3e412a8 + the later fixes:
+
+1. **auto-key**: the band's XOR byte is per-sample, so find the key that makes `.dll\0` tokens appear
+   (KillPot 0x0b, Cacheset 0x87, WinList 0x5b, pythonw 0x0f — measured). Done in one pass with a 256-bin
+   histogram (k is determined by the first byte), not 255 scans: the naive form cost up to +1.9 s on the
+   largest images;
+2. **bands**: split at zero runs of 16+ bytes, which keeps junk zones out of the name scan;
+3. **tokens**: every `<stem>.dll` ASCII run is a candidate owner (the store keeps them in group order);
+4. **forward-greedy cut**: walk the band's printable runs (4..64 chars, no `.`), keep only those with the
+   **HintName guard** (the two un-XORed bytes before the run form a hint in `0x08..0x2fff` — this is what
+   kills the stub's own `Fls*`/CRT-math decoy stores), skip `Fls*`, and bind each name to the first token at
+   or after a monotone cursor that the api_db says actually exports it;
+5. gate as the reference does: fire only when the row recovered < 64 pairs, require >= 8 mined, and require
+   the mined set to out-cover a partial recovery (>16 already recovered).
+
+**The band is NOT in the decoder's image copy.** Measured on KillPot: the engine's `image` and the dump the
+grader reads differ in 159,710 bytes, and the `KERNEL32.dll`^0x0b token is absent from the former and
+present at image offset `0x267e4` in the latter. So the miner reads **live guest memory** at
+`[base, base + image_size)` (`ctx.ql->mem().read`), which is what the engine's dump is taken from — the same
+reason pegasus re-reads `meta_.outfile` instead of its own image buffer.
+
+### 11.3 Measured (Alienyze, 126 rows, `--pin 2`, budget 85 s, wall 120)
+
+A/B over the same manifest, `TAOTE_NO_BAND` as a temporary local switch (removed before the commit):
+
+| | band off | band on |
+|---|---|---|
+| valid PE | 125 | 125 |
+| OEP exact | 108 | 108 |
+| imports ok | **94** | **95** (+1) |
+| **all three** | **88** | **88** (+0) |
+| sweep wall | 1 m 56.3 s | 1 m 55.6 s |
+
+Per row (recall): `KillPot` 0.857 → **1.000** (the mined set is the exact 70-pair multiset, 70/70 in the
+original, 0 junk — pegasus measured the same row flipping green), `Cacheset` 0.046 → **0.591** (53 mined,
+51 correct), `notepad` 0.021 → 0.062. Zero losses anywhere.
+
+**+0 all-three rows, and the reason is not the mechanism:** the only row it can bring over the 0.95 line is
+KillPot, whose entry is wrong in this tree; Cacheset is at 0.591 because its *attribution* fails, not its
+mining — the band contains api_db-valid hinted names for **87 of its 88** original imports (only
+`comctl32 #17`, an ordinal, is absent), but only 52 get bound to a DLL by the forward-greedy cut.
+
+That number is the headroom for the next mechanism (pegasus ba8c91b4, the xor-miner group attribution):
++35 pairs on Cacheset alone would put it at 0.99 and flip the row.
+
+Regression lock: `UnpackCompat.AlienyzeNameBandMinesHintNamesUnderAnyKey` (key detection, the HintName
+guard, the api_db veto, and the no-token case). Suite: **561 passed, 0 failed.**
+
+### 11.4 The attribution: api_db ownership whitelisted by the store's own DLL tokens (not a positional cursor)
+
+The reference infers a name's DLL from its **position** in the band — the monotone forward-greedy cursor over
+the trailing `.dll` tokens (pegasus ba8c91b4) — because on Windows it has no `name -> dll` table it trusts.
+taote has one (`api_db.inc`, 32,374 names / 405 DLLs), so position is not needed:
+
+* a hinted, api_db-known name is attributed to the table's **priority owner**;
+* the owner must be **one of the store's own `.dll` tokens** — which is exactly the whitelist the positional
+  cursor approximates, and it keeps the scan anchored to the store instead of wandering the image.
+
+Measured on the rows whose band exists (mined pairs / correct / junk):
+
+| row | positional cursor | api_db, unfiltered | api_db + token whitelist |
+|---|---|---|---|
+| Cacheset | 53 / 51 / 2 | 89 / 87 / 2 | **89 / 87 / 2** |
+| KillPot | 70 / 70 / 0 | 75 / 70 / 5 | **70 / 70 / 0** |
+| WinList | 44 / 44 / 0 | 60 / 44 / 16 | **44 / 44 / 0** |
+| pythonw | 13 / 12 / 1 | 29 / 12 / 17 | **13 / 12 / 1** |
+
+So the whitelist buys Cacheset's full recall **and** the cursor's precision. The cursor's monotone rule is
+what cost Cacheset 34 names: its store is not strictly grouped, and a name whose group sits before the cursor
+can never bind.
+
+Also landed: the mid-band gate from ba8c91b4 (`mined` must out-cover an existing recovery when one exceeds
+16 pairs) — with it, WinList (72 recovered vs 44 mined) and pythonw (43 vs 13) are left alone automatically.
+
+Family measurement with the api_db attribution (`--pin 2`, budget 85 s, wall 120, **1 m 43.8 s** sweep):
+
+| | band, cursor | band + api_db attribution |
+|---|---|---|
+| valid PE | 125 | 125 |
+| OEP exact | 108 | 108 |
+| imports ok | 95 | **96** (+1) |
+| **all three** | 88 | **89** (+1) |
+| sweep wall | 1 m 55.6 s | **1 m 43.8 s** |
+
+`Cacheset` flips (recall 0.591 → **0.9886**); `notepad` 0.062 → **0.843** (still short of 0.95 — its band
+carries only a fraction of its 242 imports); `ntfsinfo` 0.990 → 1.000, `pipelist` 0.992 → 1.000. Zero
+losses. Cumulative with §11.3: the band work is **+1 all-three row and +2 import rows on Alienyze**, and it
+is the reason Cacheset is green at all.

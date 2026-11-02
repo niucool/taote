@@ -44,6 +44,8 @@ current_path = C:\
 # Major Minor ProductType
 majorVersion = 10
 minorVersion = 0
+# the build the GetVersion/GetVersionExA/W pair report (Windows 10 22H2)
+buildNumber = 19045
 productType = 1
 language = 1093
 VER_SERVICEPACKMAJOR = 0
