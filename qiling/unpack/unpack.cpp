@@ -1136,6 +1136,13 @@ void Unpacker::install(Qiling& ql) {
     // DEFAULT OFF: measured on its own it moves no row (family n=116 PE=116 OEP 1 -> 0 IMP 0 ALL 0, 0 gains,
     // 0 losses) - it is a precondition, not a fix (the standing rule for a reference port that is not a win yet).
     if (opts_.family == "TELock" && !is_64_ && std::getenv("TAOTE_TLOCK_CRCBYPASS") != nullptr) {
+        // The stub records the original EP in its own section table (image base at stub+0x1cc0, ~EP at
+        // stub+0x1ce0) and writes both at RUN TIME, so they have to be read from the first-write shadow -
+        // the reference's TELockUnpacker::family_terminal_fill does exactly this. Collect the shadow for
+        // that, but keep ShadowPolicy::none: the full OVERLAY is measured wrong for TELock on the
+        // reference's own A/B ("overlay-OFF better on 5, worse on 3; telock_7z decisive at 0 vs 35191"),
+        // and taote reproduced that (0.17jj: restoring it changed nothing but code_sim).
+        shadow_wanted_ = true;
         std::uint64_t stub_start = 0;
         for (const auto& ps : sections_) {
             if (packed_ep_va_ >= ps.start && packed_ep_va_ < ps.end) {
@@ -3880,6 +3887,44 @@ UnpackResult Unpacker::finalize(Qiling& ql) {
         // families the hop machinery settles on a plausible-looking but wrong
         // entry that no earlier seam can tell from the real one. Runs on the
         // image as it will be dumped (the overlays below only add bytes).
+        // TELock's stub records the original entry point as ~EP in its own section table - image base at
+        // stub+0x1cc0, ~EP at stub+0x1ce0 - written at run time, so it is read from the first-write shadow
+        // (the reference's TELockUnpacker::family_terminal_fill, gated there by SE_TELOCK_CRCFIX). Used only
+        // when the run latched nothing usable: our TELock claims are the stub's own first stage (stub+0x37).
+        if (opts_.family == "TELock" && shadow_seen_.size() == image_size_ && !sections_.empty()) {
+            std::uint64_t st_start = 0;
+            for (const auto& ps : sections_) {
+                if (packed_ep_va_ >= ps.start && packed_ep_va_ < ps.end) {
+                    st_start = ps.start;
+                    break;
+                }
+            }
+            const bool junk = meta_oep_ == 0 || (st_start != 0 && meta_oep_ >= st_start);
+            if (st_start != 0 && junk && st_start >= base_) {
+                const auto st_off = static_cast<std::size_t>(st_start - base_);
+                if (st_off + 0x1ce4 <= shadow_seen_.size() && shadow_seen_[st_off + 0x1cc0] &&
+                    shadow_seen_[st_off + 0x1ce0]) {
+                    std::uint32_t imgb = 0, k3 = 0;
+                    std::memcpy(&imgb, &shadow_image_[st_off + 0x1cc0], 4);
+                    std::memcpy(&k3, &shadow_image_[st_off + 0x1ce0], 4);
+                    std::uint64_t ep = static_cast<std::uint64_t>(static_cast<std::uint32_t>(~k3)) + imgb;
+                    const bool in_image = ep >= base_ && ep - base_ < image_size_;
+                    const bool in_stub = ep >= st_start && ep < st_start + 0x10000;
+                    if (in_image && !in_stub) {
+                        if (opts_.debug) {
+                            std::fprintf(stderr,
+                                         "[unpack] telock oep-from-table: ~K3=0x%x -> 0x%llx (was 0x%llx)\n",
+                                         static_cast<unsigned>(~k3 & 0xffffffffu),
+                                         static_cast<unsigned long long>(ep),
+                                         static_cast<unsigned long long>(meta_oep_));
+                        }
+                        meta_oep_ = ep;
+                        last_oep_ = ep;
+                        reason_ = "telock_oep_table";
+                    }
+                }
+            }
+        }
         if (packer_ != nullptr && image.size() == image_size_) {
             packers::PackerContext fctx;
             fctx.ql = &ql;

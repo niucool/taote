@@ -12455,3 +12455,32 @@ payload's tables are therefore absent from the artifact no matter the overlay.
 So the ordering is now firm: (1) get the stub to finish (the rdata/.text content is wiped and re-derived, and the
 stub currently skips its IAT rebuild because [0x413bc4] reads 0), (2) then the shadow overlay will matter, because the
 reference's 109 imports come from the payload's tables in exactly those wiped sections.
+
+#### 0.17jk TELock: the stub's own section table carries the entry point - family OEP exact 1 -> 93
+
+The reference's `TELockUnpacker::family_terminal_fill` (telock_unpacker.cpp:28-72) documents a second mechanism that
+taote lacked entirely: **TELock's stub records the original entry point in its own section table, obfuscated as ~EP -
+image base at `stub+0x1cc0`, ~EP at `stub+0x1ce0`**, and because the stub *writes* both at run time they have to be
+read from the first-write shadow (`shadow_seen_` at both offsets, `shadow_image_` for the dwords), not from the file
+(the packed bytes there are `0x00000000` and `0xb838c542`). It is used exactly when the run latched nothing usable -
+the reference's own wording is "the accept gate keeps landing on the stub's own self-decrypted first stage, stub+0x32",
+which is precisely taote's TELock failure mode (every claim was `0x...037`).
+
+Ported before the `family_fill` seam, family-scoped to TELock, under the same `TAOTE_TLOCK_CRCBYPASS` gate (that gate
+is what collects the shadow; the shadow *overlay* stays off, which the reference's own A/B also concludes:
+"overlay-OFF better on 5, worse on 3; telock_7z decisive at 0 vs 35191" - taote reproduced that in 0.17jj):
+
+    ep = (uint32_t)~[shadow stub+0x1ce0] + [shadow stub+0x1cc0]
+    accept when ep is inside the image and outside the stub section; reason = "telock_oep_table"
+
+On telock_7z.exe: `[unpack] telock oep-from-table: ~K3=0xebc5 -> 0x40ebc5 (was 0x418037)` - the truth.
+
+**Family A/B (116 rows, 4 workers, 85 s, gate on): n=116 PE=116 OEP 1 -> 93, IMP 0 -> 0, ALL 0 -> 0**, i.e. **+93 OEP
+gains and 0 losses**. Imports stay 0 on every row, so no row flips all-three yet and the gate still ships default-off;
+but the OEP half of this family is now solved for 93 of 116 rows from two dwords the stub writes for exactly this
+purpose.
+
+Next: the import half. The reference's 109 imports come from the payload's own tables (its artifact grows a `.pgimp`
+section and reports `image_import_descriptors: 6, image_import_functions: 109`), and taote's `.rdata`/`.idata` are the
+wiped sections - so the harvest has to read the same first-write shadow the entry point now comes from, or the stub's
+GetProcAddress storm has to run (it is still skipped: [0x413bc4] reads 0, 0.17jh).
