@@ -10731,3 +10731,16 @@ That is the plan for the next unit: re-add `written_ranges` to the context (it i
 exists), then port the machine against those ranges rather than against the image. Rule (bc): prototype a ported
 pattern machine against the rows it is meant to fix BEFORE writing C++ - here it turned a "big port" into a precisely
 scoped one (the classes are right; the input was wrong) for ten minutes of work.
+
+Second data point for the same round: added `TAOTE_WRITTEN_RANGES=1` (prints the run's `ever_written_` ranges at
+finalize, qiling/unpack/unpack.cpp) and re-ran the prototype scanning exactly those ranges from the artifact dump
+instead of the whole image. On the first 12 missing rows: **0 correct, 12 wrong**, and the picks are unchanged
+(`petite_7z` 0x40ea18 vs truth 0x40ebc5; `petite_AccessEnum` 0x403a53 = taote's own claim). The written ranges on these
+rows cover the whole image anyway (`petite_rrdec`: 0x401000-0x413000, 0x414000-0x416000, 0x417000-0x419000), so the
+slate scan is not input-starved - it is simply not what produces the reference's answer.
+
+That shifts the port target: the reference's correctness on these rows must come from the stages that run *before* the
+slate scan - its EP-exit tracker (`ep_exit_pending_`, the watched section-to-section transition that fires
+`dump_module` when the stub leaves its own section) and the `keep_is_junk` validator that decides whether the slate is
+needed at all. Those two are the real port; the pattern classes are the fallback. Round 208's lesson repeats one level
+down: identify which *stage* of a reference mechanism carries the answer before porting the mechanism.

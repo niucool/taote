@@ -3077,6 +3077,16 @@ std::uint64_t Unpacker::static_oep_from_image(const std::vector<std::uint8_t>& i
     if (packer_ == nullptr || image.empty()) {
         return 0;
     }
+    // TAOTE_WRITTEN_RANGES: print the run's ever_written_ ranges at finalize, so a
+    // family seam's candidate scan can be prototyped offline against exactly the
+    // regions the reference scans (PLAN_UNPACK 0.17hk).
+    if (std::getenv("TAOTE_WRITTEN_RANGES") != nullptr) {
+        std::fprintf(stderr, "[written] %zu ranges\n", ever_written_.size());
+        for (const auto& r : ever_written_) {
+            std::fprintf(stderr, "[written] 0x%llx-0x%llx\n", (unsigned long long)r.first,
+                         (unsigned long long)r.second);
+        }
+    }
     packers::PackerContext ctx;
     ctx.image_ptr = &image;
     ctx.base = base_;
