@@ -11039,3 +11039,20 @@ so a rule (e.g. "prefer the first prologue after the decode target's first writt
 preceding bytes are a ret/padding AND which the stub's rel32 hand-off pointed at") can be tested OFFLINE over all 89
 rows before any code change. Side note: `pecompact_Everything` writes 226 MB of debug lines under
 TAOTE_UNPACK_DEBUG, so batch scans should cap or filter its stderr.
+
+Addendum: enumerated the artifact's bytes at the true entry for those rows (strict 8-byte match against the original,
+53 rows survived the section-mapping filter). The shapes are the ladder's own classes:
+
+    0x558bec6aff  55 8b ec 6a ff   (C1)  PEtite 8, WinUpack 3, JDPack 2
+    0x5589e583ec  55 89 e5 83 ec   (C2)  PEtite 8
+    0x558bec83ec  55 8b ec 83 ec   (C3)  PEtite 3, PECompact 1
+    0x6a7068..    6a ?? 68 ??..    (h1)  PEtite 6+
+
+so for this pool the truth IS in the candidate set the ladder already scans - the failure is ranking, not enumeration.
+That closes the offline loop on the round-215 result: the slate scan on a taote artifact picked the WRONG member of the
+same classes (last-per-class), which is why it measured 2/43. A ranking rule is therefore the whole fix, and it has to be
+derived from something other than address order (the truth is neither the first nor the last candidate: `petite_7z`'s
+truth 0x40ebc5 sits AFTER the ladder's 0x40e924). The next offline step is to test candidate discriminators over the 53
+rows without touching C++: preceding-byte boundary kind, the bytes AT the candidate in the packed file vs the decoded
+image, whether the stub's rel32 hand-off or the decode target's first written block points at it, and section-relative
+position.
