@@ -10502,3 +10502,35 @@ Family measurement with the api_db attribution (`--pin 2`, budget 85 s, wall 120
 carries only a fraction of its 242 imports); `ntfsinfo` 0.990 → 1.000, `pipelist` 0.992 → 1.000. Zero
 losses. Cumulative with §11.3: the band work is **+1 all-three row and +2 import rows on Alienyze**, and it
 is the reason Cacheset is green at all.
+
+## 12. Merge of `task/env-probes` into main (2 commits beyond the advertised four)
+
+`git merge --no-ff task/env-probes` at main `eec3cee` -> merge commit `d2f7066`. The branch carried **six** commits,
+not the four reported: in addition to the four listed, `6757120` (mine the XOR'd HintName band out of live guest
+memory) and `590154e` (attribute the band by api_db ownership, whitelisted by the store's own dll tokens), both
+measured at +1 row / 0 losses on the branch. All six are in.
+
+State at the merge:
+
+* **One conflict, docs only** - `PLAN_UNPACK.md`, where both sides appended sections at the same anchor. Resolved by
+  keeping BOTH blocks in order (main's rounds 168-209, then the branch's §8-§11); no code conflict, and
+  `qiling/unpack/packers/embedded_pe.cpp` auto-merged.
+* An **untracked** `tickets/T-024-windows-environment-probes-version-sysinfo-adapters.md` (237 lines, status: open) was
+  blocking the merge; it is the *older* draft - the branch's committed version is 305 lines with status "in progress"
+  and the status log - so the draft was moved out of the tree to `/tmp/T-024-untracked-main-draft.md` and the branch's
+  version kept.
+* Suite: **606 tests, 0 failed** (main was 602; the branch adds four non-skipped tests, `Windows_Api_Test` +
+  `Unpack_Compat`).
+
+Combined corpus (r101, rerun-corrected: four rows sat at dur 86-87, all restored when re-run in place):
+
+| run | PE | OEP | imports | all-three |
+|---|---|---|---|---|
+| r98 main before the merge | 2676 | 2169 | 2175 | **2138** |
+| r101 merged | 2676 | 2169 | 2222 | **2138** |
+
+So the merge is **exactly neutral on rows** - 0 gains, 0 losses, row for row. The branch's expected +13 does not
+stack because main's round-202 Alienyze work (the store EP outranking a bad hop, plus the case-aware stub surface)
+already lifted Alienyze to 125/126 import-exact and 118/126 all-three; the branch's ordinal reader and band miner were
+measured against the *pre*-round-202 baseline (79 all-three) and reach the same rows. Both implementations are now
+present and agree; the ordinal reader is the one that would matter if a future Alienyze row keeps a short INT table.
