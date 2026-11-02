@@ -11608,3 +11608,48 @@ Consequence for planning: PEtite is not a bit-reader arithmetic problem (0.17hn'
 differential is the wrong tool. The unit is the block loop's early exit; when it is fixed, the fixup pass and the tail
 block both come with it, and byte-exactness (reference: 0 of 47896 differing) becomes achievable. Recorded with the
 transform verified offline so the next round does not have to rediscover it.
+
+#### 0.17im PEtite's block table located: 6 blocks measured, and the .text block under-fills
+
+Instrumented the PEtite block loop instead of the decoder. `TAOTE_PROBE=0x4171e7` (the return pc of the block
+decompressor call at 0x4171e2, 0x417214 being the decompressor itself - which is also the entry taote wrongly claims)
+prints, per block, the advanced source pointer in eax, the block's destination in edi, its end in ecx/edx and the
+descriptor pointer in ebx. `petite_rrdec.exe` decodes SIX blocks, in this order:
+
+    #  dst        dst_end     src_end     result   descriptor (ebx)
+    1  0x414000   0x4147ff    0x408863    ok       0x41864c
+    2  0x415000   0x41500b    0x408873    ok       0x41865c
+    3  0x401000   0x40cb14    0x411596    ok       0x418678   <- .text, 0xbb14 bytes
+    4  0x40d000   0x40d3e0    0x411875    ok       0x418688   <- .data
+    5  0x40e000   0x4117f3    0x412ffd    ok       0x418698   <- .rdata
+    6  0x400000   0x4006a4    0x400005    **FAILS** 0x4186b8   <- original headers
+
+so the destinations are the payload's headers, .text, .data, .rdata, .idata and .CRT, and the two sections PEtite
+never copies (.bss/.tls) are simply absent from the list.
+
+The descriptor table is **static data in the packed file at RVA 0x18640** (file offset 0x1a40, inside the stub
+section), with VARIABLE-LENGTH records: ebx always equals record_start + 0xc, and the record starts are 0x18640,
+0x18650, 0x1866c, 0x1867c, 0x1868c, 0x186ac - i.e. strides 0x10, 0x1c, 0x10, 0x10, 0x20. A four-dword record reads
+`{size-1, dst_rva, x, src_end_fileoff}` - block 3 is `{0xbb14, 0x1000, 0x9d9, 0x11596}` at 0x1866c, block 1 is
+`{0x7ff, 0x14000, 0x1002, 0x8863}` - and the longer records (block 2's is seven dwords) carry extra trailing dwords,
+which is what the variable stride is. Reading the table from the PACKED file is required: in the artifact the same
+addresses are overwritten (the stub's data stage lands on top of its own table), which is why an earlier attempt to
+parse it post-run produced garbage.
+
+Two concrete defects, both inside block 3 and block 6:
+
+1. **Block 3 under-fills.** Its destination range is 0x401000-0x40cb14 and it returns success, but only the first
+   0x9f14 bytes are real: `TAOTE_WATCH=0x40af14` shows the bytes there arrive from `pc=0x417206` - the `rep movsd`
+   of the stub's memcpy helper - carrying STALE STACK values (0x40b129 gets 0x8b08458b), so the decoder produced
+   fewer output bytes than the block's size and the copy then moved uninitialised stack over the tail. That tail is
+   exactly the region 0.17il measured as undescribed (`.text+0xaf14` to the end, 0xc04 bytes).
+2. **Block 6 fails** (returns 0). The decompressor's chunk-type dispatch at 0x4172a1 is
+   `and ecx,7 / shr ecx,1 / je 0x4172cb / dec ecx / jne 0x4181c7`, and 0x4181c7 is the `xor eax,eax / pop / leave /
+   ret` failure exit - so the header block's stream presents a chunk type >= 2, while 0x4181cb (`mov eax,[ebp+8]`)
+   is the success exit. This is the same failure as the parked "Corrupt Data!" guard, now localised to one block.
+
+Note the addressing coincidence worth checking first next round: the stub reads its compressed stream at
+`base + FILE offset` (0x408863 = file 0x8863), and the packed file's `.petite` has raw_ptr 0x1c00 for rva 0x1000, so
+file offset and RVA differ by exactly 0xc00 - the same constant that appeared in 0.17il's per-site E8/E9 delta. If
+taote maps the packed file by RVA, the stream the stub reads is offset by 0xc00 from what the packer meant, which
+would explain BOTH an under-filled block and an invalid chunk type downstream.
