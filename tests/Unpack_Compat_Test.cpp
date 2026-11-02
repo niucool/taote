@@ -20,6 +20,7 @@
 #include "../tests/Pe_Sample_Runner.hpp"
 #include "qiling/const.hpp"
 #include "qiling/core.hpp"
+#include "qiling/unpack/packers/alienyze_names.hpp"
 #include "qiling/unpack/packers/alienyze_ordinals.hpp"
 #include "qiling/unpack/unpack.hpp"
 
@@ -318,6 +319,59 @@ TEST(UnpackCompat, FsgOrdinalRecordsAreMined) {
     EXPECT_TRUE(has_import(res, "wldap32.dll", "ordinal_155"));
     EXPECT_TRUE(has_import(res, "oleaut32.dll", "ordinal_8"));
     fs::remove_all(out, ec);
+}
+
+// The Alienyze XOR name band (PLAN_UNPACK.md §11): the payload's HintName store
+// materializes in the image and is then XORed in place with a per-sample key, so
+// the couple (hint16, name) is recoverable once the key is found - and the store's
+// DLL token (which trails the name groups in group order) attributes it.
+TEST(UnpackCompat, AlienyzeNameBandMinesHintNamesUnderAnyKey) {
+    constexpr std::size_t kSize = 0x9000;
+    std::vector<std::uint8_t> img(kSize, 0);
+    // two HintName records + a trailing DLL token, then a 16-byte zero gap
+    const auto put = [&img](std::size_t off, const std::string& s) {
+        for (std::size_t i = 0; i < s.size(); ++i) {
+            img[off + i] = static_cast<std::uint8_t>(s[i]);
+        }
+    };
+    std::size_t o = 0x1000;
+    img[o++] = 0x11;                // hint 0x0111 (little-endian, low byte first)
+    img[o++] = 0x01;
+    put(o, "CreateFileW");
+    o += 11;
+    img[o++] = 0;
+    img[o++] = 0x22;
+    img[o++] = 0x01;                // hint 0x0122
+    put(o, "GetProcAddress");
+    o += 14;
+    img[o++] = 0;
+    img[o++] = 0;
+    put(o, "KERNEL32.dll");
+    o += 12;
+    img[o] = 0;
+    for (std::size_t i = o; i < o + 32; ++i) {
+        img[i] = 0;  // the band's zero seam
+    }
+    const std::uint8_t key = 0x5b;
+    for (auto& b : img) {
+        b = static_cast<std::uint8_t>(b ^ key);
+    }
+    const auto mine = qiling::unpack::alienyze::mine_name_band(
+        img.data(), img.size(), +[](const std::string& nm) -> std::vector<std::string> {
+            if (nm == "createfilew") return {"kernel32"};
+            return {};
+        });
+    EXPECT_EQ(static_cast<unsigned>(mine.key), static_cast<unsigned>(key));
+    ASSERT_EQ(mine.pairs.size(), 1u);  // only the name the lookup vouches for
+    EXPECT_EQ(mine.pairs[0].first, "kernel32");
+    EXPECT_EQ(mine.pairs[0].second, "CreateFileW");
+
+    // no readable token under any key: no band, no pairs
+    std::vector<std::uint8_t> blank(kSize, 0xA5);
+    const auto none = qiling::unpack::alienyze::mine_name_band(
+        blank.data(), blank.size(),
+        +[](const std::string&) -> std::vector<std::string> { return {"kernel32"}; });
+    EXPECT_EQ(none.pairs.size(), 0u);
 }
 
 // The Alienyze store's ordinal table (PLAN_UNPACK.md §10): the per-DLL INT

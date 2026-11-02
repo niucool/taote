@@ -8959,3 +8959,65 @@ and **1.000 at 42 s, twice, when re-run solo** — a contention artifact, not a 
 repo learned in round 20: never believe a timeout-adjacent row without a solo re-run).
 
 Suite: **560 passed, 0 failed.**
+
+---
+
+## 11. Alienyze: the XOR name band (pegasus b3e412a8) — the mechanism works, the beneficiary rows are blocked elsewhere
+
+### 11.1 What was probed first (cdf57121, the decoy-class 0x0b salvage)
+
+cheapest first, per the ticket order. Reproduced pegasus's own scope census exactly: XOR the terminal
+dump with the hardcoded 0x0b and count the ".dll" tokens — **only KillPot** materializes one
+(`KERNEL32.dll`); `Cacheset`, `notepad`, `WinList`, `dat2file` carry none. One row, and in this tree that
+row is OEP-blocked (`oep_exact=false`, claimed entry off by a section-hop residue), so the port would earn
+**0 rows**. Not written; recorded here so nobody rebuilds the 0x0b-only shape.
+
+### 11.2 The mechanism (shipped)
+
+`qiling/unpack/packers/alienyze_names.cpp` — `mine_name_band()`, ported from b3e412a8 + the later fixes:
+
+1. **auto-key**: the band's XOR byte is per-sample, so find the key that makes `.dll\0` tokens appear
+   (KillPot 0x0b, Cacheset 0x87, WinList 0x5b, pythonw 0x0f — measured). Done in one pass with a 256-bin
+   histogram (k is determined by the first byte), not 255 scans: the naive form cost up to +1.9 s on the
+   largest images;
+2. **bands**: split at zero runs of 16+ bytes, which keeps junk zones out of the name scan;
+3. **tokens**: every `<stem>.dll` ASCII run is a candidate owner (the store keeps them in group order);
+4. **forward-greedy cut**: walk the band's printable runs (4..64 chars, no `.`), keep only those with the
+   **HintName guard** (the two un-XORed bytes before the run form a hint in `0x08..0x2fff` — this is what
+   kills the stub's own `Fls*`/CRT-math decoy stores), skip `Fls*`, and bind each name to the first token at
+   or after a monotone cursor that the api_db says actually exports it;
+5. gate as the reference does: fire only when the row recovered < 64 pairs, require >= 8 mined, and require
+   the mined set to out-cover a partial recovery (>16 already recovered).
+
+**The band is NOT in the decoder's image copy.** Measured on KillPot: the engine's `image` and the dump the
+grader reads differ in 159,710 bytes, and the `KERNEL32.dll`^0x0b token is absent from the former and
+present at image offset `0x267e4` in the latter. So the miner reads **live guest memory** at
+`[base, base + image_size)` (`ctx.ql->mem().read`), which is what the engine's dump is taken from — the same
+reason pegasus re-reads `meta_.outfile` instead of its own image buffer.
+
+### 11.3 Measured (Alienyze, 126 rows, `--pin 2`, budget 85 s, wall 120)
+
+A/B over the same manifest, `TAOTE_NO_BAND` as a temporary local switch (removed before the commit):
+
+| | band off | band on |
+|---|---|---|
+| valid PE | 125 | 125 |
+| OEP exact | 108 | 108 |
+| imports ok | **94** | **95** (+1) |
+| **all three** | **88** | **88** (+0) |
+| sweep wall | 1 m 56.3 s | 1 m 55.6 s |
+
+Per row (recall): `KillPot` 0.857 → **1.000** (the mined set is the exact 70-pair multiset, 70/70 in the
+original, 0 junk — pegasus measured the same row flipping green), `Cacheset` 0.046 → **0.591** (53 mined,
+51 correct), `notepad` 0.021 → 0.062. Zero losses anywhere.
+
+**+0 all-three rows, and the reason is not the mechanism:** the only row it can bring over the 0.95 line is
+KillPot, whose entry is wrong in this tree; Cacheset is at 0.591 because its *attribution* fails, not its
+mining — the band contains api_db-valid hinted names for **87 of its 88** original imports (only
+`comctl32 #17`, an ordinal, is absent), but only 52 get bound to a DLL by the forward-greedy cut.
+
+That number is the headroom for the next mechanism (pegasus ba8c91b4, the xor-miner group attribution):
++35 pairs on Cacheset alone would put it at 0.99 and flip the row.
+
+Regression lock: `UnpackCompat.AlienyzeNameBandMinesHintNamesUnderAnyKey` (key detection, the HintName
+guard, the api_db veto, and the no-token case). Suite: **561 passed, 0 failed.**

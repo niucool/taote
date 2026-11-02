@@ -137,6 +137,7 @@ add_library(qiling_unpack STATIC
     unpack/packers/pecompact_packer.cpp
     unpack/packers/embedded_pe.cpp
     unpack/packers/alienyze_ordinals.cpp
+    unpack/packers/alienyze_names.cpp
 )
 target_include_directories(qiling_unpack PUBLIC ${CMAKE_SOURCE_DIR})
 target_link_libraries(qiling_unpack PUBLIC qiling LIEF::LIEF nlohmann_json::nlohmann_json)
