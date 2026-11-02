@@ -11415,3 +11415,24 @@ directly against the pinned engine (unicorn 2.1.4, a 20-line harness):
 So none of the classic authenticity gaps explains PEtite's 4790-byte divergence, and these three are settled: do not
 re-test them. The differential has to come from the arithmetic itself (the bit reservoir and the match/literal tables),
 which means the offline decoder comparison remains the only route.
+
+#### 0.17if JDPack: the ladder's own candidate list contains the truth, but no ordering rule picks it
+
+Last picker data point of the family sweep. `JDPack` has 4 strict OEP-wrong rows and all 4 have the true entry decoded in
+the artifact, so it was the last place a ranking rule could still pay. taote's ladder passB reports its first and last
+hits; compared with the truth:
+
+    row              passB hits   first       last        pick        truth
+    jdpack_7z             4       0x40e924   0x40ebc5    0x40e924    0x40ebc5   <- last IS the truth
+    jdpack_7za           56       0x40e840   0x45b889    0x43f1d9    0x455641
+    jdpack_MxdwGc        19       0x1004107  0x100804e   0x1010890   0x1008e08
+    jdpack_PEview         0       -          -           0x4155f9    0x401000   <- no candidates at all
+
+So "take the last passB hit" would fix ONE of four; 7za and MxdwGc are neither first nor last (the truth sits between
+them), and PEview has no ladder candidates at all. Combined with the earlier eliminations (boundary kind, address order,
+packed-vs-decoded bytes, decoded-page, out-of-image, and the WinUpack parked slot which does not fire here), the PICKER
+LANE IS CLOSED end to end: 7 rows, no rule.
+
+That leaves the work order purely decode-side, where PEtite's 37 rows are the only pool with a byte-exact golden target
+(the reference reproduces the original `.text` with 0 of 47896 bytes differing) and the engine primitives have already
+been exonerated (shl-by-0, btr, std/rep movsd).
