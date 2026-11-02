@@ -11056,3 +11056,20 @@ truth 0x40ebc5 sits AFTER the ladder's 0x40e924). The next offline step is to te
 rows without touching C++: preceding-byte boundary kind, the bytes AT the candidate in the packed file vs the decoded
 image, whether the stub's rel32 hand-off or the decode target's first written block points at it, and section-relative
 position.
+
+Discriminators tested OFFLINE over the 53 section-mapped rows (no C++ touched), to rule candidates out cheaply:
+
+- **Boundary kind** (preceding byte is C3/C2/CC/90 or two zeros - the reference's own definition): the truth is
+  boundary-passing on 28 of 53 rows (53%), against a baseline of 63.9% for all C1/C2 candidates in the same section.
+  So boundary is worse than chance as a discriminator here - RULED OUT. This is worth knowing because it is exactly
+  the rule the reference applies to *arbitrate* between classes; it helps there and hurts here.
+- **Address position** (rank among same-class candidates in the section): middle 19, last 13, first 0, with a bimodal
+  quantile split (12 rows below 0.25, 18 above 0.75) - RULED OUT as a monotone rule; the truth is not
+  "the first" or "the last" prologue.
+- 21 of the 53 rows are not C1/C2-shaped at all (they are C3 `55 8b ec 83 ec` or h1 `6a ?? 68 ..`), so a candidate
+  scan must union all classes before any ranking is compared.
+
+Remaining untested discriminators: the bytes AT the candidate in the packed file versus the decoded image (a candidate
+the stub wrote over is payload; one the packed file already had is stub code), and whether the stub's rel32 hand-off or
+the decode target's first written block points at the candidate. Those need per-row packed/decoded byte comparisons -
+still offline, no C++.
