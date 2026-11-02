@@ -11938,3 +11938,33 @@ and the complement guard rejects it. Two candidate explanations, and they are di
 
 Either way the payload is decoded correctly and then never runs, which is why PEtite has no runtime hand-off to read
 its OEP from. Parked here with the exact instruction, the exact edge, the exact bytes and the two candidates.
+
+#### 0.17iv block 6 excludes every local explanation - the next step needs the reference implementation
+
+Followed the two candidates from 0.17iu to their end, and both are now excluded by measurement:
+
+**The record is real, not a bogus iteration.** The loop visits six records and the packed header has five
+sections - one record per section plus the header area - so the count is right. What is wrong is the SOURCE: every
+block chains (`src` of block N is the `src_end` of block N-1: 0x4085a1 -> 0x408863 -> 0x40ba5c -> 0x411596 ->
+0x411875 -> 0x412ffd), but **block 6 breaks the chain** and reads `base+5` (the packed DOS header) instead of
+0x412ffd. Its descriptor's source fields are zero, so whatever expression produced `base+5` turned "unset" into
+"the DOS header".
+
+**The bytes it reads cannot satisfy the guard, in either image.** `complement_ok(W@5) = false` on BOTH the packed
+file and the not-packed original (they are byte-identical for the first 16 bytes: `4d 5a 90 00 03 00 00 00 04 ...`),
+so this is not "our dump lost the original headers" - the original headers would fail the same test.
+
+**The chained pointer does not work either.** The dump at 0x12ffd reads `eb 93 3d 00 ...` (W = 0x003d93eb,
+`complement_ok = false`), and there is **no** complement-valid 4-byte window anywhere in 0x12000-0x16000. So the
+header stream is not "the chained stream, off by five bytes" and not anywhere else we can account for after the run.
+
+**What the failure does.** The stub consequently takes its error path (the `Corrupt Data!` MessageBoxA that the
+parked notes recorded for this family) and never transfers control to the payload: `exec PAYLOAD` traces for rrdec
+and 7z show only stub addresses, and no execution ever lands in the byte-exact `.text` that 0.17ir produces.
+
+That closes local analysis of PEtite: the input bytes are not ours, the record count is right, the chain hypothesis
+is dead, and no complement-valid stream exists in the image. The next step has to be external - either build
+`../pegasus` and run this row to see which block its emulation feeds where, or park PEtite's OEP pool and take a
+different family. Everything about PEtite's DECODE is settled (0.17iq-0.17ir: the payload is byte-exact on 43 of 73
+rows, and the family's 30 all-three rows come from the 17 that already pick the truth plus the ones whose claim is
+accepted).
