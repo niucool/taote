@@ -12431,3 +12431,27 @@ reference's decode (0.45%), and the recurrence derived from the reference's plai
 does not chain over the odd-cl steps either, so the next unit should not try to model this algebraically: it should
 find what zeroes the region after the first pass, which is an engine-side question the reference's own source answers
 more cheaply.
+
+#### 0.17jj TELock: the shadow-overlay source is the right idea but cannot show value yet (measured, reverted)
+
+The reference's TELockUnpacker comment on its shadow buffer ("just-in-time decrypt/execute/re-encrypt: the stage 1
+shadow buffer (first-write decrypted bytes)") plus `dump_module`'s family overlay (:4207) explain 0.17ji's zeroing
+exactly: TELock wipes what it decoded, so terminal memory is not the decode. taote already owns that machinery - the
+first-write shadow (`shadow_wanted_` / `shadow_image_` / `shadow_seen_`) and, generically, a zeros-restore overlay
+that rewrites any byte the stub decoded and then wiped - but **`shadow_wanted_` is false for TELock**, because only
+`ShadowPolicy::first_write` families (MEW, PECompact) collect it, so the zeros-restore had nothing to consume.
+
+Enabling collection for TELock inside the gate (keeping `ShadowPolicy::none`, so only the safe zeros-restore applies,
+not the full overlay that is measured wrong for the JIT families) makes it restore **4973 bytes** on telock_7z.exe -
+and measures exactly nothing:
+
+    family (116 rows, 4 workers, 85 s, gate on): n=116 PE=116 OEP 14 IMP 0 ALL 0, mean code_sim 0.0908
+
+i.e. identical to 0.17jg's gate-on arm (OEP 14, IMP 0, ALL 0). Reverted rather than shipped. The reason it cannot
+show value yet is visible in the same run: telock_7z.exe ends with `error=emulation error: Invalid memory read
+(UC_ERR_READ_UNMAPPED)`, so the stub never finishes its decode and what the shadow holds is the *partial* stream. The
+payload's tables are therefore absent from the artifact no matter the overlay.
+
+So the ordering is now firm: (1) get the stub to finish (the rdata/.text content is wiped and re-derived, and the
+stub currently skips its IAT rebuild because [0x413bc4] reads 0), (2) then the shadow overlay will matter, because the
+reference's 109 imports come from the payload's tables in exactly those wiped sections.
