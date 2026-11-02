@@ -11868,3 +11868,32 @@ not exist until block 6 decodes.
 So the PEtite order is now unambiguous: (1) block 6's invalid chunk type, (2) then a runtime hand-off becomes
 observable and the OEP can be read instead of guessed, (3) the 3-4 byte end-of-section copy overrun is cosmetic and
 last. The 17 rows that already pick the truth are unaffected by any of it.
+
+#### 0.17it PEtite block 6 fails with a bit reservoir that cannot come from its source (parked with a precise question)
+
+Chased the block-6 failure from 0.17is. Established:
+
+  * block 6's arguments are `src=0x400005, dst=0x400000, size=0x6a4` (the ORIGINAL headers), and the decoder
+    returns eax=0 having consumed **zero** input bytes (the src slot still reads 0x400005 at the failure) and written
+    **nothing**: `TAOTE_WATCH` over 0x400000/0x400100/0x400400/0x400600 shows exactly one write in the whole header
+    region - `pc=0x417217` writing 0x00 to 0x400000, i.e. the stub zeroing the in-memory MZ, not block 6's output.
+  * the failure is the `xor eax,eax` exit at 0x4181c7 reached from the chunk-type dispatch at 0x4172a1, and the probe
+    there reports `ebx=0x6ca5, edi=0x20, esi=3, eax=0x905a`.
+  * `(ebx & 7) >> 1 = 2` is the invalid type that fails, so the reservoir's low bits are `0b101`.
+  * BUT the source bytes cannot produce it: `TAOTE_PROBE_EBP_DISP=8` confirms `[ebp+8] = 0x400005` at the failure,
+    and the image at 0x400005 is `00 00 00 04 ...` (the dump matches the packed file byte for byte there - only the
+    MZ is zeroed), and **nothing writes to 0x400005 at any point** (`TAOTE_WATCH=0x400005:4:8` is silent).
+    The refill loop at 0x417288-0x41729e reads `movzx edx,BYTE PTR [ecx]` from `[ebp+8]` and shifts it in at bit
+    position edi, with `ebx` zeroed at 0x417245 on entry - so a first dispatch over 00 bytes must see ebx == 0.
+
+That contradiction is the question to answer next: the dispatch is reading a reservoir that did not come from the
+bytes at `[ebp+8]`. Two candidate explanations, both cheap to test with a probe on the refill loop
+(0x417288/0x41728e/0x417297):
+
+  1. the failing dispatch is NOT the first one (the `test eax,eax / jne 0x4172e7` path re-enters with a state
+     variable, and `ebx` then holds bits buffered by an earlier iteration whose source came from somewhere else);
+  2. the argument slot is re-read per iteration (`inc DWORD [ebp+8]`), so a partially-consumed pointer plus a
+     restore elsewhere could hide the real reads.
+
+Block 6 matters because it is what stops the payload from ever running (0.17is), and only then does PEtite expose a
+runtime hand-off to read the OEP from - the family's 37 OEP-wrong rows hang off this one block.
