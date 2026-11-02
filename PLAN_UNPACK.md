@@ -10625,3 +10625,46 @@ Two facts worth keeping: `petite_HDDScan`/`neolite_HDDScan` (the same program pa
 `petite_HashCalc`/`winupack_HashCalc` (same again) produce *identical* claims across packers, so the claim comes from
 the program, not the packer - and the reference's answers on those rows are its own section hops, which taote never
 takes because its run ends first.
+
+#### 0.17hi Round 213: TELock's CRC check decoded and inverted - it is an oracle for decode correctness
+
+Disassembled the check from the pre-box runtime dump (`TAOTE_APIDUMP=CreateMutexA:0x418fc0:0x100`):
+
+```
+418fe6  mov  ecx,[edi+0x40d38a]      ; flags|length
+418fec  mov  eax,[edi+0x40d386]      ; start (relative to [ebp+0x40d362])
+418ff2  test ecx,0x80000000 ; je skip
+418ffa  and  ecx,0x7fffffff          ; length
+419000  add  eax,[ebp+0x40d362]      ; the actual start address
+419006  pusha
+419007  mov  esi,eax                 ; cursor
+419009  mov  ebx,ecx                 ; count
+41900b  xor  ecx,ecx
+41900d  lea  eax,[ecx-1]             ; init 0xFFFFFFFF
+419011  mov  edi,0xedb88320          ; reflected CRC-32 polynomial
+419016  xor  edx,edx / mov dl,[esi] / xor dl,al / shr edx,1 / jnc / xor edx,edi   ; 8x
+419028  shr  eax,8 ; xor eax,edx ; inc esi ; dec ebx ; jg 0x419016
+419032  not  eax                     ; final xor, i.e. a textbook CRC-32
+419034  xor  eax,[edi+0x40d38e]
+41903a  xor  eax,0x3ce43761
+41903f  xor  eax,[ebp+0x40d3fe]
+419045  not  eax
+419047  sub  eax,[ebp+0x40d382]      ; ZF decides
+41904e  jne  0x41927b               ; -> the "CRC error" box
+```
+
+So it is a **textbook reflected CRC-32 over a stub-chosen buffer**, mixed with three of the stub's own slots and the
+constant 0x3ce43761. Inverted the mix to get the CRC the run *wanted*:
+
+    needed(eax at 0x419047) = 0x311634a8
+    crc the run COMPUTED   = 0x129e9a5b   (= crc32 of the .text our run decoded)
+    original payload .text = 0xa09619ca   (not the expected value either)
+
+So TELock's verdict reduces to: **our decode of the payload is wrong**, and this check is a precise in-run oracle for
+it (compute the CRC of any candidate buffer, mix with the three slots, compare to the needed value). The slots are the
+stub's own data; the expected value is not a plain CRC of either the packed `.text` or the original's, which means the
+buffer it CRCs is its own decoded copy, not a section.
+
+That closes TELock's *diagnosis*: the check is not the bug and cannot be "fixed" - the stub is telling the truth about a
+decode that is not byte-exact. The remaining work is the decode itself (the same place the reference's five
+`[insn-inv]` skips and three tolerated `[null-pc]` exceptions live).
