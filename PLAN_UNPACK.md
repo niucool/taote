@@ -9021,3 +9021,44 @@ That number is the headroom for the next mechanism (pegasus ba8c91b4, the xor-mi
 
 Regression lock: `UnpackCompat.AlienyzeNameBandMinesHintNamesUnderAnyKey` (key detection, the HintName
 guard, the api_db veto, and the no-token case). Suite: **561 passed, 0 failed.**
+
+### 11.4 The attribution: api_db ownership whitelisted by the store's own DLL tokens (not a positional cursor)
+
+The reference infers a name's DLL from its **position** in the band — the monotone forward-greedy cursor over
+the trailing `.dll` tokens (pegasus ba8c91b4) — because on Windows it has no `name -> dll` table it trusts.
+taote has one (`api_db.inc`, 32,374 names / 405 DLLs), so position is not needed:
+
+* a hinted, api_db-known name is attributed to the table's **priority owner**;
+* the owner must be **one of the store's own `.dll` tokens** — which is exactly the whitelist the positional
+  cursor approximates, and it keeps the scan anchored to the store instead of wandering the image.
+
+Measured on the rows whose band exists (mined pairs / correct / junk):
+
+| row | positional cursor | api_db, unfiltered | api_db + token whitelist |
+|---|---|---|---|
+| Cacheset | 53 / 51 / 2 | 89 / 87 / 2 | **89 / 87 / 2** |
+| KillPot | 70 / 70 / 0 | 75 / 70 / 5 | **70 / 70 / 0** |
+| WinList | 44 / 44 / 0 | 60 / 44 / 16 | **44 / 44 / 0** |
+| pythonw | 13 / 12 / 1 | 29 / 12 / 17 | **13 / 12 / 1** |
+
+So the whitelist buys Cacheset's full recall **and** the cursor's precision. The cursor's monotone rule is
+what cost Cacheset 34 names: its store is not strictly grouped, and a name whose group sits before the cursor
+can never bind.
+
+Also landed: the mid-band gate from ba8c91b4 (`mined` must out-cover an existing recovery when one exceeds
+16 pairs) — with it, WinList (72 recovered vs 44 mined) and pythonw (43 vs 13) are left alone automatically.
+
+Family measurement with the api_db attribution (`--pin 2`, budget 85 s, wall 120, **1 m 43.8 s** sweep):
+
+| | band, cursor | band + api_db attribution |
+|---|---|---|
+| valid PE | 125 | 125 |
+| OEP exact | 108 | 108 |
+| imports ok | 95 | **96** (+1) |
+| **all three** | 88 | **89** (+1) |
+| sweep wall | 1 m 55.6 s | **1 m 43.8 s** |
+
+`Cacheset` flips (recall 0.591 → **0.9886**); `notepad` 0.062 → **0.843** (still short of 0.95 — its band
+carries only a fraction of its 242 imports); `ntfsinfo` 0.990 → 1.000, `pipelist` 0.992 → 1.000. Zero
+losses. Cumulative with §11.3: the band work is **+1 all-three row and +2 import rows on Alienyze**, and it
+is the reason Cacheset is green at all.

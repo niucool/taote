@@ -52,15 +52,6 @@ bool is_stem_char(std::uint8_t c) {
     return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_';
 }
 
-// "kernel32" owns "kernel32.dll"'s names; the api_db stems carry no extension
-bool stem_matches(const std::string& token, const std::string& owner) {
-    if (token == owner) {
-        return true;
-    }
-    return token.size() < owner.size() ? owner.compare(0, token.size(), token) == 0
-                                       : token.compare(0, owner.size(), owner) == 0;
-}
-
 }  // namespace
 
 MinedNames mine_name_band(const std::uint8_t* img, std::size_t n,
@@ -139,23 +130,26 @@ MinedNames mine_name_band(const std::uint8_t* img, std::size_t n,
         }
     }
 
-    // ---- the forward-greedy cut ----
+    // ---- the attribution ----
+    // The reference infers a name's DLL from its POSITION in the band (the
+    // monotone forward-greedy cursor over the trailing dll tokens), because on
+    // Windows it has no name -> dll table it trusts. taote has api_db, the
+    // host-export table, so position is not needed at all: a hinted, api_db-known
+    // name is attributed to the table's priority owner.
+    //
+    // Measured on the corpus rows whose band exists: this recovers 87 of
+    // Cacheset's 88 original imports (89 pairs, 2 junk) where the cursor bound
+    // only 52 - the monotone rule drops a name whose group sits before the
+    // cursor, and Cacheset's store is not strictly grouped. The tokens keep one
+    // job: they are what finds the per-sample XOR key (a band only exists if the
+    // image carries XORed ".dll" tokens), so the scan stays anchored to the
+    // store instead of wandering the image.
+    std::set<std::string> store_dlls;  // the store's own dll list (the whitelist)
+    for (const auto& t : toks) {
+        store_dlls.insert(t.stem);
+    }
     std::set<std::pair<std::string, std::string>> mined;
     for (const auto& bd : bands) {
-        std::vector<std::string> btok;
-        bool near_tok = false;
-        for (const auto& t : toks) {
-            if (t.pos + 64 >= bd.a && t.pos <= bd.b + 64) {
-                near_tok = true;
-            }
-            if (t.pos >= bd.a && t.pos <= bd.b + 128) {
-                btok.push_back(t.stem);
-            }
-        }
-        if (!near_tok || btok.empty()) {
-            continue;
-        }
-        std::size_t tok_idx = 0;
         for (std::size_t o = bd.a; o + 6 < bd.b;) {
             std::size_t e = o;
             while (e < bd.b && dx[e] >= 0x20 && dx[e] <= 0x7e) {
@@ -170,26 +164,28 @@ MinedNames mine_name_band(const std::uint8_t* img, std::size_t n,
                 const auto hint = o >= 2
                                       ? static_cast<std::uint16_t>(dx[o - 2] | (dx[o - 1] << 8))
                                       : 0;
-                const bool has_hint = o >= 2 && hint >= 0x08 && hint <= 0x2fff &&
-                                      fn.find('.') == std::string::npos;
-                if (has_hint && fn.compare(0, 3, "Fls") != 0) {
+                if (o >= 2 && hint >= 0x08 && hint <= 0x2fff && fn.find('.') == std::string::npos &&
+                    fn.compare(0, 3, "Fls") != 0) {
                     std::string lower = fn;
                     for (auto& c : lower) {
                         c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
                     }
-                    const auto owners = owner_lookup(lower);
-                    for (std::size_t j = tok_idx; j < btok.size(); ++j) {
-                        bool owned = false;
-                        for (const auto& ow : owners) {
-                            if (stem_matches(btok[j], ow)) {
-                                owned = true;
-                                break;
-                            }
+                    auto owners = owner_lookup(lower);
+                    if (!owners.empty()) {
+                        std::string owner = owners.front();
+                        for (auto& c : owner) {
+                            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
                         }
-                        if (owned) {
-                            mined.insert({btok[j], fn});
-                            tok_idx = j;
-                            break;
+                        if (owner.size() > 4 && owner.compare(owner.size() - 4, 4, ".dll") == 0) {
+                            owner.resize(owner.size() - 4);
+                        }
+                        // ... and the owner must be one of the store's OWN dll
+                        // tokens: that is the whitelist the positional cursor
+                        // approximates in the reference. Measured cost of
+                        // dropping it: +5 junk pairs on KillPot, +16 on WinList,
+                        // +16 on pythonw, for no recall.
+                        if (store_dlls.count(owner) != 0) {
+                            mined.insert({owner, fn});
                         }
                     }
                 }
