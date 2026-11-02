@@ -12352,3 +12352,39 @@ or loses an all-three. So it stays gated off: the OEP half of the family is now 
 half still needs the stub's IAT rebuild (the reference's ~90-call GetProcAddress storm, which is where its 109 imports
 come from). Next: the fault at 0x410fff in the payload's tail - find what hands control there before the entry at
 0x40ebc5 - and then the IAT-stub-address precondition.
+
+#### 0.17jh TELock: why the IAT rebuild is skipped - the payload's .rdata is never decoded
+
+0.17jg left the stub reaching the payload's entry but with imports still 0. The skip is now localised to one branch:
+
+    419210: mov 0x40d362(%ebp),%edx     ; edx = image base (0x400000)
+    419216: mov 0x40d352(%ebp),%esi     ; esi = an RVA (0x13bb8) from the stub's descriptor at 0x419cb0
+    419224: add %edx,%esi               ; esi = 0x413bb8
+    41922d: mov 0xc(%esi),%eax          ; eax = [0x413bc4]
+    419230: andl $0x0,0xc(%esi)         ; consume it
+    419234: test %eax,%eax
+    419236: je 0x41962a                 ; TAKEN in taote: eax == 0, so no IAT rebuild
+    419240: push %eax
+    419241: call [ebp+0x40d2d0]         ; GetModuleHandleA, then the ~90-call GetProcAddress storm
+
+`TAOTE_PROBE=0x419234` reads exactly `eax=0x0 ebx=0x59e1fe3f ecx=0xa00 edx=0x400000 esi=0x413bb8`, so the branch is
+taken on the value the stub reads, not on a mis-decoded condition.
+
+The cause is upstream of the branch: **0x413bc4 is in the decoded `.rdata` (RVA 0x13bc4, VA 0x413bc4), and taote never
+decodes that section.** Dumping 0x60 bytes at 0x413b80 at the last API gives sixty zero bytes, while the reference's
+own decode of the same row holds the payload's tables there (0x41049c/0x4104a4/0x4104ac/0x4104b4/0x4104bc, then
+0x13c54, 0x11010, 0x13df0, 0x11ac). A zeroed `.rdata` is also why the payload crashes at 0x410fff once it is handed
+control: its import and relocation tables live there.
+
+Trap for whoever picks this up: `andl $0x0,0xc(%esi)` zeroes that dword as it consumes it, so **no run-end dump can
+show the pre-run value** - it has to be read at run time (a probe or an APIDUMP at a preceding API), which is why this
+looked like "the reference has zeros there too" on a first reading of both dumps.
+
+The stub's descriptor block itself is fine and readable at run time: `0x419cb0 = {0x13bb8, 0, 0x17000, 0x18000,
+0x400000, 0x400000, 0x60, 7}` (RVA base, RVA of the table the branch reads, section RVAs, image base, image base,
+0x60, 7 blocks).
+
+Next: why the decompressor leaves `.rdata` (and probably `.data`) at zero while `.text` decodes. The stub's
+decompressor is the call at stub+0x1054 the CRC bypass falls through to, and the payload's block list is the
+descriptor above (7 entries) - so compare, block by block, what the decompressor writes in taote against the block
+extent each descriptor implies.
