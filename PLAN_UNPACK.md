@@ -11436,3 +11436,27 @@ LANE IS CLOSED end to end: 7 rows, no rule.
 That leaves the work order purely decode-side, where PEtite's 37 rows are the only pool with a byte-exact golden target
 (the reference reproduces the original `.text` with 0 of 47896 bytes differing) and the engine primitives have already
 been exonerated (shl-by-0, btr, std/rep movsd).
+
+#### 0.17ig WinUpack stack-slot reproducibility, harvest timing, and a bounding experiment that failed
+
+Three family re-runs of the shipped change (ca33f96) plus instrumentation of when the harvest actually fires.
+
+**Reproducibility.** A second and third full family run give OEP 93 every time; all-three reads 80 or 81 depending on ONE
+row, `winupack_Bginfo`, whose duration under 4-worker load is 75-86 s (it was 53-67 s before the change, i.e. already
+near the 85 s budget). Solo it is 42.7 s. So the family figure is stable (93 OEP; 80-81 all-three) and the only
+variance is a pre-existing near-budget row, not the harvest.
+
+**Harvest timing** (instrumented fire counter, per-instruction hook):
+    winupack_Diskmon    harvests at fire 19.0M   -> oep 0x40b4b8 (truth)
+    winupack_ShareEnum  harvests at fire 22.5M   -> oep 0x409013 (truth)
+    winupack_Bginfo     harvests at fire 802     -> value fails the prologue gate, pick unchanged (cheap)
+    Everything / FastHash_kr / HashCalc / mtinst harvest later than 25M fires
+So the slot is parked DEEP into the run (tens of millions of instructions after the hop), which is why the hook must
+stay armed; the earlier reasoning that "one indirect call happens per row" was true only of the rows sampled first.
+
+**Bounding experiment, FAILED and reverted.** Tried to cap the hook's lifetime at 4M then 25M fires (to stop rows that
+never harvest from paying). At 25M the family drops to OEP 89 / all-three 79 because four of the six harvesting rows park
+the slot later than that; the bound cannot be small enough to save wall time and large enough to keep the harvest. Code
+reverted with `git checkout` - nothing kept, the shipped unbounded-until-harvest form stands. The real fix would be a
+cheaper trigger than a per-instruction hook (e.g. scanning the stack window at hop time and at API entries, both of which
+are already cheap events), which is the next thing to try if this family is revisited.
