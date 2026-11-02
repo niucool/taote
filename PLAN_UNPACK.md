@@ -12033,3 +12033,45 @@ addr/sec/wr_n, so this needs either a trace switch in pegasus or reading its des
 it passes. That one comparison decides whether block 6 is fed a different stream (port the argument rule) or
 tolerated on failure (port the tolerance) - and either way the EP-exit walk is the second deliverable, since it is
 what turns a running payload into an OEP without any candidate-class guessing.
+
+#### 0.17iy the reference REPO documents PEtite's root cause, and taote has the exact defect it names
+
+`../pegasus/docs/PETITE_ROOTCAUSE.md` (204 lines, 2026-09-25 -> 10-05) is the missing half of everything this
+session measured about PEtite. Its causal chain, and taote's state for each link:
+
+1. The stub does `GlobalAlloc` + `VirtualProtect(0x400780, 0x880, RW)`, restores the original PE-header fragment
+   with `rep movsd`, then `VirtualProtect(.., RO)`. **taote's VirtualProtect is a stub that returns 1 and changes
+   nothing** (`qiling/os/windows/dlls/kernel32/memoryapi.cpp:96-103`), so the header page never becomes read-only.
+2. The decoder's 4th emit writes a byte to the IMAGE BASE (`mov [edi],al`, 0x417217 here / 0x418217 there).
+   Natively that write **FAULTS** (header page RO) and the stub's SEH handler at 0x4144a5 takes over - the decode
+   is exception-driven. "Our engine swallows the fault ... the stub never sees the AV and takes the WRONG decode
+   path - that is the whole divergence." Measured in taote this round: `TAOTE_WATCH=0x400000` reports
+   `pc=0x417217 addr=0x400000 value=0x0` - the write SUCCEEDS, which is exactly the swallowed-fault state.
+3. The handler chain must be seeded for the pivot to work: the reference's resolution is a **SELF-REFERENTIAL
+   frame (F.Next = F)**, so `mov ebx,[ebx]; lea esp,[F-0x52]` lands on the walker's own `pushal` area with
+   `esi` = the decryptor's state-table pointer, and the seed's context cell must hold `img->base`. The walker sets
+   TF (`pushal; pushf; btc [esp],8; popf`), so every instruction #DB-traps and the per-trap handler at 0x414776
+   walks a 0x10-stride table: bit31 entries are copy ops (`mov al,[edx+edi]`), clear entries zero-fill
+   (`rep stosd/stosb` at `[esi+8]+ebp+[esi+4]`).
+4. With that, the payload runs, and the OEP comes from the **EP-exit section-transition trail**
+   (`sec_trans_hist_`, last 64 transitions with instruction stamps + `sec_last_write_insn_`), walked backward,
+   prologue-shape-gated - the mechanism 0.17ix measured live (`[pet-epexit] consuming transition 0x401160`).
+
+The reference's A/B numbers on its own 75-sample PEtite census make this the biggest documented lever in the repo:
+decode fix **CODE-FULL 21 -> 46** (7z: 9,794 wrong .text bytes -> 0, imports 6 -> 112), then the transition trail
+**oep=OK & CODE-FULL 33 -> 68 (+35 exact-OEP recoveries)**, with two flips queued.
+
+Taote's position: 0.17ir's host-side transform undo already reaches byte-exact `.text` WITHOUT any of this (rrdec
+4790 -> 4, 7z 9794 -> 0, mean code_sim 0.9346 -> 0.9872) - so items 1-3 are not needed for BYTE-EXACTNESS here.
+They are needed for the payload to RUN, which is the precondition for item 4 and therefore for the family's 37
+OEP-wrong rows.
+
+Work order for the next session, in dependency order:
+  a. honour VirtualProtect (at least PAGE_READONLY / PAGE_EXECUTE_READ) and dispatch a REAL guest AV on a write to
+     a protected page instead of completing it - the reference's `SE_PROT_SEH` gate, whose default-off state was a
+     historic artifact (it now dispatches either way);
+  b. seed the SEH chain self-referentially for `.petite` images with the context cell = image base;
+  c. verify the int1/TF storm runs to completion (the reference needs ~15,600 iterations vs its old ~3,944 stop);
+  d. port the section-transition trail + backward walk for the OEP.
+Each step is separately measurable on the family, and step (a) alone is a one-line change with an immediate
+observable: the write at 0x417217 must start producing a guest AV instead of succeeding.
