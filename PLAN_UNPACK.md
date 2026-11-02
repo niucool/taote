@@ -12510,3 +12510,27 @@ Three measurements say this is decode coverage, not an import-recovery bug:
 
 So the work order for the import half is now: get the stub's block decode to cover the payload (the reference ends
 with the payload's strings present), after which the import harvest and `.pgimp` fill in on their own.
+
+#### 0.17jm TELock: the payload DOES run; the import blocker is one dword the stub reads but never writes
+
+Three more measurements on telock_7z.exe under the gate, which together replace "the decode is missing" with a much
+narrower statement:
+
+1. **The payload executes.** `TAOTE_PROBE=0x410fff TAOTE_PROBE_PREV=1` reports `prev_pc=0x410ffd`, i.e. 0x410fff is
+   reached by *falling through* the payload's own code inside .text, not by a resume: the crash is the payload running
+   with a stack that is still empty (`esp=0x121ffec`, `[esp]=0x1220000` = the stack base) and the VirtualProtectEx
+   argument registers still live (`ebp=4, esi=0x1000, edi=0x400000`). So the decode is good enough to execute, and
+   what kills it is the IAT: the payload calls through slots nothing has rebuilt.
+2. **The written ranges cover the whole image** (`TAOTE_WRITTEN_RANGES=1`: 0x401000-0x411000, 0x411000-0x415000,
+   0x415000-0x417000, 0x417000-0x418000, 0x418000-0x41b000), so the decode covers .rdata too - but
+   `TAOTE_WATCH=0x413bc4` records **no write at that address**, so the coverage has holes, and this dword is one of
+   them.
+3. That dword is the whole import blocker: the stub takes `je 0x41962a` exactly once, on `eax=[0x413bc4]==0`, and
+   skips GetModuleHandleA plus the ~90-call GetProcAddress storm that produces the reference's 109 imports
+   (`TAOTE_PROBE=0x419234` fires once, eax=0; the packed file also holds 0 there, and the stub never writes it).
+
+So the family's remaining work is not "decode the payload" (it decodes and runs) but "make the stub's fixup/decode
+produce RVA 0x13bc4", after which the stub rebuilds its own IAT and the imports follow without any new heuristic. The
+fixup loop that should cover it is the one ending at 0x41920c (`jg`) with `ecx=0xa00` iterations over the descriptor
+table at 0x413bb8 (`{0x13c54, 0, 0, 0, 0x11010, 0x13df0, ...}` in the reference's decode), and in taote that loop's
+table entry for 0x13bc4 is absent.
