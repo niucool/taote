@@ -10826,3 +10826,29 @@ Open question for the next unit, now precise: does the stub expect a FLAT FILE V
 bytes 0x5.. at VA 0x400005) - a mapping taote does not create - or is the decode itself diverging? The discriminating
 test is to map the packed file flat at base for PEtite only (env-gated) and see whether the header block's status turns
 non-negative; if it does, that single mapping is the family's fix.
+
+#### 0.17hp Round 218: PEtite and TELock are ONE problem - stub decoders whose input we feed correctly and whose output diverges
+
+The discriminating test, run against the reference's own artifact. pegasus on `petite_rrdec.exe` produces oep 0x401160
+(correct), and comparing its termiminal image with taote's mid-run artifact and the packed file:
+
+    stream region 0x5..0x200 ("the header block's compressed input")
+      pegasus vs packed : 0 differing bytes
+      taote   vs packed : 0 differing bytes
+      pegasus vs taote  : 0 differing bytes
+
+So the decompressor is handed EXACTLY the same bytes in both runs, the reference's stub returns a non-negative status and
+restores the headers, and taote's returns negative and reports "Corrupt Data!". The input is not the problem and neither
+is the mapping: **our emulation of the decode loop diverges**.
+
+That makes the two biggest clean-exit pools one class of problem:
+
+    TELock   113 rows  stub CRC-32 self-check fails (round 213: computed 0x129e9a5b, wanted 0x311634a8)
+    PEtite    41 rows  stub decompressor self-check fails (this round, same input as the reference)
+
+Both are stubs that verify their own decode and refuse to hand off when the verification fails, and in both cases taote
+still grades code_sim ~0.9 on the artifact - i.e. the decode is mostly right and diverges in a corner. The next unit is
+therefore a differential: decode one PEtite block offline (the format is reachable from 0x417214: 0x8000 window at
+[ebp-4], bit reservoir at [ebp+8], probability tables at ebp-0xb658/-0xa240/-0xa23c, worker 0x418575), compare against
+taote's partial output, and name the first diverging byte and the instruction that produced it - then check Unicorn's
+semantics for that instruction. One corner case there is worth up to 154 rows, against the 12-row picker bucket.
