@@ -11230,3 +11230,57 @@ Two things survive from the earlier text and matter: (1) the truth is a ladder c
 7-120, so that pool is a ranking problem; (2) the three claims in that table that looked absurd are all in-image except
 none, so no filter lever exists there either. The mtinst deltas are small (0x37a) which is the same near-miss shape as
 the PEtite rows - the picker lands close and the remaining error is a few hundred bytes of function boundary.
+
+#### 0.17i WinUpack: the parked stack slot is the OEP - ported and measured (+6 OEP rows on the family)
+
+Round 229. The reference mechanism taote never had: its WinUpack seam snapshots the stack (`[esp+8]`) at the import
+loop's indirect call because the engine PARKS the payload entry in its own frame (winupack_unpacker.cpp:651-690). taote
+only had the comment (unpack.cpp:1364) - the harvest was never implemented.
+
+Verified before wiring it in. taote's run for these rows ends at `final pc=0x28` (a bogus return) and disassembling the
+stub's dispatch loop shows why:
+
+    44c090 pop ebp / 44c091 pop ecx / 44c092 inc esi / 44c093 lods eax / 44c094 test eax,eax / 44c096 je ...
+    44c098 push ecx / 44c099 push esi / 44c09a xchg edi,eax / 44c09b call ecx   <- ecx = 0x28, so the run dies here
+
+and at that `call ecx` the stack reads `[0]=0x43b004 [2]=0x40b4b8` - the TRUE OEP of petite/winupack_Diskmon in slot 2,
+i.e. exactly the `[esp+8]` the reference documents. Same on every sampled row:
+
+    winupack_Diskmon    [esp+8] 0x40b4b8  (truth)   ladder picked 0x406a90
+    winupack_ShareEnum  [esp+8] 0x409013  (truth)   ladder picked 0x4172dc
+    winupack_mtinst     [esp+8] 0x1003866 (truth)   ladder picked 0x1003be0
+    winupack_FastHash_kr[esp+8] 0x41dffa  (truth)   ladder picked 0x420627
+    (also winupack_Everything 0x545f0d, winupack_HashCalc 0x411e58 in the family arm)
+
+Port: a one-shot code hook that matches `ff /2` and `ff /4` (register form) inside image code, records `[esp+8]` when it
+is in-image, and REMOVES ITSELF on the first hit; the finalize pick takes that value when it validates as a payload entry
+(C1 `55 8b ec 6a ff`, C3 `55 8b ec 83`, C2 `55 89 e5 83`, h1 `6a ?? 68 .. e8`, or `ff 25`), reason `stack_oep`.
+
+Two implementation facts that cost a measurement each:
+- `ql.hook_insn(cb, UC_X86_INS_CALL)` is NOT usable here: the run dies immediately (0.2 s, no hop, imports=0), so only a
+  `hook_code` hook works - and that costs a TB boundary per instruction, which is why arming matters.
+- Arming it in `install()` slowed the long rows to the wall (Bginfo 67 s -> 86 s, Procmon 63 s -> 86 s, 2 rows lost at an
+  85 s budget). Arming it at the FIRST ACCEPTED HOP (dump_module) and removing it on the first harvest fixed that:
+  Bginfo back to 41.8 s solo.
+
+Family measurement (97 rows, 4 workers, 85 s budget, 120 s wall):
+
+    before (r102)   PE=97  OEP=87  IMP=82  ALL=79
+    after           PE=97  OEP=93  IMP=82  ALL=80
+    row diff: 6 gains (Diskmon, Everything, FastHash_kr, HashCalc, ShareEnum, mtinst - all OEP exact now,
+              2 of them all-three), 1 loss (Bginfo imports at dur 86 = the wall; solo 41.8 s, i.e. contention)
+
+Corpus measurement (r104, 2678 rows, 4 workers, 85 s budget, 120 s wall):
+
+    all-three   r102 2144  ->  r104 2146   (+2)
+    valid PE    r102 2676  ->  r104 2676
+    gains: winupack_FastHash_kr.exe, winupack_HashCalc.exe (both all-three now)
+    losses: 0
+
+The two rows that read as losses in the raw run (nspack_Bginfo, rlpack_geek, both dur 86) are the usual wall flakes and
+came back on a solo re-run (46.1 s and 63.2 s) - neither family is touched by the change. WinUpack itself went
+87 -> 93 OEP, 82 -> 83 imports, 79 -> 81 all-three.
+
+What the +6 OEP but +2 all-three split means: Diskmon, Everything, ShareEnum and mtinst now carry the correct entry but
+still fail imports, so they are now IMPORT problems, not OEP problems - a cleaner hand-off for the next unit than the
+mixed pool they were in before.

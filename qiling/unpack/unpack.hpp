@@ -208,6 +208,9 @@ private:
     std::vector<SecTrans> sec_trans_;
     std::set<int> sec_written_;                               // sections that ever saw a write
     bool sec_trans_on_ = false;                               // TAOTE_SEC_TRANS
+    std::uint64_t stack_oep_ = 0;                             // WinUpack parked OEP slot
+    HookRet* stk_hook_raw_ = nullptr;                         // one-shot: removed after the harvest
+    bool stk_armed_ = false;                                  // the harvest hook is armed
     // sections already claimed: the write hook stays armed for the sequence
     // stamps but never re-claims
     std::set<std::uint64_t> claimed_;
