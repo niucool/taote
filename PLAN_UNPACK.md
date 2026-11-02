@@ -11513,3 +11513,17 @@ as the cheap way to re-ask the question if a family ever becomes interesting aga
 
 This also explains why the per-family "no section hop; OEP guessed" rows (Amber 13-ish, Yoda 88) cannot be fixed the same
 way: they never accept a hop at all, so there is no frame to read.
+
+#### 0.17ij Robustness of the shipped parked-slot path: no crashes with it forced on, and byte-identical reruns
+
+Two invariants checked on the code shipped this block (a7f6660 / a840b48), because both are non-negotiable:
+
+- **Host safety.** Ran one row from each of 23 families with `TAOTE_STACK_OEP_ALL=1 TAOTE_HOPSNAP=1` (i.e. the harvest
+  and the snapshot active on EVERY family, the worst case the switches allow): 23 rows, 0 crashes, every exit code in
+  {0, 124} and no sanitizer/terminate output. QlErrorBase containment holds on the new path.
+- **Determinism.** `winupack_Diskmon` run twice: the rebuilt artifact and the image dump are byte-identical
+  (`584d41e8...` / `93cd2556...` both times), so the hop-time stack read does not introduce run-to-run variance.
+
+With the corpus at 2146/2678 (r105) and every lane closed by measurement, the remaining work is the decoder
+differential described in 0.17ie/0.17hq: PEtite's 37 rows are the only pool with a byte-exact golden target, and
+TELock's CRC oracle (0x311634a8) can score the same fix on another 100 rows.
