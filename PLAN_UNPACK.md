@@ -10563,3 +10563,29 @@ lose a second of wall clock are the ones that used to spin.
 
 Rule (ba): when a "survive the fault" change looks like a speed regression, vary the CAP before abandoning the
 mechanism - the cost was the runaway path being taken to its (large) limit, not the survival itself.
+
+#### 0.17hg Round 211: surviving a null FETCH is a wall regression (mean 7.6 s -> 21.6 s, measured, reverted)
+
+464 of the 2678 corpus rows end on `UC_ERR_FETCH_UNMAPPED` - more than any other error class - and the reference treats
+that fault the same way it treats the null READ it was just given for free (`[null-pc] except=0xc0000005`, carry on).
+Two variants were tried:
+
+1. **Deliver it to SEH** (`seh_dispatch(address, 8u)` on `UC_MEM_FETCH_UNMAPPED` at a low address). Inert: the dispatch
+   finds no handler in the state the stub left and the run still dies.
+2. **Map the page and let the zeros run** (the read survival's twin, page-mapping at the fault address). It works
+   mechanically - `alienyze_cpuz_x32` and `alienyze_disk2vhd` stop erroring - but both were already all-three rows:
+   the fault happens *after* the image is captured, so wiping it changes nothing.
+
+Corpus-wide it is a clear loss, measured on the first 337 rows of r103 before stopping:
+
+| run | rows | mean dur | rows >= 85 s | 120 s timeouts |
+|---|---|---|---|---|
+| r102 (shipped) | 2678 | **7.6 s** | 89 | 0 |
+| r103 (null fetch survived) | 337 | **21.6 s** | 51 | 2 |
+
+i.e. **mean runtime triples**. Executing zero-filled pages makes stubs wander, so the rows that gain nothing spend the
+whole budget first - the opposite of the read case, where the stub skipped a retry loop and got faster.
+
+Rule (bb): the read survival and the fetch survival are not the same mechanism even though the reference reports both
+as `[null-pc]` - a survived READ feeds a value back to the stub (it proceeds), while a survived FETCH hands control to
+zero bytes (it wanders). Judge a "survive the fault" change on the corpus MEAN duration, not only on the row count.
