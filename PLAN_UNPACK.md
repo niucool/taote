@@ -10124,3 +10124,27 @@ plumbing; no capability change.
 Rule (az): a ported gate is only worth keeping if the gate's precondition actually occurs in the corpus - check the
 distribution of the quantity the gate tests (here: the claimed OEP against the packed EP section) over the whole family
 BEFORE writing the seam. The same check would have saved rounds 198-199's second variant too.
+
+#### 0.17he Round 209: surviving an unhandled null READ is +1 net with three 120 s hangs (measured, reverted)
+
+`jdpack_7z.exe` dies on `read [0]` at pc 0x4184d1 while the reference logs `[null-pc] except=0xc0000005` and carries
+on. taote already survives an unhandled WRITE ("complete the store so the stub can proceed", the reference's unpack
+-mode survive behaviour), so the same was tried for a read: when `seh_dispatch` finds no handler for a
+`UC_MEM_READ_UNMAPPED`, map a zero page at the fault address and retry (capped, env-gated `TAOTE_SURVIVE_NULLREAD`).
+
+It works on the single row - `jdpack_7z.exe` stops faulting and its artifact becomes **code_sim 1.0 / import recall
+1.0** (only the OEP pick is still wrong: 0xe924 against 0xebc5) - and the stub turns out to walk a table upwards
+(0x0, 0x1200, 0x120d8 from the same pc), so an address limit of 0x10000 was too small; a cap of 16 survivals covers it.
+
+Corpus, twice:
+
+| run | cap | PE | OEP | imports | all-three | notes |
+|---|---|---|---|---|---|---|
+| r98 (baseline) | - | 2676 | 2169 | 2175 | **2138** | |
+| r99 | 256 | 2673 | 2171 | 2220 | 2141 | 3 rows hang to the 120 s wall |
+| r100 | 16 | 2673 | 2170 | 2219 | **2139** | the same 3 rows still hang under 4-way contention |
+
+Gains are real (Neolite 4, MPRESS 1-2, PECompact 1, RLPack 1, BeRo 1) but the three `*_Everything` rows
+(expressor/mew/nspack) cross the wall because surviving the faults makes them run much longer, and the net is +1 with
+hangs - not worth it. Reverted. What it *does* prove is that several family residuals share one cause: the stub is
+killed by a fault the reference survives, and the decode is otherwise complete.
