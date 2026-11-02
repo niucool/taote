@@ -1556,7 +1556,11 @@ void Unpacker::dump_module(Qiling& ql, std::uint64_t addr, const std::string& re
     // per instruction, so it is armed HERE - at the first accepted hand-off, i.e. after the
     // decode - and it removes itself on the first harvest. Measured with the hook armed for
     // the whole run: two long rows lost at the wall (Bginfo 67 s -> 86 s).
-    if (opts_.family == "WinUpack" && !stk_armed_ && ql_ != nullptr) {
+    // TAOTE_STACK_OEP_ALL=1 exercises the same harvest on every family (measurement switch:
+    // the slot is a property of the packer's hand-off, so whether other families park their
+    // entry there is a measurement, not an assumption).
+    const bool stk_family = opts_.family == "WinUpack" || std::getenv("TAOTE_STACK_OEP_ALL") != nullptr;
+    if (stk_family && !stk_armed_ && ql_ != nullptr) {
         stk_armed_ = true;
         auto stk_hits = std::make_shared<int>(0);
         auto h = std::make_shared<HookRet>(ql_->hook_code(

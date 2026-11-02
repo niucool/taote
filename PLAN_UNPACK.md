@@ -11343,3 +11343,31 @@ WinUpack stays at 81/97; its OEP work (round 229) is unaffected.
 
 Next unit: back to the PEtite byte-level differential (37 OEP-wrong rows with the true entry decoded, and the reference
 byte-exact at 0/47896), which is the largest measurable pool left that is not blocked on destroyed information.
+
+#### 0.17ic Round 232: two corrections to my own map - the pool is 416, not 504, and 616 rows run with NO family label
+
+1) **Managed rows contaminated my earlier census.** Following the standing rule (use `oep_exact is False`, never a falsy
+test) on r104: 82 rows carry `oep_exact = None` because they are managed (.NET) and `out_ep` already equals `orig_ep`
+while meta records a VA - Amber 22, Exe32pack 17, TELock 15, Eronana 13, Alienyze 8, BeRo 1. My round-224 table counted
+those as OEP-wrong, which inflated Eronana (14 "misses" -> really 1) and the total (504 -> the true **416**):
+
+    Themida 122, TELock 100, Yoda-Protector 100, PEtite 37, Amber 15, Exe32pack 15, NSPack 5, JDPack 4, ...
+
+So the 89-row "picker-winnable" pool from 0.17hv is also overstated by however many of its members were managed rows
+(Eronana's 13 certainly were). The corrected statement: the picker pool is real but smaller, and Eronana has no OEP
+headroom at all.
+
+2) **616 rows run with `family=unknown`** - Eronana 151 (all), Exe32pack 124 (all), BeRoEXEPacker 107 (all), FSG 97
+(all), Yoda-Crypter 92, Amber 41, Molebox 3, MPRESS 1. Checked whether that costs anything: only NINE families have
+gated behaviour at all (`family ==` sites: WinUpack 3, NSPack 2, MPRESS 2, UPX 1, RLPack 1, PECompact 1, Molebox 1,
+JDPack 1, EnigmaVB 1), and of the 616 unlabelled rows only **4** belong to a gated family (Molebox 3, MPRESS 1). The
+label gap is therefore NOT a lever (FSG's 96/97 needs no label, and Eronana/Exe32pack/BeRo/Yoda-Crypter have no gated
+behaviour to enable). Detection stays as it is - do not add signatures expecting rows.
+
+Also tested in the same block: the WinUpack stack-slot harvest does NOT generalise. With `TAOTE_STACK_OEP_ALL=1` the
+harvest fires on none of the sampled rows of Eronana, Exe32pack, Alienyze or PECompact (`reason=family_fill` for
+Alienyze, plain `section_hop` for the others), so the slot is a WinUpack property of that packer's hand-off and the
+family gate stays. The env switch is kept as a measurement hook.
+
+Current standing after all corrections: **2146/2678**, 416 strict OEP-wrong rows, biggest pools Themida 122 and TELock
+100 (both decode-bound) and PEtite 37 (decode-bound but with a byte-exact golden target).
