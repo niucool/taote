@@ -12388,3 +12388,46 @@ Next: why the decompressor leaves `.rdata` (and probably `.data`) at zero while 
 decompressor is the call at stub+0x1054 the CRC bypass falls through to, and the payload's block list is the
 descriptor above (7 entries) - so compare, block by block, what the decompressor writes in taote against the block
 extent each descriptor implies.
+
+#### 0.17ji TELock: the decryptor loop disassembled exactly, and a decode that gets ZEROED after it runs
+
+The loop the CRC bypass falls through to is now read straight out of runtime memory (APIDUMP at VirtualProtectEx,
+which is after the stub has self-decrypted), so it is the real instruction stream and not an encrypted guess:
+
+   418fad: mov %ebx,%edi
+   418faf: mov %edi,%esi
+   418fb1: mov 0x40d376(%ebp),%ebx    ; the seed
+   418fb7: lodsb                      ; al = ciphertext byte
+   418fbc: xor $0x55,%al
+   418fbe: sub $0x37,%al
+   418fc0: xor %cl,%al                ; cl = the counter's low byte
+   418fc2: mov %al,(%edi)
+   418fc4: ror %cl,%al
+   418fc6: xor %bl,%al
+   418fc8: add (%edi),%bl             ; reads back the byte it just stored
+   418fca: adc %cl,%bl
+   418fcc: test $0x1,%cl
+   418fcf: jne 0x418fe0
+   418fd1: shr %ebx / test $0x8,%ebx / rol %cl,%ebx / lea (%ebx,%ebx,8),%ebx
+   418fe0: stos                       ; stores the ROTATED/XORED al, overwriting the first store
+   418fe1: dec %ecx
+   418fe2: jg 0x418fb7
+
+Two measured facts that matter more than the algebra:
+
+1. **The loop runs 41,984 iterations on telock_7z.exe** (`TAOTE_PROBE=0x418fb7 TAOTE_PROBE_N=200000`), i.e. more
+   than the 0x8a00 = 35,328 bytes of the .text raw span, so the stub makes more than one pass over it.
+2. At CreateMutexA - which is *before* that loop - .text at 0x401000 **already holds a decoded-looking stream**
+   (`ed 49 14 09 7e 0e 1f 57 a8 a3 5f 49 7a 51 63 83 ...`), while at VirtualProtectEx, which is after it, the same
+   address is **nearly all zeros** (`da 00 00 00 00 ...`, with a few sparse bytes). The reference's final .text at
+   that address is 7z's real code (`33 c0 39 05 e8 61 41 00 ...`).
+
+So on this row the first stage already decodes something before CreateMutexA, and a later stage leaves .text and
+.rdata essentially zeroed. That is consistent with 0.17jh's import blocker: the stub then reads [0x413bc4] out of the
+zeroed .rdata, gets 0, and skips its IAT rebuild entirely.
+
+A hand-model of the loop, seeded with the observed `ebx=0x6d8fd7d6` and `ecx=0x8a00`, does NOT reproduce the
+reference's decode (0.45%), and the recurrence derived from the reference's plaintext (`bl_old = out ^ ror(al, cl)`)
+does not chain over the odd-cl steps either, so the next unit should not try to model this algebraically: it should
+find what zeroes the region after the first pass, which is an engine-side question the reference's own source answers
+more cheaply.
