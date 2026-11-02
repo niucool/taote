@@ -11169,3 +11169,34 @@ ordinary call from the descriptor loop at 0x4171aa.
 
 Reverted the whole port (git checkout of qiling/unpack/unpack.cpp and unpack.hpp); nothing was kept. Recorded here so it
 is not re-run without a new mechanism: the SEH seed was measured, not assumed.
+
+#### 0.17hz Round 228: WinUpack's OEP-wrong rows DO contain the truth in the ladder's classes (ranks 7..120)
+
+Looked for the next row-moving pool after PEtite's decode dead-end, and re-ran the candidate census on WinUpack, whose
+OEP-wrong rows have `code_sim` 1.00 - the image is perfect, only the address is wrong. (First attempt was wrong: it
+compared RVAs against VAs and reported "no candidates near the truth" for every row. Always print the candidate at the
+truth explicitly.)
+
+    row                        truth        claim        cands  shape@truth  rank
+    winupack_Diskmon           0x40b4b8     0x406a90        32  C1             7/32
+    winupack_Everything        0x545f0d     0x4bf150        54  C3            52/54
+    winupack_FastHash_kr       0x41dffa     0x420627       162  h1            20/162
+    winupack_HashCalc          0x411e58     0x45a9c2       228  C1           120/228
+    winupack_PEview            0x401000     0x41d5a7         8  (none)         -
+    winupack_ShareEnum         0x409013     0x4172dc        64  C1            10/64
+    winupack_mtinst            0x403866     0x1003be0      351  h1             8/351
+    winupack_notmyfault        0x404f25     0x43f3d4         0  (none)         -
+    winupack_puttytel_32       0x45bfe6     0x487448         0  (none)         -
+
+So the truth IS one of the ladder's classes in 6 of 9 rows, at ranks 7-120 - i.e. this pool is genuinely a ranking
+problem, unlike PEtite's (same-shape candidates, 0.17hw). Two incidental findings worth keeping: (1) three rows have
+claims that are not image addresses at all (`winupack_mtinst` claims 0x1003be0, inside the emulated stub-DLL range) - a
+claim outside [base, base+image_size) can never be right; (2) `notmyfault` and `puttytel_32` have no candidates at all
+because their artifacts are broken (a single garbage-named `.Upack` section and an empty `.pgimp`), so they are a dump
+problem, not a pick problem.
+
+A rule is not yet identified: the truth is early (7-10) in Diskmon/ShareEnum/mtinst but late (52, 120) in
+Everything/HashCalc, so "prefer the earliest candidate" would trade rows. The discriminator to test next is the one these
+rows offer for free - whether the candidate lies in the section the stub DECODED (differs from the packed file) versus
+stub code, per row, which is exactly the feature that was weak across the mixed 53-row pool but may separate within a
+family.
