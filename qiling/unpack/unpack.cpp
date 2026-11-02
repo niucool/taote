@@ -1547,68 +1547,40 @@ void Unpacker::dump_module(Qiling& ql, std::uint64_t addr, const std::string& re
         }
         return;
     }
-    // The reference's WinUpack parked-stack snapshot (winupack_unpacker.cpp:651-690): the
-    // engine parks the payload OEP in its own frame at the import loop's indirect call
-    // (`call ecx`), which is why the reference reads [esp+8] there. Measured on 4/4 sampled
-    // WinUpack OEP-wrong rows: that slot is EXACTLY the true OEP (0x40b4b8 Diskmon,
-    // 0x409013 ShareEnum, 0x1003866 mtinst, 0x41dffa FastHash_kr) where the ladder picks
-    // 0x406a90/0x4172dc/0x1003be0/0x420627. A per-instruction code hook costs a TB boundary
-    // per instruction, so it is armed HERE - at the first accepted hand-off, i.e. after the
-    // decode - and it removes itself on the first harvest. Measured with the hook armed for
-    // the whole run: two long rows lost at the wall (Bginfo 67 s -> 86 s).
-    // TAOTE_STACK_OEP_ALL=1 exercises the same harvest on every family (measurement switch:
-    // the slot is a property of the packer's hand-off, so whether other families park their
-    // entry there is a measurement, not an assumption).
-    const bool stk_family = opts_.family == "WinUpack" || std::getenv("TAOTE_STACK_OEP_ALL") != nullptr;
-    if (stk_family && !stk_armed_ && ql_ != nullptr) {
-        stk_armed_ = true;
-        auto stk_hits = std::make_shared<int>(0);
-        auto h = std::make_shared<HookRet>(ql_->hook_code(
-            [this, stk_hits](std::uint64_t pc, std::uint32_t) -> int {
-                if (*stk_hits >= 4096) {
-                    return 0;
+    // The reference's WinUpack parked-stack snapshot (winupack_unpacker.cpp:651-690): the stub
+    // parks the payload entry in its own frame for the hand-off. Measured at HOP TIME on six
+    // OEP-wrong rows, the frame is already there and the entry sits at stack slot [6] every
+    // time - winupack_Diskmon 0x40b4b8, ShareEnum 0x409013, Everything 0x545f0d,
+    // FastHash_kr 0x41dffa, HashCalc 0x411e58, mtinst 0x1003866 (ALL exact truths) - while the
+    // slots around it are the image base+0x1000 and a page-end scratch. So no per-instruction
+    // hook is needed (that version cost a TB boundary per instruction: Bginfo 53 s -> 75-85 s
+    // and it flipped at the 85 s budget): scan the window HERE, at the event that already
+    // exists, and let the finalize pick validate the candidates against the decoded image.
+    if (opts_.family == "WinUpack" || std::getenv("TAOTE_STACK_OEP_ALL") != nullptr) {
+        std::uint64_t sp = 0;
+        try {
+            sp = ql.arch().regs().read("esp");
+        } catch (...) {
+        }
+        // ONLY slot [6] = esp+0x18: measured as the WinUpack hand-off record on 6/6 rows.
+        // A whole-window scan regressed 8 already-correct rows (the window also carries the
+        // image base+0x1000 and a page-end scratch, which can validate as prologues).
+        for (int k = 6; k <= 6; ++k) {
+            std::uint64_t v = 0;
+            try {
+                const auto b = ql.mem().read(sp + 4 * static_cast<std::uint64_t>(k), 4);
+                if (b.size() != 4) {
+                    break;
                 }
-                if (pc < base_ || pc - base_ >= image_size_) {
-                    return 0;
-                }
-                std::vector<std::uint8_t> two;
-                try {
-                    two = ql_->mem().read(pc, 2);
-                } catch (...) {
-                    return 0;
-                }
-                if (two.size() < 2 || two[0] != 0xff) {
-                    return 0;
-                }
-                const auto modrm = static_cast<unsigned>(two[1]);
-                const auto reg = static_cast<unsigned>((modrm >> 3) & 7);
-                if ((modrm & 0xc0) != 0xc0 || (reg != 2 && reg != 4)) {
-                    return 0;
-                }
-                std::uint64_t v = 0;
-                try {
-                    const auto esp = ql_->arch().regs().read("esp");
-                    const auto b = ql_->mem().read(esp + 8, 4);
-                    if (b.size() != 4) {
-                        return 0;
-                    }
-                    v = static_cast<std::uint64_t>(b[0]) | (static_cast<std::uint64_t>(b[1]) << 8) |
-                        (static_cast<std::uint64_t>(b[2]) << 16) | (static_cast<std::uint64_t>(b[3]) << 24);
-                } catch (...) {
-                    return 0;
-                }
-                if (v >= base_ && v - base_ < image_size_) {
-                    ++*stk_hits;
-                    stack_oep_ = v;
-                    if (stk_hook_raw_ != nullptr) {
-                        stk_hook_raw_->remove();
-                        stk_hook_raw_ = nullptr;
-                    }
-                }
-                return 0;
-            }));
-        stk_hook_raw_ = h.get();
-        hooks_.push_back(std::move(h));
+                v = static_cast<std::uint64_t>(b[0]) | (static_cast<std::uint64_t>(b[1]) << 8) |
+                    (static_cast<std::uint64_t>(b[2]) << 16) | (static_cast<std::uint64_t>(b[3]) << 24);
+            } catch (...) {
+                break;
+            }
+            if (v >= base_ && v - base_ < image_size_) {
+                stack_oep_cands_.push_back(v);
+            }
+        }
     }
     hop_ledger_.push_back(addr);
     hop_write_seq_.push_back(write_seq_);
@@ -3630,9 +3602,12 @@ UnpackResult Unpacker::finalize(Qiling& ql) {
             stages_ = 1;  // one dump, at the picked OEP (the reference's semantics)
         }
         // WinUpack's parked slot outranks both the hop and the ladder when it validates as a
-        // payload entry: the stub writes it into its own frame for the hand-off.
-        if (stack_oep_ != 0) {
-            const auto rva = stack_oep_ - base_;
+        // payload entry: the stub writes it into its own frame for the hand-off. The LAST
+        // validating slot wins (measured: the entry sits at slot [6], behind the image-base and
+        // page-end scratch slots of the same frame).
+        for (auto it = stack_oep_cands_.rbegin(); it != stack_oep_cands_.rend(); ++it) {
+            const std::uint64_t cand = *it;
+            const auto rva = cand - base_;
             bool ok = rva + 8 <= image.size();
             if (ok) {
                 const auto* b = image.data() + rva;
@@ -3644,14 +3619,17 @@ UnpackResult Unpacker::finalize(Qiling& ql) {
                 const bool thunk = b[0] == 0xff && b[1] == 0x25;
                 ok = c1 || c3 || c2 || h1 || thunk;
             }
-            if (ok && stack_oep_ != meta_oep_) {
+            if (ok && cand != meta_oep_) {
                 if (opts_.debug) {
-                    std::fprintf(stderr, "[unpack] pick OEP %s (parked stack slot, was %s)\n",
-                                 hex(stack_oep_).c_str(), hex(meta_oep_).c_str());
+                    std::fprintf(stderr, "[unpack] pick OEP %s (parked stack slot, was %s)\n", hex(cand).c_str(),
+                                 hex(meta_oep_).c_str());
                 }
-                meta_oep_ = stack_oep_;
+                meta_oep_ = cand;
                 reason_ = "stack_oep";
                 stages_ = 1;
+            }
+            if (ok) {
+                break;
             }
         }
         // the executed-page view: for the JIT-decrypting stubs this is the decoded

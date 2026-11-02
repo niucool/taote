@@ -11460,3 +11460,32 @@ the slot later than that; the bound cannot be small enough to save wall time and
 reverted with `git checkout` - nothing kept, the shipped unbounded-until-harvest form stands. The real fix would be a
 cheaper trigger than a per-instruction hook (e.g. scanning the stack window at hop time and at API entries, both of which
 are already cheap events), which is the next thing to try if this family is revisited.
+
+#### 0.17ih Round 236: the WinUpack parked slot is already on the stack AT HOP TIME - the per-instruction hook is gone
+
+Round 229 shipped the parked-slot harvest as a one-shot per-instruction code hook, because the reference reads the slot
+at the stub's indirect call. Measured the frame at the hop instead: `TAOTE_HOPSNAP` printed the in-image dwords of the
+stack window when a hop is accepted, and on SIX OEP-wrong rows the payload entry is already there, at stack slot [6]:
+
+    winupack_Diskmon     hop 0x44bf1b   [1]=0x401000 [3]=0x43afff [6]=0x40b4b8   (truth)
+    winupack_ShareEnum   hop 0x455403   [1]=0x401000 [3]=0x43ffff [6]=0x409013   (truth)
+    winupack_Everything  hop 0x618c13   [1]=0x401000 [3]=0x597fff [6]=0x545f0d   (truth)
+    winupack_FastHash_kr hop 0x4aa523   [1]=0x401000 [3]=0x478fff [6]=0x41dffa   (truth)
+    winupack_HashCalc    hop 0x4a558f   [1]=0x401000 [3]=0x481fff [6]=0x411e58   (truth)
+    winupack_mtinst      hop 0x10c437b  [1]=0x1001000 [3]=0x10a0fff [6]=0x1003866 (truth)
+
+so no hook is needed at all: [1] is image base+0x1000, [3] a page-end scratch and [6] the hand-off record. Rows whose hop
+IS the truth (Bginfo 0x5b5d42, Procmon 0x4755cb) carry no in-image slots at the hop, so nothing overrides them.
+
+Two implementations measured:
+- **Whole-window scan** (record every in-image dword at the hop, let the finalize pick take the LAST that validates):
+  REGRESSED 8 already-correct rows (Bginfo, Contig, handle, junction, ntfsinfo, pipelist, ru, streams - family 81 -> 73,
+  OEP 93 -> 85) because the window also carries [1] and [3], which can validate as prologues once the image is decoded.
+- **Slot [6] only** (esp+0x18): family OEP 93 / imports 83 / all-three 81 - identical to the hook version - and the hook
+  is gone, so the per-instruction TB cost disappears: Everything 39-56 s -> 23 s, Procmon 63 s -> 31 s, Bginfo back to
+  its pre-change shape (solo 45.4 s; the 86 s readings are 4-worker load noise on a row that never harvests anyway).
+
+Corpus r105 (2678 rows, 4 workers, 85 s budget): **2146 all-three, 0 losses** against r104 (the three raw-run losses -
+aspack_Bginfo, nspack_Bginfo, rlpack_geek, all at dur 86 - came back solo at 14.7 s, 46.2 s and 66.7 s), WinUpack
+93/83/81 identical. So the refactor is row-neutral and strictly simpler: one stack read at an event that already exists,
+instead of a code hook that costs a translation-block boundary per instruction.
