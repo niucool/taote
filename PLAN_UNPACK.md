@@ -10906,3 +10906,30 @@ match what a mid-loop trace sees (that mismatch cost one round of confusion; rea
 Next step for the differential: the body check that returns negative is inside 0x4173xx-0x4181c7; with the range tracer
 the exact instruction and its operands can be read off (the trace already narrows it to the 118 instructions between
 entry and exit), and the corresponding value can be compared against the packed file's stream.
+
+#### 0.17hs Round 221: the failure is the FIRST symbol - 4 bytes are read, then the invalid path is taken
+
+Read the captured 126-instruction body line by line. The stub's header decode dies on its very first symbol:
+
+    4172f5..417302   eax=1 / 0x27 / 4 -> the counts/state init
+    417305 mov eax,[src]; 41730a movzx ...  <- reads a byte, advances, shifts into a big-endian reservoir
+                    reads 0x400001=0x5a, 0x400002=0x90, 0x400003=0x00, 0x400004=0x03
+    41730f..41731b   shl/or chain -> reservoir ecx = 0x0300905a
+    41731b..417325   pop the first symbol's bits (eax 0x905a -> ebx 0xfcff -> 0x6ca5)
+    417327           jmp 0x4181c7        <- the invalid-symbol exit, on the FIRST symbol
+
+So the decode is not slowly diverging on this block: the stream start is wrong, and the decoder says so immediately.
+That matches the descriptor the walk built for it, `{src 0, size 0x6a4, dst 0}` - a src offset of 0 points the stream at
+0x400000, the very byte the routine's own `mov [edi],al` has just overwritten with AL (0x00), and the first four bytes it
+then consumes (5a 90 00 03 from 0x400001) do not form a valid symbol. The earlier probe run of the same row passed
+`src=0x400005` for this call, i.e. there are two candidate stream starts in play and the one our stub builds is rejected
+outright.
+
+That makes the remaining question sharply bounded: the header-block descriptor's src field is built by the stub from its
+own decoded table area (0x4186a0-0x4186b8, 16-byte entries consumed and rewritten as the loop advances), so if that table
+is off, it is off because the earlier decode of the stub's own section diverged - the same 90%-correct decode measured in
+0.17hq. Next test: brute-force the stream start (0x400000..0x400010) in the running guest and see which offset the
+decoder accepts; the accepted offset names the correct descriptor value, hence the size of the table error.
+
+Method note worth keeping: this trace needed no reference run at all - a stub that fails its own check can be read
+directly, and "does it fail slowly or immediately" is answered by instruction count (here 118 instructions, first symbol).
