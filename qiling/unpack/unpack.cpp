@@ -3286,7 +3286,33 @@ std::uint64_t Unpacker::oep_from_transition_trail(const std::vector<std::uint8_t
         return 0;
     }
     constexpr std::uint64_t kGrace = 64;
+    // Excursions (A->B followed by B->A within a generous window) are calls into another
+    // section that come straight back, not hand-offs. petite_ctrl2cap is the measured case:
+    // t4 0->1 at seq 218552 and t5 1->0 at seq 218553 ONE instruction later, and the walk
+    // without this filter picked t5 (0x403ee4) while the true entry was t3 (0x40221a).
+    constexpr std::uint64_t kExcursion = 1u << 20;
+    std::vector<char> drop(sec_trans_.size(), 0);
+    for (std::size_t i = 0; i < sec_trans_.size(); ++i) {
+        if (drop[i] != 0) {
+            continue;
+        }
+        for (std::size_t j = i + 1; j < sec_trans_.size(); ++j) {
+            if (drop[j] != 0) {
+                continue;
+            }
+            if (sec_trans_[j].from_sec == sec_trans_[i].to_sec && sec_trans_[j].to_sec == sec_trans_[i].from_sec &&
+                sec_trans_[j].seq >= sec_trans_[i].seq &&
+                sec_trans_[j].seq - sec_trans_[i].seq <= kExcursion) {
+                drop[i] = 1;
+                drop[j] = 1;
+                break;
+            }
+        }
+    }
     for (std::size_t i = sec_trans_.size(); i-- > 0;) {
+        if (drop[i] != 0) {
+            continue;
+        }
         const auto& t = sec_trans_[i];
         if (t.addr == 0 || t.addr < base_ || t.addr - base_ >= image.size()) {
             continue;
@@ -3294,6 +3320,9 @@ std::uint64_t Unpacker::oep_from_transition_trail(const std::vector<std::uint8_t
         // (a) the run must never leave the target section again
         bool left_again = false;
         for (std::size_t j = i + 1; j < sec_trans_.size(); ++j) {
+            if (drop[j] != 0) {
+                continue;
+            }
             if (sec_trans_[j].from_sec == t.to_sec && sec_trans_[j].to_sec != t.to_sec) {
                 left_again = true;
                 break;
@@ -3320,7 +3349,12 @@ std::uint64_t Unpacker::oep_from_transition_trail(const std::vector<std::uint8_t
             (p[0] == 0x55 && p[1] == 0x89 && p[2] == 0xe5) ||  // push ebp; mov ebp,esp (gcc)
             (p[0] == 0x6a && p[2] == 0x68 && p[7] == 0xe8) ||  // push imm; push imm; call
             (p[0] == 0xe8 && p[5] == 0x6a && p[7] == 0x68);    // call; push; push
-        if (!prologue) {
+        // a hand-off to the very first byte of a section is structural: petite_PEview's
+        // true entry is `e8 d7 00 00 00 85 c0` at rva 0x1000, which none of the shape
+        // classes cover, and the trail's other transition (0x40a400) is a mid-decode one.
+        const bool at_section_start = t.to_sec >= 0 && t.to_sec < (int)sections_.size() &&
+                                      t.addr == sections_[t.to_sec].start;
+        if (!prologue && !at_section_start) {
             continue;
         }
         return t.addr;

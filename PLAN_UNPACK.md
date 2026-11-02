@@ -12176,3 +12176,31 @@ Corpus r107 (2678 rows, 4 workers, 85 s budget, 120 s wall):
 Suite 607/607. `UNPACK_REPORT.md` regenerated from r107. This is the first row-moving change since the WinUpack
 parked slot (round 229) and it comes entirely from the reference's documented PEtite mechanism chain:
 prot-write AV -> seeded self-referential SEH frame -> TF storm budget -> EP-exit trail.
+
+#### 0.17jc the trail's two rules: excursion cancellation and section-start hand-offs - PEtite ALL 59 -> 61, zero regressions
+
+The four PEtite rows the trail regressed (0.17jb) turned out to be two distinct mistakes in the walk, both now
+fixed and both measured:
+
+**Excursion cancellation.** `petite_ctrl2cap`'s trail ends with `t4 from=0 to=1 addr=0x4075ca seq=218552` and
+`t5 from=1 to=0 addr=0x403ee4 seq=218553` - a call into another section and back ONE instruction later. The walk
+without a filter picks t5, while the true entry is t3 (0x40221a). A pair (A->B then B->A within 1<<20 instructions)
+is an excursion, not a hand-off, so both ends are dropped before the backward walk. That and the same shape on
+efsdump (truth 0x402138) and ldmdump (truth 0x403024) put all three on the exact entry.
+
+**Section-start hand-offs.** `petite_PEview`'s true entry is `e8 d7 00 00 00 85 c0` at rva 0x1000 - a `call` tail,
+which none of the four prologue shapes cover, so the shape gate rejected it and the walk fell back to a mid-decode
+transition (0x40a400). A hand-off to the FIRST BYTE of a section is structural evidence on its own, so the gate now
+accepts `addr == section.start` as well as the shapes.
+
+Family (73 rows): n=73 PE=73 **OEP 65, IMP 66, ALL 61**, and versus the pre-trail baseline (30) that is
+**31 gains, 0 losses** - the four regressions are gone.
+
+Corpus r108 (2678 rows, same harness parameters):
+
+    all-three 2146 -> **2177**   OEP 2180 -> 2209   imports 2223 -> 2253   valid PE 2676 -> 2677
+    raw run read 2175 with 31 gains / 2 losses, and both losses are the documented wall flakes
+    (nspack_Bginfo, rlpack_geek, dur 86) which came back all-three solo, so the referee is 31 gains / 0 losses.
+
+That is +31 over the session's PEtite starting point and +2 over 0.17jb's shipment, with the family now at 61 of 73
+and no row anywhere regressing relative to r106.
