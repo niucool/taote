@@ -112,7 +112,7 @@ void register_memoryapi_family() {
         const auto size = static_cast<std::uint64_t>(api_get_int(get_param(params, "dwSize")));
         const auto prot = static_cast<std::uint32_t>(api_get_int(get_param(params, "flNewProtect")));
         const auto oldp = static_cast<std::uint64_t>(api_get_int(get_param(params, "lpflOldProtect")));
-        if (std::getenv("TAOTE_PROT_ENFORCE") == nullptr) {
+        if (!w(ql).prot_enforce() && std::getenv("TAOTE_PROT_ENFORCE") == nullptr) {
             return 1;
         }
         std::uint32_t perms = 0;

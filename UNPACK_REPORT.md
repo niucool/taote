@@ -9,9 +9,9 @@ original to grade against).
 | # | criterion | graded | pass | rate |
 |---|---|---|---|---|
 | 1 | valid PE (parses, sane headers, entry mapped) | 2678 | 2677 | **100.0%** |
-| 2 | OEP correct (EP RVA == original's) | 2597 | 2180 | **83.9%** |
-| 3 | import table correct (>=95% of the original's imports reproduced, function level) | 2677 | 2223 | **83.0%** |
-| — | **all three** | 2678 | 2146 | **80.1%** |
+| 2 | OEP correct (EP RVA == original's) | 2597 | 2207 | **85.0%** |
+| 3 | import table correct (>=95% of the original's imports reproduced, function level) | 2677 | 2253 | **84.2%** |
+| — | **all three** | 2678 | 2175 | **81.2%** |
 
 2678 samples were run; 0 further packed files were skipped because the
 dataset ships no unpacked original for them (no ground truth to grade).
@@ -36,7 +36,7 @@ dataset ships no unpacked original for them (no ground truth to grade).
 | NSPack | 97 | 100% | 95% | 2% | 94% | 1.00 | **94%** | 1.000 |
 | Neolite | 93 | 100% | 99% | 1% | 100% | 1.00 | **99%** | 1.000 |
 | PECompact | 97 | 100% | 96% | 4% | 98% | 1.00 | **95%** | 0.912 |
-| PEtite | 73 | 100% | 49% | 44% | 49% | 0.95 | **41%** | 0.922 |
+| PEtite | 73 | 100% | 86% | 14% | 90% | 1.00 | **81%** | 1.000 |
 | Packman | 105 | 100% | 100% | 0% | 100% | 1.00 | **100%** | 1.000 |
 | RLPack | 104 | 100% | 98% | 2% | 91% | 1.00 | **90%** | 1.000 |
 | TELock | 116 | 100% | 1% | 50% | 0% | 0.01 | **0%** | 0.072 |
@@ -48,11 +48,11 @@ dataset ships no unpacked original for them (no ground truth to grade).
 
 ## Why the misses miss
 
-- imports mostly missing (recall <0.5): **356**
-- OEP wrong (near): **218**
-- OEP wrong (far): **199**
+- imports mostly missing (recall <0.5): **348**
+- OEP wrong (near): **196**
+- OEP wrong (far): **194**
 - managed (.NET) original: OEP not graded: **80**
-- imports incomplete (recall 0.5-0.95): **60**
+- imports incomplete (recall 0.5-0.95): **38**
 - imports absent (recall 0): **16**
 - no valid PE: unparsable: **1**
 
@@ -63,9 +63,9 @@ Import recall: median 1.00, p10 0.05, p90 1.00 (n=2677). Import precision: media
 | original EP shape | wrong but in the entry section | wrong and elsewhere |
 |---|---|---|
 | crt-thunk | 135 | 81 |
-| msvc-frame | 40 | 36 |
-| borland | 27 | 26 |
-| other | 16 | 56 |
+| msvc-frame | 34 | 36 |
+| borland | 12 | 26 |
+| other | 15 | 51 |
 
 `crt-thunk` is the dominant class and it is a *pick* problem, not a decode
 problem: those binaries' entry point is `e8 <call __security_init_cookie>`
@@ -79,8 +79,8 @@ reported entry is off.
 
 ## The two systemic defects behind the remaining gap
 
-**1. The OEP pick, not the decode.** 417 samples have a wrong entry
-(218 of them inside the original's entry section, i.e. the right code region
+**1. The OEP pick, not the decode.** 390 samples have a wrong entry
+(196 of them inside the original's entry section, i.e. the right code region
 and the wrong address) while the payload itself is recovered: the code
 similarity medians at 1.000 for ASPack, Eronana, Packman, JDPack, MPRESS and
 Molebox. The dominant shape is the MSVC CRT-init thunk
@@ -130,8 +130,8 @@ whole corpus from 853 to 1076 samples passing all three criteria (criterion
 | Neolite | neolite_HDDScan.exe | OEP 0x3bb11e, original 0x483d20 |
 | PECompact | pecompact_Bginfo.exe | OEP 0x1000, original 0x1b5d42 |
 | PECompact | pecompact_Everything.exe | OEP 0xbf150, original 0x145f0d |
-| PEtite | petite_7z.exe | OEP 0xe924, original 0xebc5 |
-| PEtite | petite_7zFM.exe | OEP 0x22b65, original 0x22ce2 |
+| PEtite | petite_DarkNamer.exe | OEP 0xe87f, original 0xa71e |
+| PEtite | petite_Everything.exe | imports 93.5% of the original's 292 functions present (emitted 469) |
 | RLPack | rlpack_Bginfo.exe | imports 4.5% of the original's 861 functions present (emitted 153) |
 | RLPack | rlpack_HDDScan.exe | OEP 0x27ebc, original 0x483d20 |
 | TELock | telock_7z.exe | OEP 0x18037, original 0xebc5 |

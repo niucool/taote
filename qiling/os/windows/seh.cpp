@@ -581,8 +581,8 @@ bool QlOsWindows::seh_seed_petite(std::uint64_t image_base) {
     if (bits_ != 32 || image_base == 0) {
         return false;
     }
-    if (std::getenv("TAOTE_SEH_SEED") == nullptr) {
-        return false;  // opt-in while it is being measured
+    if (std::getenv("TAOTE_NO_SEH_SEED") != nullptr) {
+        return false;
     }
     try {
         // the stub section = the section holding the image's own AddressOfEntryPoint

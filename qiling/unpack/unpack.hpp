@@ -207,6 +207,12 @@ private:
     struct SecTrans { int from_sec, to_sec; std::uint64_t addr, seq; };
     std::vector<SecTrans> sec_trans_;
     std::set<int> sec_written_;                               // sections that ever saw a write
+    // PEtite's EP-exit trail (the reference's sec_trans_hist_ walk): the final
+    // stub->payload hand-off is the last transition into a section the run never
+    // leaves again that also stops receiving stub writes. TAOTE_PET_EXIT enables it.
+    int prev_sec_idx_ = -1;                                   // cached section of prev_exec_addr_
+    bool pet_exit_on_ = false;
+    std::uint64_t oep_from_transition_trail(const std::vector<std::uint8_t>& image) const;
     bool sec_trans_on_ = false;                               // TAOTE_SEC_TRANS
     std::vector<std::uint64_t> stack_oep_cands_;              // WinUpack parked-slot candidates (hop time)
     // sections already claimed: the write hook stays armed for the sequence

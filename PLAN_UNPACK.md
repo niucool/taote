@@ -12144,3 +12144,35 @@ walked backward with the prologue-shape gate, exactly as 0.17ix measured live in
 
 Both gates stay DEFAULT OFF (the code returns early without them), so the shipped baseline and the corpus are
 unchanged; this is the measured path to the family's remaining headroom.
+
+#### 0.17jb SHIPPED: PEtite's EP-exit trail + running payload - corpus 2146 -> 2175 (+29), family ALL 30 -> 59
+
+The two pieces from 0.17ja are now default-on for PEtite (env opt-outs `TAOTE_NO_PET_EXIT`,
+`TAOTE_NO_SEH_SEED`, `TAOTE_PROT_ENFORCE` still forces the protection on for any family), and the last piece is
+implemented: `oep_from_transition_trail`.
+
+    record      one SectionTransition per section change in on_section_exec, stamped with the exec-fire count;
+                the section lookup is CACHED (the hook fires hundreds of thousands of times, so the analytic
+                TAOTE_SEC_TRANS path's linear scan per fire is not affordable) - cached hit, else linear.
+    walk        BACKWARD from the newest transition; take the first whose target section the run never leaves
+                again, which saw no write at or after the hand-off (64-instruction grace, the reference's
+                constant), and whose target carries a function-entry shape (55 8b ec / 55 89 e5 / 6a ?? 68 ..
+                e8 / e8 .. 6a .. 68). Reason string `petite_ep_exit`.
+    engine      for PEtite only: VirtualProtect is enforced (the stub's read-only header must fault into its
+                handler), the TF single-step budget is 40000 instead of 4096, and the SEH frame is seeded.
+
+petite_rrdec, no env at all: `oep=0x401160 reason=petite_ep_exit` - the true entry (the not-packed original's
+0x1160), where this session started at 0x417214 (the decompressor) with the error box.
+
+Family (73 rows): n=73 PE=73 **OEP 36 -> 63, IMP 36 -> 66, ALL 30 -> 59**; 33 gains, 4 losses
+(PEview, ctrl2cap, efsdump, ldmdump - all four also fail in the reference's own A/B notes as queued flips).
+
+Corpus r107 (2678 rows, 4 workers, 85 s budget, 120 s wall):
+
+    all-three 2146 -> **2175**    OEP 2180 -> 2207    imports 2223 -> 2253    valid PE 2676 -> 2677
+    raw run read 2173 with 33 gains / 6 losses; two of the six (nspack_Bginfo, rlpack_geek, both dur 86) are the
+    long-documented wall flakes and came back all-three solo, so the referee is 33 gains / 4 losses.
+
+Suite 607/607. `UNPACK_REPORT.md` regenerated from r107. This is the first row-moving change since the WinUpack
+parked slot (round 229) and it comes entirely from the reference's documented PEtite mechanism chain:
+prot-write AV -> seeded self-referential SEH frame -> TF storm budget -> EP-exit trail.

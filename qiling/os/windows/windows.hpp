@@ -65,6 +65,14 @@ public:
     // Env-gated: TAOTE_SEH_SEED=1. Best effort: never throws into the caller.
     bool seh_seed_petite(std::uint64_t image_base);
 
+    // PEtite needs three pieces of engine behaviour that no other family asks for, so
+    // they are settable per run rather than global: VirtualProtect enforcement (the
+    // stub's read-only header must fault), a TF single-step budget large enough for the
+    // exception-driven decryptor, and the family's seeded frame.
+    void set_prot_enforce(bool on) { prot_enforce_ = on; }
+    bool prot_enforce() const { return prot_enforce_; }
+    void set_tf_trap_cap(unsigned cap) { tf_trap_cap_ = cap; }
+
     // windows.py load: the GDT/segment setup + the code hook that dispatches
     // the registered winapi surface
     void load();
@@ -373,6 +381,8 @@ private:
     uc_hook seh_hook_ = 0;
     uc_hook seh_prot_hook_ = 0;   // the sentinel-return fetch (MEM_FETCH_PROT)
     uc_hook seh_write_prot_hook_ = 0;  // the RO-page store (MEM_WRITE_PROT)
+    bool prot_enforce_ = false;        // set_prot_enforce: honour VirtualProtect
+    unsigned tf_trap_cap_ = 4096;      // set_tf_trap_cap: TF single-step budget
     std::uint64_t seh_sentinel_ = 0;        // the staged return page (mapped rw-noexec)
     std::uint64_t seh_retarget_ = 0;        // the pending run-loop restart target
     // True between a staged handler call and the point where the dispatch that

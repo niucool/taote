@@ -624,7 +624,8 @@ void Unpacker::install_gpa_sentinel(Qiling& ql) {
 }
 
 void Unpacker::install(Qiling& ql) {
-    sec_trans_on_ = std::getenv("TAOTE_SEC_TRANS") != nullptr;
+    pet_exit_on_ = opts_.family == "PEtite" && std::getenv("TAOTE_NO_PET_EXIT") == nullptr;
+    sec_trans_on_ = std::getenv("TAOTE_SEC_TRANS") != nullptr || pet_exit_on_;
     ql_ = &ql;
     classify_sections(ql);
 
@@ -1112,7 +1113,13 @@ void Unpacker::install(Qiling& ql) {
         // PEtite's exception-driven decryptor walks the SEH chain it captured; the
         // loader's empty chain makes that pivot deref null (mov ebp,[ebx+8], ebx=0).
         if (opts_.family == "PEtite") {
-            ql.os<os::windows::QlOsWindows>().seh_seed_petite(base_);
+            auto& wos = ql.os<os::windows::QlOsWindows>();
+            // the stub's read-only header must fault into its handler, the TF storm
+            // needs a far larger budget than 4096, and the decryptor walks the SEH chain
+            // it captured - without all three the payload never runs (0.17ja).
+            wos.set_prot_enforce(true);
+            wos.set_tf_trap_cap(40000);
+            wos.seh_seed_petite(base_);
         }
     } catch (...) {
     }
@@ -1359,14 +1366,23 @@ int Unpacker::on_section_exec(std::uint64_t addr) {
     // sec_trans_hist_, which its PEtite EP-exit walk reads backward). Off unless
     // the env var is set: it is a diagnostic, not a shipped mechanism (yet).
     if (sec_trans_on_) {
-        const auto idx_of = [&](std::uint64_t a) -> int {
+        // cached lookup: this hook fires hundreds of thousands of times, so a linear
+        // section scan per fire is only affordable when the section actually changes
+        const auto idx_of = [&](std::uint64_t a, int hint) -> int {
+            if (hint >= 0 && hint < (int)sections_.size() && a >= sections_[hint].start &&
+                a < sections_[hint].end) {
+                return hint;
+            }
             for (std::size_t k = 0; k < sections_.size(); ++k) {
                 if (a >= sections_[k].start && a < sections_[k].end) return (int)k;
             }
             return -1;
         };
-        const int from = idx_of(prev_exec);
-        const int to = idx_of(addr);
+        const int to = idx_of(addr, prev_sec_idx_);
+        const int from = idx_of(prev_exec, prev_sec_idx_);
+        if (to >= 0) {
+            prev_sec_idx_ = to;
+        }
         if (to >= 0 && from != to) {
             sec_trans_.push_back({from, to, addr, (std::uint64_t)exec_fires_});
         }
@@ -3259,6 +3275,59 @@ std::uint64_t Unpacker::header_ep_candidate(const std::vector<std::uint8_t>& ima
 // The packer's static ladder over the DECODED body (the reference's
 // decode_only_ladder): only the families that hand off through the decoded
 // body's own trampolines implement it.
+// PEtite EP-exit walk (../pegasus/src/unpacker/packers/petite_unpacker.cpp, the
+// [pet-epexit] trail): walk the section-transition history BACKWARD and take the
+// first transition whose target section the run never leaves again and which saw no
+// write at or after the hand-off (a 64-instruction grace, the reference's constant).
+// The terminal prologue scan cannot do this job once the payload runs: it latches
+// mid-decode .text entries (measured: family OEP 36 -> 26 with the payload running).
+std::uint64_t Unpacker::oep_from_transition_trail(const std::vector<std::uint8_t>& image) const {
+    if (sec_trans_.empty() || image.empty()) {
+        return 0;
+    }
+    constexpr std::uint64_t kGrace = 64;
+    for (std::size_t i = sec_trans_.size(); i-- > 0;) {
+        const auto& t = sec_trans_[i];
+        if (t.addr == 0 || t.addr < base_ || t.addr - base_ >= image.size()) {
+            continue;
+        }
+        // (a) the run must never leave the target section again
+        bool left_again = false;
+        for (std::size_t j = i + 1; j < sec_trans_.size(); ++j) {
+            if (sec_trans_[j].from_sec == t.to_sec && sec_trans_[j].to_sec != t.to_sec) {
+                left_again = true;
+                break;
+            }
+        }
+        if (left_again) {
+            continue;
+        }
+        // (b) no stub writes into that section at or after the hand-off (+ grace)
+        if (t.to_sec >= 0 && t.to_sec < (int)sections_.size()) {
+            const auto it = last_write_seq_.find(sections_[t.to_sec].start);
+            if (it != last_write_seq_.end() && it->second + kGrace > t.seq) {
+                continue;
+            }
+        }
+        // (c) the hand-off target must look like a function entry
+        const auto off = static_cast<std::size_t>(t.addr - base_);
+        if (off + 8 > image.size()) {
+            continue;
+        }
+        const auto* p = image.data() + off;
+        const bool prologue =
+            (p[0] == 0x55 && p[1] == 0x8b && p[2] == 0xec) ||  // push ebp; mov ebp,esp
+            (p[0] == 0x55 && p[1] == 0x89 && p[2] == 0xe5) ||  // push ebp; mov ebp,esp (gcc)
+            (p[0] == 0x6a && p[2] == 0x68 && p[7] == 0xe8) ||  // push imm; push imm; call
+            (p[0] == 0xe8 && p[5] == 0x6a && p[7] == 0x68);    // call; push; push
+        if (!prologue) {
+            continue;
+        }
+        return t.addr;
+    }
+    return 0;
+}
+
 std::uint64_t Unpacker::static_oep_from_image(const std::vector<std::uint8_t>& image) const {
     if (packer_ == nullptr || image.empty()) {
         return 0;
@@ -3856,6 +3925,18 @@ UnpackResult Unpacker::finalize(Qiling& ql) {
                 last_oep_ = guess;
                 reason_ = "fallback_guess";
                 res.error = "no section hop; OEP guessed";
+            }
+        }
+        if (pet_exit_on_ && !image.empty()) {
+            const auto trail = oep_from_transition_trail(image);
+            if (trail != 0 && trail != meta_oep_) {
+                if (opts_.debug) {
+                    std::fprintf(stderr, "[unpack] petite ep-exit: OEP %s (was %s), %zu transitions\n",
+                                 hex(trail).c_str(), hex(meta_oep_).c_str(), sec_trans_.size());
+                }
+                meta_oep_ = trail;
+                last_oep_ = trail;
+                reason_ = "petite_ep_exit";
             }
         }
         res.oep = meta_oep_;

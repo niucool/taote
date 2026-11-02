@@ -1060,7 +1060,7 @@ void QlOsWindows::run() {
     // the cap exists so a guest that arms TF and never clears it cannot spin forever, but
     // PEtite's exception-driven decryptor legitimately needs far more than the 4096 this
     // used to allow (the reference measures ~15,600 iterations on its own census).
-    unsigned tf_cap = 4096;
+    unsigned tf_cap = tf_trap_cap_;
     if (const char* tfc = std::getenv("TAOTE_TF_TRAPS")) {
         const long v = std::strtol(tfc, nullptr, 0);
         if (v > 0 && v < 2000000) {
