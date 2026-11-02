@@ -11739,3 +11739,59 @@ never ran - that is decode work, tracked with PEtite, and the row is managed (.N
 
 `UNPACK_REPORT.md` was regenerated from r106 and the two contention rows patched in, so the shipped report matches the
 committed harness artifacts.
+
+#### 0.17iq CORRECTION to 0.17il-0.17io: the analysis sliced the artifact by FILE OFFSET, not by RVA
+
+The four PEtite sections above (0.17il-il through 0.17io) compared the artifact with
+`art_bytes[0x1000 : ...]`, i.e. a slice of the artifact FILE starting at file offset 0x1000. The artifact's
+`.petite` section has `VirtualAddress=0x1000` but `PointerToRawData=0x400`, so that slice actually begins at
+**RVA 0x1c00** - every comparison was shifted by 0xc00. The old standing rule about offline scans ("slice section
+bytes through the section table by virtual size from the raw offset") is exactly what was violated, and the
+symptom is unmistakable in hindsight: the very first numbers (4790 differing bytes, first difference at 0x54) were
+right in earlier rounds and became 7484 / offset 0x84 when the slice was wrong.
+
+Corrected numbers, `.text` of `petite_rrdec.exe` vs `rrdec.exe` (proper rva2off slicing, 47896 bytes):
+
+    differing bytes 4790 in 1672 runs   (lengths: 2 -> 902, 4 -> 702, 3 -> 55, 1 -> 13)
+    first difference at +0x54, last at +0xbb17
+    3359 of the 4790 lie inside an E8/E9 displacement field; with 0F 8x added the "outside" count is **4**
+    (those 4 are +0xbb14..0xbb17, past .text's last real byte - a 4-byte copy overrun)
+
+So the CORRECT conclusion is stronger than what was published: **every single differing byte is a relative
+displacement field** (E8/E9 call/jmp or 0F 8x jcc). The payload's code and data are byte-correct; only branch
+targets differ. The earlier "one missing fixup + one undecoded block", "tail from 0x9f14", "stale stack tail" and
+"0 of 73 rows decode exactly" claims were all artifacts of the 0xc00 shift and are WITHDRAWN. In particular the
+`.text` block is not under-filled: the dump holds three complete chunks (0x8004 + 0x3434 + 0x6e4, destinations
+0x401000 / 0x409000 / 0x40c433), and chunk 3 differs in only 139 bytes.
+
+**The transform is verified exact.** Scanning a code section exactly as the stub's loop does and subtracting the
+in-block offset from every relative field:
+
+    dword[i+1] -= i   at E8/E9        dword[i+2] -= i   at 0F 8x     (i = offset from the block's destination)
+
+    petite_rrdec .text   4790 differing bytes -> 4
+    petite_7z    .text   9794 differing bytes -> 0     (byte-identical to the original)
+
+which is precisely the pass the stub's own code at 0x40d38e performs - confirming it never runs in taote's runs
+(`TAOTE_PROBE=0x40d3ad` has zero hits).
+
+**What still blocks shipping: the gate.** Applying the transform to every row is wrong, because the pass DOES run
+on some rows:
+
+    rows where the transform reduces the difference: 48 of 73   (rrdec, 7z, 7za, 7zFM ...)
+    rows already byte-exact (transform already applied): 25  - applying it there destroys the section
+        (petite_HDDScan +391984 bytes, petite_FastHash_kr +28397, petite_Diskmon +5818)
+    worst case for a blind rule: -40.4% instead of +; so a per-row gate is mandatory.
+
+Two candidate gates were measured and both FAIL:
+ - *target plausibility* ("apply if it lowers the fraction of relative targets outside the image"): tp=26 fp=0
+   **fn=17** - useless, because the E8 bytes found inside embedded DATA contribute a constant set of nonsense
+   targets that is bad before and after, and because the code section (0x6f18 on AccessEnum) is small against the
+   image (0x2a000), so a per-site shift of at most one section length usually still lands in-image;
+ - *correlation between displacement and site offset* (should be ~+1 pre-fixup, ~0 after): both groups measure
+   -0.13..+0.16, i.e. no separation at all.
+
+The gate therefore has to be RUNTIME, not structural: the stub's fixup writes into a block's destination AFTER
+that block's memcpy, so "a write landed in a code block after its copy completed" is the observable that says the
+pass ran. That detector is the next unit; with it, PEtite's `.text` becomes byte-exact on the 48 pre-fixup rows,
+which is the precondition for the OEP picker on the whole family.
