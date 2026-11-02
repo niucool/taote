@@ -1162,6 +1162,34 @@ void Unpacker::install(Qiling& ql) {
             if (crc_hook->obj() != nullptr) {
                 hooks_.push_back(std::move(crc_hook));
             }
+            // The stub then installs its own SEH frame and executes `lea eax,eax` (8d c0,
+            // ModRM mod==3) at stub_start+0x16f1 as the #UD that hands control to it. Unicorn
+            // raises UC_ERR_INSN_INVALID for that encoding when it starts a block on it (it is
+            // the same 8d byte that fires at 0x4186a8) but NOT here, mid-block: the run returns
+            // cleanly at 0x4196f1 with no emu_stop, no error, no budget hit and TF clear (7.37M
+            // instructions in; measured with a marker on Qiling::emu_stop and on the rundbg path),
+            // so the frame the stub just installed never runs. Deliver the #UD from the gate.
+            const std::uint64_t ud_site = stub_start + 0x16f1;
+            auto ud_hook = std::make_shared<HookRet>(
+                ql.hook_code([this, ud_site](std::uint64_t addr, std::uint32_t /*size*/) -> int {
+                    try {
+                        auto& os = ql_->os<os::windows::QlOsWindows>();
+                        ql_->arch().regs().set_arch_pc(addr);
+                        const bool handled = os.seh_dispatch_cpu(0xC000001Du);
+                        if (std::getenv("TAOTE_UNPACK_DEBUG") != nullptr) {
+                            std::fprintf(stderr, "[unpack] telock: #UD at 0x%llx delivered=%d\n",
+                                         static_cast<unsigned long long>(addr), handled ? 1 : 0);
+                        }
+                        if (!handled) {
+                            ql_->emu_stop();  // same contract as the invalid-instruction hook
+                        }
+                    } catch (...) {
+                    }
+                    return 0;
+                }, ud_site, ud_site));
+            if (ud_hook->obj() != nullptr) {
+                hooks_.push_back(std::move(ud_hook));
+            }
         }
     }
 

@@ -12322,3 +12322,33 @@ push fs:[0]; mov fs:[0],esp; jmp +1` - the handler is a *return address* on the 
 error line, so the #UD is never delivered and the stub's SEH frame never runs. After the reference delivers that
 exception it logs exceptions at 0x4196F1/0x4197D9/0x419814, calls GetModuleHandleA, runs ~90 GetProcAddresses (its
 109 imports), and executes 8.57M instructions of 7z startup.
+
+#### 0.17jg TELock: deliver the mid-block `lea eax,eax` #UD - family OEP exact 1 -> 14
+
+0.17jf stopped at `0x4196f1` with the run returning cleanly. Chasing that to ground:
+
+- `Qiling::emu_stop` was instrumented: the last stop before the clean return is at `0x418e2c`, i.e. **no hook stops
+  the run at 0x4196f1**.
+- The rundbg line was widened with the actual state at the stop: `pc=0x4196f1 byte=0x8d retarget=0 budget_hit=0
+  eflags=0x6 exit_point=0x8fffffff timeout=120000000us count=2e9 insns=7371130`, and `--count 20000000000` changes
+  nothing - so it is none of the budget/until/timeout cases, and it is deterministic (same pc and instruction count
+  every run).
+- `QlCoreHooks::dispatch_insn_invalid` calls every hook regardless of range, and unicorn does raise
+  `UC_ERR_INSN_INVALID` for the same `8d` byte when a block *starts* on it (the 0x4186a8 hit), so the hook is fine -
+  unicorn simply does not raise it for `lea eax,eax` when it is reached mid-block.
+
+So the gate now delivers the #UD itself: a code hook at `stub_start + 0x16f1` keeps Eip on the instruction and calls
+`seh_dispatch_cpu(0xC000001D)`, exactly the invalid-instruction hook's non-0xf1 branch, and stops if nothing handled
+it (the same contract). With that, telock_7z.exe reproduces the reference's own exception sequence:
+
+    [sehd] code=c000001d fault=4196f1 pc=4196f1 handler=4196ff      <- the reference's exception at 0x4196F1
+    [sehd] code=80000004 fault=4197d9 ... handler=4197cb            <- 0x4197D9
+    [sehd] code=80000004 fault=419815 ... handler=4197f9            <- 0x419814
+
+and then reaches the payload's `.text` for the first time (faulting at pc=0x410fff on a read of 0x5df70e00).
+
+**Family A/B (116 rows, 4 workers, 85 s, gate on): n=116 PE=116 OEP 1 -> 14, IMP 0 -> 0, ALL 0 -> 0**, no row gains
+or loses an all-three. So it stays gated off: the OEP half of the family is now unblocked on 13 rows, but the import
+half still needs the stub's IAT rebuild (the reference's ~90-call GetProcAddress storm, which is where its 109 imports
+come from). Next: the fault at 0x410fff in the payload's tail - find what hands control there before the entry at
+0x40ebc5 - and then the IAT-stub-address precondition.
