@@ -736,11 +736,45 @@ void Unpacker::install(Qiling& ql) {
     // hand-written model of FSG's decoder can be diffed against unicorn's. Used to
     // validate /tmp/fsgemu.py against fsg_cmd, whose decode taote gets right.
     if (const char* ft = std::getenv("TAOTE_FSGTRACE"); ft != nullptr) {
-        const auto n = std::strtoul(ft, nullptr, 0);
+        // "N" traces the first N instructions in the FSG EP window; "lo:hi:N" traces
+        // any range, which is how a stub decoder's own execution is read directly
+        // (a range trace needs no reference run).
+        std::uint64_t tr_lo = 0, tr_hi = 0;
+        std::size_t n = 0;
+        if (std::strchr(ft, ':') != nullptr) {
+            unsigned long long a = 0, b = 0, c = 0;
+            if (std::sscanf(ft, "%llx:%llx:%llu", &a, &b, &c) == 3) {
+                tr_lo = a;
+                tr_hi = b;
+                n = (std::size_t)c;
+            }
+        } else {
+            n = std::strtoul(ft, nullptr, 0);
+        }
         if (n > 0) {
-            auto h = std::make_shared<HookRet>(ql.hook_code([this, n, &ql](std::uint64_t addr, std::uint32_t) -> int {
+            auto h = std::make_shared<HookRet>(ql.hook_code([this, n, &ql, tr_lo, tr_hi](std::uint64_t addr, std::uint32_t) -> int {
                 static std::size_t emitted = 0;
                 if (emitted >= n || packed_ep_va_ == 0) {
+                    return 0;
+                }
+                if (tr_lo != 0) {
+                    if (addr < tr_lo || addr >= tr_hi) {
+                        return 0;
+                    }
+                    auto& r2 = ql.arch().regs();
+                    std::fprintf(stderr,
+                                 "[tr] %llx eax=%llx ebx=%llx ecx=%llx edx=%llx esi=%llx edi=%llx ebp=%llx "
+                                 "esp=%llx ef=%llx\n",
+                                 (unsigned long long)addr, (unsigned long long)(r2.read("eax") & 0xffffffffull),
+                                 (unsigned long long)(r2.read("ebx") & 0xffffffffull),
+                                 (unsigned long long)(r2.read("ecx") & 0xffffffffull),
+                                 (unsigned long long)(r2.read("edx") & 0xffffffffull),
+                                 (unsigned long long)(r2.read("esi") & 0xffffffffull),
+                                 (unsigned long long)(r2.read("edi") & 0xffffffffull),
+                                 (unsigned long long)(r2.read("ebp") & 0xffffffffull),
+                                 (unsigned long long)(r2.read("esp") & 0xffffffffull),
+                                 (unsigned long long)(r2.read("eflags") & 0xffffffffull));
+                    ++emitted;
                     return 0;
                 }
                 if (addr < packed_ep_va_ || addr >= packed_ep_va_ + 0x200) {

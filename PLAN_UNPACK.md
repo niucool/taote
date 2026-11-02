@@ -10874,3 +10874,35 @@ That is the thing to fix, and it is byte-level: decode one block offline from th
 against the original's `.text`, then name the instruction that computed the first wrong distance and check Unicorn's
 semantics for it. TELock's CRC oracle (needed 0x311634a8) gives the same kind of byte-exact target for the other 113
 rows, so the same differential harness serves both families.
+
+#### 0.17hr Round 220: the failing PEtite block is an IN-PLACE header decode, traced end to end
+
+Generalised the tracer from the FSG-only EP window to any range: `TAOTE_FSGTRACE=lo:hi:n` emits pc + eax/ebx/ecx/edx/
+esi/edi/ebp/esp/eflags per instruction inside [lo,hi), capped at n. With it, the failing header block is now traced in
+full - entry at 0x417214 with eax=0x400000, edi=0x400000, edx=0x6a4, ebx=0x4186b8, through the body at 0x4173xx, to the
+common failure exit:
+
+    417214 push ebp / mov ebp,esp          <- src edi == dst edi == 0x400000 (in place)
+    417217 mov [edi],al                    <- writes AL (0x00) over the stream's first byte
+    4173xx (body; the trace tail reaches the invalid-symbol check)
+    4181c7 xor eax,eax                     <- status < 0 -> return 0
+    4171e7 test eax,eax / 4171e9 je reporter
+
+Two facts worth keeping:
+
+1. The descriptor walk at 0x4171aa feeds it a header-block entry `{src 0, size 0x6a4, dst 0}` (base-relative), i.e. the
+   stub decompresses the original headers ONTO the page the stream itself is read from, and the routine's first
+   instruction overwrites the first input byte before decoding. Any decode of this block therefore has to tolerate the
+   routine's own pre-write - which is exactly why the "corrupt" verdict is decided inside the body and not by the input.
+2. Instrumentation does not perturb the artifact: plain, `TAOTE_PROBE=0x4171e2` and `TAOTE_FSGTRACE=0x417300:0x417400`
+   produce BYTE-IDENTICAL dumps (md5 df61a5cc...), so the trace above describes the real run and the diagnostics shipped
+   in the last rounds are safe to trust on this family.
+
+Descriptor table content at the same moment (TAOTE_APIDUMP=MessageBoxA:0x418680:0x40), 16-byte entries {src, size, dst}:
+0x418680 {0xd000, 0x1840, 0x11875}, 0x418690 {0xe000, 0x101a, 0x12ffd}, 0x4186a0 {0x12000, 0x2000, 0x0} with a trailing
+0x6a4 at 0x4186ac - note the entries are consumed and rewritten as the loop advances, so a post-mortem read does not
+match what a mid-loop trace sees (that mismatch cost one round of confusion; read such tables from a trace, not a dump).
+
+Next step for the differential: the body check that returns negative is inside 0x4173xx-0x4181c7; with the range tracer
+the exact instruction and its operands can be read off (the trace already narrows it to the 118 instructions between
+entry and exit), and the corresponding value can be compared against the packed file's stream.
