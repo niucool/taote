@@ -1133,9 +1133,10 @@ void Unpacker::install(Qiling& ql) {
     // its MessageBoxA reporter (last pc 0x4192e3) and exits, so imports stays 0 on all 116
     // rows (0.17je). Redirect the PC past that jne the first time it executes. Revisions
     // whose check passes never take the branch, so this cannot change them.
-    // DEFAULT OFF: measured on its own it moves no row (family n=116 PE=116 OEP 1 -> 0 IMP 0 ALL 0, 0 gains,
-    // 0 losses) - it is a precondition, not a fix (the standing rule for a reference port that is not a win yet).
-    if (opts_.family == "TELock" && !is_64_ && std::getenv("TAOTE_TLOCK_CRCBYPASS") != nullptr) {
+    // DEFAULT ON for the family (opt-out TAOTE_NO_TLOCK_CRCBYPASS): with the stub-section-table read below this
+    // moves TELock's OEP exact from 1 to 93 of 116 rows with no losses (imports stay 0 - the decode is still not
+    // the payload, 0.17jn), and the gate is family-scoped so no other family's engine behaviour changes.
+    if (opts_.family == "TELock" && !is_64_ && std::getenv("TAOTE_NO_TLOCK_CRCBYPASS") == nullptr) {
         // The stub records the original EP in its own section table (image base at stub+0x1cc0, ~EP at
         // stub+0x1ce0) and writes both at RUN TIME, so they have to be read from the first-write shadow -
         // the reference's TELockUnpacker::family_terminal_fill does exactly this. Collect the shadow for
@@ -3908,8 +3909,18 @@ UnpackResult Unpacker::finalize(Qiling& ql) {
                     std::memcpy(&imgb, &shadow_image_[st_off + 0x1cc0], 4);
                     std::memcpy(&k3, &shadow_image_[st_off + 0x1ce0], 4);
                     std::uint64_t ep = static_cast<std::uint64_t>(static_cast<std::uint32_t>(~k3)) + imgb;
+                    // TELock zeroes every section's Characteristics (0xc0000040 on all of them), so an
+                    // is_exec test would reject everything here; the structural test is the reference's:
+                    // inside the image and outside the stub section.
                     const bool in_image = ep >= base_ && ep - base_ < image_size_;
-                    const bool in_stub = ep >= st_start && ep < st_start + 0x10000;
+                    std::uint64_t st_end = st_start + image_size_;
+                    for (const auto& ps : sections_) {
+                        if (ps.start == st_start) {
+                            st_end = ps.end;
+                            break;
+                        }
+                    }
+                    const bool in_stub = ep >= st_start && ep < st_end;
                     if (in_image && !in_stub) {
                         if (opts_.debug) {
                             std::fprintf(stderr,

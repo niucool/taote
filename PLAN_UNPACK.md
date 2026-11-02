@@ -12568,3 +12568,41 @@ loop (or find which other decryptor writes .text page 0), not re-derive its alge
 
 Method note recorded for the family in general: 41,984 executions of 0x418fb7 against a 0x8a00 span means the loop is
 entered more than once with different counters, so "the loop's first entry" is not the whole story either.
+
+#### 0.17jo SHIPPED: TELock's stub-section-table EP, default-on for the family - corpus OEP 2209 -> 2298
+
+The 0.17jk mechanism is now the family default (opt-out `TAOTE_NO_TLOCK_CRCBYPASS`), because it is a large, clean
+capability gain on the OEP metric even though the import half is still unsolved.
+
+**Corpus r109** (2678 rows, 4 workers, 85 s budget, 120 s wall, ~90 min):
+
+| metric | r108 | r109 raw | referee |
+|---|---|---|---|
+| valid PE | 2677 | 2677 | 2677 |
+| **OEP exact** | 2209 | **2298** | **2300** |
+| imports | 2253 | 2251 | 2253 |
+| all-three | 2177 | 2175 | 2177 |
+
+The raw run lost all-three on exactly two rows, `nspack_Bginfo.exe` and `rlpack_geek.exe` - the long-documented
+dur-86 wall flakes - and both graded all-three when re-run solo (`oep=0x5b5d42` / `oep=0x559760`, imports 1.0 /
+0.9985), so the referee restores OEP, imports and all-three to the r108 levels and leaves the +91 OEP as the only
+movement: 92 TELock rows gained an exact OEP and one lost it.
+
+**The one loss is `telock_PEview.exe` (0x401000 -> 0x416bd6, reason `embedded_pe`)**, and it is NOT this mechanism
+firing: the table read only applies when the current claim is junk, and PEview's claim was already exact. What changes
+is that the gate makes the stub run far enough for the *embedded-PE* seam to fire, and that seam's candidate
+(0x416bd6) is inside the stub section - something the accept gate normally rejects as stub-section junk. So the
+follow-up is a generic guard ("an embedded-PE candidate may not sit inside the packed-EP section"), which needs its
+own corpus arm because `try_embedded_pe` is shared by every family.
+
+A tighter acceptance test was tried first and reverted: requiring the EP to land in an executable section rejects
+everything for this family, because **TELock zeroes every section's Characteristics** (`0xc0000040`, i.e.
+INITIALIZED_DATA|READ, on all five sections of telock_7z.exe and all six of telock_PEview.exe) - the same trap the
+PEtite lane recorded. The acceptance therefore stays structural: inside the image, outside the stub section (bounded
+by that section's real `end`, not a constant).
+
+Family arm re-measured after the bound change (116 rows, 4 workers, 85 s): **PE 116, OEP 1 -> 93, IMP 0, ALL 0**, one
+loss (`telock_PEview`), consistent with the corpus.
+
+Open for the family: imports stay 0 on all 116 rows because the payload's decode is still wrong (0.17jn: the key
+stream is wrong from byte 0 and .rdata is only one page deep), so the stub never rebuilds its IAT.
