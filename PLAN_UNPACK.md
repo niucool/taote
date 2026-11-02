@@ -11991,3 +11991,45 @@ Next unit, with a working oracle for the first time: get the reference to explai
 output does not include hop lines for this row - only `[petite-iat]` - so the next step is to find the reference's
 hop/stage logging switch or read `src/unpacker` for where `petite_terminal_full_fill` sets `oep_last_hop`), then
 compare taote's stage-1 stop against it. The 37 OEP-wrong PEtite rows are all downstream of that one difference.
+
+#### 0.17ix the reference's PEtite OEP is an EP-exit SECTION-TRANSITION WALK, not a hop; and the two runs diverge on block 6 only
+
+Correcting 0.17iw point 3: `meta.oep_last_hop` is NOT a runtime hop. `petite_unpacker.cpp:502-509` sets
+`meta_.oep = keep; last_oep_ = keep;` after `dump_module(keep, "petite_terminal_full_fill")` - the field simply
+mirrors the kept value. `stages = 3` counts recon stages, not hops.
+
+What actually produces the reference's OEP is its EP-exit walk, which it prints under `SE_DEBUG_FINALIZE`:
+
+    [pet-epexit] transitions=3 keep=0x40d07c junk=1
+    [pet-epexit] t[0] from=2 to=3 addr=0x40d07c t=1774078
+    [pet-epexit] t[1] from=3 to=2 addr=0x417102 t=2246804
+    [pet-epexit] t[2] from=2 to=3 addr=0x401160 t=2247679
+    [pet-epexit] cand i=2 to=3 addr=0x401160 t=2247679 lastwr=74585
+    [pet-epexit] consuming transition 0x401160 (shape=1) (was keep=0x40d07c)
+
+i.e. it keeps a section-transition history over the whole run, walks it BACKWARD, and takes the last transition into
+a section that is never left again, provided the target has a plausible prologue shape (`shape=1`). 0x401160 is
+the truth. taote has no `sec_trans_hist_` counterpart (only the env-gated `TAOTE_SEC_TRANS` diagnostic, which
+recorded ONE transition on this row where the reference records three).
+
+The two emulations, compared with `SE_DEBUG_HOP=1` against taote's traces:
+
+    reference: 479,554 hops. Starts with the SAME stub addresses taote runs (0x41710b, 0x417137, 0x417175,
+               0x417179, 0x41717b, 0x417186), then executes decoded .petite/.text code extensively
+               (0x401302, 0x40caf3, 0x40ba92, 0x40d34d ...), and first reaches 0x401160 at hop 479477.
+    reference: 0x417214 entered SIX times, 0x4171e7 returned five, and **0x4170ce - the error reporter - is
+               never executed**.
+    taote:     executes the same first stub addresses, then block 6's decode returns 0 and the stub takes
+               `test eax,eax; je 0x4170ce` straight into the error reporter (`TAOTE_APIDBG` shows
+               MessageBoxA pc=0x100a1330 ret=0x4170f1, and the last executed pcs are the reporter 0x4170ea-0x4170f3),
+               then ExitProcess. Not one decoded code byte ever runs.
+
+So both implementations make six decompressor calls; the ONLY asymmetry is the outcome of the last one, and it is
+what separates a run that executes the payload from one that pops "Corrupt Data!". Everything else about PEtite in
+taote now matches the reference (0.17iw: .text within 4 trailing bytes of byte-exact).
+
+Next unit: capture the reference's per-call arguments for the sixth call (SE_DEBUG_HOP prints only
+addr/sec/wr_n, so this needs either a trace switch in pegasus or reading its descriptor loop), and compare the src
+it passes. That one comparison decides whether block 6 is fed a different stream (port the argument rule) or
+tolerated on failure (port the tolerance) - and either way the EP-exit walk is the second deliverable, since it is
+what turns a running payload into an OEP without any candidate-class guessing.
