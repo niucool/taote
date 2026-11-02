@@ -11214,3 +11214,19 @@ it cannot rank):
 
 Net for the round: WinUpack's picker pool is real (truth present, ranks 7-120) but every static feature available from the
 artifact alone has now been measured inert, so it needs the same runtime information the reference uses. No code change.
+
+Correction to this round's own numbers: the image base is NOT always 0x400000, and both the "outside the image" count and
+the label in the WinUpack table assumed it was. Recomputed with each artifact's own ImageBase:
+
+    winupack_mtinst   base 0x1000000   truth 0x1003866   claim 0x1003be0   in-image, delta 0x37a, rank 8/351
+
+so mtinst's claim is a NEAR MISS inside its own image (not an out-of-image bogus address as written above), and the
+corpus-wide out-of-image census becomes 118 claims, of which only 14 rows are still missing (Amber 116 of the 118, and
+104 of those rows are already all-three). That in turn is explained by the grader: `oep_exact` compares the REBUILT
+ARTIFACT's AddressOfEntryPoint against the original's RVA (`unpack_report.py:302`), so `meta.oep_claimed` is a
+diagnostic, not the shipped entry - a row can pass with a nonsense claim.
+
+Two things survive from the earlier text and matter: (1) the truth is a ladder class in 6 of 9 WinUpack rows at ranks
+7-120, so that pool is a ranking problem; (2) the three claims in that table that looked absurd are all in-image except
+none, so no filter lever exists there either. The mtinst deltas are small (0x37a) which is the same near-miss shape as
+the PEtite rows - the picker lands close and the remaining error is a few hundred bytes of function boundary.
