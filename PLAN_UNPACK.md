@@ -10668,3 +10668,43 @@ buffer it CRCs is its own decoded copy, not a section.
 That closes TELock's *diagnosis*: the check is not the bug and cannot be "fixed" - the stub is telling the truth about a
 decode that is not byte-exact. The remaining work is the decode itself (the same place the reference's five
 `[insn-inv]` skips and three tolerated `[null-pc]` exceptions live).
+
+#### 0.17hj Round 214: where the remaining 417 rows actually are - and PEtite is the biggest unexplored pool
+
+Cross-tabulated every r102 row's error class against its grade. The result is a map worth keeping, because it says
+which error classes are worth *nothing*:
+
+| error class | rows | all-three | still missing |
+|---|---|---|---|
+| none | 1833 | 1486 | **347** |
+| Invalid memory fetch | 464 | **443** | 21 |
+| Invalid memory read | 203 | 173 | 30 |
+| no section hop; OEP guessed | 117 | 1 | 116 (Yoda-Protector 88) |
+| Invalid memory write | 55 | 37 | 18 |
+
+So the fetch class - the largest by count, and the one rounds 211 chased - holds only 21 recoverable rows; it is
+almost entirely *post-capture* noise. The real remaining gap is the 347 rows that end with **no error at all**:
+
+| family | missing, no error |
+|---|---|
+| Themida | 122 (the reference fails these too) |
+| TELock | 113 (diagnosis closed in round 213: its CRC says the decode is not byte-exact) |
+| **PEtite** | **41** |
+| Amber / Eronana / Exe32pack / RLPack / Alienyze / MEW / BeRo | 14 / 13 / 13 / 8 / 7 / 4 / 3 |
+
+**PEtite is the discovery**: 73 rows, 30 all-three, and 43 missing of which **41 end cleanly** - 31 of them with both
+OEP and imports wrong at `code_sim` 0.87-0.93, i.e. the image is decoded but not exact and the entry is a mid-payload
+frame (`petite_rrdec`: truth 0x1160, taote 0x417214).
+
+The reference solves most of them, via `petite_terminal_full_fill`
+(`../pegasus/src/unpacker/packers/petite_unpacker.cpp:380-505`): a candidate machine over the decoded image with six
+pattern classes (C1, H1, E8E9, C2, C3, C4), each split into "boundary-passing" or not, an EP-exit tracker, and a fixed
+precedence (chain-earliest boundary-passing candidate; a boundary-passing pick from a weak class beats a non-boundary
+one). Measured on four of taote's worst rows: pegasus is exact on three (`gzip` 0x401280, `rrdec` 0x401160, `m2cdm`
+0x401160) and wrong on one (`DarkNamer` 0x40e87f vs 0xa71e), while taote is wrong on all four.
+
+taote's side of the same row: `petite_rrdec`'s ladder yields **zero** candidates in every pass
+(`passA 0`, `passB hits=0`, `boundary-thunks in .petite: 0`, all `C=0 C3=0`) and the pick comes from a section hop at
+0x417175 adjusted to 0x417214 - i.e. taote never even enumerates the candidates the reference ranks. Porting that
+machine is the next unit of work, and unlike the WinUpack seam (round 208) its precondition - a decoded image with
+code-shaped candidates - is present on 41 rows.
