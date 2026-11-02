@@ -11284,3 +11284,34 @@ came back on a solo re-run (46.1 s and 63.2 s) - neither family is touched by th
 What the +6 OEP but +2 all-three split means: Diskmon, Everything, ShareEnum and mtinst now carry the correct entry but
 still fail imports, so they are now IMPORT problems, not OEP problems - a cleaner hand-off for the next unit than the
 mixed pool they were in before.
+
+#### 0.17ia WinUpack's four corrected-OEP rows fail on ORDINALS only - and the naive fix is metric-gaming
+
+Round 230, following the stack-slot win. The four rows that gained a correct OEP but still fail imports are all
+`recall` failures, and `imports` is `recall >= 0.95` (unpack_report.py:323):
+
+    row                  recall  precision  missing  which
+    winupack_Diskmon     0.9439    0.7063     12     oleaut32 #2..#25 (11), comctl32 #17
+    winupack_Everything  0.9247    0.1031     22     ws2_32 #1..#116 (20), imm32 ImmGetVirtualKey, shell32 #16
+    winupack_ShareEnum   0.9030    0.8917     23     oleaut32 #2..#202 (11), ws2_32 #1..#116 (11), comctl32 #17
+    winupack_mtinst      0.3129    0.1896      -     different problem: code_sim 0.8825, the decode is incomplete
+
+So three rows are 5-9 % of recall away, and everything they miss is an ORDINAL import (plus one named import in
+Everything). This is the same shape FSG and Alienyze each needed their own ordinal source for.
+
+Why this is not a small change: the artifact's IAT slots hold RESOLVED ADDRESSES, and taote's reverse symbol map
+(symbols.add(va, dll, name), unpack.cpp:2508) names the export an address belongs to. For an address that is
+oleaut32's export #12 the map can only say "oleaut32!<the name of export 12>" - while the original imported it as
+ordinal 12, because the ORIGINAL BINARY was linked that way. The ordinal spelling is a property of the caller's import
+table, which the packer destroyed.
+
+The obvious fix - emit an `ordinal_<N>` alias next to every named export - would take recall to 1.0 on all three rows and
+turn them green, but it writes each function into the rebuilt import table TWICE (by name and by ordinal). That is
+metric-gaming, not unpacking, and it also destroys `imp_exact` (precision 0.10 on Everything already). Rejected.
+
+The legitimate question for the next unit: where does WinUpack's payload keep its ORIGINAL import table, and does it
+survive in the decoded image with its 0x80000000-flagged thunks? A blind scan is not enough - the artifact holds 57
+(ShareEnum: 114) incidental dwords whose bit31 is set and whose low 16 bits match a missing ordinal - so the
+discriminator has to be structure (a contiguous run of flagged thunks after a DLL name), which is what the existing
+orphan-descriptor scan already does for named imports. Verify that the runs exist before writing a seam (rule h), and
+check whether `mtinst` is only a decode problem (code_sim 0.88) rather than an import one.
