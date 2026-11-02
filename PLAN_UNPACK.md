@@ -11556,3 +11556,55 @@ strings with DLL attribution from the stub's INT order - i.e. the same destroyed
 ordinals, not a table gap. The Reg* class (chglogon) is the same shape: the original imported them from KERNEL32 while
 the host's tables file Reg* under advapi32/rapi/clusapi, so attribution by name alone cannot reproduce that caller-side
 choice.
+
+#### 0.17il PEtite's 4790-byte divergence decomposed: one missing fixup pass + one undecoded block
+
+Followed the work order into the PEtite bit-reader differential, but classified the errors BEFORE looking at the
+decoder, and the classification reframed the whole problem. Comparing taote's dumped `.text` against the not-packed
+original (`petite_rrdec.exe` vs `rrdec.exe`, RVA 0x1000, 47896 bytes) at byte level:
+
+    differing bytes 7484 in 1577 runs; run lengths 2 (841), 4 (648), 3 (55), 1 (5)
+
+A run-length histogram dominated by EXACTLY 2 and EXACTLY 4 is the signature of a `rel32` displacement field, not of
+literal or match-copy errors. Checking that directly: of the 1047 `E8/E9` sites in the golden `.text`, **1039 (99.2%)
+carry a wrong displacement**, and for 1026 of them the error is exactly
+
+    art_disp - gold_disp == (site_rva - 0x400)
+
+i.e. a constant *per-site* shift equal to the offset inside the decoding block, not a random value. Applying the
+stub's own transform offline - `dword[rva+1] -= (rva - 0x400)` at every `E8/E9`, `dword[rva+2] -= (rva - 0x400)` at
+every `0F 8x` - takes the difference from **7484 bytes in 1577 runs to 3052 bytes in 25 runs**, and every remaining
+run lies in one contiguous region: **`.text` from 0xaf14 to the end (0xc04 bytes)**, which in the artifact is still
+compressed/encrypted garbage.
+
+So PEtite's residual is exactly two unimplemented packer steps, and neither is an arithmetic error in the decoder:
+
+1. The **block fixup pass**. The stub's own code for it is in the artifact at `0x40d38e-0x40d3cf` (it is runtime-written:
+   the packed `.petite` raw data covers only RVA 0x1000-0x8a00, so 0xd38e can only be produced by the decryptor):
+
+       40d38e  mov  ebx,[esi+4]      ; block size
+       40d391  sub  ebx,6
+       40d394  xor  edx,edx          ; edx = offset inside the block
+       40d396  mov  al,[edx+edi]
+       40d39b  cmp  al,0xe8 / 0xe9   -> 40d3ad
+       40d3a3  cmp  al,0x0f
+       40d3ad  sub  dword [edx+edi+1],edx      ; E8/E9: disp -= offset
+       40d3c5  sub  dword [edx+edi+2],edx      ; 0F 8x: disp -= offset
+       40d3d2  pop ecx / pop esi / std ...      ; the pass ends and the stub resumes
+
+   Note the guard above it: `mov ecx,[esi+0xc]; sar ecx,1; push ecx; jb 0x40d38e` - the fixup path is selected by
+   **bit 0 of descriptor field [esi+0xc]** (odd => fixup, even => the `rep stos` zero-fill branch below), so a faithful
+   host reimplementation must read that flag rather than guessing.
+
+2. One **undecoded block**: the region from `.text+0xaf14` to `.text`'s end never gets decoded, which is also why the
+   8 `E8/E9` sites that do not fit the transform all live there.
+
+`TAOTE_PROBE=0x40d3ad` (the fixup store) fires **zero times** on `petite_rrdec.exe`, and the run ends at
+`final pc=0x100211e0` (the ExitProcess cell) with `oep=0x417214 reason=section_hop` - i.e. the stub takes its error
+path before reaching the fixup stage, which is the SAME root cause as the parked "Corrupt Data!" guard recorded in
+0.17hz: the block loop stops early, so the tail block is never decoded and the fixup pass never runs.
+
+Consequence for planning: PEtite is not a bit-reader arithmetic problem (0.17hn's framing) and an offline decoder
+differential is the wrong tool. The unit is the block loop's early exit; when it is fixed, the fixup pass and the tail
+block both come with it, and byte-exactness (reference: 0 of 47896 differing) becomes achievable. Recorded with the
+transform verified offline so the next round does not have to rediscover it.
