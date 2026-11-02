@@ -12606,3 +12606,36 @@ loss (`telock_PEview`), consistent with the corpus.
 
 Open for the family: imports stay 0 on all 116 rows because the payload's decode is still wrong (0.17jn: the key
 stream is wrong from byte 0 and .rdata is only one page deep), so the stub never rebuilds its IAT.
+
+#### 0.17jp Frontier map on corpus r109 (the hand-off): 501 misses = 81 .NET + 123 IMP-bound + 18 OEP-bound + 279 both-wrong
+
+Measured per row from r109's results, with each row's ORIGINAL checked for the managed floor (a .NET original can
+never be all-three, so those rows are counted separately and excluded from every pool below):
+
+| pool | rows | families |
+|---|---|---|
+| .NET floor | 81 | Amber 22, Exe32pack 17, TELock 15, Eronana 13, Alienyze 7, tail 7 |
+| **IMP-bound** (PE ok, OEP exact, imports wrong) | **123** | **TELock 92**, WinUpack 12, RLPack 7, MEW 4, PEtite 4, Amber 1, JDPack 1, NSPack 1, Yoda 1 |
+| OEP-bound (PE ok, imports ok, OEP wrong) | 18 | PEtite 5, JDPack 4, Amber 3, PECompact 3, Neolite 1, WinUpack 1, Yoda 1 |
+| both-wrong (native) | 279 | Themida 122, Yoda 100, plus the rest of Exe32pack/Eronana/Amber |
+
+So after r109 the single biggest lever is still **TELock's 92** - now OEP-exact and waiting only on imports, which is
+the decode problem of 0.17jn (key stream wrong from byte 0, .rdata one page deep). Everything else native is either
+small or in the both-wrong (decode-bound) class with Themida and Yoda, the two families the reference also fails.
+
+RLPack's 7 IMP-bound rows, checked in detail, split into three shapes:
+
+- **Two are near-threshold and named-only** - `rlpack_Hash.exe` recall 0.9412 missing exactly 5 msvcrt names
+  (`??2@YAPAXI@Z`, `??3@YAXPAX@Z`, `__setusermatherr`, `_acmdln`, `_adjust_fdiv`) and `rlpack_calc.exe` 0.9342
+  missing 25, of which 23 are msvcrt C++ decorated symbols (`??0exception@@QAE@ABQBD@Z`, `??1type_info@@UAE@XZ`, ...)
+  plus `kernel32!InterlockedCompareExchange`. Both are one small mechanism away from the 0.95 line, and the shape is
+  the same: **decorated msvcrt C++ export names are not being reverse-resolved**, which is a spelling problem in the
+  symbol map, not a harvest problem.
+- Two are ordinal-dominated (`rlpack_Procmon.exe` 15 oleaut32 ordinals of 22 misses, `rlpack_adrestore.exe` 10 of 74)
+  - the closed ordinal wall.
+- Three are far below threshold with hundreds of ordinary named misses (`rlpack_Bginfo.exe` 0.0453, grepWin 0.006,
+  PortableWinCDEmu 0.5833), i.e. decode/rebuild-bound, not spelling-bound.
+
+Also still open from 0.17jo: the generic embedded-PE guard ("a `try_embedded_pe` candidate may not sit inside the
+packed-EP section") that would give `telock_PEview.exe` its exact OEP back; it needs its own corpus arm because that
+seam is shared by every family.
