@@ -339,6 +339,17 @@ std::vector<std::uint8_t> rebuild_pe(const RebuildInput& in);
 // by construction, so this rewrites each section's raw fields to file offset == RVA.
 // Returns {} when the header is unusable or already flat.
 std::vector<std::uint8_t> flatten_image_pe(const std::vector<std::uint8_t>& image);
+// PEtite's stub rewrites every relative displacement in a decompressed block by
+// SUBTRACTING the offset inside that block (its own pass at 0x40d38e:
+// `sub dword [edx+edi+1],edx` at E8/E9 and `sub dword [edx+edi+2],edx` at 0F 8x).
+// When that pass has not run, the dump holds the pre-transform stream and every
+// call/jmp/jcc target is off by its own position. This undoes it, per EXECUTABLE
+// section, but only when the undo genuinely restores structure: the gate is the
+// share of call targets reached by more than one call site, which rises when the
+// transform is removed from a pre-transform image and falls when it is removed
+// from an already-correct one (measured on all 73 PEtite rows: 43 apply / 30 skip,
+// 0 wrong either way). Returns the number of sections rewritten.
+std::size_t undoSelfRelativeBlockTransform(std::vector<std::uint8_t>& image, std::uint64_t base);
 
 }  // namespace unpack
 }  // namespace qiling

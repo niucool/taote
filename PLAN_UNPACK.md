@@ -11795,3 +11795,46 @@ The gate therefore has to be RUNTIME, not structural: the stub's fixup writes in
 that block's memcpy, so "a write landed in a code block after its copy completed" is the observable that says the
 pass ran. That detector is the next unit; with it, PEtite's `.text` becomes byte-exact on the 48 pre-fixup rows,
 which is the precondition for the OEP picker on the whole family.
+
+#### 0.17ir shipped: PEtite's self-relative block transform is undone, self-gated (43/73 rows, 0 regressions)
+
+The correction in 0.17iq established that PEtite's *entire* byte divergence is relative-displacement fields, and that
+the stub's own pass at 0x40d38e - which subtracts the in-block offset from every E8/E9/0F8x displacement - does not
+run in taote's emulation on most rows. This ships the undo, `undoSelfRelativeBlockTransform`:
+
+    scan one section continuously, exactly as the stub does (5 bytes after E8/E9, 6 after 0F 8x)
+    section gate : collision share of call targets, shift-0 vs shift-1  -> accept when it rises
+    page  gate   : accept a 0x1000 page only inside an accepted section AND when its own share is < 0.10
+    rewrite      : dword[i+1] -= i at E8/E9, dword[i+2] -= i at 0F 8x   (i = section-relative offset)
+    family gate  : opts_.family == "PEtite" (one call site, unpack.cpp:3851)
+
+Three properties had to be measured into the gate, each from a failure:
+
+  * the MZ byte must not be required - PEtite's stub zeroes the in-memory header (the dump starts `00 5A`), so an
+    MZ check made the function a no-op;
+  * section characteristics must not be used - the dump keeps the PACKED section table, whose characteristics are
+    cleared (all five sections read chars=0 on petite_rrdec), so an "executable section" filter also no-oped;
+  * a PAGE-only gate fires on already-correct code, where the collision share is already high: measured false
+    positives at c0 = 0.375, 0.533, 0.396, which turned 9 rows from code_sim 1.0 into 0.9968-0.9991. Adding the
+    section-level decision and the page `c0 < 0.10` cap removed all of them (0 worse).
+
+Measured, the whole PEtite family (73 rows, r106 parameters, 4 workers):
+
+    mean code_sim            0.9346 -> 0.9872
+    rows with code_sim>=0.99 25 -> 55
+    rows improved 43, unchanged 30, worse 0
+    rows  n=73 PE=73 OEP=36 IMP=36 ALL=30   (identical to the r106 baseline: this is a fidelity fix, not a row fix)
+
+Byte-exactness where it fires: `.text` vs the original differs 4790 -> 4 bytes on petite_rrdec, 9794 -> **0** on
+petite_7z; the residue is 3-4 bytes at the very end of the section (the block copy overruns the last real byte by
+one dword), which is a separate, cosmetic defect.
+
+Determinism and safety: petite_rrdec run twice gives byte-identical artifacts (md5 42bebada... artifact / d0e17e5a...
+dump), and all 73 family runs exited 0 with no sanitizer or terminate output.
+
+The change is contained to the family by construction (single `opts_.family == "PEtite"` call site), so the full
+corpus was not re-run: every row the code can touch is in the 73-row arm above, and that arm is row-for-row identical.
+
+New test pins it: `UnpackCompat.PetiteSelfRelativeTransformIsUndoneOnlyWhenPrestaged` - a synthetic image with 24
+E8 sites that all target one address once undone, in both pre-transform and already-correct form (the second must be
+byte-unchanged), plus junk and tiny-image inputs (never crash, never rewrite). Suite 607/607.

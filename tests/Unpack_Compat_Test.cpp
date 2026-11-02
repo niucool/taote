@@ -8,6 +8,7 @@
 #include <gtest/gtest.h>
 
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -619,6 +620,117 @@ TEST(UnpackCompat, UnpackGraderSmoke) {
     EXPECT_GE(out_pe->sections().size(), orig_pe->sections().size());
     std::error_code ec;
     fs::remove(out, ec);
+}
+
+// PEtite's per-block pass rewrites every relative displacement in a decompressed
+// block by subtracting the offset inside that block (its own code at 0x40d38e).
+// When the emulated stub has not run that pass, the dump holds the pre-transform
+// stream and every call/jmp/jcc target is off by its own position - measured on
+// the corpus as the ONLY source of PEtite's byte differences (petite_7z .text:
+// 9794 differing bytes -> 0). The undo must be self-gated, because on the rows
+// where the pass DID run the image is already exact and rewriting it destroys the
+// section (petite_HDDScan: +391984 bytes). The gate is the share of call targets
+// reached by more than one call site, which rises when a pre-transform image is
+// undone and falls when an already-correct one is touched.
+namespace {
+
+// A minimal PE32 image with one section at RVA 0x1000 carrying `sites` E8 rel32
+// instructions, all of which target `target_rva` once the block transform is
+// undone. `prestaged` writes the pre-transform displacements (true + offset).
+std::vector<std::uint8_t> petite_image(std::uint64_t base, std::uint32_t target_rva,
+                                       int sites, bool prestaged) {
+    std::vector<std::uint8_t> img(0x2000, 0x00);
+    img[0] = 'M';
+    img[1] = 'Z';
+    const std::size_t e = 0x80;
+    const auto wr16 = [&img](std::size_t o, std::uint16_t v) {
+        img[o] = static_cast<std::uint8_t>(v & 0xff);
+        img[o + 1] = static_cast<std::uint8_t>(v >> 8);
+    };
+    const auto wr32 = [&img](std::size_t o, std::uint32_t v) {
+        for (int k = 0; k < 4; ++k) {
+            img[o + static_cast<std::size_t>(k)] = static_cast<std::uint8_t>((v >> (8 * k)) & 0xff);
+        }
+    };
+    wr32(0x3c, static_cast<std::uint32_t>(e));
+    img[e] = 'P';
+    img[e + 1] = 'E';
+    const std::size_t coff = e + 4;
+    wr16(coff + 2, 1);      // NumberOfSections
+    wr16(coff + 16, 0xe0);  // SizeOfOptionalHeader
+    const std::size_t opt = coff + 20;
+    wr16(opt, 0x10b);
+    wr32(opt + 0x38, 0x2000);  // SizeOfImage
+    const std::size_t st = opt + 0xe0;
+    img[st] = '.';
+    wr32(st + 8, 0x1000);   // VirtualSize
+    wr32(st + 12, 0x1000);  // VirtualAddress
+    // characteristics stay ZERO on purpose: PEtite's dump keeps the packed table,
+    // where they are often cleared, so the undo must not depend on them.
+    std::uint32_t at = 0x1000;
+    for (int k = 0; k < sites; ++k) {
+        const std::uint32_t off = 0x1000 + static_cast<std::uint32_t>(k) * 16;
+        img[off] = 0xe8;
+        const std::int64_t site_rva = 0x1000 + static_cast<std::int64_t>(k) * 16;
+        std::int64_t disp = static_cast<std::int64_t>(target_rva) - (site_rva + 5);
+        if (prestaged) {
+            disp += site_rva - 0x1000;  // the stub's transform: minus the in-block offset
+        }
+        wr32(off + 1, static_cast<std::uint32_t>(static_cast<std::int32_t>(disp)));
+        at = off;
+    }
+    (void)at;
+    (void)base;
+    return img;
+}
+
+std::vector<std::int32_t> petite_disps(const std::vector<std::uint8_t>& img, int sites) {
+    std::vector<std::int32_t> out;
+    for (int k = 0; k < sites; ++k) {
+        const std::size_t off = 0x1000 + static_cast<std::size_t>(k) * 16 + 1;
+        std::int32_t d = 0;
+        std::memcpy(&d, img.data() + off, 4);
+        out.push_back(d);
+    }
+    return out;
+}
+
+}  // namespace
+
+TEST(UnpackCompat, PetiteSelfRelativeTransformIsUndoneOnlyWhenPrestaged) {
+    const std::uint64_t base = 0x400000;
+    const std::uint32_t target_rva = 0x1800;  // inside the image, past the call sites
+    const int sites = 24;
+
+    // (1) the pre-transform image: every target is off by its own position, so the
+    // undo must run and must produce the exact original displacements
+    auto pre = petite_image(base, target_rva, sites, true);
+    const auto pre_disps = petite_disps(pre, sites);
+    const auto undone = qiling::unpack::undoSelfRelativeBlockTransform(pre, base);
+    EXPECT_EQ(undone, 1u);
+    const auto after = petite_disps(pre, sites);
+    for (int k = 0; k < sites; ++k) {
+        const std::int32_t want =
+            static_cast<std::int32_t>(static_cast<std::int64_t>(target_rva) -
+                                      (static_cast<std::int64_t>(0x1000) + k * 16 + 5));
+        EXPECT_EQ(after[static_cast<std::size_t>(k)], want) << "site " << k;
+        if (k != 0) {  // the site at offset 0 is invariant under the transform
+            EXPECT_NE(after[static_cast<std::size_t>(k)], pre_disps[static_cast<std::size_t>(k)])
+                << "site " << k << " was already correct";
+        }
+    }
+
+    // (2) the already-correct image: the gate must decline and the bytes must not move
+    auto post = petite_image(base, target_rva, sites, false);
+    const auto post_disps = petite_disps(post, sites);
+    EXPECT_EQ(qiling::unpack::undoSelfRelativeBlockTransform(post, base), 0u);
+    EXPECT_EQ(petite_disps(post, sites), post_disps);
+
+    // (3) garbage must never crash or rewrite
+    std::vector<std::uint8_t> junk(0x2000, 0xff);
+    EXPECT_EQ(qiling::unpack::undoSelfRelativeBlockTransform(junk, base), 0u);
+    std::vector<std::uint8_t> tiny(8, 0x00);
+    EXPECT_EQ(qiling::unpack::undoSelfRelativeBlockTransform(tiny, base), 0u);
 }
 
 // The rebuilder parses attacker-controlled bytes: malformed input must yield an

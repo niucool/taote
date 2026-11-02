@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <unordered_map>
 #include <filesystem>
 #include <fstream>
 #include <numeric>
@@ -3843,6 +3844,13 @@ UnpackResult Unpacker::finalize(Qiling& ql) {
         const std::string stem = fs::path(opts_.sample_path).filename().string();
         std::error_code ec;
         fs::create_directories(opts_.out_dir, ec);
+        // PEtite's per-block relative-displacement pass does not always run in the
+        // emulated stub; when it did not, the dump holds the pre-transform stream
+        // and every call/jmp/jcc target is off by its own position. Self-gated on
+        // the collision share, so an already-correct image is left alone.
+        if (opts_.family == "PEtite") {
+            undoSelfRelativeBlockTransform(image, res.base);
+        }
         const auto dump_path = fs::path(opts_.out_dir) / (stem + "_dump.bin");
         {
             std::ofstream out(dump_path, std::ios::binary | std::ios::trunc);
@@ -4097,6 +4105,165 @@ struct SecRec {
 };
 
 }  // namespace
+
+namespace {
+
+struct RelSite {
+    std::uint32_t off;   // offset inside the section
+    std::uint32_t disp_off;  // 1 for E8/E9, 2 for 0F 8x
+    std::uint32_t next;  // instruction length: 5 or 6
+};
+
+// scan exactly like the stub does: after a relative field, skip the instruction
+void scan_rel_sites(const std::uint8_t* p, std::size_t n, std::vector<RelSite>& out) {
+    std::size_t i = 0;
+    while (i + 6 <= n) {
+        if (p[i] == 0xe8 || p[i] == 0xe9) {
+            out.push_back({static_cast<std::uint32_t>(i), 1, 5});
+            i += 5;
+        } else if (p[i] == 0x0f && p[i + 1] >= 0x80 && p[i + 1] <= 0x8f) {
+            out.push_back({static_cast<std::uint32_t>(i), 2, 6});
+            i += 6;
+        } else {
+            ++i;
+        }
+    }
+}
+
+// the share of call targets that more than one call site reaches
+double collide_share(const std::uint8_t* p, std::size_t n, const std::vector<RelSite>& sites,
+                     std::uint64_t sec_va, std::uint64_t lo, std::uint64_t hi, bool undo) {
+    std::unordered_map<std::uint64_t, int> hits;
+    for (const auto& s : sites) {
+        std::int32_t d = 0;
+        std::memcpy(&d, p + s.off + s.disp_off, 4);
+        std::int64_t disp = d;
+        if (undo) {
+            disp -= static_cast<std::int64_t>(s.off);
+        }
+        const std::int64_t t = static_cast<std::int64_t>(sec_va + s.off + s.next) + disp;
+        if (t < static_cast<std::int64_t>(lo) || t >= static_cast<std::int64_t>(hi)) {
+            continue;
+        }
+        ++hits[static_cast<std::uint64_t>(t)];
+    }
+    std::size_t tot = 0;
+    std::size_t shared = 0;
+    for (const auto& kv : hits) {
+        tot += static_cast<std::size_t>(kv.second);
+        if (kv.second > 1) {
+            shared += static_cast<std::size_t>(kv.second);
+        }
+    }
+    return tot == 0 ? 0.0 : static_cast<double>(shared) / static_cast<double>(tot);
+}
+
+}  // namespace
+
+std::size_t undoSelfRelativeBlockTransform(std::vector<std::uint8_t>& image, std::uint64_t base) {
+    // the MZ is deliberately NOT required: PEtite's stub zeroes the in-memory header
+    // (the dump starts 00 5A) and rebuild_pe restores it from the header snapshot, so
+    // the section table is still readable here even though the MZ is gone.
+    if (image.size() < 0x200) {
+        return 0;
+    }
+    const std::size_t e_lfanew = rd32(image, 0x3c);
+    if (e_lfanew + 0x18 > image.size() || image[e_lfanew] != 'P' || image[e_lfanew + 1] != 'E') {
+        return 0;
+    }
+    const std::size_t coff = e_lfanew + 4;
+    const std::size_t opt_off = coff + 20;
+    const std::uint16_t opt_size = rd16(image, coff + 16);
+    if (opt_off + opt_size > image.size()) {
+        return 0;
+    }
+    const std::uint16_t magic = rd16(image, opt_off);
+    if (magic != 0x10b && magic != 0x20b) {
+        return 0;
+    }
+    const std::uint32_t sizeimg = rd32(image, opt_off + 0x38);
+    const std::uint32_t n_sec = rd16(image, coff + 2);
+    if (n_sec == 0 || n_sec > 96) {
+        return 0;
+    }
+    const std::size_t sec_table = opt_off + opt_size;
+    const std::uint64_t lo = base;
+    const std::uint64_t hi = base + (sizeimg != 0 ? sizeimg : image.size());
+    std::size_t rewritten = 0;
+    for (std::uint32_t i = 0; i < n_sec; ++i) {
+        const std::size_t e = sec_table + static_cast<std::size_t>(i) * 40;
+        if (e + 40 > image.size()) {
+            break;
+        }
+        const std::uint32_t vsize = rd32(image, e + 8);
+        const std::uint32_t va = rd32(image, e + 12);
+        if (vsize == 0) {
+            continue;
+        }
+        // PAGE granularity, not section: PEtite's dump keeps the packed section table
+        // (characteristics are often zeroed, and one section covers the decoded payload
+        // AND the stub), so the code region is only distinguishable by the gate. Page
+        // decisions also keep the stub's own code out: on petite_rrdec the payload pages
+        // measure c0~0.00 -> c1~0.55 while the stub page measures 0.154 -> 0.000.
+        const std::uint64_t avail = va < image.size() ? image.size() - va : 0;
+        const std::size_t n = static_cast<std::size_t>(std::min<std::uint64_t>(vsize, avail));
+        std::size_t pages = 0;
+        // ONE continuous scan of the section: a page-local scan desynchronises at page
+        // boundaries and leaves a few dispatches uncorrected (measured: rrdec 9 instead
+        // of 4, 7z 25 instead of 0). The gate is still decided per page.
+        std::vector<RelSite> all_sites;
+        scan_rel_sites(image.data() + va, n, all_sites);
+        if (all_sites.size() < 16) {
+            continue;
+        }
+        const auto sec_va = base + va;
+        // Section-level decision first (this is the statistic validated over all 73 PEtite
+        // rows: 43 sections improve, 30 are already correct, 0 wrong either way). A page
+        // decision alone fires on already-correct code, where the collision share is
+        // already high (measured false positives: c0 = 0.375/0.533/0.396), so pages are
+        // only rewritten inside a section the gate accepts AND where c0 is near zero.
+        const double s0 = collide_share(image.data() + va, n, all_sites, sec_va, lo, hi, false);
+        const double s1 = collide_share(image.data() + va, n, all_sites, sec_va, lo, hi, true);
+        if (s1 - s0 < 0.05) {
+            continue;
+        }
+        for (std::size_t poff = 0; poff < n; poff += 0x1000) {
+            std::vector<RelSite> sites;
+            for (const auto& s : all_sites) {
+                if (s.off >= poff && s.off < poff + 0x1000) {
+                    sites.push_back(s);
+                }
+            }
+            if (sites.size() < 16) {
+                continue;
+            }
+            const double c0 = collide_share(image.data() + va, n, sites, sec_va, lo, hi, false);
+            const double c1 = collide_share(image.data() + va, n, sites, sec_va, lo, hi, true);
+            if (c0 >= 0.10 || c1 - c0 < 0.05) {
+                continue;  // already correct here, or not a transformed code page
+            }
+            std::uint8_t* p = image.data() + va;
+            for (const auto& s : sites) {
+                std::int32_t d = 0;
+                std::memcpy(&d, p + s.off + s.disp_off, 4);
+                const std::int32_t nd =
+                    static_cast<std::int32_t>(static_cast<std::uint32_t>(d) - s.off);
+                std::memcpy(p + s.off + s.disp_off, &nd, 4);
+            }
+            ++pages;
+            if (std::getenv("TAOTE_UNPACK_DEBUG") != nullptr) {
+                std::fprintf(stderr,
+                             "[unpack] petite: undo block transform in section %u page %#zx "
+                             "(%zu sites, collide %.3f -> %.3f)\n",
+                             i, poff, sites.size(), c0, c1);
+            }
+        }
+        if (pages != 0) {
+            ++rewritten;
+        }
+    }
+    return rewritten;
+}
 
 std::vector<std::uint8_t> flatten_image_pe(const std::vector<std::uint8_t>& image) {
     std::vector<std::uint8_t> mem = image;
