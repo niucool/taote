@@ -11200,3 +11200,17 @@ Everything/HashCalc, so "prefer the earliest candidate" would trade rows. The di
 rows offer for free - whether the candidate lies in the section the stub DECODED (differs from the packed file) versus
 stub code, per row, which is exactly the feature that was weak across the mixed 53-row pool but may separate within a
 family.
+
+Two more discriminators tested and eliminated on the same rows, both by the same pattern (the feature is universal, so
+it cannot rank):
+
+- **Decoded-vs-packed page**: for every WinUpack row the truth page differs from the packed file AND so does the claim's
+  page, and 32/32, 54/54, 162/162, 228/228, 64/64, 351/351 of the candidates sit in "decoded" pages. The whole image is
+  decoded by the time we pick, so the feature carries no information here (it was already weak across the mixed pool).
+- **Claims outside the image**: 30 corpus rows report an OEP claim outside [0x400000, 0x10000000) (Exe32pack 3,
+  Alienyze/EnigmaVB/Eronana/TELock/Themida 2 each), but only 5 of those rows are still missing - 25 are already all-three,
+  so gating on it would not move rows either. It remains a correctness smell (e.g. `winupack_mtinst` claiming 0x1003be0 in
+  the stub-DLL range), not a lever.
+
+Net for the round: WinUpack's picker pool is real (truth present, ranks 7-120) but every static feature available from the
+artifact alone has now been measured inert, so it needs the same runtime information the reference uses. No code change.
