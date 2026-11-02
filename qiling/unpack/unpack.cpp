@@ -4013,9 +4013,14 @@ UnpackResult Unpacker::finalize(Qiling& ql) {
                 // the reference's degenerate-path contract (Exe32pack): when the
                 // header cannot be rebuilt, the dump IS the artifact
                 const auto exe_path = fs::path(opts_.out_dir) / (stem + "_unpacked.exe");
+                // A memory image is flat (file offset == RVA), but the section table it
+                // carries still describes the packed file, so written verbatim the entry
+                // maps nowhere (corpus r105: alienyze_tinytask.exe "entry-not-mapped").
+                const auto flat = flatten_image_pe(in.image);
+                const auto& bytes = flat.empty() ? in.image : flat;
                 std::ofstream out(exe_path, std::ios::binary | std::ios::trunc);
-                out.write(reinterpret_cast<const char*>(in.image.data()),
-                          static_cast<std::streamsize>(in.image.size()));
+                out.write(reinterpret_cast<const char*>(bytes.data()),
+                          static_cast<std::streamsize>(bytes.size()));
                 res.rebuilt = static_cast<bool>(out);
                 res.outfile = exe_path.string();
                 if (res.reason.empty()) {
@@ -4092,6 +4097,69 @@ struct SecRec {
 };
 
 }  // namespace
+
+std::vector<std::uint8_t> flatten_image_pe(const std::vector<std::uint8_t>& image) {
+    std::vector<std::uint8_t> mem = image;
+    if (mem.size() < 0x200 || mem[0] != 'M' || mem[1] != 'Z') {
+        return {};
+    }
+    const std::size_t e_lfanew = rd32(mem, 0x3c);
+    if (e_lfanew + 0x18 > mem.size() || mem[e_lfanew] != 'P' || mem[e_lfanew + 1] != 'E') {
+        return {};
+    }
+    const std::size_t coff = e_lfanew + 4;
+    const std::size_t opt_off = coff + 20;
+    const std::uint16_t opt_size = rd16(mem, coff + 16);
+    if (opt_off + opt_size > mem.size()) {
+        return {};
+    }
+    const std::uint16_t magic = rd16(mem, opt_off);
+    if (magic != 0x10b && magic != 0x20b) {
+        return {};
+    }
+    const std::uint32_t file_align = rd32(mem, opt_off + 0x24) ? rd32(mem, opt_off + 0x24) : 0x200;
+    const std::uint32_t n_sec = rd16(mem, coff + 2);
+    if (n_sec == 0 || n_sec > 96) {
+        return {};
+    }
+    const std::size_t sec_table = opt_off + opt_size;
+    std::uint32_t first_va = 0;
+    int changed = 0;
+    for (std::uint32_t i = 0; i < n_sec; ++i) {
+        const std::size_t e = sec_table + static_cast<std::size_t>(i) * 40;
+        if (e + 40 > mem.size()) {
+            return {};
+        }
+        const std::uint32_t vsize = rd32(mem, e + 8);
+        const std::uint32_t va = rd32(mem, e + 12);
+        const std::uint32_t rsz = rd32(mem, e + 16);
+        const std::uint32_t rpt = rd32(mem, e + 20);
+        if (i == 0) {
+            first_va = va;
+        }
+        const std::uint32_t content = vsize != 0 ? vsize : rsz;
+        const std::uint32_t flat_rsz = align_up(content, file_align);
+        const std::uint64_t avail = va < mem.size() ? mem.size() - va : 0;
+        // never claim bytes past EOF: the artifact must stay a well-formed PE
+        if (flat_rsz == 0 || flat_rsz > avail) {
+            continue;
+        }
+        if (rpt != va || rsz != flat_rsz) {
+            wr32(mem, e + 16, flat_rsz);
+            wr32(mem, e + 20, va);
+            ++changed;
+        }
+    }
+    if (changed == 0) {
+        return {};
+    }
+    const std::uint32_t soh =
+        align_up(static_cast<std::uint32_t>(std::min<std::size_t>(first_va, 0x10000)), file_align);
+    if (soh != 0) {
+        wr32(mem, opt_off + 0x3c, soh);  // SizeOfHeaders, same offset in PE32 and PE32+
+    }
+    return mem;
+}
 
 std::vector<std::uint8_t> rebuild_pe(const RebuildInput& in) {
     std::vector<std::uint8_t> mem = in.image;

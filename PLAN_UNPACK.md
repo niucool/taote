@@ -11711,3 +11711,31 @@ arithmetically, so a "find the bad opcode" differential would be looking in the 
 `petite_rrdec` is therefore a GOOD row (its 0x1c00 tail is atypical); the family's divergence is per-row and
 stream-dependent, and it is uniformly present. That retires the hope that some PEtite rows are picker-bound: the
 whole pool is decode-bound, exactly as 0.17ii concluded, and the OEP work cannot start until `.text` is exact.
+
+#### 0.17ip shipped: the verbatim-dump fallback now emits a FLAT section table (valid PE 2676 -> 2677)
+
+The only remaining artifact defect that was not decode work. `rebuild_pe` has a documented fallback for images whose
+header cannot be laid out (the Exe32pack "degenerate" contract): write the loaded image verbatim. But a loaded image
+is FLAT - its bytes live at their RVAs - while the section table it carries still describes the PACKED file, whose
+`PointerToRawData` points into the compressed data. Written verbatim, such an artifact parses but its entry maps
+nowhere, and the grader reports `entry-not-mapped` rather than the truth: the dump is fine, the header is lying.
+
+Corpus r105 had exactly ONE such row (`alienyze_tinytask.exe`; `grep -l "rebuild failed" *.log` = 1 of 2678), so this
+is a small, safe fix rather than a family seam: `flatten_image_pe` (unpack.hpp/unpack.cpp) rewrites every section's
+`SizeOfRawData = align_up(vsize ? vsize : rsz, FileAlignment)` and `PointerToRawData = VirtualAddress`, sets
+`SizeOfHeaders` to the aligned first-section RVA, refuses to claim bytes past EOF, and returns `{}` (leaving the old
+behaviour) when the header is unusable or already flat. It only runs on the fallback path.
+
+Measured, corpus r106 (2678 rows, 4 workers, 85 s budget, 120 s wall):
+
+    all-three 2146 -> 2146      valid PE 2676 -> 2677      OEP 2180 -> 2180      imports 2223 -> 2223
+    valid-PE flips: 1, and it is the intended row: alienyze_tinytask.exe False -> True
+    raw run read 2144 with 2 losses (nspack_Bginfo, rlpack_geek, both dur 86); re-run solo they are all-three at
+    45.5 s and 68.8 s, so the referee is 0 gains / 0 losses.
+
+The artifact for that row now parses sanely (`pe_is_sane` -> `''`, `.alien` raw=0xb000 covering the entry at 0x105e0);
+its OEP and imports are still wrong because the row takes `stages=0 reason=fallback_guess imports=0`, i.e. the stub
+never ran - that is decode work, tracked with PEtite, and the row is managed (.NET) so it cannot be all-three anyway.
+
+`UNPACK_REPORT.md` was regenerated from r106 and the two contention rows patched in, so the shipped report matches the
+committed harness artifacts.

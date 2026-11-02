@@ -333,6 +333,12 @@ struct RebuildInput {
 // Returns the file bytes (empty when the dump is not a PE). Never throws into a
 // caller that catches QlErrorBase: malformed input yields an empty result.
 std::vector<std::uint8_t> rebuild_pe(const RebuildInput& in);
+// The verbatim-dump fallback (rebuild_pe cannot lay the image out) writes the LOADED
+// IMAGE, whose section table still describes the PACKED file - so PointerToRawData
+// points into the compressed file and the entry maps nowhere. A memory image is flat
+// by construction, so this rewrites each section's raw fields to file offset == RVA.
+// Returns {} when the header is unusable or already flat.
+std::vector<std::uint8_t> flatten_image_pe(const std::vector<std::uint8_t>& image);
 
 }  // namespace unpack
 }  // namespace qiling
