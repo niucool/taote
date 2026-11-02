@@ -54,6 +54,17 @@ public:
     // try/emu_error discipline)
     void run() override;
 
+    // PEtite's stub installs a frame, protects its PE header read-only, and then runs an
+    // EXCEPTION-DRIVEN decryptor: the handler walks the captured SEH chain to recover its
+    // own saved state (mov ebx,[ebx]; lea esp,[ebx-0x26]; mov ebp,[ebx+8]). With the
+    // loader's empty chain (fs:[0] = 0) that pivot lands at 0xffffffda and the second
+    // stage dies on a null read - measured on petite_rrdec: mov ebp,[ebx+8] with ebx=0.
+    // The reference (../pegasus/src/windows/win32.cpp, "... SE_SEH_SEED") seeds a
+    // SELF-REFERENTIAL frame so the per-trap pivot lands on the walker's own pushal area,
+    // with [Q-4] = the image base (the decryptor's table records are image RVAs).
+    // Env-gated: TAOTE_SEH_SEED=1. Best effort: never throws into the caller.
+    bool seh_seed_petite(std::uint64_t image_base);
+
     // windows.py load: the GDT/segment setup + the code hook that dispatches
     // the registered winapi surface
     void load();
@@ -330,6 +341,7 @@ private:
     void seh_build_context(std::uint64_t dest) const;
     void seh_load_context();
     bool seh_map_sentinel();
+
 
     std::map<WinCc, std::unique_ptr<QlFunctionCall>> fcall_table_;
     std::unique_ptr<QlMemoryHeap> heap_storage_;

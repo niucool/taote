@@ -1109,6 +1109,11 @@ void Unpacker::install(Qiling& ql) {
     // identical-fault repeat guard bounds a handler that fixes nothing.
     try {
         ql.os<os::windows::QlOsWindows>().set_seh_continue_on_exhausted(true);
+        // PEtite's exception-driven decryptor walks the SEH chain it captured; the
+        // loader's empty chain makes that pivot deref null (mov ebp,[ebx+8], ebx=0).
+        if (opts_.family == "PEtite") {
+            ql.os<os::windows::QlOsWindows>().seh_seed_petite(base_);
+        }
     } catch (...) {
     }
 

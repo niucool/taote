@@ -12104,3 +12104,43 @@ which reproduces the reference's own warning that enabling the fault dispatch al
 ships DEFAULT OFF as a measurement harness (the project's established pattern), the shipped baseline is unchanged,
 and the next unit is the link that turns this into a win: the SEH chain seed (self-referential frame, context cell =
 image base) plus the int1/TF storm, per 0.17iy steps (b) and (c), then the transition trail for the OEP.
+
+#### 0.17ja the SEH seed makes PEtite's payload RUN: family imports 36 -> 66
+
+Ported steps (a)+(c) of 0.17iy behind two gates and measured them together.
+
+`QlOsWindows::seh_seed_petite(image_base)` (windows.hpp/seh.cpp, `TAOTE_SEH_SEED=1`) installs the reference's
+frame at `[0x6ffc0000, 0x70000000)`: `H = 0x6ffe0000` = `mov eax,1; ret 0x10`, `F = 0x6ffe0100` with
+**Next = F (self-referential)**, `Handler = H`, `[F+8] = Q`, the pivot slot `[F-0x26]` = the STUB SECTION base
+(derived by parsing the guest image's own header for the section holding AddressOfEntryPoint - 0x417000 here),
+a second frame at `F+0x60` ending the chain, `[Q-4] = image base` written LAST (the `F2-0x52` zero overlaps that
+cell's upper half - the reference's write-order finding), and finally `fs:[0] = F`.
+`TAOTE_TF_TRAPS` makes the TF single-step cap tunable; it was hard-coded at 4096 and PEtite's decryptor needs far
+more, which is exactly why the storm looked like a derailment.
+
+Measured on petite_rrdec (prot + seed + cap):
+
+    [seh-seed] fs:[0]=0x6ffe0100 H=0x6ffe0000 pivot=0x6ffe00da [Q-4]=0x400000 stub=0x417000
+    pc trace: 0x403f46 0x403f49 0x4010db 0x4010dd 0x40c8f8 0x4010e2 0x4010e5 0x40ca70 ...
+    (previously: 0x417217 -> 0x40d07c -> read fault at 0x40d0db with ebx=0, esp=0xffffffda)
+
+i.e. the exception-driven decryptor now completes, the payload EXECUTES, and `0x401160` (the true entry) is reached.
+
+Family A/B (73 PEtite rows, 4 workers):
+
+    control (all gates off)      : n=73 PE=73 OEP=36 IMP=36 ALL=30   <- identical to r106, code inert by default
+    TAOTE_PROT_ENFORCE + SEH_SEED + TF_TRAPS=40000:
+                                   n=73 PE=73 OEP=26 IMP=**66** ALL=26
+    code_sim: 43 rows improved, 0 worse; ALL gains 2 (diagtrackrunner, iecleanup), losses 6
+        (PEview, ctrl2cap, efsdump, gsd, ldmdump, pagedfrg)
+
+The import effect is the largest single move this session: **36 -> 66 rows importing correctly**, because a payload
+that runs resolves its imports instead of leaving the stub's table. The OEP count DROPS (36 -> 26) for the reason the
+reference documents: with the payload running, the terminal prologue scan latches MID-DECODE `.text` entries
+("tinytask's e8e9 coincidence, gsd's non-boundary C1, 7za's boundary-passing C1"). That is precisely what the
+EP-exit trail was invented to stop, and it is the next (and last) piece: taote records section transitions only
+under the `TAOTE_SEC_TRANS` diagnostic, so the deliverable is a real `sec_trans_hist_` + `sec_last_write_insn_`
+walked backward with the prologue-shape gate, exactly as 0.17ix measured live in the reference.
+
+Both gates stay DEFAULT OFF (the code returns early without them), so the shipped baseline and the corpus are
+unchanged; this is the measured path to the family's remaining headroom.

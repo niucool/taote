@@ -1057,6 +1057,16 @@ void QlOsWindows::run() {
     // a cap on the synthetic TF traps above, so a guest that arms TF and never
     // clears it cannot spin the run loop forever
     unsigned tf_traps = 0;
+    // the cap exists so a guest that arms TF and never clears it cannot spin forever, but
+    // PEtite's exception-driven decryptor legitimately needs far more than the 4096 this
+    // used to allow (the reference measures ~15,600 iterations on its own census).
+    unsigned tf_cap = 4096;
+    if (const char* tfc = std::getenv("TAOTE_TF_TRAPS")) {
+        const long v = std::strtol(tfc, nullptr, 0);
+        if (v > 0 && v < 2000000) {
+            tf_cap = static_cast<unsigned>(v);
+        }
+    }
     while (true) {
         try {
             ql_->emu_start(begin, exit_point, ql_->timeout(), ql_->count());
@@ -1076,21 +1086,21 @@ void QlOsWindows::run() {
                 // run stops on 0x418def, whose first byte is 0xf1, with no
                 // [intr] line).
                 bool icebp = false;
-                if (tf_traps < 4096) {
+                if (tf_traps < tf_cap) {
                     try {
                         const auto b = ql_->mem().read(ql_->arch().regs().arch_pc(), 1);
                         icebp = b.size() == 1 && b[0] == 0xf1;
                     } catch (...) {
                     }
                 }
-                if (icebp && seh_on_interrupt(1) && tf_traps < 4096) {
+                if (icebp && seh_on_interrupt(1) && tf_traps < tf_cap) {
                     ++tf_traps;
                     apply_continue_context();
                     begin = seh_retarget_;
                     seh_retarget_ = 0;
                     continue;
                 }
-                if ((ql_->arch().regs().read("eflags") & 0x100ull) != 0 && tf_traps < 4096) {
+                if ((ql_->arch().regs().read("eflags") & 0x100ull) != 0 && tf_traps < tf_cap) {
                     ++tf_traps;
                     if (seh_on_interrupt(1)) {
                         apply_continue_context();

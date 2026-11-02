@@ -577,6 +577,104 @@ bool QlOsWindows::seh_write_prot_trampoline(uc_engine*, uc_mem_type /*type*/, st
     }
 }
 
+bool QlOsWindows::seh_seed_petite(std::uint64_t image_base) {
+    if (bits_ != 32 || image_base == 0) {
+        return false;
+    }
+    if (std::getenv("TAOTE_SEH_SEED") == nullptr) {
+        return false;  // opt-in while it is being measured
+    }
+    try {
+        // the stub section = the section holding the image's own AddressOfEntryPoint
+        std::uint64_t stub_base = 0;
+        try {
+            const auto hdr = ql_->mem().read(image_base, 0x400);
+            if (hdr.size() < 0x40) {
+                return false;
+            }
+            const auto w32 = [&hdr](std::size_t o) {
+                return static_cast<std::uint32_t>(hdr[o]) | (static_cast<std::uint32_t>(hdr[o + 1]) << 8) |
+                       (static_cast<std::uint32_t>(hdr[o + 2]) << 16) |
+                       (static_cast<std::uint32_t>(hdr[o + 3]) << 24);
+            };
+            const auto w16 = [&hdr](std::size_t o) {
+                return static_cast<std::uint16_t>(hdr[o] | (hdr[o + 1] << 8));
+            };
+            const std::size_t e = w32(0x3c);
+            const std::size_t coff = e + 4;
+            const std::size_t opt = coff + 20;
+            const std::size_t optsz = w16(coff + 16);
+            const std::uint32_t ep = w32(opt + 0x10);
+            const std::uint32_t nsec = w16(coff + 2);
+            if (e + 0x18 <= hdr.size() && nsec > 0 && nsec < 96 && opt + optsz + 40ull * nsec <= hdr.size()) {
+                const std::size_t st = opt + optsz;
+                for (std::uint32_t i = 0; i < nsec; ++i) {
+                    const std::size_t so = st + static_cast<std::size_t>(i) * 40;
+                    const std::uint32_t vs = w32(so + 8);
+                    const std::uint32_t va = w32(so + 12);
+                    if (ep >= va && ep < va + (vs ? vs : 0x1000)) {
+                        stub_base = image_base + va;
+                        break;
+                    }
+                }
+            }
+        } catch (...) {
+        }
+        const std::uint64_t seed_lo = 0x6ffc0000ULL;
+        const std::uint64_t H = 0x6ffe0000ULL;
+        const std::uint64_t F = 0x6ffe0100ULL;
+        const std::uint64_t Q = 0x6ffe0110ULL;
+        const std::uint64_t PIVOT = F - 0x26;
+        const std::uint64_t F2 = F + 0x60;
+        // the page may already exist (seh_map_sentinel), so map only if needed
+        try {
+            ql_->mem().read(seed_lo, 4);
+        } catch (...) {
+            ql_->mem().map(seed_lo, 0x40000, UC_PROT_ALL, "emu.seh_seed");
+        }
+        const auto wr32 = [this](std::uint64_t a, std::uint32_t v) {
+            ql_->mem().write(a, std::vector<std::uint8_t>{static_cast<std::uint8_t>(v & 0xff),
+                                                         static_cast<std::uint8_t>((v >> 8) & 0xff),
+                                                         static_cast<std::uint8_t>((v >> 16) & 0xff),
+                                                         static_cast<std::uint8_t>((v >> 24) & 0xff)});
+        };
+        const std::uint8_t hcode[8] = {0xB8, 0x01, 0x00, 0x00, 0x00, 0xC2, 0x10, 0x00};
+        ql_->mem().write(H, std::vector<std::uint8_t>(hcode, hcode + sizeof hcode));
+        // F.Next = F (self-referential): the per-trap handler re-derives its popal slot as
+        // [[fs:[0]]]-0x52, which must land on the walker's own pushal area.
+        wr32(F, static_cast<std::uint32_t>(F));
+        wr32(F + 4, static_cast<std::uint32_t>(H));
+        wr32(F + 8, static_cast<std::uint32_t>(Q));
+        if (stub_base != 0) {
+            wr32(PIVOT, static_cast<std::uint32_t>(stub_base));  // mov edi,[esp]; add edi,0x102
+        }
+        wr32(F2, 0xFFFFFFFFu);
+        wr32(F2 + 4, static_cast<std::uint32_t>(H));
+        wr32(F2 - 0x52, 0);
+        // ORDER MATTERS: the F2-0x52 zero starts two bytes into the [Q-4] cell.
+        wr32(Q - 4, static_cast<std::uint32_t>(image_base));
+        // install F as fs:[0]: the TEB is the fs segment's backing, and both the guest and
+        // the engine's chain walk read the same cell.
+        std::uint64_t fs_addr = 0;
+        try {
+            fs_addr = ql_->arch().regs().read("fsbase");
+        } catch (...) {
+        }
+        if (fs_addr != 0) {
+            wr32(fs_addr, static_cast<std::uint32_t>(F));
+        }
+        if (std::getenv("TAOTE_RUNDBG") != nullptr) {
+            std::fprintf(stderr, "[seh-seed] fs:[0]=0x%llx H=0x%llx pivot=0x%llx [Q-4]=0x%llx stub=0x%llx\n",
+                         static_cast<unsigned long long>(F), static_cast<unsigned long long>(H),
+                         static_cast<unsigned long long>(PIVOT), static_cast<unsigned long long>(image_base),
+                         static_cast<unsigned long long>(stub_base));
+        }
+        return true;
+    } catch (...) {
+        return false;  // a seed that cannot be installed must not kill the run
+    }
+}
+
 bool QlOsWindows::seh_on_write_prot(std::uint64_t address, std::uint32_t size, std::uint64_t value) {
     if (bits_ != 32 || !seh_dispatch_enabled_ || !loader_done()) {
         return false;
