@@ -11838,3 +11838,33 @@ corpus was not re-run: every row the code can touch is in the 73-row arm above, 
 New test pins it: `UnpackCompat.PetiteSelfRelativeTransformIsUndoneOnlyWhenPrestaged` - a synthetic image with 24
 E8 sites that all target one address once undone, in both pre-transform and already-correct form (the second must be
 byte-unchanged), plus junk and tiny-image inputs (never crash, never rewrite). Suite 607/607.
+
+#### 0.17is does exact `.text` unlock PEtite's OEP? No - the stub never hands off, because block 6 fails
+
+Followed 0.17ir straight away: with `.text` byte-exact on the 43 pre-transform rows, the ladder sees real code for
+the first time. Measured the whole family with `TAOTE_UNPACK_DEBUG=1` (73 rows, 4 workers) and parsed every ladder
+report:
+
+    rows emitting a passB line        54 of 73
+    rows with passB hits > 0          17     (before 0.17ir: 0 - the ladder found nothing at all)
+    pick already correct              17 of the 54 non-managed rows
+    truth == first hit                 8
+    truth == last hit                  6, and on 4 rows that is NOT what the ladder picks
+        (petite_7z 0x40ebc5 vs claim 0x40e924; petite_7za-family 7zFM/7zFMn; petite_AccessEnum 0x407a98 vs 0x403a53)
+
+So exact `.text` does put the truth into the candidate list on a handful of rows, but the obvious ranking rules are
+all dead ends: "take the last hit" is **+4 / -15** over the 54 rows (it breaks FastHash_kr, pssuspend, PEview,
+adrestore, ldmdump, ctrl2cap and nine more that the current pick gets right), and on 41 rows neither the first nor
+the last hit is the truth at all. This is the same shape the JDPack census found (truth present, no ordering rule),
+so the picker lane stays closed.
+
+**The real blocker is upstream.** `exec PAYLOAD` traces show the emulation only ever executes the STUB
+(0x41710b -> 0x417137 -> 0x417175 -> ... on rrdec, 0x4181xx on 7z); not one execution lands inside the decoded
+`.text`. The payload is decoded correctly and then never runs, because the stub decides the image is corrupt: block 6
+(the original headers, dst 0x400000, size 0x6a4) returns 0 from the chunk-type dispatch at 0x4172a1 -> 0x4181c7
+(0.17im). That is why there is no runtime hand-off to read - the PEtite equivalent of the WinUpack parked slot does
+not exist until block 6 decodes.
+
+So the PEtite order is now unambiguous: (1) block 6's invalid chunk type, (2) then a runtime hand-off becomes
+observable and the OEP can be read instead of guessed, (3) the 3-4 byte end-of-section copy overrun is cosmetic and
+last. The 17 rows that already pick the truth are unaffected by any of it.
