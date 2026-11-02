@@ -10771,3 +10771,21 @@ Family-gated to PEtite, so the blast radius is its 73 rows.
 
 This also explains round 207's picker-bucket observation one level deeper: the reference is right on those rows because
 its runs do not stop at the first hop, not because it ranks frames differently.
+
+#### 0.17hn Round 216b: PEtite's run DOES continue - inside the emulated stub module, never back to image code
+
+The last check before writing a non-terminal-hop change: does PEtite's run actually stop at the hop? No. `petite_rrdec.exe`
+with `TAOTE_SEC_TRANS=1 TAOTE_UNPACK_DEBUG=1` runs to **200000+ section-exec fires** in 0.40 s and ends at
+`final pc=0x100211e0` - an address inside the emulated stub module (0x10000000+), not in any image section - with 23864
+writes and still exactly ONE recorded transition (the stub's own section entry).
+
+So the hop is not what ends the run, and the missing transition history is not a hook-coverage bug: after the decode the
+stub hands control to its own resolver/loader stubs and spends the whole run there, never re-entering image code in a
+way that would produce a section transition. That is the same shape as RLPack's round-106 diagnosis (emulation depth,
+not attribution): the reference's EP-exit walk sees a rich history because ITS run keeps executing image code.
+
+Consequence for the work order: PEtite's 41 clean-exit rows are NOT reachable by porting the picker stages (measured
+2/43 and 0/12 and 0/1 above). They need the run to progress past the stub's loader stubs, which is the emulation-depth
+problem RLPack already has - i.e. a shared root cause across two families, worth attacking once rather than twice.
+TELock (113 rows) is the other clean-exit pool and has a byte-exact oracle (the round-213 CRC), so it is the better next
+target: an offline-checkable decode, no picker involved.
