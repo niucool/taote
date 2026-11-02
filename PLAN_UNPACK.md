@@ -10852,3 +10852,25 @@ therefore a differential: decode one PEtite block offline (the format is reachab
 [ebp-4], bit reservoir at [ebp+8], probability tables at ebp-0xb658/-0xa240/-0xa23c, worker 0x418575), compare against
 taote's partial output, and name the first diverging byte and the instruction that produced it - then check Unicorn's
 semantics for that instruction. One corner case there is worth up to 154 rows, against the 12-row picker bucket.
+
+#### 0.17hq Round 219: the PEtite divergence is in the decode's match copies (4790 bytes, 1672 near-singleton runs)
+
+Captured the decoded `.text` at the moment the stub gives up (`TAOTE_APIDUMP=MessageBoxA:0x401000:0x12000`) and diffed it
+against the not-packed original's `.text` (0xbb18 bytes):
+
+    differing bytes 4790 (9.9%)
+    runs           1672, nearly all of length 1
+    first diverg.  0x401054 - the FIRST byte of a `e8 rel32` displacement: orig `e8 10 ba 00 00` vs ours `e8 63 ba 00 00`
+
+So the decode is ~90% right, and what is wrong is a scattering of single bytes, concentrated in call displacements
+(`0x40105c` `e8 20 a6 00 00` vs `e8 7b a6 00 00`, `0x401061`, `0x401093`, `0x4010a1`, `0x4010ae`, ...), with a DIFFERENT
+delta at each site (0x53, 0x5b, ...). None of our 6-byte sequences occurs verbatim anywhere in the original, so this is
+not "copied from the wrong offset by a constant" - i.e. not a plain off-by-N distance error. The shape matches a match
+copy whose DISTANCE is computed slightly wrong and then lands on the payload's highly self-similar code, which is why
+most bytes still match.
+
+That is the thing to fix, and it is byte-level: decode one block offline from the packed stream (format reachable from
+0x417214, worker 0x418575, 0x8000 window, probability tables at ebp-0xb658/-0xa240/-0xa23c) and diff per output byte
+against the original's `.text`, then name the instruction that computed the first wrong distance and check Unicorn's
+semantics for it. TELock's CRC oracle (needed 0x311634a8) gives the same kind of byte-exact target for the other 113
+rows, so the same differential harness serves both families.
