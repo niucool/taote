@@ -10589,3 +10589,39 @@ whole budget first - the opposite of the read case, where the stub skipped a ret
 Rule (bb): the read survival and the fetch survival are not the same mechanism even though the reference reports both
 as `[null-pc]` - a survived READ feeds a value back to the stub (it proceeds), while a survived FETCH hands control to
 zero bytes (it wanders). Judge a "survive the fault" change on the corpus MEAN duration, not only on the row count.
+
+#### 0.17hh Round 212: TELock's check is a CRC-32 over .text with a non-standard variant; the picker bucket is down to 12
+
+**TELock (113 rows end with NO error at all** - the clean `MessageBoxA -> ExitProcess` exit). Executed the round-206
+probe:
+
+* at `0x419047` (`sub eax,[ebp+0x40d382]`, the instruction whose ZF decides) the registers are
+  `eax=0x23884536 ecx=0 ebx=0 edx=0xedb88320 esi=0x409a00 edi=0xc95e ebp=0xc95e` - `edx` is the **reversed CRC-32
+  polynomial** and `esi=0x409a00` is exactly `.text`'s end (0x401000 + 0x8a00), so the check is a CRC-32 of `.text`;
+* the three slots the compare uses are `[edi+0x40d38e]=0xcee9cb57`, `[ebp+0x40d3fe]=0x3ce4dca4`,
+  `[ebp+0x40d382]=0xffff143a`, and the compare wants `eax=0x311634a8` to pass;
+* **the CRC input is not corrupted**: dumping `.text` at the run's first API *and* at `CreateMutexA` (the last call
+  before the box) gives bytes **identical to the packed file** (`crc32 = 0xa221c838` both times); it is only after the
+  box that the stub's decode rewrites the section (35181 of 35328 bytes differ at `ExitProcess`);
+* no standard zlib CRC-32 over any plausible range of the packed file (whole file, headers+text, .text, sections, .text
+  to EOF, and their complements) equals the computed `0x23884536` or the needed `0x311634a8`.
+
+So TELock's verdict is decided by a CRC variant whose parameters live in the stub's own (encrypted) data, over a
+mapping that is demonstrably correct. Next probe: find the CRC loop's init/range by watching its reads (the loop's
+cursor is `esi`, ending at 0x409a00), then reproduce its arithmetic offline.
+
+**Picker bucket: 16 -> 12** on r102, i.e. the shipped null-read survival took four of them (neolite_Diskmon, Hasher,
+md5summer + one). What is left:
+
+| family | rows | truth | claim |
+|---|---|---|---|
+| JDPack 4 | jdpack_7z / 7za / MxdwGc / PEview | 0xebc5 / 0x55641 / 0x8e08 / 0x1000 | 0xe924 / 0x3f1d9 / 0x10890 / 0x155f9 |
+| PEtite 3 | petite_HDDScan / HashCalc / tinytask | 0x483d20 / 0x11e58 / 0x454c | 0x7bb11e / 0x62bf8 / 0x1000 |
+| WinUpack 3 | FastHash_kr / HashCalc / PEview | 0x1dffa / 0x11e58 / 0x1000 | 0x20627 / 0x5a9c2 / 0x1d5a7 |
+| Neolite 1 | neolite_HDDScan (dur 86) | 0x483d20 | 0x7bb11e |
+| PECompact 1 | pecompact_Everything | 0x145f0d | 0x4bf150 |
+
+Two facts worth keeping: `petite_HDDScan`/`neolite_HDDScan` (the same program packed twice) and
+`petite_HashCalc`/`winupack_HashCalc` (same again) produce *identical* claims across packers, so the claim comes from
+the program, not the packer - and the reference's answers on those rows are its own section hops, which taote never
+takes because its run ends first.
