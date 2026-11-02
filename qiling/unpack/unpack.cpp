@@ -1124,6 +1124,47 @@ void Unpacker::install(Qiling& ql) {
     } catch (...) {
     }
 
+    // TELock's stub self-check (the reference's F68, telock_unpacker.cpp:169-235): a CRC32
+    // over the packed .text raw span compared against constants stored in the stub section.
+    // A whole generation of TELock (the NirSoft/adwcleaner class) carries constants that do
+    // not match its own bytes, so the failing 6-byte `jne` at stub_start+0x104e takes the
+    // abort branch (+0x127b) and the decompressor at +0x1054 never runs - measured here on
+    // telock_7z.exe: crc(0x401000,0x8a00)=0x23884536 at 0x419047 mismatches, the stub shows
+    // its MessageBoxA reporter (last pc 0x4192e3) and exits, so imports stays 0 on all 116
+    // rows (0.17je). Redirect the PC past that jne the first time it executes. Revisions
+    // whose check passes never take the branch, so this cannot change them.
+    // DEFAULT OFF: measured on its own it moves no row (family n=116 PE=116 OEP 1 -> 0 IMP 0 ALL 0, 0 gains,
+    // 0 losses) - it is a precondition, not a fix (the standing rule for a reference port that is not a win yet).
+    if (opts_.family == "TELock" && !is_64_ && std::getenv("TAOTE_TLOCK_CRCBYPASS") != nullptr) {
+        std::uint64_t stub_start = 0;
+        for (const auto& ps : sections_) {
+            if (packed_ep_va_ >= ps.start && packed_ep_va_ < ps.end) {
+                stub_start = ps.start;
+                break;
+            }
+        }
+        if (stub_start != 0) {
+            const std::uint64_t site = stub_start + 0x104e;
+            auto crc_hook = std::make_shared<HookRet>(
+                ql.hook_code([this, site](std::uint64_t addr, std::uint32_t /*size*/) -> int {
+                    try {
+                        ql_->arch().regs().set_arch_pc(addr + 6);
+                        if (std::getenv("TAOTE_UNPACK_DEBUG") != nullptr) {
+                            std::fprintf(stderr,
+                                         "[unpack] telock: self-check jne at 0x%llx skipped -> 0x%llx\n",
+                                         static_cast<unsigned long long>(addr),
+                                         static_cast<unsigned long long>(addr + 6));
+                        }
+                    } catch (...) {
+                    }
+                    return 0;
+                }, site, site));
+            if (crc_hook->obj() != nullptr) {
+                hooks_.push_back(std::move(crc_hook));
+            }
+        }
+    }
+
     // The invalid-instruction dispatch (the reference's install_invalid_insn_,
     // unpacker.cpp:4773-4811): TELock's self-modifying ladder executes 0xf1
     // (ICEBP) and the undefined `lea reg,reg` (ModRM mod==3) form as exception

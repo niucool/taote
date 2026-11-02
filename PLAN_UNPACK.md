@@ -12283,3 +12283,42 @@ offline: model it from the seeds and see whether it reproduces pegasus's decode.
 One incidental engine wart found on the way (not a TELock cause): `host_to_virtual_path` normalizes the body but not
 the anchor, so the guest sees `C:/Windows\telock_7z.exe` - a forward slash in the drive anchor - even though the
 default `PATH.current_dir` is `C:\Windows\system32`.
+
+#### 0.17jf TELock: ported the reference's self-check bypass (F68) - gated off, and what it unlocks
+
+`../pegasus/src/unpacker/packers/telock_unpacker.cpp:169-235` (F68) states the mechanism outright: **TELock's
+stub self-check is a CRC32 over the packed .text raw span compared against constants stored in the stub section, and
+a whole generation of TELock (the NirSoft/adwcleaner class) carries constants that do not match its own bytes**, so
+the failing six-byte `jne` at `stub_start + 0x104e` takes the abort branch (`+0x127b`) and the decompressor at
+`+0x1054` never runs. The reference redirects the PC past that `jne` the first time it executes ("revisions whose
+check passes never take the branch, so removing it cannot change them") and gates it with
+`SE_NO_TELOCK_CRCBYPASS`.
+
+That is exactly 0.17je's measurement: on telock_7z.exe the CRC at 0x419047 mismatches and the stub reports and
+exits - so **taote's decode was never wrong, the stub aborts by design on this generation.** (This also retracts
+0.17je's "the key stream is wrong from byte 0": .text at that point is simply the *undecoded* packed span, which is
+what the 99.6% difference from the reference's decode is.)
+
+Ported: `Unpacker::install` now installs, family-scoped to TELock, a code hook at `stub_start + 0x104e` that sets the
+PC to `+0x1054`, where `stub_start` is the section containing the packed EP. Gated with `TAOTE_TLOCK_CRCBYPASS=1`:
+
+    gate OFF  oep=0x418037 stages=1 reason=section_hop imports=3     (baseline, bit-identical)
+    gate ON   ... GetModuleFileNameA -> CreateFileA -> ReadFile -> CloseHandle -> CreateMutexA
+              -> VirtualAlloc(0x8a10)/Free -> (0x1010)/Free -> (0xa10)/Free -> VirtualAlloc/Free
+              -> GetCurrentProcessId -> OpenProcess -> VirtualProtectEx
+              -> stops at 0x4196f1
+
+The three alloc/free triples are the reference's own sequence (0x8a10 = .text size + 0x10), so the bypass is
+correct: it puts the stub on the reference's path.
+
+**Family A/B (116 rows, 4 workers, 85 s, same binary): n=116 PE=116 OEP 1 -> 0 IMP 0 ALL 0, 0 gains / 0 losses.**
+So it ships DEFAULT OFF - it is a precondition, not a fix, and the standing rule applies.
+
+The next link, pinned exactly: `0x4196f1` is `8d c0` = `lea eax,eax` with ModRM mod==3, the real #UD the reference's
+roadmap names, and the stub installs its handler frame immediately before it (`sub eax,eax; add dword [esp],0x1d;
+push fs:[0]; mov fs:[0],esp; jmp +1` - the handler is a *return address* on the stack adjusted by 0x1d).
+`TAOTE_UNPACK_DEBUG=1` shows taote's invalid-instruction hook fires only at 0x419a08 (0xf1) and 0x4186a8 (0x8d),
+**never at 0x4196f1**: the run stops with the block entry at 0x4196f1 as the last pc and with no `emu_stop` and no
+error line, so the #UD is never delivered and the stub's SEH frame never runs. After the reference delivers that
+exception it logs exceptions at 0x4196F1/0x4197D9/0x419814, calls GetModuleHandleA, runs ~90 GetProcAddresses (its
+109 imports), and executes 8.57M instructions of 7z startup.
