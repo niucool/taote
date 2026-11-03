@@ -14314,3 +14314,50 @@ reference has its own byte.
 
 taote's own watch uses the same post-instruction convention (its pc is read from the arch state in the write hook), so the two
 pc columns are comparable as long as both are read as "instruction after the store" - which is how they are now documented.
+
+#### 0.17lj ROOT CAUSE FOUND: `[0x418118]` is a per-exception-kind COUNTER, and taote dispatches 0 of the reference's 4 single-steps
+
+Reading the reference's per-run write log with the corrected post-instruction-EIP convention (0.17li) and decoding taote's live
+stub bytes at the store settled it. Both engines run the SAME instructions here; the values differ:
+
+    ref  writes to 0x418118: 0xac 0x65 0x36 0xa3 0xa4 0x00 [0x01 0x02 0x03 0x04] 0x00
+    taote writes to 0x418118: 0xac 0x65 0x36 0xa3 0xa4 0x00 [             ] 0xfc
+
+The bracket is the divergence, and the code explains it exactly. From taote's live bytes:
+
+    0x418080  push fs:[0] ; mov fs:[0],esp        install the stub's own SEH frame
+    0x41808c  int3                                enters the stub's dispatcher once
+    0x4180a5  xor ebx,ebx ; 0x4180a7 div ebx      deliberate #DE
+    0x4180ba  mov al,[ebp+0x99]   (ebp=0x41807f)   READS the counter at 0x418118
+    0x4180c0  jmp 0x418161
+    --- the dispatcher ---
+    0x4180c5  mov eax,[esp+4] ; mov ecx,[esp+0xc] ; inc dword [ecx+0xb8]
+    0x4180d3  mov eax,[eax]                       ExceptionRecord->ExceptionCode
+    0x4180d5  cmp eax,0xC0000094 ; jne 0x418100   #DE  -> clears the context's dr fields
+    0x418100  cmp eax,0x80000004 ; je  0x418113   SINGLE STEP -> the counter path
+    0x418107  cmp eax,0x80000003 ; je  0x418120   breakpoint
+    0x418113  call 0x418119        (pushes 0x418118 - the byte is its own return address)
+    0x418119  pop eax             eax = 0x418118
+    0x41811a  inc byte [eax]      <-- increments the counter at 0x418118
+    0x418120  ... mov eax,[ecx+0xb4]              breakpoint path
+    0x418161  sub al,4            al = counter-4  (al was 4 -> 0)
+    0x418163  mov [ebx+0x99],cl
+
+So `[0x418118]` is not stub scratch data in any meaningful sense: it is a 4-byte value that is simultaneously part of the
+`call $+5` displacement (always 0 at rest) and a **counter of STATUS_SINGLE_STEP dispatches**, incremented by the handler at
+0x41811a and read back at 0x4180ba, then biased by `sub al,4`. With the true count of 4 the byte becomes 0; taote's count is 0,
+so `0 - 4 = 0xfc` - the exact byte that poisons the key fold at iteration 280 and makes edx 0x6d8fd7d6 instead of 0x12cdd33f.
+
+Measured dispatch counts in this stub's dispatcher (`pc=0x4180c5`):
+
+    reference: 6 entries  (1 x 0xC0000094 #DE, 4 x 0x80000004 single-step, 1 x 0x80000003 int3)
+    taote:     2 entries  (probe: eax=0x0 and eax=0x41898300 on entry; only one reaches 0x418100, once, with 0x80000003)
+
+Taote therefore never delivers STATUS_SINGLE_STEP to this handler even though it *does* see ICEBP (0xf1) under its
+`hook_insn_invalid` (0x419a08 is logged). So the single-step deliveries the reference makes four times are being routed
+elsewhere (or dropped) in taote, and that is the last link in the TELock chain.
+
+NEXT UNIT: instrument taote's insn_invalid path for 0xf1 - log `os.seh_retarget()` right after the 0x80000004 dispatch and the
+dispatcher address it resolves to - and compare with the four reference single-steps. If taote's retarget lands in a different
+SEH frame than 0x4180c5, the fix is in the dispatch target selection, not in TELock-specific code, which would make it a
+corpus-wide fidelity fix.
