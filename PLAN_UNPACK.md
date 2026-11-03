@@ -12747,3 +12747,35 @@ plus the 116-row TELock family = 232 rows, 4 workers, 85 s):
 | all-three | 2179 | 2177 | 2179 |
 
 So +1 OEP on the corpus (PEview), 0 all-three movement (that row still has no import table), 0 losses.
+
+#### 0.17jt TELock decode: the first divergence is at byte 0 of the key stream, and the toolchain cannot localise it further
+
+Final round of instrumentation on this family; the numbers are recorded so the next session starts from them and does
+not repeat the dead ends.
+
+**The entry state is canonical.** At the stub's packed entry `0x418000` taote holds `eax=ebx=ecx=edx=esi=edi=0`,
+`esp=ebp=0x1220000` - the Windows convention, and the same state the reference must start from. So nothing the loader
+leaves in the registers is the difference.
+
+**The stage-1 arithmetic, at byte 0.** `TAOTE_PROBE=0x418da8` (the `stos` of the multiply-PRNG decryptor) reads
+`eax=0x1016 ebx=0xac21fbc7 ecx=0x8a00 edx=0xd1b05d29 esi=0x401001 edi=0x401000`, `prev_pc=0x418da5` (`ror $0x7,%al`).
+The ciphertext there is `0x00` (the packed `.text` raw begins with 0xc00 zero bytes), and the observed output byte is
+`0x16`, so the pre-`xor dl` byte was `0x99` (`0x16 = ror7(0x99 ^ 0x29)`). The reference's plaintext byte is `0x33`,
+which with the same `dl` needs a pre-`xor` byte of `0xb0` (`rol7(0x33) ^ 0x29`), or with the same pre-`xor` byte
+needs `dl = 0x00`. Either way the two emulators agree on the *code path* and disagree on the PRNG state - a seed, not
+an arithmetic slip.
+
+**What is ruled out**, each for a measured reason: the entry registers (above); the input bytes (the 0x400-byte
+self-read is byte-identical to the packed file, and the `.text` ciphertext is zeros there anyway); the file itself
+(both read the same file); every fabricated API value (the mutex name is byte-identical between the two tools, and the
+reference decodes correctly with *its own* fabricated handles, so no handle can be part of the key); the loop algebra
+(three hand models failed, one of them fitted to taote's own output - 1 of 199 chained).
+
+**One dead end to record so it is not repeated:** comparing the two artifacts' *stub section* (6540 of 12288 bytes
+differ, from byte 0) proves nothing - the reference ran 8.5M instructions of the payload and its stub section is
+end-state, while taote derails early, so that difference is run progress, not the divergence.
+
+**Conclusion:** localising further needs a *memory dump from the reference at a common point* (e.g. pegasus's image at
+a named API, the way taote's `TAOTE_APIDUMP` does), or an instruction-level register diff between the two emulators.
+taote has both dump and probe machinery; pegasus has neither exposed. Until that exists, TELock's 92 import-bound rows
+are out of reach for this toolchain, and the OEP half (0.17jk/0.17jo) is what the family can ship.
