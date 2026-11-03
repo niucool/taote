@@ -13127,3 +13127,42 @@ Next unit: with the seed's geometry known, the missing piece is a *diff of the h
 memory (an apidump at any API that fires afterwards, or a probe-time read), then compare it against the packed file's
 stub after applying the known self-decrypt - the differing offsets are where taote's stub image diverges, which is one
 step above the payload key and the last unknown in this lane.
+
+#### 0.17kd Census: no precision lever exists, the .NET floor is exactly 81 (43 of them otherwise complete), and the pegasus Exe32pack lead is already taote's
+
+Measured over corpus r111 (2678 rows) rather than assumed:
+
+**1. There is no precision lever.** Of the 122 rows that are valid-PE and OEP-exact but import-wrong, **122 fail on recall
+(< 0.95) and exactly 0 fail on precision alone** (every row's `imp_recall >= 0.95` set is empty). The
+`docs/iat-recovery-plan.md` framing of an `iat_over` slice as a successor lever therefore has **no value under the
+current grading** (recall is the pass criterion; over-emission only downgrades `imp_exact`, which nothing counts).
+Any remaining import work must add *missing* pairs.
+
+**2. The non-TELock remainder is 29 rows and is closed by two mechanisms.** TELock 93, WinUpack 12, RLPack 5, MEW 4,
+PEtite 4, Amber 1, JDPack 1, NSPack 1, Yoda-Protector 1. The near-threshold ones (rlpack_Procmon 0.9491,
+winupack_Dbgview 0.9460, petite_FileTypesMan 0.9458, winupack_Diskmon 0.9439, petite_shexview 0.9419, ...) are the
+ordinal-dominated rows already documented in 0.17jr, and the far ones are decode-bound (rlpack_adrestore 0.0633,
+rlpack_grepWin 0.0060, winupack_mtinst 0.3129, ...). So **TELock's 93 is the whole of the reachable import pool.**
+
+**3. The .NET floor is exactly 81 rows, and taote is already right on 43 of them.** All 81 misses with `oep_exact =
+None` are the `com_rva` (managed-original) rows that `tools/unpack_report.py` deliberately does not OEP-grade
+(`if (not orig.get("com_rva"))`). What taote actually produced on them:
+
+    81 ungraded rows
+    57 carry the ORIGINAL entry point exactly (out_ep == orig_ep)
+    48 of those also pass imports (recall >= 0.95)
+    43 of those also have code_sim >= 0.8   (Eronana 13, Exe32pack 13, Amber 12, TELock 9, Alienyze 7, ...)
+
+e.g. `exe32pack_AddInProcess.exe`: out_ep == orig_ep == 0x681e, 5 sane sections, imp_recall 1.0, code_sim 0.9246.
+**This is recorded, not exploited**: the monitor's standing ruling is that the honest base is 2594 and that .NET rows
+can never be all-three, so the grading convention is left alone. Re-baselining it would change the definition of the
+metric, not taote's capability - and would move the reference by the same rule.
+
+**4. The pegasus Exe32pack lead is already shipped in taote.** `5de920eb "restore a wipe-degenerate section table from
+the packed file (Exe32pack)"` is explicitly a *port of taote bb4bc8d*, and taote carries it at
+qiling/unpack/unpack.cpp:3632-3704 ("restored %zu zeroed section headers from the packed file"). taote's Exe32pack
+artifacts are not wipe-degenerate (e.g. the row above has `.text/.rsrc/.reloc/.i/.pgimp`), and 13 of its 17
+`oep_exact=None` rows are the .NET class of point 3. Lead closed.
+
+Net: no measured lever exists outside TELock's decode, so this lane's model work (0.17ka-kb-kc) stays the critical
+path, and the honest scoreboard is unchanged at 2179/2678.
