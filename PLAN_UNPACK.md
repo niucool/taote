@@ -12878,3 +12878,27 @@ So the TELock decode question is exactly as open as 0.17jv said, but for none of
 is the packed section (mapped correctly), the two tools disagree on the *transform*, and the loop at 0x418fad is not
 it. The next step remains "read the real loop body at runtime", with the corrected `(ciphertext, keystream)` pairs
 above as the acceptance test.
+
+#### 0.17jx TELock: coverage is NOT the problem - both tools transform the whole span, and taote runs the loop too often
+
+Two measurements that finish the classification of this decode (with the corrected 0x1000 slice of 0.17jw):
+
+**1. Coverage is identical and correct in both tools.** Fraction of `.text` bytes still equal to the packed
+ciphertext after the run: **taote 148/35328 (0.4%), reference 134/35328 (0.4%)**. Both transformed essentially the
+whole span, so this has never been a "the stub did not decode" problem - it is the *transform* (or its key) that
+differs, which is exactly the `(ciphertext, keystream)` disagreement 0.17jw recorded:
+
+    reference keystream : de 89 2d 0c 96 6f 5e 57 a7 3c 9f 8a 2f da 8f d2
+    taote keystream     : 37 d3 bb ef e5 5c a2 b8 30 2a 69 d1 ab b3 09 df
+
+**2. taote runs the loop 41,984 times over a 35,328-byte span** - the difference is exactly **6,656 (0x1a00)**, i.e.
+18.8% of the span again. That is the first concrete structural lead this lane has produced: either the loop is entered
+twice with different counters (a second pass over the first 0x1a00 bytes would double-transform exactly that head, and
+the artifact's head is where taote and the reference disagree first), or one entry runs past the span. A future
+session should instrument `0x418fb7`'s `ecx` at *every* entry (not just the first) - `TAOTE_PROBE` prints it, and the
+per-entry values settle the pass structure in one run - and check whether the artifact's first 0x1a00 bytes are the
+*double* transform of the ciphertext.
+
+This is the last item this session can honestly add to the TELock lane: the question is now narrowly "how many passes
+does the decryptor make, and with which counter", not "what seed", "what coverage" or "what algebra" (0.17jw/0.17jv
+closed those).
