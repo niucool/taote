@@ -13504,3 +13504,33 @@ destroys the claim. The in-place early return is load-bearing exactly as written
 Reverted; the clear rule stays gated to the `!in_written` path and to JDPack by default (r114/r115 = 2184 refereed).
 This is the third measured negative in this area (PECompact guard -0, erase-split -2, in-place widening -41), so the
 pool's remaining rows need a discriminator aimed at *which transfer is the entry*, not at widening the acceptance path.
+
+#### 0.17kn Why every section-based rule failed on this pool: PECompact's stub lives INSIDE the payload's section
+
+Auditing the picker before designing another rule produced the structural fact that explains the last three negatives.
+`pecompact_md5summer` has **two sections and nothing else**:
+
+    CODE    0x401000-0x4e3000  vs=0xe2000 raw=0x4fc00 exec=1 inplace
+    .rsrc   0x4e3000-0x4ec000  vs=0x9000  raw=0x8c00  exec=1 inplace
+
+with `packed_ep_va_ = 0x401000`. So the "packer's own section" IS the payload's section: the stub, the decoder and the
+payload all live in one 0xe2000-byte `CODE` region, and the two transfers that were recorded by a stub-origin test
+(0x4ebaec@0, 0x4ebb0f@3) sat in the same section as their targets. Every rule that asked "did the transfer leave the
+packer's section" is therefore structurally inapplicable here:
+
+    recorded truth 0x49ec68: prev=0x4ebba6 -> same section as the target -> not a cross-section transfer
+    the pick then keeps 0x49a786 while the ledger holds only 0x4ebaec / 0x401016 / 0x4ebb0f
+
+That is also why widening the in-clear path scored -41: an in-section rule degenerates into "accept every transfer" for a
+single-section layout. Ledger-only recording (accept the transfer into `hop_ledger_` without claiming, so the finalize
+pick can score it) was built behind `TAOTE_HOP_LEDGER_ONLY` and measured: it adds three candidates to the ledger on this
+row and changes nothing (0x49a786 stays), because the discriminator has to be *content* (which of the transfers is an
+entry) rather than geometry. Reverted.
+
+The picker audit did show taote already carries a partial port of the reference's `pick_and_emit_oep`: a ledger, a
+junk-latch rule (write ordinal >= 32), a `shape_at` prologue vote and an incumbent-strength rule (aspack_Cacheset,
+molebox_AccessEnum, bero_Autologon are the measured cases). What it does NOT carry is the reference's V2/V3/V4 terms and,
+more importantly, the reference's habit of *ledgering every candidate during the run and emitting once at pick time* -
+taote claims at hop time, which is why the pool's earlier-than-truth claims are already fixed before any pick can reorder
+them. The next unit is therefore to record (not claim) the in-section, stub-origin transfers and let the existing
+`shape_at` pick choose - a content discriminator, which is the only kind this layout admits.
