@@ -14219,3 +14219,28 @@ whether it lands correctly depends on what the stub wrote earlier. Two consequen
 loop head (0x4187fa) with `<n>` across the 8 inner steps of iteration 280 and compare with the reference's trace pcs, to see
 the first inner step where they part; (b) if that path proves tool-sensitive, drop the copy-the-algorithm plan and take the
 endgame in PLAN 0.17le: read the value from the stub's own post-ladder image, where this function's output is stored anyway.
+
+#### 0.17lg The fold's executed code is identical between iterations, so the differing input is the BYTE READ, not the code
+
+Three facts narrow 0.17lf's open question to a single byte:
+
+  1. The reference's inner-loop pc cycle per byte is 0x4187fa -> 0x4187fc -> (jae 0x418806 | jmp 0x418801 -> xor eax,imm32 ->
+     0x418806) -> 0x418807 -> 0x41880a -> 0x4187fa. The "polynomial branch at 0x418837" was a decode artifact: 0x4187fe's
+     `eb 01` lands on the SECOND byte of `eb 35`, i.e. 0x418801 = `35 e1 95 c7 cd` = `xor eax,0xcdc795e1`. So the bit loop is
+     a textbook reflected CRC step with polynomial 0xcdc795e1, not a self-modified jump.
+  2. taote's live code over the whole function is BYTE-IDENTICAL at hit 280 and at hit 281 (TAOTE_PC_DUMP=0x4187fa with the
+     nth-hit selector, window [pc-0x40,pc+0x80)), and the register state at hits 279/280 matches the reference's exactly.
+  3. Yet eax at hit 281 differs. Computing the step by hand shows why nothing else can explain it: with the polynomial and
+     dl=0xbb neither engine's eax_281 is reproduced from byte 0xac (taote's CRC step of 0xac/0xbb gives 0x6dca002a, its actual
+     eax is 0x470317ee; no single byte reproduces the reference's 0x3e36130d at all).
+
+So the CRC's *inputs* at that moment differ even though (a) the code is the same, (b) edx/dl at the previous hit was the same,
+and (c) the byte that the ladder wrote at 0x418118 was 0xac in both engines. The remaining possibility is that the byte AT THE
+MOMENT OF THE READ is not what the ladder wrote - something wrote it afterwards, and only in one engine - or that the outer
+edx/dl used is not the value captured at 0x418811.
+
+NEXT UNIT (one probe): dump at the READ instruction rather than the fold pc - `TAOTE_PC_DUMP=0x4187f7:<n>` (the `lodsb`) with
+n covering hit 280/281, and read `at_esi[0]` (the byte about to be read) and dl; repeat one step later (0x4187f8) to see al^dl.
+Then diff the four values against the reference's own trace for the same two outer iterations, which already prints eax (the
+post-xor value at 0x4187fa). One of those four numbers will differ and the fix follows from which. Try
+TAOTE_PC_DUMP=0x4187f8:560 (8 inner steps x 70 = 560, so this lands exactly on the divergent iteration's first bit).
