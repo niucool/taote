@@ -12937,3 +12937,68 @@ So the next unit is no longer "what algorithm": it is **why taote's first pass r
 next two entries - so the value comes from guest state, and the divergence is in whatever computes it, not in the loop
 body). A probe on the counter's load site (the instruction before the loop's entry that writes `ecx`) is the next
 measurement; the acceptance test is that a page-wise pass reproduces the reference's `33 c0 39 05 e8 61 41 00 ...`.
+
+#### 0.17jz CORRECTION: the "three passes" are three SECTIONS (raw sizes), not a double transform - 0.17jy withdrawn
+
+Probing the block that *loads the loop's state* (0x418fad: `mov %ebx,%edi; mov %edi,%esi; mov 0x40d376(%ebp),%ebx`)
+settles the pass structure in one run - it executes once per entry, so its hits are the entries:
+
+    #1  eax=0x1000   ebx=0x401000  ecx=0x8a00  esi=3
+    #2  eax=0x11000  ebx=0x411000  ecx=0x1000  esi=2
+    #3  eax=0x15000  ebx=0x415000  ecx=0x0a00  esi=1
+
+eax is the section RVA (.text 0x1000, .rdata 0x11000, .data 0x15000 - exactly the packed section table's VAs), ebx is
+base+RVA (the pass's destination), ecx is that section's **raw size** (.text 0x8a00, .rdata 0x1000, .data 0xa00 -
+exactly the packed raw sizes), and esi counts the sections down 3,2,1. So the decryptor is a **section walk**: each of
+the three data sections is decrypted **once**, in place, with its own raw size. 35,328 + 4,096 + 2,560 = 41,984 was
+three sections, not three passes over the head.
+
+**0.17jy is therefore withdrawn in full**: there is no double or triple transform of the head, the counter is not a
+repeated pass length, and "the head is transformed 3x / the extra passes destroy the head" was a misreading of three
+distinct section destinations. The one durable part of 0.17jy is the datum itself - 41,984 = 0x8a00 + 0x1000 + 0xa00.
+
+The real body was also read for the first time, from a runtime dump of the stub rather than from a re-disassembly guess
+(`TAOTE_APIDUMP=VirtualProtectEx:418000:3000` - the stub's own sections ARE decoded at that call, unlike the payload's,
+which is why an earlier .text dump at the same API looked like garbage; the final artifact re-encrypts the stub, so the
+artifact is not a source for stub code):
+
+    418fb7  ac            lodsb
+    418fb8  eb 02         jmp 0x418fbc     ; skips a two-byte 0xcd 0x20 filler the earlier read misaligned
+    418fbc  34 55         xor al,0x55
+    418fbe  2c 37         sub al,0x37
+    418fc0  32 c1         xor al,cl
+    418fc2  88 07         mov [edi],al
+    418fc4  d2 c8         ror al,cl
+    418fc6  32 c3         xor al,bl
+    418fc8  02 1f         add bl,[edi]     ; byte-oriented form, not add [edi],bl
+    418fca  12 d9         adc bl,cl
+    418fcc  f6 c1 01      test cl,1
+    418fcf  75 0f         jne 0x418fe0
+    418fd1  d1 eb         shr ebx,1
+    418fd3  f7 c3 08 00 00 00  test ebx,8
+    418fd9  75 05         jne 0x418fe0
+    418fdb  d3 c3         rol ebx,cl
+    418fdd  8d 1c db      lea ebx,[ebx+ebx*8]
+    418fe0  aa            stosb
+    418fe1  49            dec ecx
+    418fe2  7f d3         jg 0x418fb7
+
+Ground truth for validating any model of it (`TAOTE_PROBE=0x418fe0`, `PROBE_N=8`; the store fires *before* `stosb`, so
+eax's low byte is the byte written and ebx is post-update):
+
+    i  cl      stored  ebx
+    0  0x00    0xda    0xed074b79
+    1  0xff    0xb7    0xed074bdf
+    2  0xfe    0x2b    0x7683a58d
+    3  0xfd    0x81    0x7683a50c
+    4  0xfc    0xba    0x3b41d2b9
+    5  0xfb    0xdc    0x3b41d2df
+    6  0xfa    0x0d    0x8c2aa0c4
+    7  0xf9    0xf9    0x8c2aa038
+
+and it **still does not fit** the body above (with the observed `bl` chained iter to iter the implied input bytes come
+out 0x44, 0x0e, ... which are not stage 1's 0x16, 0x9a, ...), so the input to this loop is not stage 1's output byte for
+byte and the `bl`/`ebx` state carried across iterations is not the one the probe reports at 0x418fe0 - i.e. there is at
+least one more state variable (likely the `adc`/rotate path being taken differently than the flag sequence implies). The
+next unit is to probe the *pre*-store instruction (0x418fc2) as well and chain from a known entry `ebx` (read at
+0x418fb7, i.e. after the reload from [0x40d396+ebp]) instead of guessing.
