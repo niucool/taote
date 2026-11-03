@@ -183,7 +183,9 @@ Detection detect_from_file(const std::string& path) {
             //   BE ?? ?? ?? ??   mov esi,<stub table>
             //   53 E8 0A 00 00 00  push ebx; call $+0xa
             // Reference census over the corpus: 117 of 119 FSG rows, 0 of the other 2,961.
-            if (f2.gcount() == 24 &&
+            // >= 21 (the bytes the pattern needs), not == 24: a stub whose head ends
+            // within 24 bytes of EOF would otherwise fall through to "unknown".
+            if (f2.gcount() >= 21 &&
                 b[0] == 0xBB && b[5] == 0xBF && b[10] == 0xBE &&
                 b[15] == 0x53 && b[16] == 0xE8 && b[17] == 0x0A && b[18] == 0x00 &&
                 b[19] == 0x00 && b[20] == 0x00) {
@@ -195,7 +197,11 @@ Detection detect_from_file(const std::string& path) {
                 b[4] == 0x81) {
                 return set("Exe32pack", "ep-prefix", "3b c0 74 02 81");
             }
-            if (f2.gcount() == 10 && b[0] == 0xb8 && b[5] == 0x50 && b[6] == 0x64 && b[7] == 0xff &&
+            // NOTE: the guard is >= 9, NOT == 10. Widening the read to 24 bytes for the
+            // FSG head (round 287) left this test demanding gcount() == 10, so it could
+            // never fire again and 29 PECompact rows silently lost their label and with
+            // it the engine's PECompact seams (corpus r116: all-three 2184 -> 2152).
+            if (f2.gcount() >= 9 && b[0] == 0xb8 && b[5] == 0x50 && b[6] == 0x64 && b[7] == 0xff &&
                 b[8] == 0x35) {
                 return set("PECompact", "ep-prefix", "b8..50 64 ff 35");
             }

@@ -13729,3 +13729,32 @@ KEPT: the write-unmapped diagnostic under TAOTE_SEHDBG (`[sehc] write unmapped a
 NEXT UNIT for Exe32pack: the stub parses the module returned by GetModuleHandleA and stores a field from it; find what it
 expects of that module (taote hands it a synthetic stub image at 0x10020000) and diff it against what the reference's
 loader exposes. Alternative target with the same shape and fewer unknowns: Amber's 15 decode-bound rows.
+
+#### 0.17ku A widened detector read silently killed PECompact's label: -29 rows, caught only by the corpus arm
+
+Round 287 widened the EP-prefix read from 10 bytes (for PECompact's `b8 <imm32> 50 64 ff 35`) to 24 (for FSG's stub
+head) and updated the FSG guard to `gcount() == 24`, but **left PECompact's guard at `gcount() == 10`**. Since the read is
+now 24 bytes, `gcount()` is 24 for every file with 24 bytes available, so the PECompact test could never fire again:
+
+    family label      r115 (before 287)   r116 (after)
+    PECompact rows    92 all-three        63 all-three    (29 rows changed claim, e.g.
+                                                           pecompact_FileTypesMan 0x4109f0 -> 0x401000)
+
+Those 29 rows kept their original section names, so no other rule caught them: they silently became `family="unknown"`,
+which disables the engine's PECompact seams (the pecompact-epfix ladder rule among them). Round 287 measured only its own
+two families (FSG 96 -> 96, Exe32pack 92 -> 92) and skipped the corpus arm, which is exactly the rule this violated.
+
+Fix: `gcount() >= 9` for PECompact and `gcount() >= 21` for FSG (the bytes each pattern actually needs, so a head that
+ends near EOF cannot fall through). Measured: PECompact 92 -> 92 with **0 claims changed**, FSG 96 -> 96 with 0 claims
+changed, and corpus r117 = valid PE 2677 / OEP 2306 / imports 2253 / all-three 2181 against r115's 2677/2307/2253/2182 -
+the single difference being `bero_geek.exe`, the cap-flaky row whose 600 s claim is identical in both arms, so the
+refereed baseline stays **2184** (r117 raw 2181 + the three habitual dur-86 flakes).
+
+So the detector work of rounds 287-289 is now corpus-refereed and genuinely neutral, and the round's real yield is this
+bug plus the rule-shaped lesson: **a family label is engine behaviour; any change to the detector needs the corpus arm,
+not just the family it was designed for.**
+
+Also in this round (see 0.17ks/0.17kt): the BeRo label ships as a measured no-op (with the ±1 family-arm noise floor
+established), the 85 s budget is proved not to be the binding constraint (23 capped failing rows, 0 gains at 7x), and
+Exe32pack's decode failure is localised to a value, not a mapping (a store to 0x54 through a stub-internal `self`
+pointer that arrives as 0x40).
