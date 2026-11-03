@@ -14295,3 +14295,22 @@ SE_TELOCK_WRLOG=<two different files> and diff the logs; if they differ, every c
 re-checked against single-run pairs (or the comparison has to be done inside one run). If they agree, the 0x41811a/0x418163
 mismatch means instead that the write-log's pc column is not the executing instruction's address for those stores, and the next
 step is to capture the *single-run* write history around 0x418118 on the reference side the way taote's TAOTE_WATCH_RANGE does.
+
+##### 0.17li retracted: the reference IS deterministic, and the pc-column mismatch is an EIP-convention artefact
+
+Two reference runs with `SE_TELOCK_WRLOG` to different files produce **identical** 200,000-line logs (`cmp` clean), so cross-run
+comparison is valid and 0.17li's caveat is withdrawn. The real explanation of "the write log says pc=0x41811a, the trace shows
+zero executions there" is the convention:
+
+  * the reference's write log records `reg_read(EIP)` **inside the write hook**, i.e. the EIP *after* the store;
+  * the reference's stub trace records the address of each instruction *as it executes*.
+
+So a store whose instruction sits at 0x418118/0x418119 logs pc=0x41811a, and the trace correspondingly lists 0x418118/0x418119,
+never 0x41811a. Read correctly, 0.17lh's evidence says the REFERENCE's store into 0x418118 is performed by an instruction at
+~0x418118 - not by "an incrementing loop at 0x41811a" - while taote's later store there is performed by an instruction at
+~0x418161 (logged 0x418163). The divergence 0.17lh found is therefore real and unchanged in substance: after the shared early
+writes, the two engines write *different values* into 0x418118 from *different code*, and the fold reads taote's 0xfc where the
+reference has its own byte.
+
+taote's own watch uses the same post-instruction convention (its pc is read from the arch state in the write hook), so the two
+pc columns are comparable as long as both are read as "instruction after the store" - which is how they are now documented.
