@@ -14272,3 +14272,26 @@ stub's self-modifying region, so the answer is a branch in the code just before 
 (nth-hit dump at a pc in that range gives the live bytes) and check the same window against the reference's trace, then diff
 the branch condition. This is now a control-flow question in one 0x80-byte window, not a crypto question - and it is the last
 step before the 116-row TELock family.
+
+#### 0.17li METHOD CAVEAT: my write-log vs trace comparison mixed two different reference runs - validate determinism first
+
+Chasing 0.17lh's "reference reaches 0x41811a, taote reaches 0x418163", I asked each engine directly:
+
+    reference (SE_TELOCK_STUBTRACE)  executions of pc=0x41811a: 0    of pc=0x418163: 0
+    taote     (TAOTE_PROBE)          executions of pc=0x41811a: 0    of pc=0x418163: 1
+
+So the reference's "writes from pc=0x41811a" came from its **write log (wl.txt), a different run** than the trace I compared it
+against. Cross-run comparison is only valid if the reference run is deterministic, and nothing so far establishes that: TELock's
+stub decrypts itself with a key derived from state that may include time- or layout-sensitive values, and the two reference
+artifacts seen this session already disagreed on the stub region's bytes.
+
+That flaw is worth writing down because several earlier conclusions leaned on the same mixture (ladder values from wl.txt vs
+taote's watch; the fold sequences from one trace vs another). The *taote* side is self-consistent (one run per measurement), and
+the parts where taote was compared against the reference *within one artefact* (the byte-exact .text oracle, the register state
+at the fold's hits 279/280) are sound - those came from a single run each.
+
+NEXT UNIT, before any more TELock reasoning: **establish determinism**. Run the reference twice on telock_7z.exe with
+SE_TELOCK_WRLOG=<two different files> and diff the logs; if they differ, every cross-run inference in 0.17kx-0.17lh has to be
+re-checked against single-run pairs (or the comparison has to be done inside one run). If they agree, the 0x41811a/0x418163
+mismatch means instead that the write-log's pc column is not the executing instruction's address for those stores, and the next
+step is to capture the *single-run* write history around 0x418118 on the reference side the way taote's TAOTE_WATCH_RANGE does.
