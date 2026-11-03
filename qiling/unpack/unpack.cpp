@@ -1528,7 +1528,7 @@ int Unpacker::on_section_exec(std::uint64_t addr) {
                 }
                 std::fprintf(stderr,
                              "[hoptrace] addr=0x%llx prev=0x%llx stages=%d dumped=%d ranges=%zu matched=%d "
-                             "range=[0x%llx,0x%llx) in_written=%d inplace=%d ep_dist=0x%llx\n",
+                             "range=[0x%llx,0x%llx) in_written=%d inplace=%d ep_dist=0x%llx meta_oep=0x%llx\n",
                              static_cast<unsigned long long>(addr),
                              static_cast<unsigned long long>(prev_exec),
                              static_cast<int>(stages_), dumped_addrs_.count(addr) ? 1 : 0,
@@ -1536,7 +1536,8 @@ int Unpacker::on_section_exec(std::uint64_t addr) {
                              static_cast<unsigned long long>(mf), static_cast<unsigned long long>(mt),
                              in_written ? 1 : 0, inside_inplace(addr) ? 1 : 0,
                              static_cast<unsigned long long>(
-                                 addr > packed_ep_va_ ? addr - packed_ep_va_ : packed_ep_va_ - addr));
+                                 addr > packed_ep_va_ ? addr - packed_ep_va_ : packed_ep_va_ - addr),
+                             static_cast<unsigned long long>(meta_oep_));
             }
         }
     }
@@ -1581,12 +1582,32 @@ int Unpacker::on_section_exec(std::uint64_t addr) {
             }
             const bool from_stub = stub_sec != nullptr && prev_exec >= stub_sec->start &&
                                    prev_exec < stub_sec->end;
+            // A clear transfer only FILLS A GAP: if any claim already exists it is not
+            // emitted, because the in-clear class can produce a long tail of spurious
+            // transfers out of the stub (measured on upx_FastHash_kr: the true
+            // 0x41dffa is accepted first, then clear hops at 0x41c7ad / 0x41d6cd /
+            // 0x43cc15 overwrite it), while the rows this is for have NO written-range
+            // claim at all.
+            // ...and it may override a claim that sits INSIDE the packed-EP section,
+            // which is junk by construction (dump_module already refuses the mirror
+            // case - a new candidate in the stub section never replaces an outside
+            // claim). jdpack_PEview is exactly this: meta_oep_ is already 0x41502e in
+            // .jdpack when the real 0x401000 executes, while on upx_FastHash_kr the
+            // existing claim 0x41dffa is NOT in the stub section and must survive.
+            const bool cur_is_stub_junk =
+                meta_oep_ != 0 && stub_sec != nullptr && meta_oep_ >= stub_sec->start &&
+                meta_oep_ < stub_sec->end;
             if (from_stub && dst_sec != nullptr && dst_sec != stub_sec &&
+                (meta_oep_ == 0 || cur_is_stub_junk) &&
                 dumped_addrs_.insert(addr).second && stages_ < opts_.max_stages) {
+                // WEAK claim: emit the candidate but leave have_hop_/last_hop_imp_ alone,
+                // so a later WRITTEN-range hop is still judged as a first hop. Not doing
+                // this cost upx_FastHash_kr on corpus r113: the clear transfer set
+                // last_hop_imp_, and the payload's real hop that followed was then
+                // rejected as "import-quiet" (imports had not grown), pinning the claim
+                // to the wrong 0x41bf46. On the in-clear rows there is no later written
+                // hop at all, so the weak claim simply stands.
                 dump_module(*ql_, addr, "section_clear");
-                last_hop_addr_ = addr;
-                last_hop_imp_ = imports_.size();
-                have_hop_ = true;
             }
         }
         return 0;

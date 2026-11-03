@@ -13451,3 +13451,30 @@ Refereed: r112 2178 + 5 flakes = 2183 -> r114 2182 + 2 flakes = **2184** (+1, ex
 flakes (nspack_Bginfo, rlpack_geek) failed in both rounds at dur 86.
 
 `TAOTE_HOP_CLEAR` = unset -> JDPack only, `1` -> every family, `0` -> off.
+
+#### 0.17kl Making the in-clear rule generic: a WEAK claim that only fills a gap or displaces stub-section junk (corpus-neutral, UPX regression removed)
+
+0.17kk's rule lost one UPX row when enabled for every family. The cause was found with the same instrument: my clear hop
+set `last_hop_imp_`/`have_hop_`, so the payload's *real* hop that followed on `upx_FastHash_kr` was rejected as
+"import-quiet" (imports had not grown since) and the claim stayed at the wrong 0x41bf46. Two refinements fix the class:
+
+1. **weak claim** - the clear candidate is emitted without touching `have_hop_`/`last_hop_imp_`, so a later written-range
+   hop is judged as a first hop;
+2. **gap-fill + stub-junk override** - it is emitted only when there is no claim yet, **or** when the existing claim sits
+   *inside the packed-EP section* (junk by construction - `dump_module` already refuses the mirror case, a new candidate
+   in the stub section never replacing an outside claim). Without (2) nothing is emitted at all on jdpack_PEview, whose
+   `meta_oep_` is already 0x41502e in `.jdpack` when the real 0x401000 executes - measured directly with
+   `TAOTE_HOP_TRACE` (`... in_written=0 ... meta_oep=0x41502e`).
+
+Both rows are then correct: `upx_FastHash_kr` -> 0x41dffa (its truth) and `jdpack_PEview` -> 0x401000 (its truth).
+
+Measured with the rule enabled for **every** family:
+
+    UPX     108 rows: all-three 108 -> 108, 0 rows changed   (the r113 regression is gone)
+    JDPack  100 rows: all-three  96 ->  96, 0 rows changed
+    corpus r115 (global rule): 2178... 2182 raw / oep 2307 / imports 2253 - IDENTICAL to r114 (JDPack-scoped):
+              0 gains, 0 losses, so the generic form buys nothing beyond jdpack_PEview and the shipped default stays
+              JDPack-scoped (least blast radius). `TAOTE_HOP_CLEAR=1` now means "every family, safely".
+
+So this round keeps no capability change (2184 refereed either way) but removes a deterministic regression from the
+generic path and documents exactly why the two conditions are needed.
