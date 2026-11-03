@@ -263,6 +263,15 @@ private:
     // decrypt tracking needs (PETITE_INT_RUNS).
     std::vector<std::uint8_t> exec_view_;
     std::vector<bool> exec_page_seen_;
+    // The WHOLE image at the first instruction fetch outside the packed-EP section
+    // (TAOTE_HANDOFF_SNAP). A stub that decrypts its payload in place and then
+    // RE-ENCRYPTS what it decoded (TELock, measured: 35328 single-byte stores into
+    // .text, then the payload runs one page and dies) leaves nothing usable in
+    // terminal memory or in the first-write shadow - the decode exists for exactly
+    // the interval between the decryptor finishing and the payload's first fetch,
+    // and that is the hand-off. exec_view_ captures only the pages that EXECUTE,
+    // which for these stubs is one page.
+    std::vector<std::uint8_t> handoff_view_;
     // the packer's install-time static OEP (the MEW header table and friends)
     std::uint64_t static_oep_ = 0;
     // the light pick (the reference's V1 prologue-shape vote, :8060-8110)

@@ -1612,6 +1612,30 @@ int Unpacker::on_section_exec(std::uint64_t addr) {
         }
         return 0;
     }
+    // the hand-off whole-image snapshot (see Unpacker::handoff_view_)
+    if (handoff_view_.empty() && std::getenv("TAOTE_HANDOFF_SNAP") != nullptr && ql_ != nullptr &&
+        packed_ep_va_ != 0 && addr >= base_ && addr - base_ < image_size_) {
+        std::uint64_t stub_lo = 0, stub_hi = 0;
+        for (const auto& ps : sections_) {
+            if (packed_ep_va_ >= ps.start && packed_ep_va_ < ps.end) {
+                stub_lo = ps.start;
+                stub_hi = ps.end;
+                break;
+            }
+        }
+        const bool in_stub = stub_lo != 0 && addr >= stub_lo && addr < stub_hi;
+        if (stub_lo != 0 && !in_stub) {
+            try {
+                handoff_view_ = ql_->mem().read(base_, image_size_);
+            } catch (...) {
+                handoff_view_.clear();
+            }
+            if (opts_.debug) {
+                std::fprintf(stderr, "[unpack] handoff snapshot at 0x%llx (%zu bytes)\n",
+                             static_cast<unsigned long long>(addr), handoff_view_.size());
+            }
+        }
+    }
     // the executed-page view (see Unpacker::exec_view_)
     if (addr >= base_ && addr - base_ < image_size_) {
         const auto page = static_cast<std::size_t>((addr - base_) / 0x1000);
@@ -3995,6 +4019,20 @@ UnpackResult Unpacker::finalize(Qiling& ql) {
             }
             if (opts_.debug && restored != 0) {
                 std::fprintf(stderr, "[unpack] exec-page overlay: %zu pages\n", restored);
+            }
+        }
+        // The hand-off snapshot (TAOTE_HANDOFF_SNAP, see Unpacker::handoff_view_): the
+        // decoder's output, captured at the moment execution first left the stub.
+        if (!handoff_view_.empty() && handoff_view_.size() == image.size()) {
+            std::size_t replaced = 0;
+            for (std::size_t i = 0; i < image.size(); ++i) {
+                if (handoff_view_[i] != image[i]) {
+                    image[i] = handoff_view_[i];
+                    ++replaced;
+                }
+            }
+            if (opts_.debug) {
+                std::fprintf(stderr, "[unpack] handoff overlay %zu bytes\n", replaced);
             }
         }
         // The family's terminal OEP fill (the reference's family_terminal_fill):

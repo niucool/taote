@@ -13758,3 +13758,53 @@ Also in this round (see 0.17ks/0.17kt): the BeRo label ships as a measured no-op
 established), the 85 s budget is proved not to be the binding constraint (23 capped failing rows, 0 gains at 7x), and
 Exe32pack's decode failure is localised to a value, not a mapping (a store to 0x54 through a stub-internal `self`
 pointer that arrives as 0x40).
+
+#### 0.17kv The real roadmap: 232 of taote's 497 misses are rows the REFERENCE solves (tools/ref_parity.py)
+
+Until now "parity" was a corpus-level comparison (taote 2184 vs the reference's 1996), which says nothing about any single
+row. `tools/ref_parity.py` (new) runs pegasus over every row taote fails and compares its `oep_rva` with the original EP
+RVA - a per-row oracle, 497 rows in ~10 minutes at 6-way parallelism. Result on r117:
+
+    family             taote misses the reference SOLVES
+    TELock             116 of 116
+    Exe32pack           30 of  32
+    Amber               26 of  38
+    WinUpack            14 of  16
+    Eronana Packer      13 of  14
+    Alienyze             7 of   8
+    NSPack               7 of   7
+    JDPack / MEW         4 of   4 each
+    PECompact            4 of   5
+    PEtite               3 of   8
+    ASPack / BeRo / MPRESS  1 each
+    TOTAL              232 of 232 -> solved
+
+    both engines fail: Themida 122, Yoda-Protector 100, Amber 12, RLPack 9, PEtite 5, BeRo 4, Exe32pack 2, MPRESS 2,
+    WinUpack 2, Alienyze 1, EXpressor 1, Eronana 1, FSG 1.
+
+So the headroom is **232 portable rows, not ~135**, and 114 of them are TELock - a family this session had written off as
+"decode-blocked" because taote's own artifacts never decode it. That conclusion was about *taote's* run, not about the
+packer: the reference gets TELock's entry on all 116 rows and its artifact .text equals the original byte for byte.
+
+**TELock diagnosis (the subject of the next rounds).** telock_7z.exe, taote vs the reference:
+
+    reference   .text 65536/65536 bytes equal to not-packed/7z.exe's .text, OEP RVA 0xebc5 (exact)
+    taote       .text  5133/65536 equal (packed entropy), OEP 0x40ebc5 via the ported telock_oep_table rule (exact)
+
+So the OEP seam is already right; the *decode* is what differs. Three capture points measured, all garbage:
+
+    first-write shadow (TAOTE_UNPACK_SHADOW_ALL=1)   48796 bytes restored, .text unchanged -> the shadow holds the
+                                                     stub's own earlier writes, not the decryptor's output
+    executed-page view (default)                     "exec-page overlay: 1 pages" - the payload executes one page
+    hand-off whole-image snapshot (new, next para)   "handoff snapshot at 0x40ebc5 (110592 bytes)", .text unchanged
+
+The last one is decisive: at the instant execution first leaves the stub section (the true EP), taote's image ALREADY
+holds packed bytes. So the decryptor's output is not what taote's run ever holds, and the reference's own comment is the
+explanation: "in TELock's at-OEP state the live memory already holds the fully unpacked image" - its run reaches the OEP
+with a decoded image, taote's reaches the OEP with a re-encrypted one. That is a difference in the emulated *path* (the
+stub's 59K SEH-ladder dispatches, the corrupt small pointers at 0x419128 that taote survives by mapping zero pages),
+not in the dump.
+
+New instrument kept (env-gated, default off, so the corpus is byte-identical): `TAOTE_HANDOFF_SNAP=1` snapshots the whole
+image at the first fetch outside the packed-EP section and overlays it at finalize, logging
+`[unpack] handoff snapshot at 0x... (N bytes)` / `[unpack] handoff overlay N bytes`.
