@@ -13992,3 +13992,30 @@ decode becomes exact, the fix is a loader-layout one (matching the reference's m
 should be measured corpus-wide; if not, the derivation is base-dependent in a way that needs the stub's hash function read.
 Then also decide on `TAOTE_IF_USER` as a DEFAULT-ON fidelity fix (ring-3 IF is real Windows semantics), measured on the
 corpus as its own unit.
+
+#### 0.17la The 0.17kz "module base" hypothesis is measured wrong; what survives is the IF-fidelity fix tool
+
+0.17kz ended on "TELock's key seed is derived from a module base (taote 0x10020000 vs the reference 0x77000000)". Tested
+by teaching the stub-dll synthesizer to place the whole stub surface at a chosen base:
+
+    TAOTE_STUB_IMAGEBASE=0x77000000   the stub records 0x77020000 at 0x419da0 (base+0x20000, so the synthesizer's own
+                                      section offset lands on top) - and [0x419cd4] stayed 0x6d8fd7d6
+    TAOTE_STUB_IMAGEBASE=0x76fe0000   chosen so the *mapped* base would be 0x77000000 - [0x419cd4] still 0x6d8fd7d6
+
+So the decrypt key is NOT derived from that module base; 0x419da0 and 0x419cd4 are two independent stub fields that a
+common routine happens to fill (both at pc 0x41882b's neighbourhood, 0x41840c for the first). The base override was
+reverted, as was a redundant `TAOTE_IF_ALWAYS` prototype (it set IF once per run-loop iteration, which the guest's own CLI
+immediately undid - superseded by the per-block TAOTE_IF_USER below).
+
+KEPT (env-gated, default off) as the working tool for the next unit: **TAOTE_IF_USER=1** re-asserts IF at every basic block,
+which is real ring-3 semantics (CLI faults with #GP; POPF ignores IF). With it, taote's flags at the decrypt loop read
+0x247 exactly like the reference's, and taote executes the seed block at 0x418fb1..0x418fbc that it otherwise skips. It
+changes no grade yet, and it is the strongest candidate for a DEFAULT-ON fidelity fix - to be evaluated as its own unit on
+the corpus (it touches every family's flag state, so it needs the 2678-row arm before it ships).
+
+WHAT IS STILL UNKNOWN, and the corrected next unit: with IF fixed, taote and the reference now walk the same seed block, yet
+[0x419cd4] still differs (taote 0x6d8fd7d6, reference 0x12cdd33f) and that value is written at the SAME pc (0x41882b) in
+both engines. So the input to that computation is something other than the two candidate fields tried so far. Next: read the
+code at 0x41882b itself (TAOTE_PROBE=0x41882b dumps 40 live bytes plus the register file) and walk back to whatever feeds it,
+comparing against the reference's trace with its new `ebx=` and `efl=` columns (both were added to the reference's stub trace
+this round: it now prints ebx and eflags, which is what made the byte-level comparison possible at all).

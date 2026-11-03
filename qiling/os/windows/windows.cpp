@@ -1069,15 +1069,6 @@ void QlOsWindows::run() {
     }
     while (true) {
         try {
-            // EXPERIMENT (TAOTE_IF_ALWAYS=1): a Windows ring-3 thread runs with IF set, and POPF
-            // cannot clear it from ring 3. taote's guest runs with IF=0 throughout (probe:
-            // eflags=0x16/0x2 where the reference has 0x247), and TELock reads back its own
-            // flags before deciding the decryptor's key seed - it skips the seed block when the
-            // interrupt flag is clear.
-            if (std::getenv("TAOTE_IF_ALWAYS") != nullptr) {
-                auto f = ql_->arch().regs().read("eflags");
-                ql_->arch().regs().write("eflags", f | 0x200ull);
-            }
             ql_->emu_start(begin, exit_point, ql_->timeout(), ql_->count());
             if (seh_retarget_ == 0) {
                 // TF single-stepping (round 169): when a guest arms TF with
