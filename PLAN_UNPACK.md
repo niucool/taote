@@ -13922,3 +13922,31 @@ NEXT UNIT: deliver #DB per instruction while eflags.TF is set. Either make `emu_
 one number: ladder writes at pc 0x418030, 64 -> ~6481 (TAOTE_WATCH_RANGE=0x418041-0x418130 | grep -c 'pc=0x418030'), then
 telock_7z `.text` equality 5133 -> 65536, then the TELock family, then the corpus. Cost control: TELock's ladder is ~59K
 instructions, but the hook must not slow the other 2500 rows - gate it to TF-set windows only.
+
+##### Correction to 0.17ky: the ladder is NOT TF/single-step driven - that inference is measured wrong
+
+0.17ky concluded "the ladder is a single-step decryptor" from the reference's comment about "59K+ SEH ladder dispatches".
+Tested the mechanism directly and it is wrong:
+
+    TAOTE_TF_STEP=1   an instruction-level hook confined to the packed-EP section that calls emu_stop() whenever
+                      eflags.TF is set (so the run loop's existing clean-return trap branch delivers the #DB), plus
+                      set_tf_trap_cap(200000) for the ladder's ~6481 iterations.
+    result            ladder writes at pc=0x418030: 64 -> 64.  .text equality unchanged.
+
+So taote never observes TF set during this run at all (which is also why `TAOTE_RUNDBG` reports zero "emu_start returned
+cleanly" lines - the two facts are the same fact). TELock arms TF at 0x418ad5, which is *after* the ladder region, so the
+ladder cannot be TF-driven in the first place; the 64-byte exit is caused by the two exception dispatches that follow it
+(0x419a08 ICEBP, 0x4186a8 #UD -> handler 0x41868a) and by whatever that handler does or returns to.
+
+The prototype was reverted (measured and not kept). What 0.17ky still establishes, and what the next unit should use:
+
+  * the ladder's state at entry is correct: ecx=6481 (the reference's exact write count), eax=0x7efc (the key),
+    esi=0x418041 (its first decrypted byte, 0xe8 in both engines);
+  * taote stops after exactly 64 decrypted bytes, then dispatches two CPU exceptions whose chain (fs:[0]=0x121ffb8,
+    installed by the stub's own store at pc 0x4186a0) and handler address (0x41868a) both match the reference's;
+  * after that handler the reference continues the ladder and taote jumps to the .text copy pass at 0x418da8.
+
+NEXT UNIT, corrected: instrument the handler at 0x41868a - its first instructions, its `iret`/`ret` target, and the
+registers/flags it restores into the interrupted context - because THAT is where the ladder is abandoned. A useful
+single-number probe: does the reference return from that handler into the ladder region (a pc in [0x418030, 0x4180a0)) while
+taote returns to 0x418da8? Compare with `TAOTE_PROBE` on both sides.
