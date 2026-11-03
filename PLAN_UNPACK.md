@@ -13059,3 +13059,36 @@ against `cl`/`bl`/`dl`, ending `32 c2 xor dl,al / c0 c8 07 ror al,7 / aa stosb /
 edx,edx,0x4bcdb0a5 / f9 72 02 stc-jb skip / d1 c2 rol edx,1 / 69 db 70 1f ee 6a imul ebx,ebx,0x6aee1f70 / 03 da add
 ebx,edx / 49 dec ecx / jg`), so the next unit is the same shape of work that just succeeded on the other loop: probe
 stage 1's store, chain its registers iteration by iteration, and turn it into a second pinned recurrence.
+
+#### 0.17kb TELock's STAGE 1 is exact too - the whole decode is now specified, and its two PRNGs are the 0.17jh "non-fit-able" ones with the dropped rol restored
+
+Stage 1 (stub 0x418d20-0x418da8) is a straight-line AL chain plus a two-register PRNG. Read from the runtime stub dump
+and validated against the emulator, **both** parts are exact:
+
+    edx_next = rol1(edx * 0x4bcdb0a5)              ; imul / stc / jb-skip / rol edx,1
+    ebx_next = ebx * 0x6aee1f70 + edx_next         ; imul ebx,ebx,0x6aee1f70 / add ebx,edx
+
+Both hold on all seven observed transitions (edx 0xd1b05d29 -> 0x071a76da -> 0xa0acf505 -> 0x47dcb872 -> 0x52b682f4
+-> 0x461c4e88 -> 0xc2483b50 -> 0xa0ca7521; ebx 0xac21fbc7 -> 0xec77b6ea -> 0x85bf5165 -> 0x74518fa2 -> 0xb365f7d4 ->
+0x4ad36748 -> 0xed3722d0 -> 0x9380e021).
+
+**This retracts the "stage 1's PRNG is not fit-able" verdict of 0.17jh.** That rejection rested on
+`0xd1b05d29 * 0x4bcdb0a5 mod 2^32 = 0x038d3b6d` not being the next edx - but the next edx is
+`rol1(0x038d3b6d) = 0x071a76da`, exactly as observed. The `f9 72 02` (`stc; jb` over a two-byte filler) between the
+imul and the `d1 c2 rol edx,1` had been read as a conditional skip of the rotate; it skips the *filler*, and the
+rotate is unconditional. Likewise "edx takes even values so no constant multiplier can exist" was an artefact of
+comparing against unrotated products.
+
+The AL chain (73 instructions from `lodsb` to `stosb`) is pinned instruction-for-instruction as a table and reproduces
+all eight observed stored bytes from the packed ciphertext (0xed 0x49 0x14 0x09 0x7e 0x0e 0x1f 0x57 -> 0x16 0x9a 0xaf
+0xe6 0x9b 0x52 0xbd 0xef), with the runs of `ror al,cl` and the paired `not`/`neg`/`inc` surviving intact - a
+hand-flattened version that drops the intervening rotates silently produces 0x88 instead of 0x16, which is exactly why
+the test is table-driven from the dump.
+
+State of the lane now: **both** TELock decryptors (stage 1 at 0x418d20, the section loop at 0x418fb7) are exact and
+pinned by `Unpack_Compat.TelockStage1DecryptorMatchesTheEmulator` and
+`Unpack_Compat.TelockDecryptorRecurrenceMatchesTheEmulator` (suite 608 -> 609), so the decode is fully specified up to
+its **two seed constants**: stage 1's entry ebx/edx. Neither appears in the packed file or in the original
+(0xac21fbc7 / 0xd1b05d29 are absent from both), so the stub computes them, and the remaining question is local and
+finite: which guest state produces them. The next unit is to watch the writes that fill those two variables (the loop's
+`mov 0x40d396(%ebp),%ebx` slot and its edx twin) and trace back one step from there.

@@ -853,3 +853,100 @@ TEST(Unpack_Compat, TelockDecryptorRecurrenceMatchesTheEmulator) {
         EXPECT_EQ(ebx, want_ebx[i]) << "ebx after byte " << i;
     }
 }
+
+// TELock's stage-1 decryptor (stub 0x418d20-0x418da8, PLAN_UNPACK.md §0.17kb): a
+// straight-line AL chain plus the two PRNG multiplies. Pinned against the eight
+// iterations observed at its store (0x418da8) on telock_7z.exe, together with the
+// two PRNG transitions, so the model of TELock's decode stays exact.
+namespace {
+
+struct TelockStage1 {
+    std::uint8_t out;
+    std::uint32_t ebx;
+    std::uint32_t edx;
+};
+
+// The body is table-driven so it mirrors the runtime dump instruction for
+// instruction: a mis-transcription here would silently "prove" a wrong model.
+enum TelockS1Op { S1_LODS, S1_XORI, S1_ADDCL, S1_ADDDL, S1_ADDBL, S1_ADDI, S1_INC,
+                  S1_NEG, S1_NOT, S1_RORCL, S1_ROR7, S1_XORBL, S1_XORDL, S1_NONE };
+
+struct TelockS1Step {
+    int op;
+    unsigned imm;
+};
+
+// 0x418d20..0x418da8, one entry per instruction in program order.
+const TelockS1Step kTelockS1Body[] = {
+    {S1_LODS, 0}, {S1_XORI, 0xffu}, {S1_XORI, 0x33u}, {S1_NONE, 0},
+    {S1_ADDCL, 0}, {S1_NONE, 0}, {S1_NONE, 0}, {S1_INC, 0},
+    {S1_XORI, 0x8du}, {S1_ADDDL, 0}, {S1_NOT, 0}, {S1_NONE, 0},
+    {S1_NOT, 0}, {S1_RORCL, 0}, {S1_NEG, 0}, {S1_RORCL, 0},
+    {S1_RORCL, 0}, {S1_INC, 0}, {S1_NONE, 0}, {S1_ADDI, 0x01u},
+    {S1_NONE, 0}, {S1_NONE, 0}, {S1_NONE, 0}, {S1_NEG, 0},
+    {S1_NONE, 0}, {S1_NONE, 0}, {S1_ADDI, 0x4bu}, {S1_NONE, 0},
+    {S1_NONE, 0}, {S1_NONE, 0}, {S1_NONE, 0}, {S1_ADDCL, 0},
+    {S1_XORI, 0xffu}, {S1_RORCL, 0}, {S1_NEG, 0}, {S1_NOT, 0},
+    {S1_INC, 0}, {S1_ADDCL, 0}, {S1_NOT, 0}, {S1_XORI, 0x6fu},
+    {S1_NOT, 0}, {S1_NONE, 0}, {S1_NONE, 0}, {S1_NONE, 0},
+    {S1_NONE, 0}, {S1_NONE, 0}, {S1_NONE, 0}, {S1_NOT, 0},
+    {S1_ADDCL, 0}, {S1_NONE, 0}, {S1_RORCL, 0}, {S1_NONE, 0},
+    {S1_ADDCL, 0}, {S1_NONE, 0}, {S1_RORCL, 0}, {S1_NONE, 0},
+    {S1_ADDBL, 0}, {S1_RORCL, 0}, {S1_NONE, 0}, {S1_NONE, 0},
+    {S1_ADDI, 0x05u}, {S1_NONE, 0}, {S1_XORBL, 0}, {S1_INC, 0},
+    {S1_ADDCL, 0}, {S1_NEG, 0}, {S1_NONE, 0}, {S1_NONE, 0},
+    {S1_NONE, 0}, {S1_NONE, 0}, {S1_XORDL, 0}, {S1_ROR7, 0},
+    {S1_NONE, 0},
+};
+
+std::uint8_t telock_s1_body(std::uint8_t in, std::uint8_t cl, std::uint8_t bl, std::uint8_t dl) {
+    unsigned al = 0;
+    for (const TelockS1Step& s : kTelockS1Body) {
+        switch (s.op) {
+            case S1_LODS:  al = in; break;
+            case S1_XORI:  al ^= s.imm; break;
+            case S1_ADDCL: al = (al + cl) & 0xff; break;
+            case S1_ADDDL: al = (al + dl) & 0xff; break;
+            case S1_ADDBL: al = (al + bl) & 0xff; break;
+            case S1_ADDI:  al = (al + s.imm) & 0xff; break;
+            case S1_INC:   al = (al + 1) & 0xff; break;
+            case S1_NEG:   al = (0u - al) & 0xff; break;
+            case S1_NOT:   al = (~al) & 0xff; break;
+            case S1_RORCL: al = telock_ror8(static_cast<std::uint8_t>(al), cl); break;
+            case S1_ROR7:  al = telock_ror8(static_cast<std::uint8_t>(al), 7); break;
+            case S1_XORBL: al ^= bl; break;
+            case S1_XORDL: al ^= dl; break;
+            default: break;
+        }
+    }
+    return static_cast<std::uint8_t>(al);
+}
+
+}  // namespace
+
+TEST(Unpack_Compat, TelockStage1DecryptorMatchesTheEmulator) {
+    // the packed .text ciphertext (.text raw file offset 0x1000) and the eight
+    // (stored byte, ebx, edx) triples observed at 0x418da8
+    const std::uint8_t ct[8] = {0xed, 0x49, 0x14, 0x09, 0x7e, 0x0e, 0x1f, 0x57};
+    const std::uint8_t want[8] = {0x16, 0x9a, 0xaf, 0xe6, 0x9b, 0x52, 0xbd, 0xef};
+    const std::uint32_t ebx_seen[8] = {0xac21fbc7u, 0xec77b6eau, 0x85bf5165u, 0x74518fa2u,
+                                       0xb365f7d4u, 0x4ad36748u, 0xed3722d0u, 0x9380e021u};
+    const std::uint32_t edx_seen[8] = {0xd1b05d29u, 0x071a76dau, 0xa0acf505u, 0x47dcb872u,
+                                       0x52b682f4u, 0x461c4e88u, 0xc2483b50u, 0xa0ca7521u};
+    std::uint32_t ecx = 0x8a00u;
+    for (int i = 0; i < 8; ++i) {
+        const std::uint8_t got = telock_s1_body(ct[i], static_cast<std::uint8_t>(ecx & 0xff),
+                                               static_cast<std::uint8_t>(ebx_seen[i] & 0xff),
+                                               static_cast<std::uint8_t>(edx_seen[i] & 0xff));
+        EXPECT_EQ(static_cast<unsigned>(got), static_cast<unsigned>(want[i])) << "byte " << i;
+        if (i + 1 < 8) {
+            // imul edx,edx,0x4bcdb0a5 / stc,jb / rol edx,1
+            const std::uint32_t t = edx_seen[i] * 0x4bcdb0a5u;
+            const std::uint32_t edx_next = (t << 1) | (t >> 31);
+            EXPECT_EQ(edx_next, edx_seen[i + 1]) << "edx after byte " << i;
+            // imul ebx,ebx,0x6aee1f70 / add ebx,edx
+            EXPECT_EQ(ebx_seen[i] * 0x6aee1f70u + edx_next, ebx_seen[i + 1]) << "ebx after byte " << i;
+        }
+        --ecx;
+    }
+}
