@@ -151,6 +151,27 @@ bool adopt_embedded_pe(Qiling& ql, PackerContext& ctx, std::vector<std::uint8_t>
                                 (static_cast<std::uint64_t>(head[opt + 0x11]) << 8) |
                                 (static_cast<std::uint64_t>(head[opt + 0x12]) << 16) |
                                 (static_cast<std::uint64_t>(head[opt + 0x13]) << 24);
+            // A candidate whose ENTRY lands inside the section that holds the PACKED entry point is
+            // the packer's own stub carrying a false MZ, not an embedded payload: measured on
+            // telock_PEview.exe, whose TELock stub section (0x415000-0x418000) holds one whose EP
+            // 0x416bd6 displaced the correct 0x401000 claim once the TELock gate let the stub run
+            // further (corpus r109, 0.17jo). Rejecting the candidate falls back to the normal pick.
+            if (ctx.packed_ep_va != 0) {
+                bool stub_payload = false;
+                for (const auto& ps : ctx.sections) {
+                    if (ctx.packed_ep_va >= ps.start && ctx.packed_ep_va < ps.end) {
+                        const std::uint64_t cand_ep = cand_base + ep_rva;
+                        stub_payload = cand_ep >= ps.start && cand_ep < ps.end;
+                        break;
+                    }
+                }
+                if (stub_payload) {
+                    if (dbg) std::fprintf(stderr, "[embed] reject stub-section payload at 0x%llx ep=0x%llx\n",
+                                          (unsigned long long)cand_base,
+                                          (unsigned long long)(cand_base + ep_rva));
+                    continue;
+                }
+            }
             if ((chars & 0x0002) == 0 || ep_rva == 0 || ep_rva >= soi) {
                 if (dbg) std::fprintf(stderr, "[embed] reject chars=0x%x ep=0x%llx soi=0x%llx at 0x%llx\n",
                                       chars, (unsigned long long)ep_rva, (unsigned long long)soi,

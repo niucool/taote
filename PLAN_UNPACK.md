@@ -12713,3 +12713,37 @@ imports Reg* from advapi32 and also uses kernel32 for other calls). Rejected on 
 
 So the corpus's remaining headroom is: TELock's 92 (decode), the embedded-PE guard's single row, and the
 Themida/Yoda both-wrong pools that the reference also fails. Nothing in the near-threshold tail is left unexamined.
+
+#### 0.17js SHIPPED: an embedded-PE candidate may not sit inside the packed-EP section - +2 OEP, 0 losses
+
+The 0.17jo loss is fixed generically. `adopt_embedded_pe` scans memory for a candidate `MZ`+`PE` and adopts it when
+its `Characteristics` looks executable and its entry is inside its own SizeOfImage - but it never asked *where* the
+candidate is. TELock's stub section (0x415000-0x418000 on telock_PEview.exe) carries a false `MZ`+`PE` whose entry
+(0x416bd6) displaced the correct 0x401000 claim the moment the TELock gate made the stub run further. The guard, in
+the candidate loop:
+
+    if the candidate's ENTRY (cand_base + ep_rva) lands inside the section that holds the PACKED entry point -> skip
+    the candidate (fall back to the normal pick)
+
+Note the first attempt guarded the candidate's *base*, which does nothing: on this row the base is a legitimate
+image start and only the ENTRY lands in the stub section.
+
+**Affected-population arm** (complete by construction: every row whose r110 meta says `reason=embedded_pe`, 118 rows,
+plus the 116-row TELock family = 232 rows, 4 workers, 85 s):
+
+    OEP exact 196 -> 198   imports 115 -> 115   all-three 103 -> 103   0 all-three gains, 0 losses
+    OEP gains: telock_PEview.exe, telock_adwcleaner_7.2.4.0.exe (the latter was arm-only)
+
+**Corpus r111** (2678 rows, 4 workers, 85 s, ~90 min) confirms the intended row and nothing else:
+
+    telock_PEview.exe   0x416bd6 (wrong) -> 0x401000 (EXACT)
+    nspack_Bginfo.exe   flaked again (raw all-three lost, all-three solo at recall 1.0) -> refereed back
+
+| metric | r110 referee | r111 raw | r111 referee |
+|---|---|---|---|
+| valid PE | 2677 | 2677 | 2677 |
+| OEP exact | 2301 | 2299 | **2302** |
+| imports | 2255 | 2253 | 2255 |
+| all-three | 2179 | 2177 | 2179 |
+
+So +1 OEP on the corpus (PEview), 0 all-three movement (that row still has no import table), 0 losses.
