@@ -13478,3 +13478,29 @@ Measured with the rule enabled for **every** family:
 
 So this round keeps no capability change (2184 refereed either way) but removes a deterministic regression from the
 generic path and documents exactly why the two conditions are needed.
+
+#### 0.17km The in-clear rule must NOT extend into in-place sections (PECompact 92 -> 51 all-three, measured, reverted)
+
+The r115 meta pass showed the remaining `code_sim >= 0.8` OEP-wrong rows split by where the claim sits: mostly inside the
+payload's own section but *earlier* than the truth, and the traces of two of them (both PECompact) show the killer is a
+different early return than jdpack's:
+
+    pecompact_md5summer, truth 0x49ec68: in_written=0 inplace=1 meta_oep=0x401016
+    pecompact_Hasher,     truth 0x482628: in_written=0 inplace=1 meta_oep=0x401016
+
+i.e. those transfers die at `if (inside_inplace(addr) && !in_written) return 0;` — the in-place guard, not the
+written-range guard. So the natural experiment was to let the in-clear fallback run from that early return too
+(hoisted into a `clear_hop_from_stub` lambda reachable from both). Measured on the 97-row PECompact family with
+`TAOTE_HOP_CLEAR=1`:
+
+    default (clear rule JDPack-only) :  all-three 92, oep 92, imports 95
+    with the in-place path widened   :  all-three 51, oep 51, imports 95   (-41, 46 rows changed)
+
+e.g. pecompact_AccessEnum 0x407a98 -> 0x42c564, Cacheset 0x4024a2 -> 0x4270dc, Diskmon 0x40b4b8 -> 0x43cde0 — every one
+of them was OEP-exact and becomes wrong. The reason is the one Neolite already showed at family level: PECompact's `.text`
+is written **later** (JIT), so the early stub->.text transfers are *internal* traffic, and answering them as hand-offs
+destroys the claim. The in-place early return is load-bearing exactly as written.
+
+Reverted; the clear rule stays gated to the `!in_written` path and to JDPack by default (r114/r115 = 2184 refereed).
+This is the third measured negative in this area (PECompact guard -0, erase-split -2, in-place widening -41), so the
+pool's remaining rows need a discriminator aimed at *which transfer is the entry*, not at widening the acceptance path.
