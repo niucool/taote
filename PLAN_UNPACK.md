@@ -14571,3 +14571,33 @@ wrong AddressOfEntryPoint) with at least three different causes already measured
 
 So each row needs its own stub-level root cause, and the common enabler is "make the stub reach its hand-off", not "improve the
 OEP picker".
+
+#### 0.17lp CORRECTION: the three non-TELock losses are REAL and reproducible - the Dr0-3 port costs those rows time
+
+Re-ran the full corpus on an idle box (4 workers, 85 s, /home/jim/runs/r119) and it reproduces r118 exactly: **all-three 2271**,
+per-family identical (TELock 93, MEW 101, MPRESS 102, RLPack 94), rows at dur >= 84: 95 (r118: 94), mean dur 8.2. So the +90 net
+gain from the Dr0-3 port is solid.
+
+But 0.17lk's explanation of the three losses ("cap artefacts, mechanism inert") is WRONG, and the rerun proves it:
+
+    row                  r117                        r118                        r119
+    mew_procexp          83 s imp 1.000 (pass)       85 s imp 0.9463 (fail)      86 s imp 0.9463 (fail)
+    mpress_geek          83 s cs 1.0000 (pass)       86 s cs 0.9025 claim 0x6f7025 (fail)  86 s identical (fail)
+    rlpack_ComIntRep     81 s imp 1.000 (pass)       86 s imp 0.4231 (fail)      86 s imp 0.1879 (fail)
+
+Identical claims and identical code_sim on the two runs means these are deterministic reproductions, not load noise. What actually
+happens: these three stubs also arm Dr0-3 (breakpoint-based anti-debug is not TELock-specific), so they now take the four extra
+#DB dispatches, the extra SEH dispatch + run-loop restart costs them 2-5 s, and they cross the 85 s per-sample budget - after
+which the run is truncated and the claim/import recovery degrades (mpress_geek's claim 0x559760 -> 0x6f7025 with code_sim
+1.0 -> 0.90 is the signature of a truncated run, not of a wrong mechanism).
+
+The round-303 evidence I read the other way ("they pass with TAOTE_NO_HW_BREAKPOINTS=1") is exactly what a mechanism-caused cost
+looks like - the flag-off run is the control, not the exoneration.
+
+So the honest ledger for the port is TELock +93, MEW -1, MPRESS -1, RLPack -1 = **+90**, and the next lever on this mechanism is
+COST, not correctness: make the #DB delivery cheaper (each one currently builds a CONTEXT, walks the chain and restarts the run
+loop) or avoid it where the guest has nothing to catch it. Recovering those three rows is worth 3 all-three, and the same cost
+reduction would help every other Dr-arming stub in the corpus.
+
+Also noted: rlpack_ComIntRep's import recall is not stable across runs (0.4231 vs 0.1879), so it should not be used as a
+single-row oracle for this work.
