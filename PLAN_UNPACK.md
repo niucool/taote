@@ -13280,3 +13280,17 @@ So the two candidate mechanisms for the next unit are now specific and cheap:
         bound the mitigation per pc/section rather than per run), so a poisoned pointer takes its own SEH path.
 
 Both are gated and family-measurable, and (a) has an exact acceptance test on jdpack_7z (claim 0x40ebc5).
+
+Correction to 0.17kg(a): the ladder's `ladder: unique MSVC frame entry 0x%llx` log prints `hit_va` **unconditionally**, so it
+reads as "unique" even when the startup-pattern vote found two candidates. Verified on the artifact: **both** jdpack_7z
+candidates are 3-push CRT startup frames
+
+    0xebc5 (truth) : 55 8b ec 6a ff 68 28 15 41 00 68 e2 ec 40 00 64 a1
+    0xe924 (chosen): 55 8b ec 6a ff 68 f8 14 41 00 68 e2 ec 40 00 64 a1
+
+so the rule actually applied was the *first-frame* vote (frames.front()), not a uniqueness test, and that vote is itself
+measured-better elsewhere (14 of the corpus's 19 such rows have the true EP at the FIRST frame). A last-frame preference
+would therefore trade this row for others and is not a lever; jdpack_7z needs a discriminator that is not first-vs-last
+(e.g. the stub's own jump target, or which frame's handler/scope pointers lie in-image). Mechanism (b) - the null-read
+mitigation poisoning a decoder - remains the one clean lead in this pool, because a poisoned decoder is a defect on its
+own terms rather than a coin flip between two plausible entries.
