@@ -13414,3 +13414,40 @@ Two negatives in a row on this pool (guard-for-PECompact neutral, erase-split -2
 signal to stop hypothesising about the ledger and instead instrument it: the next attempt should print, for one of the 9
 rows, every candidate (addr, matched range, prev_exec, accept/reject reason) at the moment the payload's true entry
 executes - i.e. prove *why* that address is not a candidate before touching the mechanism again.
+
+#### 0.17kk The instrument found it: JDPack's payload is IN THE CLEAR, so the written-range rule can never see the hand-off - corpus 2183 -> 2184 refereed
+
+Per 0.17kj's decision I stopped hypothesising about the ledger and instrumented it (`TAOTE_HOP_TRACE=<addr>`, printed
+*inside* `on_section_exec` **before** any early return, with the matched range, `prev_exec`, `stages_` and the early-return
+state). One run on `jdpack_PEview`, tracing the true entry:
+
+    [hoptrace] addr=0x401000 prev=0x415402 stages=0 dumped=0 ranges=2 matched=0 range=[0x0,0x0)
+               in_written=0 inplace=0 ep_dist=0x14000
+
+So the payload's first execution has `in_written=0` - no claimed range covers it - and the function returns before the hop
+logic ever runs. The next instrument answered *why*: `TAOTE_UNPACK_DEBUG` shows the claims on that row are `.jdpack`,
+`.rsrc`, `.idata` and `data`, and **never `code` (.text)**, and a corrected-syntax range census
+(`TAOTE_WATCH_RANGE=0x401000-0x409110`) shows **not one write ever lands in `.text`** - so `code_sim 1.0` on this row is
+trivial: the packed file already holds the payload's plaintext and the stub only redirects execution. The family is the
+**in-clear class**, and no written-range rule can ever accept its hand-off.
+
+Also worth recording: the packed file zeroes every section's Characteristics (`exec=0` on all six sections here, like
+TELock), so `any_exec_watched` is false, the JDPack-class fallback watches `vsize > raw` sections, and the secondary watch
+set ends up covering all six - which is why the exec hook *does* fire at 0x401000 but the write side never claims it.
+
+**The mechanism** (`TAOTE_HOP_CLEAR`, unpack.cpp on_section_exec): when `in_written` is false, still accept a hand-off if
+the transfer comes **out of the packer's own (packed-EP) section into a different image section** - the in-clear class.
+Measured:
+
+    JDPack 100 rows:  all-three 95 -> 96, oep_exact 96 -> 97, imports 99 -> 99, exactly ONE row changed
+                      (jdpack_PEview 0x4155f9 -> 0x401000 = its true EP), zero collateral
+    corpus r113 with the rule for EVERY family: +jdpack_PEview but -upx_FastHash_kr (0x41dffa -> 0x41bf46,
+                      deterministic) - UPX decompresses INTO the destination section, so its transfers do have writes
+                      and the fallback mis-fires
+    corpus r114 with the rule scoped to JDPack: all-three 2182 raw (r112: 2178), oep 2307, imports 2253,
+                      4 gains (jdpack_PEview plus the three recovered dur-86 flakes), ZERO losses
+
+Refereed: r112 2178 + 5 flakes = 2183 -> r114 2182 + 2 flakes = **2184** (+1, exactly the designed row). The two habitual
+flakes (nspack_Bginfo, rlpack_geek) failed in both rounds at dur 86.
+
+`TAOTE_HOP_CLEAR` = unset -> JDPack only, `1` -> every family, `0` -> off.

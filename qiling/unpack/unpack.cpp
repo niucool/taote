@@ -1504,6 +1504,42 @@ int Unpacker::on_section_exec(std::uint64_t addr) {
         return false;
     }();
 
+    // TAOTE_HOP_TRACE=<hex addr>: one-line report the first time a given address
+    // enters the hop detector, BEFORE any early return - the instrument the
+    // claim-ledger questions need (which early return fires, which range matched,
+    // what prev_exec was) instead of another hypothesis about the accept rules.
+    {
+        static const std::uint64_t hop_trace = []() -> std::uint64_t {
+            const char* t = std::getenv("TAOTE_HOP_TRACE");
+            return t != nullptr ? static_cast<std::uint64_t>(std::strtoull(t, nullptr, 0)) : 0;
+        }();
+        if (hop_trace != 0 && addr == hop_trace) {
+            static bool once = false;
+            if (!once) {
+                once = true;
+                int spans = 0;
+                std::uint64_t mf = 0, mt = 0;
+                for (const auto& r : written_ranges_) {
+                    if (addr >= r.first && addr <= r.second) {
+                        ++spans;
+                        mf = r.first;
+                        mt = r.second;
+                    }
+                }
+                std::fprintf(stderr,
+                             "[hoptrace] addr=0x%llx prev=0x%llx stages=%d dumped=%d ranges=%zu matched=%d "
+                             "range=[0x%llx,0x%llx) in_written=%d inplace=%d ep_dist=0x%llx\n",
+                             static_cast<unsigned long long>(addr),
+                             static_cast<unsigned long long>(prev_exec),
+                             static_cast<int>(stages_), dumped_addrs_.count(addr) ? 1 : 0,
+                             written_ranges_.size(), spans,
+                             static_cast<unsigned long long>(mf), static_cast<unsigned long long>(mt),
+                             in_written ? 1 : 0, inside_inplace(addr) ? 1 : 0,
+                             static_cast<unsigned long long>(
+                                 addr > packed_ep_va_ ? addr - packed_ep_va_ : packed_ep_va_ - addr));
+            }
+        }
+    }
     // the stub's own code near the packed EP is not the payload (unless the
     // stub decoded over itself there)
     const std::uint64_t ep_delta = addr > packed_ep_va_ ? addr - packed_ep_va_ : packed_ep_va_ - addr;
@@ -1515,6 +1551,44 @@ int Unpacker::on_section_exec(std::uint64_t addr) {
         return 0;
     }
     if (!in_written) {
+        // TAOTE_HOP_CLEAR=1: a transfer out of the packer's own section into another
+        // image section is a hand-off even when the destination was NEVER written -
+        // the in-clear class, where the packed file already holds the payload's bytes
+        // so the stub only redirects execution (measured on jdpack_PEview: NOT ONE
+        // write lands in .text, ranges=2 and matched=0 at the true entry, so the
+        // written-range rule can never accept it although prev_exec=0x415402 is the
+        // stub and the entry itself executes).
+        // TAOTE_HOP_CLEAR: unset -> JDPack only (measured), "1" -> every family
+        // (corpus r113: +jdpack_PEview but -upx_FastHash_kr, because UPX decompresses
+        // INTO the destination section, so its transfers do have writes and this
+        // fallback mis-fires), "0" -> off.
+        static const int clear_mode = [] {
+            const char* e = std::getenv("TAOTE_HOP_CLEAR");
+            if (e == nullptr) return 1;                      // family-scoped default
+            return std::strcmp(e, "0") == 0 ? 0 : 2;         // 2 = every family
+        }();
+        const bool clear_hop = clear_mode == 2 || (clear_mode == 1 && opts_.family == "JDPack");
+        if (clear_hop && addr >= base_ && addr - base_ < image_size_) {
+            const PackSection* stub_sec = nullptr;
+            const PackSection* dst_sec = nullptr;
+            for (const auto& ps : sections_) {
+                if (packed_ep_va_ >= ps.start && packed_ep_va_ < ps.end) {
+                    stub_sec = &ps;
+                }
+                if (addr >= ps.start && addr < ps.end) {
+                    dst_sec = &ps;
+                }
+            }
+            const bool from_stub = stub_sec != nullptr && prev_exec >= stub_sec->start &&
+                                   prev_exec < stub_sec->end;
+            if (from_stub && dst_sec != nullptr && dst_sec != stub_sec &&
+                dumped_addrs_.insert(addr).second && stages_ < opts_.max_stages) {
+                dump_module(*ql_, addr, "section_clear");
+                last_hop_addr_ = addr;
+                last_hop_imp_ = imports_.size();
+                have_hop_ = true;
+            }
+        }
         return 0;
     }
     // the executed-page view (see Unpacker::exec_view_)
