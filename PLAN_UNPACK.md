@@ -14019,3 +14019,39 @@ both engines. So the input to that computation is something other than the two c
 code at 0x41882b itself (TAOTE_PROBE=0x41882b dumps 40 live bytes plus the register file) and walk back to whatever feeds it,
 comparing against the reference's trace with its new `ebx=` and `efl=` columns (both were added to the reference's stub trace
 this round: it now prints ebx and eflags, which is what made the byte-level comparison possible at all).
+
+#### 0.17lb BREAKTHROUGH: TELock's decrypt key is a fold over the stub's RESOLVED EXPORT TABLE, and forcing the right value decodes .text to 93%
+
+Working from the reference's ebx/efl-bearing trace, TELock's key field is now fully mapped:
+
+    0x41880f/0x418811  fold loop:   edx = (edx >> 8) ^ eax      (verified arithmetically on the reference's own
+                                                                 sequence: 0x00926809 ^ 0x7472f296 = 0x74e09a9f)
+                       seed:        0x92680909
+                       eax:         a per-entry hash, one iteration per entry of the stub dll's export table
+                                    (taote's counter runs from 0x1992 = 6546 down)
+    0x418824           xor dx, word [ebp+0x1b55]  ->  the word at 0x419bd4 = 0xf900 in BOTH engines
+    0x41882b           mov [ebp+0x1c55], edx       ->  the field at 0x419cd4, i.e. the key
+    reference 0x12cdd33f   taote 0x6d8fd7d6
+
+And the decisive experiment: with `TAOTE_TLOCK_KEY=<hex>` (new, env-gated, per-instruction hook that forces edx at
+0x41882b - a per-BLOCK hook never sees that pc, it is mid-block, which is why the first attempt silently did nothing):
+
+    TAOTE_TLOCK_KEY=0x12cdd33f  ->  telock_7z .text equals not-packed/7z.exe's .text for **61037 of 65536 bytes**
+                                    (93.2%), against 5133 in every arm before it
+
+So the key field is THE blocker: everything else about taote's TELock decode - the ladder, the copy pass, the intermediate
+transform, the round-trip key 0xf900, the OEP - is already exact. The 4499 remaining bytes are a second-order difference
+(most likely a second keyed field or the tail of the span).
+
+Why the two engines disagree: the fold covers the stub dll's export table, and taote's surface (its own api_db SDK table) is
+not the reference's (sdk_exports.inc, 24,291 names). One entry that differs, or a different ordering, changes the whole fold.
+Measured and rejected as the cause already: export-name CASE (TAOTE_STUB_CASE=TELock / =all leave edx unchanged) and the
+module base (0.17la).
+
+NEXT UNIT, now concrete: align the TELock stub-dll export surface with the reference's sdk_exports.inc (same names, same
+sorted order) and re-measure edx at 0x418824 against 0x12cd2a3f. If the fold matches, the decode is exact without any forced
+value, and the whole 116-row family follows - measure the TELock family, then the corpus. If the fold still differs, dump the
+per-entry eax hashes on both sides (TAOTE_PROBE=0x418811 with PROBE_N) and find the first entry whose hash differs, which
+names are involved, and whether that name is in api_db at all. The fold's arithmetic is simple enough to reimplement
+host-side, so an alternative (and possibly better) lever is to compute the key from the *packed* stub's own export
+references rather than from taote's surface.

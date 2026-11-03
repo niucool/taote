@@ -1652,6 +1652,49 @@ int Unpacker::on_section_exec(std::uint64_t addr) {
         }
         return 0;
     }
+    // EXPERIMENT (TAOTE_TLOCK_KEY=<hex>): force the stub's own key field at pc 0x41882b
+    // (`mov [ebp+0x1c55], edx` -> 0x419cd4), whose value the stub derives from the RESOLVED
+    // STUB-DLL ADDRESSES (reference 0x12cdd33f from addresses at 0x7700xxxx; taote
+    // 0x6d8fd7d6 from its synthetic surface at 0x1002xxxx). It is the XOR key of the .text
+    // transform (final = intermediate ^ bl), so forcing it decides whether that value is the
+    // ONLY thing between taote and a byte-exact TELock decode.
+    if (const char* kk = std::getenv("TAOTE_TLOCK_KEY")) {
+        static const std::uint64_t want = std::strtoull(kk, nullptr, 0);
+        if (addr == 0x41882b) {
+            ql_->arch().regs().write("edx", want);
+        }
+    }
+    // EXPERIMENT (TAOTE_TLOCK_KEY=<hex>): force the stub's key field at pc 0x41882b
+    // (`mov [ebp+0x1c55], edx` -> 0x419cd4). The stub derives that value from the RESOLVED
+    // STUB-DLL ADDRESSES (reference 0x12cdd33f from addresses at 0x7700xxxx, taote 0x6d8fd7d6
+    // from its synthetic surface at 0x1002xxxx) and it is the XOR key of the .text transform
+    // (final = intermediate ^ bl). Forcing it decides whether that value is the ONLY thing
+    // between taote and a byte-exact TELock decode. Per-instruction hook over the stub range:
+    // a per-BLOCK hook never sees 0x41882b, which is mid-block (the first attempt at this
+    // experiment silently did nothing for exactly that reason).
+    if (const char* kk = std::getenv("TAOTE_TLOCK_KEY")) {
+        static const std::uint64_t want = std::strtoull(kk, nullptr, 0);
+        std::uint64_t klo = 0, khi = 0;
+        for (const auto& ps : sections_) {
+            if (packed_ep_va_ >= ps.start && packed_ep_va_ < ps.end) {
+                klo = ps.start;
+                khi = ps.end;
+                break;
+            }
+        }
+        if (klo != 0) {
+            auto key_hook = std::make_shared<HookRet>(ql_->hook_code([this](std::uint64_t a, std::uint32_t) -> int {
+                if (a == 0x41882b) {
+                    ql_->arch().regs().write("edx", want);
+                }
+                return 0;
+            }, klo, khi));
+            if (key_hook->obj() != nullptr) {
+                hooks_.push_back(std::move(key_hook));
+            }
+        }
+    }
+
     // the hand-off whole-image snapshot (see Unpacker::handoff_view_)
     if (handoff_view_.empty() && std::getenv("TAOTE_HANDOFF_SNAP") != nullptr && ql_ != nullptr &&
         packed_ep_va_ != 0 && addr >= base_ && addr - base_ < image_size_) {
