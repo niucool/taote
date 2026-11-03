@@ -14519,3 +14519,24 @@ What is left as the jdpack_7z gate: the stub's *decode input differs from the re
 esi (a VirtualAlloc buffer) and the decoded output addresses come out as garbage (0x2f7762, 0xff20b4f1). The next probe is to
 dump that buffer and the stub's source span in taote and compare with the reference's run of the same sample - the same shape of
 comparison that closed TELock, but before the decode rather than after it.
+
+##### 0.17ln addendum: artifact-vs-artifact comparison on jdpack_7z
+
+Dumped images from both engines (102400 bytes each) differ in 2783 bytes, but the distribution is informative:
+
+    .text  (0x1000-0xa000)   ZERO differing bytes        -> taote's payload really is byte-identical (code_sim 1.00 confirmed at byte level)
+    stub   (0x18000)         1104 diffs, 1083 of them taote=0x00 vs reference=code
+    .rdata (0x11000-0x15000) mixed, both sides non-zero
+    .data  (0x14000)         848 diffs, ALL reference=0x00 vs taote=ASCII ("teDire..")
+
+The stub one is exact: the packed file at RVA 0x18000 starts `60 e8 00 00 00 00 5d 8b d5 81 ed c6 2b 40 00` (pushad / call $+5 /
+pop ebp / sub ebp,0x402bc6 - the stub's own entry), the reference's artifact keeps those bytes, and taote's artifact has them
+zeroed. There is no deliberate stub-erase in taote's finalize (grep finds none), so this is the guest wiping its own section
+after use and taote keeping the end-of-run state, while the reference's dump holds the pre-wipe content. That is a dump-timing
+difference, not a decode difference - and it means artifact-vs-artifact comparison is only meaningful for the payload spans.
+
+So the jdpack_7z picture after this round: payload correct, stub self-wipe explains the stub-region diff, alignment is not the
+gate (measured), the module base is not zero (measured), and the stub still dies in its LZ loop before the hand-off. The next
+probe has to be the stub's *input*: at the fault pc its bit-stream source is esi (a VirtualAlloc buffer), so log that buffer's
+contents in taote and read the reference's equivalent by dumping the same guest address from its run (SE_TELOCK_WRLOG-style
+write log, or a memory dump at the same pc) - the pre-decode equivalent of the comparison that closed TELock.
