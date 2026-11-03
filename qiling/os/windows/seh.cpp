@@ -304,6 +304,15 @@ bool QlOsWindows::seh_on_fault(int access, std::uint64_t address) {
     // ExceptionInformation[0] convention), which is what permission-driven
     // decryption (Neolite's demand-paged .text) selects on.
     if (access == UC_MEM_WRITE_UNMAPPED) {
+        // Diagnostic (TAOTE_SEHDBG): the guest's own write target is what tells an
+        // under-mapped image apart from a bad pointer. It found exe32pack_bzip2's
+        // death: a store through a small uninitialised pointer right after its
+        // GetModuleHandleA("KERNEL32"), i.e. a value the stub computed from an API
+        // result, not a missing mapping.
+        if (std::getenv("TAOTE_SEHDBG") != nullptr) {
+            std::fprintf(stderr, "[sehc] write unmapped addr=0x%llx\n",
+                         static_cast<unsigned long long>(address));
+        }
         return seh_dispatch(address, 1u);
     }
     if (access == UC_MEM_READ_UNMAPPED) {

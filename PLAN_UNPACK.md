@@ -13690,3 +13690,42 @@ BY-PRODUCT, and the more interesting lead: **bero_HDDScan.exe reaches its TRUE e
 ladder scan simply does not finish inside 85 s. Same truth as rlpack/mpress/neolite HDDScan (0x883d20), and neolite's
 copy was closed earlier as "meta_oep_ already held 0xadaa70". Worth a census: how many of the corpus's misses have
 `dur >= 84` and turn exact when given 600 s - that population is the honest target for a *faster* scan, not a bigger budget.
+
+#### 0.17kt The corpus budget is NOT the binding constraint (23 capped failing rows, 0 gains at 7x), and Exe32pack's decode dies on a value, not a mapping
+
+**Budget census.** 90 of 2678 rows finish at `dur >= 84` (the 85 s cap); 23 of those fail all-three. Re-ran all 23
+through the same harness with `--unpack-timeout 600` (7x the budget): **0 all-three gains, 0 OEP gains**. So the cap costs
+essentially nothing on this corpus and "make the scan faster" is not a lever - the one row that does benefit solo
+(bero_HDDScan reaches its true 0x883d20 at 600 s single-threaded) does not survive 4-way wall-clock sharing, which is the
+condition the corpus is graded in.
+
+**Decoded-miss census (r115, 496 misses) by class:**
+
+    A oep ungraded (managed/odd)      81      E import near-miss (recall>=0.85)  22
+    C decode-bound OEP-wrong         272      F import-bound, decode low        94
+    D decoded OEP-wrong               18      G import-bound, decoded             9
+    C breakdown: Themida 122 + Yoda-Protector 100 (both also fail for the reference) + Amber 15 + Exe32pack 15 +
+                 TELock 8 + NSPack 5 + WinUpack 2 + Alienyze 1. So the non-parity decode pool is only ~46 rows.
+
+**Exe32pack, 15 rows, exact oracle available.** The reference decodes exe32pack_bzip2.exe to the ORIGINAL .text byte for
+byte (19456/19456 equal), while taote's artifact .text is entirely zero - nothing is ever written there. The packed file
+has a wiped section table (every raw size/pointer is 0 except .tls and .k; the payload+headers live in `.k` at ptr 0x600,
+raw 0x4e0e, vsize 0x7302) and EP 0x1100c sits INSIDE `.k`, whose bytes are a self-modifying delta decoder
+(`3b c0 74 02 81 83 55 ... call $+5 / pop ebp / sub ebp, 0x403aec`). taote runs 7727 writes inside `.k`, reaches
+pc 0x4178a0, then dies on a **write to 0x54** - a store through a small uninitialised pointer, immediately after the stub's
+`GetModuleHandleA("KERNEL32")` (the pointer 0x411190 really does hold "KERNEL32\0" in `.k`).
+
+Two mechanisms measured and rejected for it (both reverted):
+
+    TAOTE_NULLWRITE=1   mirror of the read-side null-page tolerance on WRITE faults: the run then dies on a FETCH
+                        (UC_ERR_FETCH_UNMAPPED) instead - the pointer is computed from a value, so surviving the store
+                        only moves the crash.
+    TAOTE_STUB_CASE=Exe32pack  the export-name case-aware surface (the hashed-lookup hypothesis): bzip2, DriveCleanup and
+                        touch all keep their exact claims and import counts.
+
+KEPT: the write-unmapped diagnostic under TAOTE_SEHDBG (`[sehc] write unmapped addr=0x...`), which is what identified the
+0x54 store as a value problem rather than a missing mapping.
+
+NEXT UNIT for Exe32pack: the stub parses the module returned by GetModuleHandleA and stores a field from it; find what it
+expects of that module (taote hands it a synthetic stub image at 0x10020000) and diff it against what the reference's
+loader exposes. Alternative target with the same shape and fewer unknowns: Amber's 15 decode-bound rows.
