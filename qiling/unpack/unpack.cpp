@@ -1285,16 +1285,27 @@ void Unpacker::install(Qiling& ql) {
         if (std::getenv("TAOTE_TLOCK_KEY") != nullptr || std::getenv("TAOTE_PC_DUMP") != nullptr) {
             const char* kk = std::getenv("TAOTE_TLOCK_KEY");
             const std::uint64_t want = kk != nullptr ? std::strtoull(kk, nullptr, 0) : 0ull;
+            // TAOTE_PC_DUMP=<pc>[:<n>] - <n> (1-based, default 1) selects WHICH hit dumps, so a
+            // loop's per-iteration state can be captured (TELock's key fold runs 6546 times and
+            // the interesting iteration is the first divergent one, not the first).
             const char* pd = std::getenv("TAOTE_PC_DUMP");
-            const std::uint64_t dpc = pd != nullptr ? std::strtoull(pd, nullptr, 0) : 0ull;
-            const auto hook = [this, want, dpc](std::uint64_t a, std::uint32_t) -> int {
+            std::uint64_t dpc = 0, dhit = 1;
+            if (pd != nullptr) {
+                const std::string spec = pd;
+                const auto c = spec.find(':');
+                dpc = std::strtoull(spec.substr(0, c).c_str(), nullptr, 0);
+                if (c != std::string::npos) {
+                    dhit = std::strtoull(spec.substr(c + 1).c_str(), nullptr, 0);
+                    if (dhit == 0) dhit = 1;
+                }
+            }
+            const auto hook = [this, want, dpc, dhit](std::uint64_t a, std::uint32_t) -> int {
                 if (want != 0 && a == 0x41882b) {
                     ql_->arch().regs().write("edx", want);
                 }
                 if (dpc != 0 && a == dpc) {
-                    static bool once = false;
-                    if (!once) {
-                        once = true;
+                    static std::uint64_t hits = 0;
+                    if (++hits == dhit) {
                         const auto hexdump = [this](std::uint64_t at, std::uint64_t n) {
                             std::string hx;
                             try {
@@ -1315,7 +1326,7 @@ void Unpacker::install(Qiling& ql) {
                                      static_cast<unsigned long long>(r.read("edx")),
                                      static_cast<unsigned long long>(r.read("ebx")),
                                      static_cast<unsigned long long>(r.read("esi")));
-                        std::fprintf(stderr, "[pcdump] code( -0x60 ) %s\n", hexdump(a - 0x60, 0x60).c_str());
+                        std::fprintf(stderr, "[pcdump] code( -0x40 ) %s\n", hexdump(a - 0x40, 0xC0).c_str());
                         std::fprintf(stderr, "[pcdump] stack %s\n", hexdump(r.arch_sp(), 0x40).c_str());
                         std::fprintf(stderr, "[pcdump] at_eax %s\n",
                                      hexdump(r.read("eax"), 0x20).c_str());

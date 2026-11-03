@@ -14187,3 +14187,35 @@ on both sides - the reference side needs the same trick (its stub trace prints e
 sequence is complete; taote needs the per-iteration registers rather than the first-hit snapshot). Then the inputs of the one
 divergent iteration are enumerable, and the endgame stays: compute the key host-side (the fold is ~9 instructions) from the
 packed stub's post-ladder image.
+
+#### 0.17lf The nth-hit dump works; TELock's key function is a byte CRC whose poly branch SELF-MODIFIES
+
+`TAOTE_PC_DUMP=<pc>[:<n>]` now selects which hit dumps (1-based) and prints `[pc-0x40, pc+0x80)`, so a loop's per-iteration
+state is capturable. taote's fold state at the three interesting hits, next to the reference's trace:
+
+    hit 279  taote eax=0x573ebef4 edx=0x5788665a ebx=0x187c esi=0x418117   reference: IDENTICAL
+    hit 280  taote eax=0xe257a0dd edx=0xe20028bb ebx=0x187b esi=0x418118   reference: IDENTICAL
+    hit 281  taote eax=0x470317ee edx=0x47e117c6 ebx=0x187a esi=0x418119   reference: eax=0x3e36130d edx=0x3ed41325
+
+so at the first divergent iteration the byte (0x418118 = 0xac) and the carry-in (edx 0xe20028bb) both match, and the fold's
+own arithmetic still produces different results. The disassembly of the live code explains why static reasoning kept failing:
+
+    4187ce  clc / 73 02 jae / cd 20 int 0x20          (dead trigger)
+    4187d3  mov ecx,0xd ; lea esi,[ebp+0x3bf] ; lea edi,[esi+ecx*4-4]
+    4187e2  lodsd / push eax / and dword [esi-4],0 / loop      <- saves AND ZEROES 13 dwords of stub state
+    4187ea  lea esi,[ebp-0x7f] (=0x418000) ; mov ebx,0x1992 ; lea edx,[ecx-1] (=0xffffffff) ; xor eax,eax
+    4187f7  lodsb ; xor al,dl ; then 8x: shr eax,1 ; jae ... ; and cl,7 ; jne 0x4187fa   <- a CRC bit loop
+    41880c  shr edx,8 ; xor edx,eax                                                    <- the per-byte fold
+    418811  dec ebx ; jg 0x4187f5 ; (je / int 0x20)
+    418818  mov ecx,0xd ; pop eax ; stos dword [edi] ; sub edi,8 ; loop                <- restores what it zeroed
+    418824  xor dx, WORD [ebp+0x1b55] (=0xf900, identical in both engines)
+    41882b  mov [ebp+0x1c55], edx        <- the key field at 0x419cd4
+    418831  stc ; jb ; jmp 0x4187c3      <- and the poly branch of the bit loop jumps to 0x418837, which in the image at
+                                            that moment is `mov ebp,0x1d3d` - i.e. ANOTHER routine: the stream rewrites
+                                            itself, and the same static bytes decode differently at different times.
+
+So the remaining question cannot be settled by reading bytes: the CRC's polynomial path is a *self-modified* jump target, and
+whether it lands correctly depends on what the stub wrote earlier. Two consequences for the next unit: (a) dump the inner bit
+loop head (0x4187fa) with `<n>` across the 8 inner steps of iteration 280 and compare with the reference's trace pcs, to see
+the first inner step where they part; (b) if that path proves tool-sensitive, drop the copy-the-algorithm plan and take the
+endgame in PLAN 0.17le: read the value from the stub's own post-ladder image, where this function's output is stored anyway.
