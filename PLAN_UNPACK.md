@@ -13204,3 +13204,44 @@ Also closed this round: comparing the hashed stub range (0.17kc) across the two 
 that region re-encrypted (`4f b0 e2 98 ...` at RVA 0x18fb7) while the reference **zeroes** it (all-zero there), so the
 92%-difference measurement of last round is an artefact of two different post-run conventions, not evidence about the
 decrypt.
+
+#### 0.17kf Three corrections: the watch-range syntax, the real write census, and where the run now ends (plus the shadow-overlay A/B)
+
+**1. My own measurement bug, session-wide: `TAOTE_WATCH_RANGE` takes `<lo>-<hi>[:n]`, not `<lo>:<hi>`.** Every census I
+reported with `lo:hi` (e.g. `0x401000:0x411000`) silently became a **one-page** window `[lo, lo+0x1000)` with an
+enormous print budget, so the "0x418da8 4096 / 0x418fc2 4096 / 0x418fe0 4096" counts that have been quoted since 0.17jj
+are a *page-size artefact*, not totals. Corrected census over the whole `.text`
+(`TAOTE_WATCH_RANGE=0x401000-0x411000:400000`):
+
+    35328 pc=0x418fe0      (the section loop's stosb)
+    35328 pc=0x418fc2      (its pre-rotation store)
+    35328 pc=0x418da8      (stage 1's store)
+      223 pc=0x419128      (relocation/fixup pass)
+       43 pc=0x4190ba
+        1 pc=0x4190e2
+
+So `.text` is written by **exactly the three decryptor stores, once per raw byte each, and by nothing else**: there is
+no decompressor pass in taote, no page-wise re-decode, and the 223-byte fixup pass is the only other writer.
+
+**2. The run no longer ends at 0x4196f1.** With the CRC bypass and the #UD delivery both shipped, the log says
+`[unpack] telock: #UD at 0x4196f1 delivered=1` - the frame the stub installed *does* run - and the run now proceeds
+into the payload and dies at **pc 0x410fff with UC_ERR_READ_UNMAPPED** (the last byte of `.text` page 0). The standing
+note that "the run ends inside the stub at the #UD" is obsolete.
+
+**3. The shadow overlay is a measured no-op for TELock (not kept).** The reference's 100%-correct `.text` comes from
+its finalize **first-write shadow dump** (its own comment: "TELock uses just-in-time decrypt/execute/re-encrypt ... re-dump
+at finalize to capture the accumulated shadow buffer"), which is a mechanism taote has - gated on
+`ShadowPolicy::first_write`, which TELock does not set. Enabled for TELock behind `TAOTE_TLOCK_SHADOW` and A/B measured on
+16 TELock rows (4 workers, 85 s):
+
+    arm     all-three  oep_exact  imports  mean code_sim
+    off     0          14         0        0.0687
+    on      0          14         0        0.0687        (byte-identical artifacts on telock_7z.exe)
+
+The overlay fires (48,796 bytes restored) but changes nothing that matters: TELock's decryptors write each byte **once**,
+so the first write *is* the final garbage - the shadow holds the same junk as the image. Reverted; no code change kept.
+
+**4. The stream is not a standard codec.** `zlib.decompressobj` in raw-deflate (-15), gzip (31) and zlib (15) modes all
+reject taote's 0x8a00-byte stream, whose head is `da 9a af e6 9b 52 bd ef` with all 256 byte values present. If the
+payload is compressed (0.17ke), the codec is TELock's own, and nothing in the stub's executed path expands `.text`, so
+the expansion must happen wherever the payload's own hand-off leads - which is exactly where taote now dies (0x410fff).
