@@ -1225,8 +1225,18 @@ void Unpacker::install(Qiling& ql) {
                 }
                 auto& os = ql_->os<os::windows::QlOsWindows>();
                 if (opts_.debug) {
-                    std::fprintf(stderr, "[unpack] insn_invalid pc=%s b=0x%02x\n", hex(pc).c_str(),
-                                 static_cast<unsigned>(b));
+                    std::uint64_t fs0_early = 0;
+                    try {
+                        const auto f4 = ql_->mem().read(regs.read("fsbase"), 4);
+                        if (f4.size() == 4) {
+                            fs0_early = static_cast<std::uint64_t>(f4[0]) | (static_cast<std::uint64_t>(f4[1]) << 8) |
+                                        (static_cast<std::uint64_t>(f4[2]) << 16) | (static_cast<std::uint64_t>(f4[3]) << 24);
+                        }
+                    } catch (...) {
+                    }
+                    std::fprintf(stderr, "[unpack] insn_invalid pc=%s b=0x%02x fs0=0x%llx esp=0x%llx\n", hex(pc).c_str(),
+                                 static_cast<unsigned>(b), static_cast<unsigned long long>(fs0_early),
+                                 static_cast<unsigned long long>(regs.arch_sp()));
                 }
                 if (b == 0xf1) {
                     // #DB (ICEBP) is a trap: Eip advances to the next
@@ -1236,7 +1246,25 @@ void Unpacker::install(Qiling& ql) {
                     (void)os.seh_dispatch_cpu(0x80000004u);
                     return QL_HOOK_BLOCK;
                 }
-                if (!os.seh_dispatch_cpu(0xC000001Du)) {
+                const bool handled = os.seh_dispatch_cpu(0xC000001Du);
+                if (opts_.debug) {
+                    std::uint64_t fs0 = 0;
+                    try {
+                        const auto b4 = ql_->mem().read(regs.read("fsbase"), 4);
+                        if (b4.size() == 4) {
+                            fs0 = static_cast<std::uint64_t>(b4[0]) | (static_cast<std::uint64_t>(b4[1]) << 8) |
+                                  (static_cast<std::uint64_t>(b4[2]) << 16) | (static_cast<std::uint64_t>(b4[3]) << 24);
+                        }
+                    } catch (...) {
+                    }
+                    std::fprintf(stderr,
+                                 "[unpack] insn_invalid dispatch pc=%s handled=%d fs0=0x%llx esp=0x%llx retarget=0x%llx\n",
+                                 hex(pc).c_str(), handled ? 1 : 0,
+                                 static_cast<unsigned long long>(fs0),
+                                 static_cast<unsigned long long>(regs.arch_sp()),
+                                 static_cast<unsigned long long>(os.seh_retarget()));
+                }
+                if (!handled) {
                     // nothing handled the #UD: surface the original stop
                     ql_->emu_stop();
                 }

@@ -13885,3 +13885,40 @@ whose condition reads memory/stack (the engines' esp differ: 0x121ffc0 vs 0x15ff
 the ladder's loop end (the reference's ladder pc is 0x418030; its callers/handlers live at 0x4186xx-0x4199xx) and by making
 the TF single-step path reachable for TELock. Success is a single number: ladder writes 64 -> ~6481, then .text equal
 5133 -> 65536 on telock_7z, then the 116-row TELock family via tools/ref_parity.py.
+
+#### 0.17ky The ladder is single-step driven: taote delivers 2 exception dispatches where the reference delivers ~59K
+
+Instrumented the invalid-instruction handler (debug-only) and measured telock_7z.exe end to end. The ladder's own code is
+visible in live memory at its entry (`TAOTE_PROBE=0x418030` -> `30 06 46 5a eb 01 e9 ...` = `xor [esi],al; inc esi; ...`,
+an overlapping-instruction stream), and its state at entry is CORRECT:
+
+    ecx = 0x1951 = 6481      <- exactly the reference's write count, so the loop bound is right
+    eax = 0x7efc             <- the XOR key
+    esi = 0x418041           <- the first decrypted byte, which both engines write as 0xe8
+
+and then the ladder STOPS after exactly 64 bytes (0x418041..0x418080), immediately followed by two CPU-exception
+dispatches, in this order:
+
+    0x419a08  b=0xf1  (ICEBP)  fs0=0x121ffb0  esp=0x121ffb0
+    0x4186a8  b=0x8d  (#UD)    fs0=0x121ffb8  esp=0x121ffb8  -> handled=1, retarget=0x41868a
+
+Both the guest's SEH chain (fs:[0] = 0x121ffb8, installed by the stub's own store at pc 0x4186a0 - 22 writes to the TEB,
+same install/restore shape as the reference's `fs0 0x0 -> 0x15fffa0 at eip=0x4186a8`) and the handler address are RIGHT:
+the reference dispatches to `eip=0x41868a` too. After the handler runs, the reference continues the ladder and taote goes
+straight to the `.text` copy pass at 0x418da8 - which is why its rolling key never advances and its `.text` stays packed.
+
+The counts make the missing mechanism unambiguous: the reference logs 5 `[insn-inv]` events but ~59K SEH dispatches
+(its own comment: "the stage 1 dump, taken early, before the 59K+ SEH ladder dispatches"). taote logs 2 dispatch-worthy
+events in total. taote's TF single-step delivery (qiling/os/windows/windows.cpp:1090-1112) only fires when `emu_start`
+returns CLEANLY with eflags.TF set - measured: **zero clean returns on this row** (every exit is an exception), so that
+branch is dead code here and the guest never sees a per-instruction #DB.
+
+So the ladder is a single-step decryptor: execute one instruction, the #DB handler decrypts the next byte(s), repeat ~6481
+times. Nothing about TELock's ladder code, its bounds, its key, its SEH chain or its handler differs between the engines -
+only the *trap delivery* does.
+
+NEXT UNIT: deliver #DB per instruction while eflags.TF is set. Either make `emu_start` return per instruction for TF runs
+(the existing path) or add an instruction-level hook that stages `seh_dispatch_cpu(0x80000004)` when TF is set. Measure with
+one number: ladder writes at pc 0x418030, 64 -> ~6481 (TAOTE_WATCH_RANGE=0x418041-0x418130 | grep -c 'pc=0x418030'), then
+telock_7z `.text` equality 5133 -> 65536, then the TELock family, then the corpus. Cost control: TELock's ladder is ~59K
+instructions, but the hook must not slow the other 2500 rows - gate it to TF-set windows only.
