@@ -14149,3 +14149,41 @@ index 280. If that call resolves an address from the synthesised module, the pra
 at: compute the key host-side from the packed stub's own references (the fold is 3 instructions plus that call) - or take the
 value from the stub's own post-ladder image, which is already available in the emulator and is where any baked constant would
 live (item 3 above rules out the packed file).
+
+#### 0.17le A working per-instruction dump, and the fold's arithmetic says it reads MORE than one byte per iteration
+
+The pc dump now exists in the right place: a per-instruction hook installed once in `Unpacker::install` (the earlier attempt
+lived inside `on_section_exec`, so it only ever saw block entries and silently did nothing). `TAOTE_PC_DUMP=<pc>` prints, at
+the first execution of <pc>: the register file, `[pc-0x60, pc)`, 0x40 bytes at esp, 0x20 at eax and 0x40 at esi. TAOTE_TLOCK_KEY
+moved to the same hook (still env-gated, still default off).
+
+With it, TELock's key fold body is readable (0x4187b1..0x418811, live/decrypted):
+
+    f8            clc
+    73 02 / cd 20 jae +2 / int 0x20          (the self-modifying trigger)
+    b9 0d 00 00 00       mov ecx,0xd
+    8d b5 bf 03 00 00    lea esi,[ebp+0x3bf]
+    8d 7c 8e fc          lea edi,[esi+ecx*4-4]
+    ad / 50 / 83 66 fc 00 lodsd / push eax / and dword [esi-4],0
+    e2 f8                loop
+    8d 75 81             lea esi,[ebp-0x7f]      -> 0x418000, the fold's source base
+    bb 92 19 00 00       mov ebx,0x1992          -> 6546 iterations
+    8d 51 ff             lea edx,[ecx-1]
+    33 c0                xor eax,eax
+    ac / 32 c2 / d1 e8 / 73 08 / eb 01 / eb 35   lodsb / xor al,dl / shr eax,1 / jae / jmp / jmp
+
+so the per-iteration value is a rolling byte mix (`eax` feeds itself through `shr`), not a call as the earlier `ret=...`
+reading suggested.
+
+**And the arithmetic proves one byte per iteration is not enough.** At the first divergent index (280): edx was 0xe20028bb in
+BOTH engines, the byte at 0x418000+280 = 0x418118 is 0xac in BOTH engines (its write log entries match: 0x418117=0xec,
+0x418118=0xac, 0x418119=0xe5 then 0x2f), so `0xac ^ 0xbb = 0x17`, `shr` gives 0x0b with CF=1 - the same branch and the same
+inputs in both engines. Yet eax_280 differs (reference 0x3e36130d, taote 0x470317ee). So the iteration consumes at least one
+more input: candidates are the bytes at 0x41811a+ (the fold may read a dword and step by 2), the `int 0x20` handler's effect
+on the following bytes, or the flags not covered by the captured state.
+
+NEXT UNIT: make the dump fire on the Nth hit (`TAOTE_PC_DUMP=<pc>:<n>`) and capture the fold's state at iterations 279/280/281
+on both sides - the reference side needs the same trick (its stub trace prints eax/edx/ebx/efl per instruction already, so its
+sequence is complete; taote needs the per-iteration registers rather than the first-hit snapshot). Then the inputs of the one
+divergent iteration are enumerable, and the endgame stays: compute the key host-side (the fold is ~9 instructions) from the
+packed stub's post-ladder image.
