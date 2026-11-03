@@ -13566,3 +13566,31 @@ Recorded state of the pool: 4 measured negatives (guard +/-0, erase-split -2, in
 -2/-53) and one positive (the in-clear JDPack hand-off, +1). Every one of the negatives is explained by PECompact keeping
 stub + decoder + payload in a single section (0.17kn), so the only remaining lever there is content-based, and it needs
 the deferral above.
+
+#### 0.17kp The deferral works mechanically, but a FAMILY rule returns before the ledger vote - and that rule is what makes three other rows pass
+
+Followed 0.17ko's plan: since the artifact is written **only in finalize** from `res.oep` (unpack.cpp:4391-4412), deferring
+the claim is cheap - record the in-place, entry-shaped transfers and let `pick_oep` decide. Two pieces were built:
+
+1. **record without claiming** (`TAOTE_INPLACE_LEDGER`): on the in-place early return, if the target opens like an entry
+   (`55 8b ec` / `6a ?? 68` / `68 ?? e8` / `e8 ?? e5`), push it to `hop_ledger_`+`hop_write_seq_` and emit nothing.
+   Measured: the ledger then holds the truth (0x49ec68@924007 on pecompact_md5summer, second entry after the junk latch).
+2. **first-entry pick** in that mode: take the FIRST ledger candidate with `seq >= 32 && shape_at >= 2` instead of the
+   last, because the in-place class appends the payload's own transfers *after* the entry.
+
+Both work in isolation and neither changes the answer, and the reason is now located precisely: `pick_oep` has a
+**PECompact-specific rule ahead of the incumbent vote** (unpack.cpp:3130-3170) -
+
+    if (ladder != 0 && ladder != pep && ladder_is_startup_frame) -> return ladder   // "pecompact epfix"
+
+which fires for these rows (the PassC ladder's 0x49a786 *is* a `55 8b ec 6a ff 68` startup frame) and returns before the
+ledger vote is ever consulted. That rule is not removable: its own measurements are pecompact_{DarkNamer,Hash,rm}, which
+it flips to exact and which currently pass. So on this family the two failing rows (md5summer, Hasher) trade directly
+against three passing ones - a lottery, not a mechanism.
+
+Reverted both pieces. This is the FIFTH measured negative in this pool (guard +/-, erase-split -2, in-place widening -41,
+legacy ledger -2/-53, deferral + family rule = no change), and the conclusion is now firm: the 16 rows that are decoded
+but OEP-wrong cannot be moved by any section predicate, ledger ordering, or acceptance change, because the only
+available discriminator is a prologue shape that the family rule already uses for a *different* set of rows. Further work
+there needs either a stronger content model (the reference's V3 quiescence term depends on an instruction timeline taote
+does not record) or per-family knowledge of the kind the reference keeps in `v5_family` priors.
