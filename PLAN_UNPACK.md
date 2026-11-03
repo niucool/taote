@@ -13002,3 +13002,60 @@ byte and the `bl`/`ebx` state carried across iterations is not the one the probe
 least one more state variable (likely the `adc`/rotate path being taken differently than the flag sequence implies). The
 next unit is to probe the *pre*-store instruction (0x418fc2) as well and chain from a known entry `ebx` (read at
 0x418fb7, i.e. after the reload from [0x40d396+ebp]) instead of guessing.
+
+#### 0.17ka TELock's section decryptor is now an EXACT model (8/8 iterations) - and the seed is provably not the divergence
+
+Read at run time (not from a re-disassembly), the loop is:
+
+    418fb7  ac        lodsb
+    418fb8  eb 02     jmp 0x418fbc          ; skips a two-byte 0xcd 0x20 filler
+    418fbc  34 55     xor al,0x55
+    418fbe  2c 37     sub al,0x37
+    418fc0  32 c1     xor al,cl
+    418fc2  88 07     mov [edi],al
+    418fc4  d2 c8     ror al,cl
+    418fc6  32 c3     xor al,bl
+    418fc8  02 1f     add bl,[edi]
+    418fca  12 d9     adc bl,cl
+    418fcc  f6 c1 01  test cl,1
+    418fcf  75 0f     jne 0x418fe0
+    418fd1  d1 eb     shr ebx,1
+    418fd3  f7 c3 08 00 00 00  test ebx,8
+    418fd9  75 05     jne 0x418fe0
+    418fdb  d3 c3     rol ebx,cl
+    418fdd  8d 1c db  lea ebx,[ebx+ebx*8]
+    418fe0  aa        stosb
+    418fe1  49        dec ecx
+    418fe2  7f d3     jg 0x418fb7
+
+Entered with **ebx=0x6d8fd7d6, ecx=0x8a00, edx=0xfd62f97a, esi=edi=0x401000** (probe at 0x418fb7 - note ebx is
+*reloaded* from [0x40d396+ebp] at 0x418fb1, which is why the probe at 0x418fad shows the destination 0x401000 instead),
+and its input is **stage 1's output** (not the packed ciphertext): with in=0x16 it stores 0xda and leaves
+ebx=0xed074b79, exactly as the emulator does. The recurrence then reproduces **all eight** observed iterations byte
+**and** full 32-bit `ebx`:
+
+    i  in     cl      out (obs)   ebx after (obs)
+    0  0x16   0x00    0xda        0xed074b79
+    1  0x9a   0xff    0xb7        0xed074bdf
+    2  0xaf   0xfe    0x2b        0x7683a58d
+    3  0xe6   0xfd    0x81        0x7683a50c
+    4  0x9b   0xfc    0xba        0x3b41d2b9
+    5  0x52   0xfb    0xdc        0x3b41d2df
+    6  0xbd   0xfa    0x0d        0x8c2aa0c4
+    7  0xef   0xf9    0xf9        0x8c2aa038
+
+This is pinned by `Unpack_Compat.TelockDecryptorRecurrenceMatchesTheEmulator` (suite 607 -> 608), so the model cannot
+rot: it is the oracle any future TELock decode work has to agree with.
+
+**The decisive negative.** The model makes the seed testable. The reference's `.text` head is `33 c0 39 05 e8 61 41 00
+0f 9f c0 c3 55 8b ec 51`; its implied seed low byte (from byte 0 alone) is `0x3f` where taote has `0xd6`, but all 2^24
+possible upper halves of that seed were searched (`/tmp/seedsolve.c`, ~0.1 s) and **none** reproduces the reference's 16
+bytes from taote's stage-1 input. So the reference's decryptor is not taote's decryptor with a different seed: the
+**input** differs, i.e. stage 1 (the PRNG store at 0x418da8) is confirmed as the sole remaining divergence, and
+everything downstream of it is now understood exactly.
+
+Stage 1's body is also on record from the same runtime dump (0x418d50-0x418da8: a long chain of `add/ror/not/neg/xor al`
+against `cl`/`bl`/`dl`, ending `32 c2 xor dl,al / c0 c8 07 ror al,7 / aa stosb / 69 d2 a5 b0 cd 4b imul
+edx,edx,0x4bcdb0a5 / f9 72 02 stc-jb skip / d1 c2 rol edx,1 / 69 db 70 1f ee 6a imul ebx,ebx,0x6aee1f70 / 03 da add
+ebx,edx / 49 dec ecx / jg`), so the next unit is the same shape of work that just succeeded on the other loop: probe
+stage 1's store, chain its registers iteration by iteration, and turn it into a second pinned recurrence.

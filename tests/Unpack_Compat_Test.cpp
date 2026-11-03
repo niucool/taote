@@ -791,3 +791,65 @@ TEST(UnpackCompat, UnpackHostSafety) {
     }
     EXPECT_EQ(checked, cuts.size() * 8);
 }
+
+// TELock's section decryptor (stub pc 0x418fb7, PLAN_UNPACK.md §0.17ka): the
+// loop body was read from a runtime dump of the stub, and this pins the
+// recurrence against eight consecutive iterations observed in the emulator
+// (TAOTE_PROBE=0x418fe0 on telock_7z.exe, first pass: ebx=0x6d8fd7d6,
+// ecx=0x8a00). A regression here means the model of the decryptor - the only
+// exact oracle taote has for TELock's decode - no longer describes the stub.
+namespace {
+
+struct TelockStep {
+    std::uint8_t out;      // the byte the loop stores
+    std::uint32_t ebx;     // ebx after the iteration (the carried key state)
+};
+
+std::uint8_t telock_ror8(std::uint8_t v, std::uint8_t c) {
+    c &= 7;
+    return static_cast<std::uint8_t>((v >> c) | (v << ((8 - c) & 7)));
+}
+
+TelockStep telock_decrypt_step(std::uint8_t in, std::uint32_t& ebx, std::uint32_t ecx) {
+    const std::uint8_t cl = static_cast<std::uint8_t>(ecx & 0xff);
+    // xor al,0x55 / sub al,0x37 / xor al,cl  -> the pre-rotation store
+    const std::uint8_t pre = static_cast<std::uint8_t>(((in ^ 0x55) - 0x37) ^ cl);
+    // ror al,cl / xor al,bl -> the byte stosb writes
+    std::uint8_t al = static_cast<std::uint8_t>(telock_ror8(pre, cl) ^ (ebx & 0xff));
+    // add bl,[edi] / adc bl,cl
+    std::uint8_t bl = static_cast<std::uint8_t>(ebx & 0xff);
+    unsigned t = bl + pre;
+    const unsigned cf = t > 0xff ? 1u : 0u;
+    bl = static_cast<std::uint8_t>(t);
+    t = bl + cl + cf;
+    bl = static_cast<std::uint8_t>(t);
+    ebx = (ebx & 0xffffff00u) | bl;
+    // test cl,1 / jne / shr ebx,1 / test ebx,8 / jne / rol ebx,cl / lea ebx,[ebx+ebx*8]
+    if ((cl & 1) == 0) {
+        ebx >>= 1;
+        if ((ebx & 8) == 0) {
+            const std::uint8_t c = static_cast<std::uint8_t>(cl & 31);
+            ebx = c ? ((ebx << c) | (ebx >> (32 - c))) : ebx;
+            ebx *= 9;
+        }
+    }
+    return TelockStep{al, ebx};
+}
+
+}  // namespace
+
+TEST(Unpack_Compat, TelockDecryptorRecurrenceMatchesTheEmulator) {
+    // stage 1's output over .text (the input to this loop) and the loop's stores
+    const std::uint8_t in[8] = {0x16, 0x9a, 0xaf, 0xe6, 0x9b, 0x52, 0xbd, 0xef};
+    const std::uint8_t want[8] = {0xda, 0xb7, 0x2b, 0x81, 0xba, 0xdc, 0x0d, 0xf9};
+    const std::uint32_t want_ebx[8] = {0xed074b79u, 0xed074bdfu, 0x7683a58du, 0x7683a50cu,
+                                       0x3b41d2b9u, 0x3b41d2dfu, 0x8c2aa0c4u, 0x8c2aa038u};
+    std::uint32_t ebx = 0x6d8fd7d6u;
+    std::uint32_t ecx = 0x8a00u;
+    for (int i = 0; i < 8; ++i) {
+        const TelockStep s = telock_decrypt_step(in[i], ebx, ecx);
+        --ecx;
+        EXPECT_EQ(static_cast<unsigned>(s.out), static_cast<unsigned>(want[i])) << "byte " << i;
+        EXPECT_EQ(ebx, want_ebx[i]) << "ebx after byte " << i;
+    }
+}
