@@ -14493,3 +14493,29 @@ Two further measured facts for whoever takes it:
 NEXT UNIT: the allocator follow-up the code itself calls for - make the import salvage independent of the heap chunk table
 (the salvage is what forced both earlier reverts), then re-measure the 13 wrong-OEP rows; jdpack_7z should then reach its
 hand-off and produce the hop that decides 0xebc5. Before that, one quick measurement of the repeated-return anomaly above.
+
+#### 0.17ln Measured: page-aligned VirtualAlloc does NOT unlock jdpack_7z (the plan's assumption was wrong)
+
+Two measurements this round, both correcting 0.17lm:
+
+1. **The repeated VirtualAlloc return is not a bug.** With the heap state logged, three calls (0x886c, 0x8b9, 0x7) all return
+   0x50007c2 while the heap stays `chunks=22 last=0x50007c2/0x886c`, and logging VirtualFree shows the exact sequence
+   `alloc -> VirtualFree(0x50007c2) -> alloc -> VirtualFree -> alloc`: the guest frees between calls and `alloc` recycles the
+   freed chunk. Legitimate Windows-like reuse. (RUNDBG now prints the call sequence number, the heap extent, the chunk count
+   and the last chunk, and VirtualFree is logged too, so this is visible next time.)
+
+2. **Alignment is not what blocks jdpack_7z.** Added `TAOTE_VALLOC_ALIGNED=1` (default off) which routes VirtualAlloc through
+   `QlMemoryHeap::alloc_aligned(size, 0x1000)` - pad-with-filler, stay a heap chunk, so the salvage's region scan is unchanged.
+   With it on, the three allocations become 0x5001000 / 0x500a000 / 0x500b000 (page-aligned as Windows requires) and the run
+   still dies inside the stub's LZ loop, just one instruction earlier (pc 0x4184cb instead of 0x418527). The OEP stays
+   0x40e924 from `ladder_scan`; no hop appears. So the recorded next-unit assumption ("jdpack_7z should then reach its
+   hand-off") is FALSE, and the alignment gap - real as it is for amber_nbtstat - is not this row's gate.
+
+Also ruled out as the cause of the RVA-shaped bad reads (0x1200, 0x120d8, 0x120d00): a zero module base. `QlLoaderPE::init_peb`
+does populate `PEB->ImageBaseAddress` from `pe_image_address_` (loader/pe.cpp:1259), so a stub reading fs:[0x30]+0x10 gets the
+image base, not 0.
+
+What is left as the jdpack_7z gate: the stub's *decode input differs from the reference's*. Its LZ loop reads a bit stream through
+esi (a VirtualAlloc buffer) and the decoded output addresses come out as garbage (0x2f7762, 0xff20b4f1). The next probe is to
+dump that buffer and the stub's source span in taote and compare with the reference's run of the same sample - the same shape of
+comparison that closed TELock, but before the decode rather than after it.

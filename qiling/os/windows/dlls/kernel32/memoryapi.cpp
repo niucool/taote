@@ -59,13 +59,28 @@ void register_memoryapi_family() {
         // because it is the tool for that follow-up.
         const auto dw_size = api_get_int(get_param(params, "dwSize"));
         const auto hint = api_get_int(get_param(params, "lpAddress"));
-        const auto ret = w(ql).heap().alloc(dw_size);
+        // Page alignment: Windows' contract is page-aligned and page-rounded.
+        // TAOTE_VALLOC_ALIGNED=1 rides alloc_aligned (pad with a filler chunk,
+        // stay a heap chunk so the import salvage's region scan is unchanged)
+        // instead of the raw bump, so the alignment gap above can be measured
+        // without the salvage regression the earlier whole-region conversion
+        // caused. Default off: this is the measurement flag, not the policy.
+        static const bool valign = std::getenv("TAOTE_VALLOC_ALIGNED") != nullptr;
+        const auto ret = valign ? w(ql).heap().alloc_aligned(dw_size, 0x1000) : w(ql).heap().alloc(dw_size);
         if (std::getenv("TAOTE_RUNDBG") != nullptr) {
-            std::fprintf(stderr, "[rundbg] VirtualAlloc(hint=0x%llx size=0x%llx prot=0x%llx) -> 0x%llx\n",
-                         static_cast<unsigned long long>(hint),
+            static unsigned alloc_seq = 0;
+            const auto& ch = w(ql).heap().chunks();
+            std::fprintf(stderr,
+                         "[rundbg] VirtualAlloc#%u(hint=0x%llx size=0x%llx prot=0x%llx) -> 0x%llx "
+                         "heap=[0x%llx,0x%llx) chunks=%zu last=%s\n",
+                         ++alloc_seq, static_cast<unsigned long long>(hint),
                          static_cast<unsigned long long>(dw_size),
                          static_cast<unsigned long long>(api_get_int(get_param(params, "flProtect"))),
-                         static_cast<unsigned long long>(ret));
+                         static_cast<unsigned long long>(ret),
+                         static_cast<unsigned long long>(w(ql).heap().start_address()),
+                         static_cast<unsigned long long>(w(ql).heap().end_address()),
+                         ch.size(), ch.empty() ? "-" :
+                             (std::to_string(ch.back().address) + "/" + std::to_string(ch.back().size)).c_str());
         }
         return ret;
     };
@@ -82,7 +97,11 @@ void register_memoryapi_family() {
     }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
         const auto lp_address = api_get_int(get_param(params, "lpAddress"));
 
-        w(ql).heap().free(lp_address);
+        const bool ok = w(ql).heap().free(lp_address);
+        if (std::getenv("TAOTE_RUNDBG") != nullptr) {
+            std::fprintf(stderr, "[rundbg] VirtualFree(0x%llx) -> %d\n",
+                         static_cast<unsigned long long>(lp_address), ok ? 1 : 0);
+        }
 
         return 1;
     };
