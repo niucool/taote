@@ -12779,3 +12779,37 @@ end-state, while taote derails early, so that difference is run progress, not th
 a named API, the way taote's `TAOTE_APIDUMP` does), or an instruction-level register diff between the two emulators.
 taote has both dump and probe machinery; pegasus has neither exposed. Until that exists, TELock's 92 import-bound rows
 are out of reach for this toolchain, and the OEP half (0.17jk/0.17jo) is what the family can ship.
+
+#### 0.17ju The ceiling census: Themida and Yoda are parity-failing, and every native pool left is decode-bound
+
+With TELock's decode closed (0.17jt) the remaining 499 misses were censused family by family, and the result is that
+**taote has no tractable pool left that the reference can do** - it is 183 all-three rows ahead of the reference
+(2179 vs 1996).
+
+**Themida (122 rows, the biggest untouched pool) is parity-failing, verified, not assumed.** taote: 122 valid PE, 0
+OEP, 0 imports, mean code_sim 0.0654, every row `reason=section_hop`. The reference on six sampled rows
+(7z, ADExplorer, ADInsight, AccessEnum, Autologon, Autoruns) returns `reason=end_of_emulation_fallback` with
+`oep_rva=None` on every one - it does not unpack a single sampled Themida row either, which matches the monitor's
+standing note that Themida and Yoda fail for the reference.
+
+**Yoda-Protector (101 rows) has exactly two partially-successful rows, and both are dead ends for the same reason:**
+
+- `yoda-protector_PEview.exe`: code_sim **1.0**, OEP **exact** (0x401000), and the artifact really does carry 66 of the
+  original's 102 import names - but the grader scores recall 0.0 because **every recovered name is attributed to
+  `kernel32`** (plus one literal `*.ocx`), while the original spreads them over advapi32, comctl32, comdlg32, gdi32,
+  kernel32, shell32 and user32. So this is a DLL-attribution loss, not a recovery loss: the re-attribution pass cannot
+  fire because the artifact's own `image_dlls` is just `{kernel32, *.ocx}` (0.17jr explains why preferring the DB's
+  PRIORITY owner instead was rejected - it would break the common advapi32 case). The reference also fails this row
+  (`yp_terminal_full_fill`, `oep_rva=None`).
+- `yoda-protector_livekd.exe`: imports **ok** (recall 0.9733) but OEP wrong (0x43ecc7 vs 0x409663) with code_sim
+  0.044, i.e. decode-bound.
+
+**Every other native pool is decode-bound.** Highest code_sim among the native misses: Amber 16 rows - only
+`amber_chglogon.exe` at 0.923 (the attribution-closed row of 0.17jr), everything else <= 0.054; Exe32pack 15 rows -
+max 0.207; Eronana 1 row - 0.094. So no family hides a picker-shaped pool: their payloads are not decoded at all.
+
+**Conclusion for the next session:** the corpus headroom that this toolchain can reach has been spent this session
+(1843 -> 2179). What remains is (a) 81 .NET rows that can never be all-three, (b) Themida 122 + Yoda 101 where the
+reference also fails, and (c) decode-bound native rows in Amber/Exe32pack/Eronana/TELock whose stubs need emulator
+work beyond taote's current fidelity. Any new project should start from a *decode-fidelity* comparison against the
+reference at a common point (the gap 0.17jt names for TELock applies to all three), not from a picker heuristic.
