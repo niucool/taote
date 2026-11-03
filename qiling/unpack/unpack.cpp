@@ -1465,6 +1465,18 @@ void Unpacker::poll_dyn_maps() {
 // The reference's on_section_exec (unpacker.cpp:5520-5810): a written section
 // that starts executing is the payload hand-off.
 int Unpacker::on_section_exec(std::uint64_t addr) {
+    // EXPERIMENT (TAOTE_IF_USER=1): a Windows ring-3 thread runs with IF set and cannot clear it
+    // (CLI faults with #GP; POPF ignores IF outside ring 0). Unicorn executes CLI silently and
+    // taote's guest therefore runs with IF=0, while the reference runs at eflags=0x202. TELock
+    // reads its own flags back before choosing the decryptor's key seed and takes a different
+    // branch when the interrupt flag is clear (measured: the seed block 0x418fb1.. at 0x418faf).
+    if (std::getenv("TAOTE_IF_USER") != nullptr) {
+        auto& fl_regs = ql_->arch().regs();
+        const auto fl = fl_regs.read("eflags");
+        if ((fl & 0x200ull) == 0) {
+            fl_regs.write("eflags", fl | 0x200ull);
+        }
+    }
     const std::uint64_t prev_exec = prev_exec_addr_;
     prev_exec_addr_ = addr;
     // TAOTE_SEC_TRANS: record section-to-section transitions (the reference's

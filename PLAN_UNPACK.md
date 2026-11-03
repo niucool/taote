@@ -13950,3 +13950,45 @@ NEXT UNIT, corrected: instrument the handler at 0x41868a - its first instruction
 registers/flags it restores into the interrupted context - because THAT is where the ladder is abandoned. A useful
 single-number probe: does the reference return from that handler into the ladder region (a pc in [0x418030, 0x4180a0)) while
 taote returns to 0x418da8? Compare with `TAOTE_PROBE` on both sides.
+
+#### 0.17kz CORRECTION + the TELock divergence is now two precise facts: a flags-fidelity bug and a module-base-dependent key seed
+
+**Correction first (my 0.17kx/0.17ky numbers were instrument artifacts).** `TAOTE_WATCH_RANGE` takes an optional `[:max]`
+line cap, and I measured "the ladder writes 64 bytes" without it. With `TAOTE_WATCH_RANGE=0x418000-0x41b000:400000` taote's
+census is IDENTICAL to the reference's write log:
+
+    6481 pc=0x418030 (the stub self-decrypt)   6474 x4 pc=0x4199cb/0x4199cf/0x4199d2/0x4199d6 (copy loop)
+    4823 pc=0x418432   4788 pc=0x4186d8   4754 pc=0x4186f9   4724 pc=0x418719  ...
+
+and the ladder's written values match at both ends (0x418041=0xe8 .. 0x419991=0xfb, identical to the reference's log).
+So the ladder, its bounds, its key and its output are all correct: 0.17ky's "taote stops after 64 bytes" is withdrawn.
+Lesson (same family as the hop-trace placement mistake): check the diagnostic's own limits before drawing a conclusion.
+
+**Fact 1 - the guest runs with IF=0, the reference with IF=1.** At the decrypt loop both engines hold eax/ecx/edx/esi/edi/
+ebp/ebx identically, and the flags differ in exactly one bit: taote `eflags=0x47` (CF|PF|ZF), the reference `efl=0x247`
+(same plus **IF**). A ring-3 Windows thread runs with IF=1 and cannot clear it (CLI faults with #GP, POPF ignores IF), while
+unicorn executes CLI silently, so taote's stub reads back "interrupts disabled" and takes the emulator-detection branch.
+Prototype `TAOTE_IF_USER=1` (re-assert IF at every basic block, env-gated, default off) makes taote's flags read 0x247 and
+makes it execute the seed block at 0x418fb1..0x418fbc that it previously jumped over. It changes no grade yet, because of
+fact 2.
+
+**Fact 2 - the key seed is a stub data slot whose input is the MODULE BASE.** The seed instruction is
+`mov ebx,[ebp+0x40d376]` = the dword at **0x419cd4**, and:
+
+    reference   [0x419cd4] = 0x12cdd33f   (written at pc 0x41882b)
+    taote       [0x419cd4] = 0x6d8fd7d6   (written at pc 0x41882b - same pc, different value)
+
+The upstream input is one slot away: pc 0x41840c writes a module base to 0x419da0 -
+
+    reference   0x419da0 = 0x77000000
+    taote       0x419da0 = 0x10020000   (taote's synthetic stub-DLL base)
+
+So TELock's decrypt key is derived from a module base, and the two loaders place that module differently. That is a LAYOUT
+difference, not a decode mechanism, and it is the last thing between taote and a byte-exact TELock decode.
+
+NEXT UNIT (one experiment decides the family): relocate taote's stub-DLL base for the TELock run to 0x77000000 and re-measure
+`[0x419cd4]`, the key byte (bl at 0x418fbe; reference 0x12cdd33f) and telock_7z `.text` equality (5133 -> 65536). If the
+decode becomes exact, the fix is a loader-layout one (matching the reference's module placement for this family) and it
+should be measured corpus-wide; if not, the derivation is base-dependent in a way that needs the stub's hash function read.
+Then also decide on `TAOTE_IF_USER` as a DEFAULT-ON fidelity fix (ring-3 IF is real Windows semantics), measured on the
+corpus as its own unit.
