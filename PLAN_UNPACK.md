@@ -14412,3 +14412,42 @@ The three losses are cap artefacts, not mechanism regressions: all three landed 
 rose very slightly overall (rows at dur >= 84: 90 -> 94, mean dur 7.9 -> 8.2), consistent with the corpus running while other
 work was in flight rather than with a real per-instruction cost (the breakpoint hook exists only while a guest has Dr0-3
 armed).
+
+#### 0.17ll Roadmap refresh: the reference is no longer a useful guide (only ~13 gradeable portable rows left)
+
+After the Dr0-3 port (0.17lk) the corpus stands at **2271/2678 all-three**, and the 81 `.NET`/managed rows can never be graded
+(oep_exact is deliberately None when the original has a `com_rva`), so the honest base is **2597** and the honest missing set is
+**326 rows**. A fresh parity sweep over those 326 (tools/ref_parity.py, `--par 4`, logs in /home/jim/runs/r118q) reports:
+
+    taote misses 407 (all rows)   reference reproduces the ORIGINAL EP on 141
+      Exe32pack 30/32  Amber 26/38  TELock 23/23  WinUpack 14/16  Eronana 13/14  Alienyze 7/8  NSPack 7/7
+      MEW 5/5  JDPack 4/4  PECompact 4/5  PEtite 3/8  BeRo 2/5  ASPack 1/1  MPRESS 1/4  Yoda-Protector 1/101
+
+but "reproduces the EP" is not the same as "passes the row". Adding the import requirement (recall >= 0.95, i.e. what the grader
+demands) and dropping the ungradeable `.NET` rows leaves **~13 gradeable portable rows in the whole corpus**:
+
+    JDPack      jdpack_7z, jdpack_7za, jdpack_MxdwGc             (taote code_sim 1.00, imports 1.00 - OEP FIELD only)
+    PECompact   pecompact_Everything, _Hasher, _md5summer       (code_sim 0.87-0.91, imports 1.00 - OEP field only)
+    WinUpack    winupack_PEview, winupack_Snap2HTML             (code_sim 1.00, imports 1.00 - OEP field only)
+    Amber/other amber_chgport, _chgusr, _mdbx_dump, _ppt2x, bero_Snap2HTML
+
+Two things follow, and both change the plan:
+
+1. **The "reference mechanism taote lacks" lead is exhausted for the corpus.** Every other row the reference "solves" is either a
+   managed row the grader cannot score, or a row where the reference's import recall equals taote's to three decimals
+   (measured on all 15 WinUpack misses: 0.904/0.9045, 0.2367/0.2367, 0.946/0.946, 0.9439/0.9439, 0.8481/0.8481, ...) - i.e. the
+   reference fails them too, so there is no mechanism behind its EP to port. taote is now ahead of the reference on the metric
+   that counts (2271 vs ~1996 all-three).
+2. **The remaining portable rows are a single, well-defined defect**: an unpacked-correct image with the WRONG
+   AddressOfEntryPoint (code_sim 1.00, imports 1.00). That is the highest-value target left, and it is one mechanism, not five:
+   JDPack 3, PECompact 3, WinUpack 2, Amber 3, BeRo 1 all have the payload right and the entry wrong. The recorded per-family
+   leads for it are: JDPack clear-hop (unpack.cpp:1571) vs the reference's hand-off read, PECompact's ledger exclusion
+   (unpack.cpp:2989), WinUpack's stack-OEP rule (unpack.cpp:1818, and winupack_PEview's truth is 0x1000, the very first byte of
+   .text).
+3. Everything else is a **both-engines-fail** family, where progress has to come from taote-original mechanism work:
+   Themida 122, Yoda-Protector 100, RLPack 10, PEtite 5, BeRo 3, MPRESS 3, Exe32pack 2, WinUpack 2, and singles. Themida and
+   Yoda-Protector are 222 of those 253 rows and neither engine gets any - they stay last.
+
+NEXT UNIT: the wrong-AddressOfEntryPoint class above (13 rows), starting with the five where code_sim is already 1.00
+(jdpack_7z, jdpack_7za, jdpack_MxdwGc, winupack_PEview, winupack_Snap2HTML, plus the three PECompact rows at 0.87-0.91), since
+each of those is one comparison between taote's accepted claim and the true entry inside an image that is already byte-right.
