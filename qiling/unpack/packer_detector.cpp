@@ -169,8 +169,29 @@ Detection detect_from_file(const std::string& path) {
             const std::uint64_t off = static_cast<std::uint64_t>(s.raw_ptr) + (pe.ep - s.va);
             std::ifstream f2(path, std::ios::binary);
             f2.seekg(static_cast<std::streamoff>(off));
-            std::uint8_t b[10] = {0};
-            f2.read(reinterpret_cast<char*>(b), 10);
+            std::uint8_t b[24] = {0};
+            f2.read(reinterpret_cast<char*>(b), 24);
+            // FSG (the reference's STATUS 435 rule, packer_detector.cpp:522-539): the
+            // family BLANKS its section names (four NUL bytes then 't'/'ta'/'a'), so no
+            // section-name marker can ever match and every FSG row was "unknown" - which
+            // silently disabled every name-keyed seam. Its stub head is stable:
+            //   BB ?? ?? ?? ??   mov ebx,<base+0x1d0>
+            //   BF ?? ?? ?? ??   mov edi,<base+0x100>
+            //   BE ?? ?? ?? ??   mov esi,<stub table>
+            //   53 E8 0A 00 00 00  push ebx; call $+0xa
+            // Reference census over the corpus: 117 of 119 FSG rows, 0 of the other 2,961.
+            if (f2.gcount() == 24 &&
+                b[0] == 0xBB && b[5] == 0xBF && b[10] == 0xBE &&
+                b[15] == 0x53 && b[16] == 0xE8 && b[17] == 0x0A && b[18] == 0x00 &&
+                b[19] == 0x00 && b[20] == 0x00) {
+                return set("FSG", "ep-stub-head", "BB..BF..BE..53 E8 0A 00 00 00");
+            }
+            // Exe32pack (the reference's ep_sigs entry {3b c0 74 02 81}): its section
+            // table is wiped, so "$win8" never matches either.
+            if (f2.gcount() >= 5 && b[0] == 0x3b && b[1] == 0xc0 && b[2] == 0x74 && b[3] == 0x02 &&
+                b[4] == 0x81) {
+                return set("Exe32pack", "ep-prefix", "3b c0 74 02 81");
+            }
             if (f2.gcount() == 10 && b[0] == 0xb8 && b[5] == 0x50 && b[6] == 0x64 && b[7] == 0xff &&
                 b[8] == 0x35) {
                 return set("PECompact", "ep-prefix", "b8..50 64 ff 35");

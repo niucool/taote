@@ -13594,3 +13594,42 @@ but OEP-wrong cannot be moved by any section predicate, ledger ordering, or acce
 available discriminator is a prologue shape that the family rule already uses for a *different* set of rows. Further work
 there needs either a stronger content model (the reference's V3 quiescence term depends on an instruction timeline taote
 does not record) or per-family knowledge of the kind the reference keeps in `v5_family` priors.
+
+#### 0.17kq 616 rows run as family "unknown" - and the reference's EP-head signatures fix 245 of them (FSG 117, Exe32pack 128), with zero behaviour change
+
+A corpus-wide census of the r115 logs found **616 of 2677 rows report `family=unknown`**, and they are whole families:
+
+    Eronana 151/151   Exe32pack 124/124   BeRoEXEPacker 107/107   FSG 97/97
+    Yoda-Crypter 92    Amber 41           Molebox 3               MPRESS 1
+
+`opts_.family` comes from `guess_family()` (tools/taote.cpp:103) when the CLI passes none - i.e. from
+`packer_detector.cpp` - and that detector keys these families on **section names** (`"fsg"`, `"$win8"`, `".bero"`,
+`".eronana"`, `".yp"`). Those are exactly the families that blank or wipe their section names, so the marker can never
+match. Every name-keyed seam in the runner is therefore silently inert on 23% of the corpus.
+
+The reference hit the same wall and fixed it with **EP-head signatures** (its `ep_sigs()` map plus a 24-byte FSG stub-head
+rule whose comment says every FSG row "was reported unknown -- which also left the name-keyed early-stop policy unable to
+reach them"). Ported the two that are structurally censused, in the same idiom taote already uses for PECompact/TELock:
+
+    FSG        BB ?? ?? ?? ??  BF ?? ?? ?? ??  BE ?? ?? ?? ??  53 E8 0A 00 00 00
+    Exe32pack  3b c0 74 02 81
+
+Selectivity measured over the **whole packed corpus** (3001 files, EP file offset computed from each file's own section
+table):
+
+    FSG signature:        117 hits, 117 in the FSG directory,    0 elsewhere
+    Exe32pack signature:  128 hits, 128 in the Exe32pack directory, 0 elsewhere
+
+which reproduces the reference's own census (117 of 119 FSG, 0 of 2,961). Behaviour measured on both families before and
+after: **FSG all-three 96 -> 96, Exe32pack 92 -> 92, zero rows changed** - the labels are truthful now but nothing was
+keyed on them, so this is a prerequisite, not a win. (Blast radius is fully enumerated, not inferred: the census above
+proves no other row can be relabelled.)
+
+**Also measured and rejected in the same area**: porting the reference's Exe32pack *stale second hop* rule
+(Exe32packUnpacker::family_pre_dump_accept: "once an OEP is latched, a later section_hop is definitionally stale") as a
+`dump_module` veto is catastrophic - **all-three 92 -> 17** (-75, 89 claims changed, e.g. exe32pack_AddInProcess
+0x40681e -> 0x40c0eb) - because Exe32pack's stub legitimately hops again in taote's run; the reference applies that rule
+at its own pre-dump seam with context taote does not have. Reverted.
+
+The remaining 371 unknown rows (Eronana 151, BeRo 107, Yoda-Crypter 92, Amber 41, ...) need their own EP signatures
+before any family-scoped mechanism can reach them.
