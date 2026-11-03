@@ -102,7 +102,10 @@ Detection detect_from_file(const std::string& path) {
         if (has(".themida")) return set("Themida", "section", ".themida");
         if (has(".jdpack")) return set("JDPack", "section", ".jdpack");
         if (has(".packman")) return set("Packman", "section", ".packman");
-        if (has(".bero")) return set("BeRoEXEPacker", "section", ".bero");
+        // BeRoEXEPacker names its sections "packerBY" / "bero^fr" - NO dot - so the old
+        // ".bero" test could never match and all 107 corpus rows ran as "unknown" (the
+        // reference's table is the bare {"bero"}). Census: 110 files, all BeRo, 0 elsewhere.
+        if (has("bero")) return set("BeRoEXEPacker", "section", "bero");
         if (has(".eronana")) return set("Eronana", "section", ".eronana");
         if (has(".ex_cod") || has(".ex_dat")) return set("EXpressor", "section", ".ex_cod/.ex_dat");
 

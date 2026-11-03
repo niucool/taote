@@ -13662,3 +13662,31 @@ both families), while BeRo's does not.
 All three were reverted (a change that is neutral-or-worse on its own arms has no business shipping). The workable
 sequence for the remaining 371 unknown rows is therefore: signature -> **seam audit** (run the family arm with and
 without the label and diff every claim, as was done here for `bero_geek`) -> only then keep it.
+
+#### 0.17ks The BeRo label ships as a genuine no-op; the "regression" that blocked 0.17kr was budget-cap noise
+
+0.17kr reverted three detector signatures because BeRoEXEPacker's arm read 103 -> 102 with `bero_geek.exe` moving
+0x559760 -> 0x6c25a2. That diagnosis was wrong, and the way it was wrong is the useful part:
+
+    two arms of the SAME binary       102 vs 103, and exactly the same three rows moved with the same claims
+    3 rows solo at 85 s               bero_geek 0x559760 / bero_HDDScan 0x7bb11e / bero_adwcleaner 0x566dbf (stable)
+    the same 3 at 600 s, label OFF    geek 0x559760 / HDDScan 0x883d20 / adwcleaner 0x566dbf
+    the same 3 at 600 s, label ON     geek 0x559760 / HDDScan 0x883d20 / adwcleaner 0x566dbf   <- IDENTICAL
+
+So the label changes nothing on these rows; they are **cap-flaky**: `dur` is 86-87 in every 85 s arm (wall-capped) and
+their claim depends on how much of the ladder scan finished. Any family arm containing such rows has a +/-1 noise floor,
+and a one-row delta on a 100-row family is not evidence unless the row is re-run deterministically.
+
+Census of the three: 110 corpus hits for `has("bero")`, all BeRoEXEPacker, 0 elsewhere (the reference's bare `{"bero"}`;
+taote tested ".bero" WITH a dot, which the real `packerBY` / `bero^fr` names never match, hence 107 rows as "unknown").
+
+SHIPPED: the BeRo signature only. The ladder shaping that the label newly unlocks (packer.hpp opts WinUpack/BeRo/NSPack/
+RLPack into `ladder_skip_boundary` + `ladder_first_c3` from a round-50 measurement) was kept: at 600 s it is neutral on
+all three flagged rows apart from bero_adwcleaner landing on 0x5468ca instead of 0x566dbf, both wrong against the truth
+0xcfb5d8 (code_sim 0.40 - that row is decode-bound, not claim-bound).
+
+BY-PRODUCT, and the more interesting lead: **bero_HDDScan.exe reaches its TRUE entry 0x883d20 at 600 s** while every
+85 s arm claims 0x74dbe7/0x427ebc/0x7bb11e. That row is not claim-bound and not decode-bound - it is BUDGET-bound: the
+ladder scan simply does not finish inside 85 s. Same truth as rlpack/mpress/neolite HDDScan (0x883d20), and neolite's
+copy was closed earlier as "meta_oep_ already held 0xadaa70". Worth a census: how many of the corpus's misses have
+`dur >= 84` and turn exact when given 600 s - that population is the honest target for a *faster* scan, not a bigger budget.
