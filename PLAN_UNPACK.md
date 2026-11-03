@@ -14089,3 +14089,30 @@ then the corpus. Note the size: the fold covers 6546 entries while kernel32 alon
 more than one DLL - the port has to preserve the *whole* per-module table, not just kernel32. If the exact reference list
 cannot be reproduced, the fallback lever is to compute the key host-side from the packed stub's own references (the fold's
 arithmetic is 3 instructions) and to take the *expected* value from wherever the stub's own check stores it.
+
+##### Correction to 0.17lc: the fold does NOT hash export names - it walks the stub's OWN byte span, and the bytes match
+
+0.17lc concluded the fold diverged "because the two stub-DLL surfaces differ (1584 vs 1651 kernel32 names)". Two measurements
+refute it:
+
+  1. The name lists already differ at sorted index 277 (DefineDosDeviceA vs CreateWaitableTimerExW) yet the FOLD matches
+     through iteration 279 and first differs at 280 - so the fold's inputs are not that list.
+  2. The ladder's 6481 written values are BYTE-IDENTICAL between the engines (full diff of taote's
+     TAOTE_WATCH_RANGE=0x418041-0x419992 write list against the reference's SE_TELOCK_WRLOG: 0 differences).
+
+What the fold actually walks, from the trace and the probe: `esi` steps 0x418001, 0x418002, ... and the loop runs 6546 times,
+which is exactly 0x419992 - 0x418001 + 1 - i.e. it folds over THE STUB'S OWN DECRYPTED BYTE SPAN, one iteration per byte
+(`0x41880f: 33 d0 xor edx,eax / 4b dec ebx / 7f e1 jg`, and the body just before it computes eax). The accumulator is
+`edx = (edx >> 8) ^ eax` (the >>8 is visible in the sequence), seeded 0x92680909.
+
+The first differing iteration is therefore the byte at 0x418001 + 280 = **0x418119**, which the ladder decrypted identically -
+so `eax` is not a function of that byte alone: it carries state from earlier iterations or reads a second input. The probe at
+the fold adds one clue about that second input: `ret=0x100214e0`, a return address INSIDE the stub DLL, so the fold's
+per-byte value comes from a call into the synthesised module and the module's content/addresses are involved after all -
+which is consistent with the base experiment (moving the surface alone changed nothing, because the *content* at the
+referenced cells did not move with it).
+
+NEXT UNIT: probe 0x41880f with TAOTE_PROBE_PREV to get the caller, dump the loop body 0x4187c0..0x41880f (40 live bytes at a
+time), and compare the per-iteration eax sequences at index 280 - both full sequences are already extracted
+(/tmp/ref_fold.txt, /tmp/ta_lfold.txt) so the exact byte that changes the hash is one diff away. The fold's arithmetic is
+three instructions, so the endgame remains a host-side computation of the key from the packed stub.
