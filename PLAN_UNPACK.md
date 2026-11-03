@@ -14055,3 +14055,37 @@ per-entry eax hashes on both sides (TAOTE_PROBE=0x418811 with PROBE_N) and find 
 names are involved, and whether that name is in api_db at all. The fold's arithmetic is simple enough to reimplement
 host-side, so an alternative (and possibly better) lever is to compute the key from the *packed* stub's own export
 references rather than from taote's surface.
+
+#### 0.17lc TELock's key fold diverges at export entry 280 because the two stub-DLL SURFACES differ (1584 vs 1651 names)
+
+Following 0.17lb: the fold (`edx = (edx >> 8) ^ eax` at 0x41880f/0x418811) runs 6546 iterations in BOTH engines, and the
+first iterations are IDENTICAL -
+
+    idx      reference                        taote
+    0        ebx=0x1992 eax=0x677845db  edx=0x6787ba24   identical
+    ...      identical                      identical
+    279      ebx=0x187b eax=0xe257a0dd  edx=0xe20028bb   identical
+    280      ebx=0x187a eax=0x3e36130d  edx=0x3ed41325   eax=0x470317ee  <- FIRST DIVERGENCE
+    281      ebx=0x1879 eax=0x9625524b  edx=0x961b8658   eax=0x0feb6709
+
+One entry differs and, because the table is walked in sorted order, everything after it is shifted. The cause is the surface
+itself:
+
+    taote      qiling/unpack/api_db.inc (mingw-w64 import libs)  kernel32: 1584 names
+    reference  src/windows/sdk_exports.inc (mingw-w64, own filter) kernel32: 1651 names
+    73 names only in taote's list (BaseAttachCompleteThunk, ConvertToGlobalHandle, CreateSocketHandle, ...),
+    140 only in the reference's (BaseCleanupAppcompatCacheSupportWorker, BaseProcessStart, BaseThreadStart, ...),
+    and the sorted orders diverge already at index 44 (BaseAttachCompleteThunk vs BaseCheckAppcompatCache).
+
+So TELock's decrypt key is a hash fold over the *actual export-name list of the module it resolves against*, and taote's
+synthesised surface is a different list. Nothing about taote's decode machinery is wrong - with the reference's key value
+forced, .text is 61037/65536 exact (0.17lb). taote simply computes the key from a different name list, exactly the way a
+different Windows build would.
+
+NEXT UNIT: port the reference's sdk_exports.inc surface into taote's stub-DLL writer (same names, same sorted order, per
+module) - the reference added that file for this reason ("seed the stub export surface from the SDK") - then re-measure edx at
+0x418824 against 0x12cd2a3f on telock_7z, then the TELock family (116 rows, all reference-solved per tools/ref_parity.py),
+then the corpus. Note the size: the fold covers 6546 entries while kernel32 alone has ~1600 names, so the walked table spans
+more than one DLL - the port has to preserve the *whole* per-module table, not just kernel32. If the exact reference list
+cannot be reproduced, the fallback lever is to compute the key host-side from the packed stub's own references (the fold's
+arithmetic is 3 instructions) and to take the *expected* value from wherever the stub's own check stores it.
