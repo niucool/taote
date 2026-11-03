@@ -12676,3 +12676,40 @@ movement is the +2 from the msvcrt surface.
 
 Method note: this is the cheapest shape of win in the corpus - a *surface* change rather than an engine change, with
 a family arm that identifies the intended rows in advance and a corpus arm that confirms nothing else moved.
+
+#### 0.17jr Closing the near-threshold tail: 11 rows, and every one is closed by evidence, not by choice
+
+The r110 census of import-bound rows with named misses leaves exactly **11 rows at or above 0.88 recall**, and each
+one is now accounted for:
+
+| row | recall | misses | why it is closed |
+|---|---|---|---|
+| rlpack_Procmon.exe | 0.9491 | 22 (7 named, 15 ord) | ordinal-dominated |
+| winupack_Dbgview.exe | 0.946 | 17 (1 named, 16 ord) | ordinal-dominated |
+| amber_chglogon.exe | 0.9412 | 5 (all named) | DLL attribution, see below |
+| jdpack_chglogon.exe | 0.9412 | 5 (all named) | DLL attribution, see below |
+| winupack_HWMonitorPro_x32.exe | 0.9389 | 28 (1 named) | ordinal-dominated |
+| mew_Bginfo.exe | 0.9373 | 54 (1 named) | ordinal-dominated |
+| winupack_Everything.exe | 0.9247 | 22 (1 named) | ordinal-dominated |
+| winupack_ADExplorer.exe | 0.9045 | 30 (1 named) | ordinal-dominated |
+| winupack_ShareEnum.exe | 0.903 | 23 (1 named) | ordinal-dominated |
+| mew_ComIntRep.exe | 0.8994 | 53 (1 named) | ordinal-dominated |
+| nspack_ComIntRep.exe | 0.8994 | 53 (3 named) | ordinal-dominated |
+
+**The ordinal rows are closed for a measured reason:** `winupack_Dbgview.exe` makes **zero GetProcAddress calls** in
+the whole run, so the packer neither kept the ordinal thunks nor asked for the functions at run time - the artifact
+resolves each slot through the reverse symbol map and emits export N's *name* while the original imported ordinal N.
+There is no remaining signal that says "this was an ordinal", which is the same conclusion the WinUpack lane reached.
+
+**The two chglogon rows are closed by policy, not by a bug.** Both packers of the same original emit
+`advapi32!RegCloseKey` / `RegCreateKeyExW` / `RegOpenKeyExW` / `RegQueryValueExW` / `RegSetValueExW` where the
+original imports those five from **kernel32**. taote's re-attribution pass (unpack.cpp:4183-4212) deliberately only
+rewrites a pair when the assigned DLL is *not* among the name's owners and exactly one owner is named by the image;
+`advapi32` IS a legitimate owner of every one of those names, so it leaves them alone. That is the reference's own
+stated rule - gen_api_db.py's comment: "the runtime picks a default from the first, and the re-attribution pass
+intersects the list with the DLLs the image itself names (a stricter test than 'the database's favourite owner')" - so
+preferring PRIORITY's kernel32 here would be a policy change that would break the far more common case (a binary that
+imports Reg* from advapi32 and also uses kernel32 for other calls). Rejected on those grounds.
+
+So the corpus's remaining headroom is: TELock's 92 (decode), the embedded-PE guard's single row, and the
+Themida/Yoda both-wrong pools that the reference also fails. Nothing in the near-threshold tail is left unexamined.
