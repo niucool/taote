@@ -14451,3 +14451,45 @@ Two things follow, and both change the plan:
 NEXT UNIT: the wrong-AddressOfEntryPoint class above (13 rows), starting with the five where code_sim is already 1.00
 (jdpack_7z, jdpack_7za, jdpack_MxdwGc, winupack_PEview, winupack_Snap2HTML, plus the three PECompact rows at 0.87-0.91), since
 each of those is one comparison between taote's accepted claim and the true entry inside an image that is already byte-right.
+
+#### 0.17lm The wrong-OEP class traced to the OPEN VirtualAlloc alignment gap (jdpack_7z, first case)
+
+Took the largest of the 13 portable rows apart. jdpack_7z.exe is the ideal specimen: the artifact is byte-perfect
+(code_sim 1.00, imports 159/159 = 1.00) and only AddressOfEntryPoint is wrong - 0xe924 instead of the true 0xebc5.
+
+Why the ladder picks the wrong one: Pass B finds four frames and the rule "with no hop, the first (lowest) frame" decides.
+
+    candidates: 0xe924 0xe9a4 0xea18 0xebc5        truth = 0xebc5 = the LAST
+
+All four are byte-identical 3-push CRT startup prologues, distinguished only by their SEH handler immediate:
+
+    55 8b ec 6a ff 68 <handler> 68 e2 ec 40 00 64 a1 00 00 00 00
+    handlers 0x4114f8 / 0x411508 / 0x411518 / 0x411528  -  the entry's is 0x411528, the highest
+
+The rule that WOULD decide is the hop (a frame within +0x16 below the hop), which is also what the reference uses here: its
+report says `"oep_source": "hop"`. Taote has no hop on this row because **the stub dies before the hand-off**:
+
+    taote exec 0x40ebc5: 0 hits      taote exec 0x40e924: 0 hits
+    [rundbg] emu error 'Invalid memory read (UC_ERR_READ_UNMAPPED)' pc=0x418527
+    [fault] access=19 addr=0x2f7762 pc=0x418527 ; addr=0xff20b4f1 ; addr=0x1200/0x120d8/0x120d00 (RVA-shaped)
+
+0x418527 is inside the stub's own bit-level LZ decode loop (`00 d2 / 75 05 / 8a 16 / 46 / 10 d2 / ...` reading a bit stream
+from esi), running against esi=0x50007ce - i.e. a buffer handed out by VirtualAlloc(hint=0, size=0x886c) which returned
+0x50007c2, an **unaligned heap bump address**. That is the gap memoryapi.cpp already documents in place ("the alignment gap is
+real and still open", with two measured-negative conversions: a page-aligned region -85 all-three, alloc_aligned -4), and its
+own note names the follow-up: closing it needs "a salvage that does not depend on the heap chunk table, or a budget change -
+not a mapping tweak".
+
+Two further measured facts for whoever takes it:
+
+  * the packed file stores NO copy of the true entry: searching every JDPack row's file for the original EP as a dword (RVA
+    and VA forms) gives 0 occurrences, so a static "stub-declared entry" source does not exist and the entry genuinely has to
+    come from execution;
+  * in this run three consecutive VirtualAlloc calls (sizes 0x886c, 0x8b9, 0x7, all hint=0) logged the SAME return value
+    0x50007c2. The bump allocator cannot do that (`current_use_` advances), so either the API is dispatched more than once per
+    guest call or the heap state is restored in between. That is unexplained and worth one measurement before the allocator
+    work, because a fixed return value would poison every stub that allocates twice.
+
+NEXT UNIT: the allocator follow-up the code itself calls for - make the import salvage independent of the heap chunk table
+(the salvage is what forced both earlier reverts), then re-measure the 13 wrong-OEP rows; jdpack_7z should then reach its
+hand-off and produce the hop that decides 0xebc5. Before that, one quick measurement of the repeated-return anomaly above.
