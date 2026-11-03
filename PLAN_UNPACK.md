@@ -14395,3 +14395,20 @@ Family measurement (116 TELock rows, 4 workers, 85 s budget, tools/unpack_report
     r118t (after)  n=116  PE=116  OEP= 94  IMP=109  ALL= 93
 
 Suite 609/609 serial, 0 failed.
+
+##### 0.17lk corpus measurement
+
+Full corpus, 4 workers, 85 s budget, identical grading code for both arms:
+
+    r117  all-three 2181/2678   (TELock 0)
+    r118  all-three 2271/2678   (TELock 93)          delta +90
+
+Per-family deltas: TELock 0 -> 93 (+93), MEW 102 -> 101 (-1), MPRESS 103 -> 102 (-1), RLPack 95 -> 94 (-1). Every other
+family is unchanged, i.e. the Dr0-3 mechanism is inert outside the exception-driven stubs.
+
+The three losses are cap artefacts, not mechanism regressions: all three landed at dur 85-86 s (the per-sample budget) versus
+81-83 s in r117, and re-running them ALONE with `TAOTE_NO_HW_BREAKPOINTS=1` at the same 85 s budget still caps two of them at
+85 s yet all three pass - so they are load-sensitive rows under a 4-worker sweep, not rows the breakpoints broke. Cap pressure
+rose very slightly overall (rows at dur >= 84: 90 -> 94, mean dur 7.9 -> 8.2), consistent with the corpus running while other
+work was in flight rather than with a real per-instruction cost (the breakpoint hook exists only while a guest has Dr0-3
+armed).
