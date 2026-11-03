@@ -12843,3 +12843,38 @@ even possible for those pairs), and `ebx` gives two different `imul` constants f
 (`0x45ab2dc6`, `0xcdbc17fa`). So the recurrence is not `x <- x*K`, and the four-line linear model that the disassembly
 at 0x418d80 suggested is a misaligned read of that region, not the real loop. Any future attempt must read the *loop
 body* at runtime (a `TAOTE_WATCH_RANGE` on its own writes plus probes at successive pcs) instead of fitting constants.
+
+#### 0.17jw CORRECTION: the packed .text raw starts at 0x1000, not 0x400 - which voids 0.17jt and 0.17jv's framing
+
+A slice error invalidated the last two rounds' *premises* (not their measurements). `telock_7z.exe`'s section table is
+
+    .text  va 0x1000 vs 0x10000 rs 0x8a00 pr 0x1000      .rdata va 0x11000 rs 0x1000 pr 0x9a00
+    .data  va 0x15000 rs 0xa00   pr 0xaa00              .rsrc  va 0x17000 rs 0x200 pr 0xb400
+    (last) va 0x18000 vs 0x3000  rs 0x2400 pr 0xb600
+
+so **`.text`'s raw data begins at file offset 0x1000**, not 0x400. The 0xc00 zero bytes I read at 0x400 are the
+header/padding between the PE header and the first section - not ciphertext. Consequences:
+
+1. **0.17jt is withdrawn** ("taote's .text is a key stream because the ciphertext is zeros"): the ciphertext at
+   `.text+0` is `ed 49 14 09 7e 0e 1f 57 a8 a3 5f 49 7a 51 63 83`, and the value taote holds there at the *first API*
+   (GetModuleFileNameA, i.e. before the stub has done anything) is exactly that - the loader mapped the section
+   correctly. There is no host-side seeding and no mystery write.
+2. **0.17jv is withdrawn** ("0x418da8 is a second transform on already-transformed bytes, so the first divergence is
+   upstream"): it was built on the same error - the "already-transformed" stream `ed 49 14 09 ...` IS the packed
+   ciphertext.
+3. The real numbers, for whichever session picks this up:
+
+       ciphertext .text+0      : ed 49 14 09 7e 0e 1f 57 a8 a3 5f 49 7a 51 63 83
+       reference decode        : 33 c0 39 05 e8 61 41 00 0f 9f c0 c3 55 8b ec 51
+       => true keystream      : de 89 2d 0c 96 6f 5e 57 a7 3c 9f 8a 2f da 8f d2
+       taote's artifact .text  : da 9a af e6 9b 52 bd ef ...   => its keystream 37 d3 bb ef e5 5c a2 b8 ...
+
+4. The recurrence check was re-run against the *real* ciphertext and the reference's plaintext: deriving
+   `bl_old = ks ^ ror(al, cl)` and chaining the odd-cl steps still gives **0 of 199** consistent, so 0.17jv's second
+   conclusion stands and is now on a correct basis - the loop body read at 0x418fad-0x418fe2 is not the decryptor that
+   produced the payload (or the model of it is still wrong), and algebraic fitting is not the way in.
+
+So the TELock decode question is exactly as open as 0.17jv said, but for none of the reasons it gave: the ciphertext
+is the packed section (mapped correctly), the two tools disagree on the *transform*, and the loop at 0x418fad is not
+it. The next step remains "read the real loop body at runtime", with the corrected `(ciphertext, keystream)` pairs
+above as the acceptance test.
