@@ -13294,3 +13294,36 @@ would therefore trade this row for others and is not a lever; jdpack_7z needs a 
 (e.g. the stub's own jump target, or which frame's handler/scope pointers lie in-image). Mechanism (b) - the null-read
 mitigation poisoning a decoder - remains the one clean lead in this pool, because a poisoned decoder is a defect on its
 own terms rather than a coin flip between two plausible entries.
+
+#### 0.17kh Two negatives that close 0.17kg's leads: the payload never executes on jdpack_7z, and the null-read mitigation is not its cause
+
+**1. Correction to 0.17kg: jdpack_7z's payload never executes at all.** I read `ret=0x40100a` at the failing decoder call as
+"the payload is running". Probed directly, that address never executes:
+
+    pc 0x401000 : 0 hits      pc 0x40100a : 0 hits      pc 0x40100b : 0 hits      pc 0x40ebc5 (truth) : 0 hits
+
+The stub *fabricates* that return frame (the house anti-analysis trick in this code), so the run stays inside the stub
+and dies at 0x418527 without ever handing off. That also explains the empty hop ledger: there is nothing to hop *to*.
+The image is nonetheless fully decoded (code_sim 1.0) and the imports are right, so the OEP is decided by the ladder
+scan alone - whose first-frame vote cannot tell the true 0x40ebc5 from the look-alike 0x40e924 (both are 3-push CRT
+startup frames, 0.17kg correction).
+
+**2. Mechanism (b) - the null-read mitigation poisoning a decoder - is measured FALSE.** Disabling it outright (bound
+0) leaves jdpack_7z *identical*:
+
+    bound 0x10000000 (shipped)  oep=0x40e924 reason=ladder_scan imports=159 + UC_ERR_READ_UNMAPPED at pc 0x418527
+    bound 0x100000             oep=0x40e924 reason=ladder_scan imports=159 + the same fault
+    bound 0x10000 / 0x1000 / 0x0   oep=0x40e924 reason=ladder_scan imports=159 + the same fault
+
+So the decoder dies on the data it reads, not on a zero page the host invented; the mitigation's bound (which the comment
+documents as "the first megabyte" while the code said 0x10000000) is not load-bearing for this row. The bound change was
+built, A/B'd on the **100-row JDPack family and is exactly neutral** (all-three 95 -> 95, oep 96 -> 96, imports 99 -> 99,
+mean code_sim 0.9693 -> 0.9693, zero rows changed), so it was not kept. It is recorded here as the one unmeasured
+variant worth a corpus arm if anyone wants the comment/code mismatch gone: it is a *tightening* (fewer patches), so its
+only risk is the rows that relied on a 1 MB-256 MB patch, which the family arm shows JDPack does not.
+
+**Where that leaves jdpack_7z** (one row, plus 3 JDPack look-alikes in the same pool): the only remaining lever is to make
+the stub survive its own decoder, which is upstream of the null-read story - and the pool's other 14 rows sit on
+`section_hop` where the same question (does the payload ever run?) must be asked per row before any OEP heuristic is
+worth designing. The general lesson from this round: **probe the addresses you claim are executing** - a fabricated
+return frame reads exactly like a genuine caller in the `ret=` field.
