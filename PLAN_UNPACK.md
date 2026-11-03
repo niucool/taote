@@ -13092,3 +13092,38 @@ its **two seed constants**: stage 1's entry ebx/edx. Neither appears in the pack
 (0xac21fbc7 / 0xd1b05d29 are absent from both), so the stub computes them, and the remaining question is local and
 finite: which guest state produces them. The next unit is to watch the writes that fill those two variables (the loop's
 `mov 0x40d396(%ebp),%ebx` slot and its edx twin) and trace back one step from there.
+
+#### 0.17kc TELock's payload key is a self-checksum of the stub - and it deliberately zeroes exactly the 13 host-fabricated IAT dwords before hashing
+
+0.17kb left two seed constants to explain. Their producer is found: **pc 0x41882b** writes `edx` into the loop's key
+slot (`mov %edx,0x1c55(%ebp)` with ebp=0x41807f -> **0x419cd4**, the same slot the section loop reloads at 0x418fb1), and
+`edx` there is `0x6d8fd7d6`. Immediately before it, `0x418824 xor 0x1b55(%ebp),%dx` mixes in a 16-bit constant from
+0x419bd4, so the seed is
+
+    seed = HASH(stub image) ^ word[0x419bd4]
+
+with HASH being the loop at 0x4187f5: `xor eax,eax / lodsb / xor al,dl / shr eax,1 / <conditional> / shr edx,8 /
+xor eax,edx / dec ebx / jg`, run over **ebx = 0x1992 bytes starting at esi = 0x418000** - i.e. over the stub's own
+decrypted section - with edx starting at 0xffffffff.
+
+The decisive detail is what the stub does *just before* hashing (0x4187d3): it takes 13 dwords from `ebp+0x3bf` =
+**0x41843e**, pushes each, and **zeroes it** (`andl $0,-0x4(%esi)`), hashing only afterwards. Those 13 dwords are
+
+    0x10021550 0x10021950 0x100211e0 0x10021d90 0x10021da0 0x10021100 0x100213c0
+    0x10021a40 0x10021dc0 0x10021050 0x10021ae0 0x100210c0 0x100214e0
+
+- they are the stub's **IAT thunk values pointing into the host-mapped stub-DLL region (0x1000000+)**. So the packer
+knows those are environment-specific and excludes them from the checksum by construction. That is exactly the kind of
+planted trap this round was looking for: the checksum is *stable by design*, so taote's differing payload key cannot be
+explained by its different API addresses, and some **other** byte in 0x418000..0x419992 must differ.
+
+Caveat recorded for the next unit: the hash loop sits inside the stub's own self-decrypting region, so a late dump
+(taken at VirtualProtectEx, i.e. after the run) shows re-encrypted bytes there and cannot be disassembled - the body has
+to be read while it runs (probe-driven, as was done for stage 1 and the section loop), and the same applies to the
+`0x4187f5` region before any model of the hash is trusted.
+
+Next unit: with the seed's geometry known, the missing piece is a *diff of the hashed range*. Since the checksum covers
+0x418000..0x419992 and the run is deterministic, instrument the hash loop's first hit to dump that range from guest
+memory (an apidump at any API that fires afterwards, or a probe-time read), then compare it against the packed file's
+stub after applying the known self-decrypt - the differing offsets are where taote's stub image diverges, which is one
+step above the payload key and the last unknown in this lane.
