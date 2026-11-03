@@ -13166,3 +13166,41 @@ artifacts are not wipe-degenerate (e.g. the row above has `.text/.rsrc/.reloc/.i
 
 Net: no measured lever exists outside TELock's decode, so this lane's model work (0.17ka-kb-kc) stays the critical
 path, and the honest scoreboard is unchanged at 2179/2678.
+
+#### 0.17ke TELock's payload is COMPRESSED, not just encrypted - and the reference's decode equals the original byte-for-byte (an exact oracle)
+
+Two measurements that reframe the lane.
+
+**1. The correct decode is known exactly.** Comparing section by section against the corpus's own `not-packed/7z.exe`:
+
+    reference artifact .text vs ORIGINAL .text :  65536/65536 bytes equal  (100.00%)
+    reference artifact @OEP 0xebc5 vs ORIGINAL  :  55 8b ec 6a ff 68 28 15 41 00 ...  identical
+    taote     artifact .text vs ORIGINAL       :   5133/65536 equal (and those are mostly zeros matching zeros)
+    taote     artifact @OEP 0xebc5             :  00 00 00 00 ... (all zero)
+
+So the reference does not merely "decode differently": it reconstructs the original 64 KB of `.text` perfectly. That is
+a hard, per-row acceptance oracle for any TELock decode work - no modelling or reference dump needed, just compare the
+artifact's `.text` with the original's.
+
+**2. The payload is compressed, which is why taote's output stops.** In the packed file `.text` is
+`vsize 0x10000 / rawsize 0x8a00`, and the original entry point RVA **0xebc5 lies beyond the raw span's end (0x1000 +
+0x8a00 = 0x9a00)**. The per-page nonzero census shows exactly this:
+
+    taote .text nonzero by page: 4094 4096 4096 4095 4096 4096 4096 4096 2560 0 0 0 0 0 0 0
+    orig  .text nonzero by page: 3503 3548 3573 3594 3521 3626 3618 3558 3659 3674 3665 3769 3828 3750 3943 1192
+
+i.e. taote fills precisely the 0x8a00-byte packed span and nothing after it, while the original's code fills all 16
+pages. So the 0x8a00 bytes are a **compressed stream that must decompress to 0x10000**, and the "section decryptor"
+of 0.17ka/0.17jz is only the stream's stage 1. Taote never decompresses: its stream is garbage from byte 0, so the
+stub's decompressor either never runs or runs on nonsense, which is consistent with the run ending inside the stub
+(0x4196f1) rather than at a payload hand-off.
+
+**Consequence for the worklist.** The lane's objective is now precisely stated: *get the stub's decompressor to consume
+the stream and emit 0x10000 bytes*, and its success criterion is the 100% `.text` comparison above. Everything about the
+keystream (0.17ka-kc) is a means to that end, and the two pinned models give the fastest possible check of any candidate
+stream.
+
+Also closed this round: comparing the hashed stub range (0.17kc) across the two artifacts is impossible - taote leaves
+that region re-encrypted (`4f b0 e2 98 ...` at RVA 0x18fb7) while the reference **zeroes** it (all-zero there), so the
+92%-difference measurement of last round is an artefact of two different post-run conventions, not evidence about the
+decrypt.
