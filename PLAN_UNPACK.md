@@ -13245,3 +13245,38 @@ so the first write *is* the final garbage - the shadow holds the same junk as th
 reject taote's 0x8a00-byte stream, whose head is `da 9a af e6 9b 52 bd ef` with all 256 byte values present. If the
 payload is compressed (0.17ke), the codec is TELock's own, and nothing in the stub's executed path expands `.text`, so
 the expansion must happen wherever the payload's own hand-off leads - which is exactly where taote now dies (0x410fff).
+
+#### 0.17kg The 15-row "decoded but OEP-wrong" pool: 14 sit on section_hop, jdpack_7z is a genuine gap, and the run dies on a poisoned decoder
+
+Measured pool (corpus r111): of the 298 valid-PE OEP-wrong rows, **15 have `code_sim >= 0.95`** and **10 of those already
+pass imports**, so each is a one-row fix away from all-three. Families: PEtite 8, JDPack 4, ASPack 1, Neolite 1,
+WinUpack 1. Reasons: **section_hop 14, ladder_scan 1**. Every claim is *later* in the image than the truth.
+
+**Parity is not uniform, so this pool is only partly reachable.** The reference's own eval rows settle two of them:
+
+    jdpack_7z.exe    reference = UNPACKED_VERIFIED, out_ep == orig_ep == 0xebc5   -> taote 0x40e924: a REAL gap
+    petite_7za.exe   reference = PARTIAL,            out_ep 374921 vs 349761      -> parity-failing, not a gap
+
+**jdpack_7z.exe, root-caused in three steps.** The image is already correct (`code_sim` 1.0, imports 159) and the payload
+is running (the decoder's return address is 0x40100a), but:
+
+1. `[unpack] hop ledger (0):` - **no hop is ever latched**, which is why the scan fallback runs at all.
+2. `[unpack] ladder passB hits=4 first=0x40e924 last=0x40ebc5` then `ladder: unique MSVC frame entry 0x40e924` - the true
+   entry **0x40ebc5 is among the four candidates** (it is the *last* hit) and the selection rule takes the first/unique
+   one instead. So the OEP half is a *selection* defect, not a discovery defect.
+3. The run then dies at pc **0x418527** (`mov al,[edi]`, a secondary stub decoder) with `edi = 0xff20b4f1`. Probing every
+   entry of that instruction shows the corruption growing: `edi` goes 0x4064e7 (good) -> 0x2f7762 -> 0xff20b4f1 (fatal).
+   The **0x2f7762 step is the null-read mitigation** (seh.cpp:309-336): a read at an address below 0x10000000 is answered
+   by mapping a zero page, so the decoder continues with zeros instead of taking its guest exception path - and the next
+   computed pointer is garbage. In other words the mitigation, measured at +9 corpus rows, **keeps a corrupted decoder
+   alive** on this row instead of letting the stub handle the fault itself.
+
+So the two candidate mechanisms for the next unit are now specific and cheap:
+
+    (a) ladder candidate SELECTION: with several MSVC-frame entries, the truth here is the LAST one. A rule that prefers
+        the candidate the stub transfers control to (or the last hit) is testable on the JDPack family (4 rows) before
+        the corpus, and the four hits are logged so the class can be measured.
+    (b) null-read scoping: do not answer a read with a zero page when the faulting pc is inside a decoder's data walk (or
+        bound the mitigation per pc/section rather than per run), so a poisoned pointer takes its own SEH path.
+
+Both are gated and family-measurable, and (a) has an exact acceptance test on jdpack_7z (claim 0x40ebc5).
