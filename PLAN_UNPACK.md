@@ -12639,3 +12639,40 @@ RLPack's 7 IMP-bound rows, checked in detail, split into three shapes:
 Also still open from 0.17jo: the generic embedded-PE guard ("a `try_embedded_pe` candidate may not sit inside the
 packed-EP section") that would give `telock_PEview.exe` its exact OEP back; it needs its own corpus arm because that
 seam is shared by every family.
+
+#### 0.17jq SHIPPED: the SDK export database gains msvcrt and MSVC-decorated names - corpus 2177 -> 2179
+
+The RLPack near-threshold rows of 0.17jp were a *stub-surface* gap, and the gap was in the generator: `gen_api_db.py`
+**skipped libmsvcrt entirely** (`"msvcr"` was in SKIP_SUBSTRINGS) and its SYMBOL_RE required a name to start with
+`[A-Za-z_]`, so MSVC C++ decorated symbols (`??2@YAPAXI@Z`, `?terminate@@YAXXZ`) were dropped. A sample whose packed
+import table is destroyed can only resolve msvcrt imports through that SDK surface, so the decorated/data names
+simply did not exist:
+
+    before: 32374 names, 405 DLLs, 0 msvcrt entries, 0 decorated names
+    after:  34773 names, 427 DLLs, 1679 msvcrt entries, 559 decorated names
+
+(`--from-pe` on the *not-packed* original already produced a stub msvcrt with those names, which is what proved the
+surface - not the runtime - was the gap.)
+
+**RLPack family arm (104 rows, 4 workers, 85 s): ALL 93 -> 94 raw, 2 gains / 1 loss, and the loss
+(`rlpack_ComIntRep.exe`, `dur=86`) came back all-three solo with recall 1.0 - the documented budget flake - so the
+referee is 93 -> 95, 2 gains / 0 losses.** The two gains are exactly the ones 0.17jp predicted:
+
+    rlpack_Hash.exe  recall 0.9412 -> 0.9647   (5 msvcrt names: ??2@YAPAXI@Z, ??3@YAXPAX@Z, __setusermatherr, _acmdln, _adjust_fdiv)
+    rlpack_calc.exe  recall 0.9342 -> 0.9658   (25 names, 23 of them msvcrt C++ decorated)
+
+**Corpus r110** (2678 rows, 4 workers, 85 s, ~89 min - no runtime cost from the larger surface):
+
+| metric | r109 referee | r110 raw | r110 referee |
+|---|---|---|---|
+| valid PE | 2677 | 2677 | 2677 |
+| OEP exact | 2300 | 2299 | 2301 |
+| imports | 2253 | 2253 | 2255 |
+| all-three | 2177 | 2177 | **2179** |
+
+The two raw all-three failures were again `nspack_Bginfo.exe` and `rlpack_geek.exe` (recall 0.0314 / 0.0521), both
+all-three solo (1.0 / 0.9985), and the raw arm shows **0 losses against r109** across all 2678 rows - so the only
+movement is the +2 from the msvcrt surface.
+
+Method note: this is the cheapest shape of win in the corpus - a *surface* change rather than an engine change, with
+a family arm that identifies the intended rows in advance and a corpus arm that confirms nothing else moved.

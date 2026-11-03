@@ -42,7 +42,7 @@ import sys
 SKIP_SUBSTRINGS = (
     "apiset", "headless", "windowsapp", "onecore", "mincore", "ucrtbased",
     "api-ms", "ext-ms", "downlevel", "uuid", "ksuser", "oldnames", "icu",
-    "wsmsvc", "ucrtapp", "vcruntime", "msvcp", "msvcr", "concrt",
+    "wsmsvc", "ucrtapp", "vcruntime", "msvcp", "concrt",
 )
 
 # A few names exist in several libraries. Attribution prefers the library the dump
@@ -54,7 +54,7 @@ PRIORITY = (
     "wininet", "uxtheme", "dbghelp", "wintrust", "secur32", "mpr", "ntdll",
 )
 
-SYMBOL_RE = re.compile(r"\b[TI]\s+_?([A-Za-z_][A-Za-z0-9_@?$]*)$")
+SYMBOL_RE = re.compile(r"\b[TI]\s+_?([?A-Za-z_][A-Za-z0-9_@?$]*)$")
 
 
 def canonical(existing: str | None, new: str) -> str:

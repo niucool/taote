@@ -9,9 +9,9 @@ original to grade against).
 | # | criterion | graded | pass | rate |
 |---|---|---|---|---|
 | 1 | valid PE (parses, sane headers, entry mapped) | 2678 | 2677 | **100.0%** |
-| 2 | OEP correct (EP RVA == original's) | 2597 | 2298 | **88.5%** |
-| 3 | import table correct (>=95% of the original's imports reproduced, function level) | 2677 | 2251 | **84.1%** |
-| — | **all three** | 2678 | 2175 | **81.2%** |
+| 2 | OEP correct (EP RVA == original's) | 2597 | 2299 | **88.5%** |
+| 3 | import table correct (>=95% of the original's imports reproduced, function level) | 2677 | 2253 | **84.2%** |
+| — | **all three** | 2678 | 2177 | **81.3%** |
 
 2678 samples were run; 0 further packed files were skipped because the
 dataset ships no unpacked original for them (no ground truth to grade).
@@ -33,12 +33,12 @@ dataset ships no unpacked original for them (no ground truth to grade).
 | MEW | 106 | 100% | 100% | 0% | 96% | 1.00 | **96%** | 1.000 |
 | MPRESS | 106 | 100% | 98% | 2% | 98% | 1.00 | **97%** | 0.998 |
 | Molebox | 93 | 100% | 100% | 0% | 99% | 1.00 | **99%** | 1.000 |
-| NSPack | 97 | 100% | 94% | 3% | 93% | 1.00 | **93%** | 1.000 |
+| NSPack | 97 | 100% | 95% | 2% | 93% | 1.00 | **93%** | 1.000 |
 | Neolite | 93 | 100% | 99% | 1% | 100% | 1.00 | **99%** | 1.000 |
 | PECompact | 97 | 100% | 96% | 4% | 98% | 1.00 | **95%** | 0.912 |
 | PEtite | 73 | 100% | 89% | 11% | 90% | 1.00 | **84%** | 1.000 |
 | Packman | 105 | 100% | 100% | 0% | 100% | 1.00 | **100%** | 1.000 |
-| RLPack | 104 | 100% | 97% | 3% | 90% | 1.00 | **89%** | 1.000 |
+| RLPack | 104 | 100% | 97% | 3% | 92% | 1.00 | **91%** | 1.000 |
 | TELock | 116 | 100% | 91% | 7% | 0% | 0.01 | **0%** | 0.072 |
 | Themida | 122 | 100% | 0% | 0% | 0% | 0.07 | **0%** | 0.052 |
 | UPX | 108 | 100% | 100% | 0% | 100% | 1.00 | **100%** | 1.000 |
@@ -49,10 +49,10 @@ dataset ships no unpacked original for them (no ground truth to grade).
 ## Why the misses miss
 
 - imports mostly missing (recall <0.5): **340**
-- OEP wrong (near): **151**
+- OEP wrong (near): **150**
 - OEP wrong (far): **148**
 - managed (.NET) original: OEP not graded: **80**
-- imports incomplete (recall 0.5-0.95): **38**
+- imports incomplete (recall 0.5-0.95): **36**
 - imports absent (recall 0): **26**
 - no valid PE: unparsable: **1**
 
@@ -62,7 +62,7 @@ Import recall: median 1.00, p10 0.05, p90 1.00 (n=2677). Import precision: media
 
 | original EP shape | wrong but in the entry section | wrong and elsewhere |
 |---|---|---|
-| crt-thunk | 98 | 81 |
+| crt-thunk | 97 | 81 |
 | msvc-frame | 34 | 23 |
 | borland | 13 | 17 |
 | other | 6 | 27 |
@@ -79,8 +79,8 @@ reported entry is off.
 
 ## The two systemic defects behind the remaining gap
 
-**1. The OEP pick, not the decode.** 299 samples have a wrong entry
-(151 of them inside the original's entry section, i.e. the right code region
+**1. The OEP pick, not the decode.** 298 samples have a wrong entry
+(150 of them inside the original's entry section, i.e. the right code region
 and the wrong address) while the payload itself is recovered: the code
 similarity medians at 1.000 for ASPack, Eronana, Packman, JDPack, MPRESS and
 Molebox. The dominant shape is the MSVC CRT-init thunk
@@ -109,7 +109,7 @@ whole corpus from 853 to 1076 samples passing all three criteria (criterion
 |---|---|---|
 | ASPack | aspack_adwcleaner_7.2.4.0.exe | OEP 0x1290035, original 0x8fb5d8 |
 | Alienyze | alienyze_tinytask.exe | OEP 0x105e0, original 0x454c |
-| Amber | amber_AddInProcess32.exe | imports 0.0% of the original's 1 functions present (emitted 74) |
+| Amber | amber_AddInProcess32.exe | imports 0.0% of the original's 1 functions present (emitted 58) |
 | Amber | amber_Hash.exe | OEP 0x14ea, original 0x532c |
 | BeRoEXEPacker | bero_Bginfo.exe | OEP 0x2ec008, original 0x1b5d42 |
 | BeRoEXEPacker | bero_HDDScan.exe | OEP 0x34dbe7, original 0x483d20 |
@@ -125,14 +125,14 @@ whole corpus from 853 to 1076 samples passing all three criteria (criterion
 | MPRESS | mpress_Bginfo.exe | OEP 0x1e5b61, original 0x1b5d42 |
 | MPRESS | mpress_HDDScan.exe | OEP 0x371283, original 0x483d20 |
 | Molebox | molebox_Snap2HTML.exe | imports 0.0% of the original's 1 functions present (emitted 145) |
-| NSPack | nspack_Bginfo.exe | OEP 0x35fb, original 0x1b5d42 |
+| NSPack | nspack_Bginfo.exe | imports 3.1% of the original's 861 functions present (emitted 35) |
 | NSPack | nspack_ComIntRep.exe | imports 89.9% of the original's 527 functions present (emitted 521) |
 | Neolite | neolite_HDDScan.exe | OEP 0x3bb11e, original 0x483d20 |
 | PECompact | pecompact_Bginfo.exe | OEP 0x1000, original 0x1b5d42 |
 | PECompact | pecompact_Everything.exe | OEP 0xbf150, original 0x145f0d |
 | PEtite | petite_7za.exe | OEP 0x74800, original 0x55641 |
 | PEtite | petite_DarkNamer.exe | OEP 0xe87f, original 0xa71e |
-| RLPack | rlpack_Bginfo.exe | imports 4.5% of the original's 861 functions present (emitted 153) |
+| RLPack | rlpack_Bginfo.exe | imports 4.5% of the original's 861 functions present (emitted 155) |
 | RLPack | rlpack_HDDScan.exe | OEP 0x27ebc, original 0x483d20 |
 | TELock | telock_7z.exe | imports 0.0% of the original's 109 functions present (emitted 2) |
 | TELock | telock_AkelAdmin.exe | imports 0.0% of the original's 37 functions present (emitted 2) |
