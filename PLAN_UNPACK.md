@@ -13534,3 +13534,35 @@ more importantly, the reference's habit of *ledgering every candidate during the
 taote claims at hop time, which is why the pool's earlier-than-truth claims are already fixed before any pick can reorder
 them. The next unit is therefore to record (not claim) the in-section, stub-origin transfers and let the existing
 `shape_at` pick choose - a content discriminator, which is the only kind this layout admits.
+
+#### 0.17ko Content-gated in-section recording reaches the right candidate - the PICK still isn't the decider (and the legacy ledger is far worse)
+
+Two more measurements in the same area, both reverted:
+
+**1. The legacy ledger path is not the answer.** `TAOTE_CLAIM_LEDGER=0` (ledger every first-exec in a written section, no
+claim consumption) on the families holding these rows:
+
+    PECompact  97 rows: all-three 92 -> 90   (-2)
+    Neolite    93 rows: all-three 73 -> 20   (-53)
+
+Recording everything is far worse than the claim ledger, as the code comments already claimed - now re-measured on this
+pool.
+
+**2. Content-gated in-section recording works, but the pick never sees it.** Built behind `TAOTE_INPLACE_LEDGER`: on the
+in-place early return, record (do not claim) a transfer whose target opens like an entry (`55 8b ec` / `6a ?? 68` /
+`68 ?? e8` / `e8 ?? e5`). On pecompact_md5summer the ledger then holds **24** entries and the second one is the truth:
+
+    [unpack] hop ledger (24): 0x401016@3 0x49ec68@924007 0x403f0c@924022 ...
+    [unpack] pick OEP 0x49a786 (was 0x401016)
+
+- the truth is recorded with a large write ordinal (924007), and the finalize printout then shows the settled ledger.
+So the recording half of the reference's design is achievable; what is missing is that **the pick is not the decider** -
+it returns a ladder address (0x49a786) that is not even in the ledger, i.e. the pick runs before/independently of these
+late entries, and the claim (`meta_oep_`) is already fixed at hop time. Making this work needs the claim deferred to
+finalize for the in-place class, which is a structural change to the emission path (dump_module writes the artifact at
+claim time), not another accept/reject predicate.
+
+Recorded state of the pool: 4 measured negatives (guard +/-0, erase-split -2, in-place widening -41, legacy ledger
+-2/-53) and one positive (the in-clear JDPack hand-off, +1). Every one of the negatives is explained by PECompact keeping
+stub + decoder + payload in a single section (0.17kn), so the only remaining lever there is content-based, and it needs
+the deferral above.
