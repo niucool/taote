@@ -9,9 +9,9 @@ original to grade against).
 | # | criterion | graded | pass | rate |
 |---|---|---|---|---|
 | 1 | valid PE (parses, sane headers, entry mapped) | 2678 | 2677 | **100.0%** |
-| 2 | OEP correct (EP RVA == original's) | 2597 | 2299 | **88.5%** |
-| 3 | import table correct (>=95% of the original's imports reproduced, function level) | 2677 | 2253 | **84.2%** |
-| — | **all three** | 2678 | 2177 | **81.3%** |
+| 2 | OEP correct (EP RVA == original's) | 2597 | 2305 | **88.8%** |
+| 3 | import table correct (>=95% of the original's imports reproduced, function level) | 2677 | 2250 | **84.0%** |
+| — | **all three** | 2678 | 2178 | **81.3%** |
 
 2678 samples were run; 0 further packed files were skipped because the
 dataset ships no unpacked original for them (no ground truth to grade).
@@ -30,13 +30,13 @@ dataset ships no unpacked original for them (no ground truth to grade).
 | Exe32pack | 124 | 100% | 86% | 1% | 85% | 1.00 | **74%** | 1.000 |
 | FSG | 97 | 99% | 100% | 0% | 100% | 1.00 | **99%** | 1.000 |
 | JDPack | 100 | 100% | 96% | 3% | 99% | 1.00 | **95%** | 1.000 |
-| MEW | 106 | 100% | 100% | 0% | 96% | 1.00 | **96%** | 1.000 |
+| MEW | 106 | 100% | 100% | 0% | 95% | 1.00 | **95%** | 1.000 |
 | MPRESS | 106 | 100% | 98% | 2% | 98% | 1.00 | **97%** | 0.998 |
 | Molebox | 93 | 100% | 100% | 0% | 99% | 1.00 | **99%** | 1.000 |
-| NSPack | 97 | 100% | 94% | 3% | 93% | 1.00 | **93%** | 1.000 |
+| NSPack | 97 | 100% | 93% | 4% | 91% | 1.00 | **91%** | 1.000 |
 | Neolite | 93 | 100% | 99% | 1% | 100% | 1.00 | **99%** | 1.000 |
 | PECompact | 97 | 100% | 96% | 4% | 98% | 1.00 | **95%** | 0.912 |
-| PEtite | 73 | 100% | 89% | 11% | 90% | 1.00 | **84%** | 1.000 |
+| PEtite | 73 | 100% | 99% | 1% | 90% | 1.00 | **89%** | 1.000 |
 | Packman | 105 | 100% | 100% | 0% | 100% | 1.00 | **100%** | 1.000 |
 | RLPack | 104 | 100% | 97% | 3% | 92% | 1.00 | **91%** | 1.000 |
 | TELock | 116 | 100% | 92% | 8% | 0% | 0.01 | **0%** | 0.072 |
@@ -48,11 +48,11 @@ dataset ships no unpacked original for them (no ground truth to grade).
 
 ## Why the misses miss
 
-- imports mostly missing (recall <0.5): **340**
-- OEP wrong (near): **153**
+- imports mostly missing (recall <0.5): **341**
+- OEP wrong (near): **147**
 - OEP wrong (far): **145**
 - managed (.NET) original: OEP not graded: **80**
-- imports incomplete (recall 0.5-0.95): **36**
+- imports incomplete (recall 0.5-0.95): **38**
 - imports absent (recall 0): **26**
 - no valid PE: unparsable: **1**
 
@@ -63,9 +63,9 @@ Import recall: median 1.00, p10 0.05, p90 1.00 (n=2677). Import precision: media
 | original EP shape | wrong but in the entry section | wrong and elsewhere |
 |---|---|---|
 | crt-thunk | 100 | 79 |
-| msvc-frame | 34 | 23 |
+| msvc-frame | 29 | 23 |
 | borland | 13 | 17 |
-| other | 6 | 26 |
+| other | 5 | 26 |
 
 `crt-thunk` is the dominant class and it is a *pick* problem, not a decode
 problem: those binaries' entry point is `e8 <call __security_init_cookie>`
@@ -79,8 +79,8 @@ reported entry is off.
 
 ## The two systemic defects behind the remaining gap
 
-**1. The OEP pick, not the decode.** 298 samples have a wrong entry
-(153 of them inside the original's entry section, i.e. the right code region
+**1. The OEP pick, not the decode.** 292 samples have a wrong entry
+(147 of them inside the original's entry section, i.e. the right code region
 and the wrong address) while the payload itself is recovered: the code
 similarity medians at 1.000 for ASPack, Eronana, Packman, JDPack, MPRESS and
 Molebox. The dominant shape is the MSVC CRT-init thunk
@@ -121,17 +121,17 @@ whole corpus from 853 to 1076 samples passing all three criteria (criterion
 | JDPack | jdpack_7z.exe | OEP 0xe924, original 0xebc5 |
 | JDPack | jdpack_7za.exe | OEP 0x3f1d9, original 0x55641 |
 | MEW | mew_Bginfo.exe | imports 93.7% of the original's 861 functions present (emitted 809) |
-| MEW | mew_ComIntRep.exe | imports 89.9% of the original's 527 functions present (emitted 742) |
+| MEW | mew_ComIntRep.exe | imports 89.9% of the original's 527 functions present (emitted 507) |
 | MPRESS | mpress_Bginfo.exe | OEP 0x1ea681, original 0x1b5d42 |
 | MPRESS | mpress_HDDScan.exe | OEP 0x371283, original 0x483d20 |
 | Molebox | molebox_Snap2HTML.exe | imports 0.0% of the original's 1 functions present (emitted 145) |
-| NSPack | nspack_Bginfo.exe | OEP 0x35fb, original 0x1b5d42 |
-| NSPack | nspack_ComIntRep.exe | imports 89.9% of the original's 527 functions present (emitted 521) |
+| NSPack | nspack_ADInsight.exe | imports 31.1% of the original's 328 functions present (emitted 338) |
+| NSPack | nspack_Bginfo.exe | OEP 0x110414, original 0x1b5d42 |
 | Neolite | neolite_HDDScan.exe | OEP 0x3bb11e, original 0x483d20 |
 | PECompact | pecompact_Bginfo.exe | OEP 0x1000, original 0x1b5d42 |
 | PECompact | pecompact_Everything.exe | OEP 0xbf150, original 0x145f0d |
-| PEtite | petite_7za.exe | OEP 0x74800, original 0x55641 |
-| PEtite | petite_DarkNamer.exe | OEP 0xe87f, original 0xa71e |
+| PEtite | petite_DarkNamer.exe | imports 18.8% of the original's 245 functions present (emitted 195) |
+| PEtite | petite_Everything.exe | imports 93.5% of the original's 292 functions present (emitted 468) |
 | RLPack | rlpack_Bginfo.exe | imports 4.5% of the original's 861 functions present (emitted 155) |
 | RLPack | rlpack_HDDScan.exe | OEP 0x27ebc, original 0x483d20 |
 | TELock | telock_7z.exe | imports 0.0% of the original's 109 functions present (emitted 2) |
@@ -157,5 +157,5 @@ program, so it is one rebuild rule, not per-family decoding: the import
 rebuilder emits hint/name entries only and drops the `0x80000000|ordinal`
 form. A DLL-coverage rubric cannot see this (oleaut32 is still 'covered').
 
-Runtime: median 2s, mean 8s, max 99s (wall cap 120s).
+Runtime: median 2s, mean 8s, max 100s (wall cap 120s).
 
