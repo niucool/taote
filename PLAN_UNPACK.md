@@ -13633,3 +13633,32 @@ at its own pre-dump seam with context taote does not have. Reverted.
 
 The remaining 371 unknown rows (Eronana 151, BeRo 107, Yoda-Crypter 92, Amber 41, ...) need their own EP signatures
 before any family-scoped mechanism can reach them.
+
+#### 0.17kr Labelling the remaining unknown families is truthful but NOT behaviour-neutral: a label routes to a different seam
+
+Censused and built the three remaining signatures (0.17kq's next unit), all measured over the packed corpus:
+
+    BeRoEXEPacker  has("bero")       110 hits, all 110 BeRo, 0 elsewhere
+                   (taote tested ".bero" WITH a dot; the names are "packerBY"/"bero^fr", so all
+                    107 rows ran as "unknown" - the reference's table is the bare {"bero"})
+    YodaCrypter    has("yc")         113 hits: 112 Yoda-Crypter + 1 Amber (the reference carries
+                   the same signature and the same exposure)
+    Eronana        EP {0x60,0x68}    260 hits on its own - 151 Eronana AND 109 BeRo - so it is
+                   only safe AFTER the section rules: BeRo's "bero" claims its 109 first and
+                   exactly the 151 Eronana rows reach the EP test
+
+Family arms (4 workers, 85 s), before -> after:
+
+    BeRoEXEPacker   103/107 -> 102/107     ONE regression
+    Eronana Packer  137/151 -> 137/151     neutral
+    Yoda-Crypter     92/92  ->  92/92      neutral
+
+The BeRo regression is instructive: `bero_geek.exe` is OEP-exact at 0x559760 without the label and claims 0x6c25a2 with
+it, i.e. **the label routes the row to a different seam** (a family packer instead of the generic one) whose pick differs.
+So a truthful detection is a prerequisite only when the seam it selects has been audited; the FSG and Exe32pack labels of
+0.17kq were exactly neutral because those seams happen to behave like the generic path (measured: zero rows changed in
+both families), while BeRo's does not.
+
+All three were reverted (a change that is neutral-or-worse on its own arms has no business shipping). The workable
+sequence for the remaining 371 unknown rows is therefore: signature -> **seam audit** (run the family arm with and
+without the label and diff every claim, as was done here for `bero_geek`) -> only then keep it.
