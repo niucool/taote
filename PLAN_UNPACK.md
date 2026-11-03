@@ -14116,3 +14116,36 @@ NEXT UNIT: probe 0x41880f with TAOTE_PROBE_PREV to get the caller, dump the loop
 time), and compare the per-iteration eax sequences at index 280 - both full sequences are already extracted
 (/tmp/ref_fold.txt, /tmp/ta_lfold.txt) so the exact byte that changes the hash is one diff away. The fold's arithmetic is
 three instructions, so the endgame remains a host-side computation of the key from the packed stub.
+
+#### 0.17ld The key is not stored in the packed file, and the fold's body is a 35-byte-block decryptor
+
+Three measurements to close the "where does eax come from" question before the next unit:
+
+  1. `TAOTE_PC_DUMP` was attempted and **does not work from where I put it** - the hook-installation block it was added to
+     lives inside `on_section_exec`, so a `pc == <target>` test there only ever sees BASIC-BLOCK entries, and 0x418811 (like
+     0x41882b earlier) is mid-block. The edit was reverted to the committed state; the lesson is the same one as
+     0.17kz/0.17lc and the hop-trace mistake: in taote, any "at this pc" diagnostic must be a per-INSTRUCTION hook
+     (`ql.hook_code` over the section range), never a block hook.
+  2. Reading the fold's neighbourhood through the probe's 40-byte windows: only 0x418740 of {0x418740, 0x418780, 0x4187c0,
+     0x4187f0} executes, and its bytes are a block decryptor, not a hash:
+         8d 74 15 00   lea esi,[ebp+edx]
+         83 c2 23      add edx,0x23        <- blocks of 0x23 = 35 bytes
+         8b fe         mov edi,esi
+         83 e3 00      and ebx,0
+         b9 2a 12 00 00 mov ecx,0x122a
+         ac            lodsb / 32 c3 xor al,bl / fe c0 inc al / f9 stc / 72 01 jb / eb 34 jmp / aa stosb / 32 d8 32 c3
+     i.e. the same overlapping-stream self-modifying pattern as the ladder, with a per-block stride of 35 bytes.
+  3. The expected key is NOT in the packed file in the clear: 0x12cdd33f (and the seed 0x92680909) do not occur in
+     telock_7z.exe; the family's stub is encrypted at rest, so any "read the baked constant" mechanism has to come from the
+     post-ladder-decrypted image, not from the file.
+
+Net: the fold's per-byte value comes from a call into the stub DLL (its ret is 0x100214e0) while its counter walks the stub's
+own span, and the stub's own decrypted bytes are identical between the engines. So the divergence has to be in what that call
+returns, not in the bytes being folded.
+
+NEXT UNIT: re-add the pc dump as a per-instruction hook (in the same place TAOTE_TLOCK_KEY installs its hook, which is known
+to work), dump the fold body 0x4187c0..0x418828 and the caller's frame, and settle what the call at the fold returns for byte
+index 280. If that call resolves an address from the synthesised module, the practical fix is the one 0.17lb already points
+at: compute the key host-side from the packed stub's own references (the fold is 3 instructions plus that call) - or take the
+value from the stub's own post-ladder image, which is already available in the emulator and is where any baked constant would
+live (item 3 above rules out the packed file).
