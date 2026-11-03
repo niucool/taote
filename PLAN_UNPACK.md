@@ -13365,3 +13365,37 @@ re-run solo they all grade all-three with recall 1.0 (claims 0x4755cb, 0x434dac,
     refereed r111 = 2177 + 2 = 2179      refereed r112 = 2178 + 5 = 2183      -> +4, 0 real losses
 
 Suite 609/609, 0 failed. The OEP-exact count also climbs 2299 -> 2305 raw, and the 15-row pool shrinks to 11.
+
+#### 0.17kj The guard avenue is exhausted (PECompact neutral) - and the 9 "executes the true EP but claims elsewhere" rows share one shape
+
+Extended the 0.17kh/0.17ki probe split from the `code_sim >= 0.95` pool to **every** `code_sim >= 0.8` OEP-wrong row
+(18 rows), probing the true EP address (VA = base + the original's EP RVA) in each:
+
+    executes the true EP : 9   PECompact 4 (md5summer, Hasher, Everything, Bginfo), RLPack 1 (geek),
+                               Neolite 1 (HDDScan), NSPack 1 (Everything), MPRESS 1 (Bginfo), JDPack 1 (PEview)
+    never executes it    : 9   WinUpack 1, RLPack 1, PEtite 1, MPRESS 1, JDPack 3, BeRo 1, ASPack 1
+
+**Arming the payload-internal traffic guard for PECompact is a measured no-op.** 97-row family, 4 workers, 85 s:
+
+    arm   all-three  oep_exact  imports   rows changed
+    off   92         92         95        -
+    on    92         92         95        0
+
+So PEtite remains the *only* family that responded to that guard (+4). NSPack and JDPack are already armed and still get 3
+of these rows wrong, which says the guard is not what decides them.
+
+**What the 9 rows actually share** (meta reasons: section_hop 7, ladder_passc 2) is that the *claim sits inside the
+packer's own stub section* while the payload's true entry executes:
+
+    jdpack_PEview  ledger hop 0x41502e -> claim 0x4155f9   truth 0x401000   (0x4150xx is .jdpack, the stub)
+    neolite_HDDScan   claim 0x7bb11e   truth 0x883d20
+    mpress_Bginfo     claim 0x5ea681   truth 0x5b5d42
+    pecompact_Bginfo  claim 0x401000   truth 0x5b5d42   (an EARLIER claim - the section start, i.e. a fallback)
+
+i.e. the accepted hop is into the stub's own written section, and the payload's first execution never becomes a candidate.
+The next hypothesis is mechanical and checkable: the claim ledger tracks `written_ranges_`, and those ranges can **span the
+stub and the payload** (the packer decodes .text while its own section is also dirty); a hop that matches such a range
+**erases the range** (unpack.cpp:1587-1591), which removes the payload's range too, so its first execution has nothing to
+match. The experiment is to erase only the matching range's intersection with the hop's own section (or not to erase a
+range that spans more than one section), gated, and A/B on PECompact (97) plus JDPack (100) - both families hold 4 and 4
+of these rows and both are cheap to measure.
