@@ -14540,3 +14540,34 @@ gate (measured), the module base is not zero (measured), and the stub still dies
 probe has to be the stub's *input*: at the fault pc its bit-stream source is esi (a VirtualAlloc buffer), so log that buffer's
 contents in taote and read the reference's equivalent by dumping the same guest address from its run (SE_TELOCK_WRLOG-style
 write log, or a memory dump at the same pc) - the pre-decode equivalent of the comparison that closed TELock.
+
+#### 0.17lo New instrument TAOTE_LOWPC, and why the wrong-OEP class is NOT one mechanism
+
+Added `TAOTE_LOWPC=1` (default off): a 16-entry rolling window of the executed pcs, printed at finalize. It exists because a run
+that transfers control to a garbage address reports only the NEW pc (winupack_PEview dies with a fetch at 0x28), so the jump
+source has to be recovered from the run's tail. First use answers the question in one run:
+
+    [lowpc] last pcs: 0x41d711 0x41d713 0x41d716 0x41d718 0x41d719 0x41d71b 0x41d71c 0x41d71d 0x41d71e 0x41d71f 0x41d720 0x41d722 0x41d724 0x41d725 0x41d726 0x41d727
+
+Disassembling the tail from the live bytes:
+
+    0x41d6fb  pop eax / pop edi / pop ecx      restore the saved registers
+    0x41d700  mov al,[edi] / add al,0x18 / cmp al,2 / jae     (a length-coded scan)
+    0x41d709  mov eax,[edi] / cmp al,7 / jne                   (find a 07-tagged record)
+    0x41d711  bswap eax / add eax,[esi+0x38] / sub eax,edi / stosd / loop   (a delta-relocation pass)
+    0x41d71d  pop ecx ; lods eax,[esi] ; test eax,eax ; je out ; push ecx ; push esi ; xchg edi,eax
+    0x41d727  call ecx                                        <-- ecx = 0x28
+
+and the stack at 0x41d727 is `[esp]=0x415004 [esp+4]=0x28`, i.e. the pushed ecx IS 0x28. So the routine restores `ecx` from its
+own saved-register slot and calls it: the caller passed 0x28 where a code pointer belongs. That is stub-internal logic diverging
+on an input value, the same shape as jdpack_7z's LZ input - not a missing rule in taote's OEP selection.
+
+This also withdraws the 0.17ll claim that the ~13 portable rows are "one defect class". They are one SYMPTOM (perfect payload,
+wrong AddressOfEntryPoint) with at least three different causes already measured:
+
+    jdpack_7z       stub dies in its own LZ loop (pc 0x4184cb/0x418527) before the hand-off; alignment ruled out
+    winupack_PEview stub calls ecx=0x28 from a restored register; no API call occurs in the run at all
+    pecompact_*     claim lands in a different section (0x4bf150 vs truth 0x145f0d) with code_sim 0.87-0.91
+
+So each row needs its own stub-level root cause, and the common enabler is "make the stub reach its hand-off", not "improve the
+OEP picker".

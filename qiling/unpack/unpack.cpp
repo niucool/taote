@@ -1274,6 +1274,25 @@ void Unpacker::install(Qiling& ql) {
             hooks_.push_back(std::move(invalid_hook));
         }
 
+        // TAOTE_LOWPC=1: a tripwire for a stub that transfers control to a garbage pointer (the
+        // measured shape is a fetch at 0x28 on winupack_PEview, i.e. a field that should have been
+        // a pointer). The error line reports only the new pc, so keep a short ring of the last
+        // instructions and print it when execution lands below 0x10000 - the pre-jump context.
+        if (std::getenv("TAOTE_LOWPC") != nullptr) {
+            auto ring = std::make_shared<std::vector<std::uint64_t>>();
+            ring->reserve(16);
+            pc_ring_ = ring;
+            auto lh = std::make_shared<HookRet>(ql.hook_code([ring](std::uint64_t a, std::uint32_t) -> int {
+                if (ring->size() == 16) {
+                    ring->erase(ring->begin());
+                }
+                ring->push_back(a);
+                return 0;
+            }, 1, 0));
+            if (lh->obj() != nullptr) {
+                hooks_.push_back(std::move(lh));
+            }
+        }
         // Diagnostics that must fire on a MID-BLOCK pc. TELock's stub is an overlapping-instruction
         // stream, so its interesting addresses are never basic-block entries, and a per-BLOCK hook
         // (on_section_exec) silently misses them - that mistake produced two false negatives this
@@ -3737,6 +3756,14 @@ std::uint64_t Unpacker::static_oep_from_image(const std::vector<std::uint8_t>& i
 }
 
 UnpackResult Unpacker::finalize(Qiling& ql) {
+    // TAOTE_LOWPC: report where control came from when the stage died on a bad fetch
+    if (pc_ring_ != nullptr && !pc_ring_->empty()) {
+        std::fprintf(stderr, "[lowpc] last pcs:");
+        for (const auto p : *pc_ring_) {
+            std::fprintf(stderr, " 0x%llx", static_cast<unsigned long long>(p));
+        }
+        std::fprintf(stderr, "\n");
+    }
     if (opts_.debug) {
         std::fprintf(stderr, "[unpack] finalize begin: imports=%zu\n", imports_.size());
     }

@@ -311,6 +311,9 @@ private:
 
     // the per-section hook handles (RAII: HookRet unregisters)
     std::vector<std::shared_ptr<HookRet>> hooks_;
+    // TAOTE_LOWPC: the rolling window of the last executed pcs, so a run that
+    // dies on a fetch at a garbage address can report where control came from
+    std::shared_ptr<std::vector<std::uint64_t>> pc_ring_;
     // TAOTE_LASTPC=N: a ring buffer of the last N instruction addresses, for the
     // clean stops that call no API at all (TELock/Yoda-Protector/Alienyze bail on
     // an INLINE environment check, so there is nothing to see in the api log).
