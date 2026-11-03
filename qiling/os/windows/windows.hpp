@@ -249,6 +249,18 @@ public:
     // Returns false when nothing handled the exception.
     bool seh_dispatch_cpu(std::uint32_t exception_code);
 
+    // Dr0-3 execution breakpoints -> #DB (STATUS_SINGLE_STEP), mirrored from
+    // the guest CONTEXT exactly as the reference does (pegasus winemu.cpp:5223
+    // loads them, :5237 implements them). TELock sets Dr0-3 through a context
+    // load and counts the resulting #DB traps into a self-modifying byte that
+    // lies inside the region it then hashes to derive its decryption key; with
+    // the breakpoints not emulated that counter is short by the number of traps
+    // (4 on telock_7z.exe), so the key is wrong and the section CRC fails.
+    // TAOTE_NO_HW_BREAKPOINTS=1 restores the old behaviour.
+    void update_hw_breakpoints(std::uint32_t d0, std::uint32_t d1, std::uint32_t d2,
+                               std::uint32_t d3, std::uint32_t dr7);
+    bool on_hw_breakpoint(int idx, std::uint64_t addr);
+
     void set_seh_dispatch(bool enabled) noexcept { seh_dispatch_enabled_ = enabled; }
     // unpack mode: a guest handler that answers EXCEPTION_CONTINUE_SEARCH when
     // fs:[0] is exhausted resumes at the saved CONTEXT's Eip instead of ending
@@ -410,6 +422,13 @@ private:
     std::uint64_t seh_fault_pc_ = 0;        // the repeat-guard key (pc)
     std::uint64_t seh_fault_addr_ = 0;      // the repeat-guard key (fault address)
     int seh_repeat_count_ = 0;
+    // Dr0-3 execution breakpoints (see update_hw_breakpoints)
+    std::uint32_t hw_dr_[4] = {0, 0, 0, 0};      // the enabled execution addresses
+    std::uint32_t hw_dr7_ = 0;                   // mirrored into the built CONTEXT
+    std::uint32_t hw_dr6_ = 0;                   // the hit bits of the trap in flight
+    std::uint32_t hw_bp_hook_addr_[4] = {0, 0, 0, 0};  // the address each hook watches
+    bool hw_bp_busy_ = false;                    // a breakpoint dispatch is running
+    std::shared_ptr<HookRet> hw_bp_hook_[4];
     bool seh_dispatch_enabled_ = true;   // the set_seh_dispatch switch
     bool seh_continue_on_exhausted_ = false;
     std::function<void(const std::string&)> api_observer_;  // the unpack-mode raw-chain continue

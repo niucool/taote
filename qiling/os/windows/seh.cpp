@@ -34,6 +34,12 @@ namespace {
 //   0x0b4 Ebp, 0x0b8 Eip, 0x0bc SegCs, 0x0c0 EFlags, 0x0c4 Esp, 0x0c8 SegSs,
 //   0x0cc ExtendedRegisters (512) — the fixed part ends at 0xcc
 constexpr std::size_t kCtxContextFlags = 0x0;
+constexpr std::size_t kCtxDr0 = 0x04;
+constexpr std::size_t kCtxDr1 = 0x08;
+constexpr std::size_t kCtxDr2 = 0x0c;
+constexpr std::size_t kCtxDr3 = 0x10;
+constexpr std::size_t kCtxDr6 = 0x14;
+constexpr std::size_t kCtxDr7 = 0x18;
 constexpr std::size_t kCtxSegGs = 0x8c;
 constexpr std::size_t kCtxSegFs = 0x90;
 constexpr std::size_t kCtxSegEs = 0x94;
@@ -572,6 +578,92 @@ bool QlOsWindows::seh_on_interrupt(std::uint32_t intno) {
     return true;
 }
 
+// Dr0-3 execution breakpoints -> #DB (STATUS_SINGLE_STEP).
+//
+// Real x86 raises #DB *before* executing an instruction whose address equals an
+// enabled Drn, and Windows reports it as STATUS_SINGLE_STEP with Dr6.Bn set. We
+// install one code hook per breakpoint address, so the check costs nothing on
+// every other instruction (the reference's update_hw_breakpoints,
+// pegasus winemu.cpp:5237).
+//
+// Why this matters for unpacking: TELock (and relatives) set Dr0-3 through a
+// context load and count the resulting #DB traps into a self-modifying byte that
+// lies inside the region they then hash to derive a decryption key. With the
+// breakpoints not emulated, that counter is short by the number of traps (four
+// on telock_7z.exe), which changes the key, fails the section CRC and aborts the
+// unpack. TAOTE_NO_HW_BREAKPOINTS=1 restores the old behaviour.
+void QlOsWindows::update_hw_breakpoints(std::uint32_t d0, std::uint32_t d1, std::uint32_t d2,
+                                        std::uint32_t d3, std::uint32_t dr7) {
+    static const bool enabled = std::getenv("TAOTE_NO_HW_BREAKPOINTS") == nullptr;
+    if (!enabled || bits_ != 32) {
+        return;
+    }
+    const std::uint32_t drs[4] = {d0, d1, d2, d3};
+    if (std::getenv("TAOTE_SEHDBG") != nullptr) {
+        std::fprintf(stderr, "[dr] sync d=%x,%x,%x,%x dr7=0x%x busy=%d\n", d0, d1, d2, d3, dr7,
+                     hw_bp_busy_ ? 1 : 0);
+    }
+    for (int i = 0; i < 4; ++i) {
+        const bool on = (dr7 & (1u << (2 * i))) != 0 || (dr7 & (1u << (2 * i + 1))) != 0;
+        const bool exec = ((dr7 >> (16 + 4 * i)) & 0x3u) == 0;  // RWn=00 => execution
+        const std::uint32_t want = (on && exec) ? drs[i] : 0u;
+        hw_dr_[i] = want;
+        if (want == 0 || hw_bp_hook_addr_[i] == want) {
+            continue;
+        }
+        // never (re)install from inside a breakpoint's own dispatch: removing a
+        // running hook would free the callback we are executing
+        if (hw_bp_busy_) {
+            continue;
+        }
+        if (hw_bp_hook_[i]) {
+            hw_bp_hook_[i]->remove();
+            hw_bp_hook_[i].reset();
+        }
+        hw_bp_hook_addr_[i] = want;
+        const std::uint64_t a = want;
+        auto* self = this;
+        hw_bp_hook_[i] = std::make_shared<HookRet>(ql_->hook_code(
+            [self, i](std::uint64_t addr, std::uint32_t) -> int {
+                // unicorn's range check can fire for the byte after the
+                // breakpoint; only the exact Dr address is a real hit
+                if (addr != static_cast<std::uint64_t>(self->hw_dr_[i])) {
+                    return 0;
+                }
+                (void)self->on_hw_breakpoint(i, addr);
+                return 0;
+            }, a, a + 1));
+        if (std::getenv("TAOTE_SEHDBG") != nullptr) {
+            std::fprintf(stderr, "[dr] install BP%d @0x%x (dr7=0x%x)\n", i, want, dr7);
+        }
+    }
+    hw_dr7_ = dr7;
+}
+
+bool QlOsWindows::on_hw_breakpoint(int idx, std::uint64_t addr) {
+    if (std::getenv("TAOTE_SEHDBG") != nullptr) {
+        std::fprintf(stderr, "[dr] hit BP%d @0x%llx retarget=0x%llx armed=%d\n", idx,
+                     static_cast<unsigned long long>(addr),
+                     static_cast<unsigned long long>(seh_retarget_), seh_dispatch_armed_ ? 1 : 0);
+    }
+    if (hw_bp_busy_ || !seh_dispatch_enabled_ || seh_retarget_ != 0) {
+        return false;
+    }
+    hw_bp_busy_ = true;
+    hw_dr6_ = 1u << idx;  // Bn: which breakpoint hit (this hit)
+    // the hook fires BEFORE the instruction runs, and a #DB is a fault raised at
+    // that instruction, so the dispatched Eip is the current pc - seh_dispatch_cpu
+    // stages exactly that and stops the run for the restart at the handler
+    const bool ok = seh_dispatch_cpu(0x80000004u);
+    if (std::getenv("TAOTE_SEHDBG") != nullptr) {
+        std::fprintf(stderr, "[dr] dispatch BP%d ok=%d retarget=0x%llx\n", idx, ok ? 1 : 0,
+                     static_cast<unsigned long long>(seh_retarget_));
+    }
+    hw_dr6_ = 0;
+    hw_bp_busy_ = false;
+    return ok;
+}
+
 bool QlOsWindows::seh_write_prot_trampoline(uc_engine*, uc_mem_type /*type*/, std::uint64_t address,
                                             std::uint32_t size, std::int64_t value, void* user_data) {
     auto* self = static_cast<QlOsWindows*>(user_data);
@@ -1026,6 +1118,20 @@ void QlOsWindows::seh_build_context(std::uint64_t dest) const {
 
     std::vector<std::uint8_t> ctx(SEH_CONTEXT_SIZE, 0);
     put_u32(ctx, kCtxContextFlags, kContextFull);
+    // the debug-register window: Dr6 reports which execution breakpoint fired
+    // (real x86 sets Bn plus the 0xFF0 reserved bits), and Dr0-3/Dr7 are the
+    // guest's own breakpoint state mirrored back unchanged - the handler that
+    // receives this CONTEXT must see the breakpoints it installed, otherwise a
+    // CONTINUE_EXECUTION reload silently drops them (the reference mirrors them
+    // at pegasus winemu.cpp:5846 for exactly this reason).
+    put_u32(ctx, kCtxDr0, hw_dr_[0]);
+    put_u32(ctx, kCtxDr1, hw_dr_[1]);
+    put_u32(ctx, kCtxDr2, hw_dr_[2]);
+    put_u32(ctx, kCtxDr3, hw_dr_[3]);
+    if (hw_dr6_ != 0) {
+        put_u32(ctx, kCtxDr6, 0xFF0u | (hw_dr6_ & 0xFu));
+    }
+    put_u32(ctx, kCtxDr7, hw_dr7_);
     put_u32(ctx, kCtxSegGs, static_cast<std::uint32_t>(regs.read("gs")));
     put_u32(ctx, kCtxSegFs, static_cast<std::uint32_t>(regs.read("fs")));
     put_u32(ctx, kCtxSegEs, static_cast<std::uint32_t>(regs.read("es")));
@@ -1079,6 +1185,12 @@ void QlOsWindows::seh_apply_context(const std::vector<std::uint8_t>& image) {
     regs.write("eflags", get_u32(image, kCtxEFlags));
     regs.set_arch_sp(get_u32(image, kCtxEsp));
     regs.set_arch_pc(get_u32(image, kCtxEip));
+    // TELock-class: mirror the CONTEXT's Dr0-3/Dr7 into hardware execution
+    // breakpoints, exactly as the reference does when it loads a CONTEXT
+    // (pegasus winemu.cpp:5222). TELock installs them through this path and
+    // counts the traps they raise into the byte it hashes for its key.
+    update_hw_breakpoints(get_u32(image, kCtxDr0), get_u32(image, kCtxDr1), get_u32(image, kCtxDr2),
+                          get_u32(image, kCtxDr3), get_u32(image, kCtxDr7));
 }
 
 // NtContinue / RtlRestoreContext: the CRT's exception transfer hands the

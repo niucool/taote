@@ -14361,3 +14361,37 @@ NEXT UNIT: instrument taote's insn_invalid path for 0xf1 - log `os.seh_retarget(
 dispatcher address it resolves to - and compare with the four reference single-steps. If taote's retarget lands in a different
 SEH frame than 0x4180c5, the fix is in the dispatch target selection, not in TELock-specific code, which would make it a
 corpus-wide fidelity fix.
+
+#### 0.17lk PORTED: Dr0-3 execution breakpoints -> #DB (STATUS_SINGLE_STEP). TELock family 0 -> 93 all-three
+
+The reference has a mechanism taote never had, and its own source comment names this exact sample: pegasus registers Dr0-3
+execution breakpoints as one code hook per address (`WindowsEmulator::update_hw_breakpoints`, winemu.cpp:5237; mirrored from a
+loaded CONTEXT at :5223; `on_hw_breakpoint` at :5277) and its comment reads "TELock (and relatives) set Dr0-3 via
+SetThreadContext and count the resulting #DB traps into a self-modifying byte that lies inside the region they then hash to
+derive a decryption key. With the breakpoints not emulated that counter is short by the number of traps (4 for
+telock_7z.exe), which changes the key, fails the section CRC and aborts the unpack."
+
+That is precisely the chain 0.17lj identified from the other end. Ported:
+
+  * `QlOsWindows::update_hw_breakpoints(d0..d3, dr7)` - enabled when `dr7` enables the slot (L/Gn) and RWn==00 (execution),
+    installs one hook over `[addr, addr+1)`, and the callback only acts when the address equals the current Drn (unicorn's
+    range check can fire for the following byte);
+  * `QlOsWindows::on_hw_breakpoint(idx, addr)` - sets Dr6.Bn and dispatches `0x80000004` through `seh_dispatch_cpu`, i.e. a
+    #DB fault at the instruction about to run, then lets the run loop restart at the handler;
+  * `seh_apply_context` now mirrors Dr0-3/Dr7 out of every applied CONTEXT (that is how the stub installs them);
+  * `seh_build_context` now writes Dr0-3 and Dr7 **and** Dr6 (0xFF0|Bn) into the CONTEXT it hands to the handler. This part is
+    not optional: without mirroring Dr0-3 back, the first trap's CONTINUE_EXECUTION reload carries zeros and silently clears
+    every breakpoint, which measured as exactly one trap instead of four;
+  * opt-out `TAOTE_NO_HW_BREAKPOINTS=1`, plus `[dr]` lines under TAOTE_SEHDBG.
+
+Measured on telock_7z.exe: the four breakpoints install at 0x4180a3/0x41809e/0x418099/0x418090 (dr7=0x155) - the same four
+addresses the reference's trace shows - all four hit in the reference's order, the counter byte becomes 4, and the artifact
+`.text` goes from 5133/65536 to **61037/65536 byte-identical to not-packed/7z.exe** with head `33 c0 39 05 e8 61 41` (the true
+plaintext), i.e. the previously forced-key oracle result is now reached legitimately.
+
+Family measurement (116 TELock rows, 4 workers, 85 s budget, tools/unpack_report.py):
+
+    r117 (before)  n=116  PE=116  OEP= 93  IMP=  0  ALL=  0
+    r118t (after)  n=116  PE=116  OEP= 94  IMP=109  ALL= 93
+
+Suite 609/609 serial, 0 failed.
