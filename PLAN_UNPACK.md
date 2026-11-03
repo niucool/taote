@@ -12902,3 +12902,38 @@ per-entry values settle the pass structure in one run - and check whether the ar
 This is the last item this session can honestly add to the TELock lane: the question is now narrowly "how many passes
 does the decryptor make, and with which counter", not "what seed", "what coverage" or "what algebra" (0.17jw/0.17jv
 closed those).
+
+#### 0.17jy TELock: the decryptor runs in THREE passes (0x8a00, 0x1000, 0xa00) - and the counter is part of the key
+
+The pass structure 0.17jx asked for, measured in one run (`TAOTE_PROBE=0x418fb7`, `PROBE_N=60000`, reading `ecx` per
+hit):
+
+    pass 1   hits 1..35328      ecx 0x8a00 -> 0x1    35,328 iterations = the whole .text raw span
+    pass 2   hits 35329..39424  ecx 0x1000 -> 0x1     4,096 iterations = exactly one page
+    pass 3   hits 39425..41984  ecx 0x0a00 -> 0x1     2,560 iterations
+
+    35,328 + 4,096 + 2,560 = 41,984 = the observed hit count, exactly.
+
+So the stub enters its decryptor **three times over the head of .text**, with counters that are *lengths*: the whole
+raw span, then one page, then 0x0a00. The head (first 0xa00 bytes) is therefore transformed three times, the range
+0xa00-0x1000 twice, and everything above 0x1000 once.
+
+Two consequences, and they are the first actionable ones this lane has had:
+
+1. **The counter is part of the key.** The loop body uses `cl` (the counter's low byte) in `xor al,cl` and
+   `ror al,cl`, so a pass's keystream depends on the counter's *starting* value and the per-byte offset, not just on
+   the seed. Decrypting 0x8a00 in one pass and decrypting the same bytes page-by-page therefore produce **different
+   plaintext from the same ciphertext** - a per-page pass starts its `cl` at 0x00 with 0x1000 offsetting it
+   differently from a 0x8a00 pass. TELock is a just-in-time, per-page decryptor (the reference's own comment: "the
+   decryption wave runs from a deeper loop"), so the *page-sized* passes are the design and the 0x8a00 pass is what
+   makes taote's output differ from the reference's byte-for-byte even where only one pass ran (the census showed
+   taote and the reference disagree above 0x1000 too, where taote transformed once and the reference page-wise).
+2. The two extra passes then re-transform the head, which is consistent with the head being where taote and the
+   reference disagree *first*, and with the artifact's `da 9a af e6 ...` head against the reference's
+   `33 c0 39 05 ...`.
+
+So the next unit is no longer "what algorithm": it is **why taote's first pass requests 0x8a00 instead of a page**
+(the counter is loaded from a stub variable immediately before the call, and the same guest code requests 0x1000 on the
+next two entries - so the value comes from guest state, and the divergence is in whatever computes it, not in the loop
+body). A probe on the counter's load site (the instruction before the loop's entry that writes `ecx`) is the next
+measurement; the acceptance test is that a page-wise pass reproduces the reference's `33 c0 39 05 e8 61 41 00 ...`.
