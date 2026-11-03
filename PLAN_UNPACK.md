@@ -14244,3 +14244,31 @@ n covering hit 280/281, and read `at_esi[0]` (the byte about to be read) and dl;
 Then diff the four values against the reference's own trace for the same two outer iterations, which already prints eax (the
 post-xor value at 0x4187fa). One of those four numbers will differ and the fix follows from which. Try
 TAOTE_PC_DUMP=0x4187f8:560 (8 inner steps x 70 = 560, so this lands exactly on the divergent iteration's first bit).
+
+#### 0.17lh The CRC input byte differs because the stub's OWN STATE evolves differently: 0x418163 (taote) vs a 0x41811a counter (reference)
+
+Probing the read instruction itself (`TAOTE_PC_DUMP=0x4187f7:281`) settles where the key divergence enters:
+
+    reference  ... esi=0x418118, and its trace's eax at the next pc implies the byte read there is NOT what the ladder stored
+    taote      pc=0x4187f7 eax=0x0 edx=0xe20028bb esi=0x418118, at_esi[0] = 0xfc
+               (the ladder stored 0xac at 0x418118 in BOTH engines)
+
+and the full write history of that address shows why - the two engines stop agreeing after the shared early writes:
+
+    shared   pc=0x418030 -> 0xac     pc=0x4199cb -> 0x65   pc=0x4199cf -> 0x36
+             pc=0x4199d2 -> 0xa3     pc=0x4199d6 -> 0xa4   pc=0x418074 -> 0x00
+    reference next writes come from pc=0x41811a with values 0x01, 0x02, 0x03, 0x04, ... (an incrementing loop)
+    taote     next write is pc=0x418163 -> 0xfc, then pc=0x419779 -> 0x00
+
+So the fold's input byte differs because the stub's own scratch area at 0x4181xx is written by different code in the two
+engines: the reference runs a small loop at 0x41811a that taote never reaches, and taote runs 0x418163 instead. Everything
+downstream (the CRC, the key, the .text decode) follows from that.
+
+This also explains why every earlier hypothesis failed: the CRC inputs match *at the fold*, but the byte it reads had already
+been overwritten differently much earlier in the stub's own execution.
+
+NEXT UNIT (bounded): find why the reference reaches 0x41811a while taote reaches 0x418163. Both addresses are inside the
+stub's self-modifying region, so the answer is a branch in the code just before them: probe/dump 0x4180f0..0x418170 in taote
+(nth-hit dump at a pc in that range gives the live bytes) and check the same window against the reference's trace, then diff
+the branch condition. This is now a control-flow question in one 0x80-byte window, not a crypto question - and it is the last
+step before the 116-row TELock family.
