@@ -13399,3 +13399,18 @@ stub and the payload** (the packer decodes .text while its own section is also d
 match. The experiment is to erase only the matching range's intersection with the hop's own section (or not to erase a
 range that spans more than one section), gated, and A/B on PECompact (97) plus JDPack (100) - both families hold 4 and 4
 of these rows and both are cheap to measure.
+
+**Measured: the erase hypothesis is wrong too (not kept).** Built behind `TAOTE_HOP_ERASE_SPLIT` (do not erase a matched
+range that spans more than one section) and A/B'd on both families that hold these rows:
+
+    PECompact 97 rows:  all-three 92 -> 90   (-2: pecompact_AccessEnum 0x407a98 -> 0x403a53, pecompact_Diskmon
+                                              0x40b4b8 -> 0x406a90, both OEP-exact before and OEP-wrong after)
+    JDPack 100 rows:    all-three 95 -> 95   (0 rows changed - jdpack_PEview keeps 0x4155f9)
+
+So a spanning range's erase is not what hides the payload's entry; keeping the range only lets an *earlier, worse* hop
+win. Reverted.
+
+Two negatives in a row on this pool (guard-for-PECompact neutral, erase-split -2) after one clean win (PEtite +4) is the
+signal to stop hypothesising about the ledger and instead instrument it: the next attempt should print, for one of the 9
+rows, every candidate (addr, matched range, prev_exec, accept/reject reason) at the moment the payload's true entry
+executes - i.e. prove *why* that address is not a candidate before touching the mechanism again.
