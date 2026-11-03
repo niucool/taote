@@ -13808,3 +13808,45 @@ not in the dump.
 New instrument kept (env-gated, default off, so the corpus is byte-identical): `TAOTE_HANDOFF_SNAP=1` snapshots the whole
 image at the first fetch outside the packed-EP section and overlays it at finalize, logging
 `[unpack] handoff snapshot at 0x... (N bytes)` / `[unpack] handoff overlay N bytes`.
+
+#### 0.17kw TELock's decode diverges on ONE register: the second pass's rolling key (bl), not the code path
+
+The reference's write log is the discriminator: `SE_TELOCK_WRLOG=<file> SE_TELOCK_WRLOG_FULL=1` prints
+`addr value size pc` for every write (capped at 200k lines). Run on telock_7z.exe it shows BOTH engines walk the same
+three-pass decryptor, with identical pcs:
+
+    0x418da8  35328 writes   pass 1: copy the packed stream into .text   (byte-identical in both engines,
+                                                                          verified at both ends of the span:
+                                                                          0x401000..7 = 16 9a af e6 9b 52 bd ef,
+                                                                          0x4099f0..f7 = 1c 6f 2c af 80 5e f0 de)
+    0x418faa  loop start, writes each byte TWICE:
+              0x418fc2  intermediate value   (both engines: 0x0c at 0x401000)
+              0x418fe0  final value          REFERENCE 0x33 = the truth   TAOTE 0xda = the ciphertext
+    0x4190ba / 0x419128  partial passes (43 / 223 writes in taote, 9434 in the reference at 0x419128)
+
+Register-level comparison at the same pcs (`TAOTE_PROBE` vs the reference's `SE_TELOCK_STUBTRACE`):
+
+    pc        engine      eax       ecx     edx         esi       edi        ebp
+    0x418faa  taote       0x418faa  0       0x8f398597  0x409a00  0x409a00   0xc95e      (entry to the loop)
+    0x418fab  both        0x1000    0x8a00  0xfd62f97a  0x3       0xc95e    0xc95e
+    0x418fbe  taote       0x1043 ... IDENTICAL ...
+    0x418fc2  both        0x100c    -       -           -         -          -           store 0x0c
+    0x418fc8  reference   0x1033    ...     -           -         -          -           <- diverges here
+    0x418fc8  taote       0x10da    ...     -           -         -          -
+
+The loop body explains it exactly. At 0x418fbe `sub al,0x37` turns 0x43 into 0x0c; at 0x418fc4 `ror al,cl` (cl=0) is a
+no-op; at 0x418fc6 `xor al,bl` mixes the rolling key. So `final = 0x0c ^ bl`:
+**the reference's bl is 0x3f, taote's is 0xd6** (0x0c ^ 0xd6 = 0xda, exactly what taote stores). Every other register and
+every other write in the stream matches, so this is NOT a code-path, mapping or decode-loop difference - it is one piece
+of key state.
+
+`ebx` is seeded before 0x418faa and is not touched by the copy pass (whose output is byte-identical), so the seed itself is
+what differs between the two engines. Nearest suspects, in order: the stack address (taote esp=0x121ffc0, the reference
+0x15fffc0 - TELock is an anti-emulation packer and a stack/PEB-derived key would explain a divergence that survives an
+identical code path), a value read from a stub data slot the stub filled earlier, or an API return the two loaders answer
+differently.
+
+NEXT UNIT: find the ebx seed. Probe backward from 0x418faa at 4-byte steps (the loop entry is 0x418fab, so the seed is set
+in the ~0x40 bytes before it) and compare `ebx` with the reference's, remembering that the reference's trace does NOT print
+ebx - so the comparison has to be made through its write log (`final == intermediate ^ bl`) or by adding ebx to the
+comparison via a probe of the reference's [stub] trace format.
