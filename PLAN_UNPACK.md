@@ -13327,3 +13327,41 @@ the stub survive its own decoder, which is upstream of the null-read story - and
 `section_hop` where the same question (does the payload ever run?) must be asked per row before any OEP heuristic is
 worth designing. The general lesson from this round: **probe the addresses you claim are executing** - a fabricated
 return frame reads exactly like a genuine caller in the `ret=` field.
+
+#### 0.17ki PEtite joins the payload-internal traffic guard - corpus all-three 2179 -> 2183 refereed (+4, 0 losses)
+
+The per-row probe split of 0.17kh asked the right question and paid off in one round. For the 15 rows that are
+`code_sim >= 0.95` and OEP-wrong, probing **the true EP address** (VA = base + the original's EP RVA) divides them:
+
+    executes the true EP (claim is later)          : 7   petite_7za, petite_HDDScan, petite_Hasher, petite_md5summer,
+                                                        petite_Everything, neolite_HDDScan, jdpack_PEview
+    never executes it (the stub dies first)        : 8   jdpack_7z, jdpack_7za, jdpack_MxdwGc, petite_HashCalc,
+                                                        petite_DarkNamer, petite_PEViewer, winupack_PEview,
+                                                        aspack_adwcleaner_7.2.4.0
+
+The first group is exactly the shape of the reference's **payload-internal traffic guard** (which taote only armed for
+UPX/NSPack/Molebox/JDPack): a later hop is the payload's own runtime writes reclaiming a range around the executing flow,
+so it must not replace the entry hop. Armed for PEtite behind `TAOTE_HOPGUARD_EXTRA` and measured:
+
+    PEtite family, 73 rows, 4 workers, 85 s budget:
+        arm   all-three  oep_exact  imports
+        off   61         65         66
+        on    65         72         66         (+4 all-three: 7za, HDDScan, Hasher, md5summer; +7 OEP; 0 losses)
+    Neolite, 93 rows, same arm:  92 -> 73 all-three (-19)   -> REJECTED
+
+Neolite is why the guard cannot be generic: its `.text` is demand-paged, so a re-hop inside the range is legitimate and
+dropping it destroys the claim (eight rows fall back to 0x401000). PEtite only.
+
+**Corpus r112** (2678 rows, 85 s, 4 workers, launched 03:21, ALL RUNS COMPLETE 04:56):
+
+    valid PE 2677   oep_exact 2305   imports 2250   all-three 2178 (raw)
+    r111 raw: 2677 / 2299 / 2253 / 2177
+
+4 gains - exactly the four PEtite rows above - and 3 raw losses, all three of them the documented **dur-86 wall flake** in
+untouched families (mew_Procmon recall 0.912 at dur 86, nspack_ADInsight 0.311 at 86, nspack_Everything 0.9281 at 86);
+re-run solo they all grade all-three with recall 1.0 (claims 0x4755cb, 0x434dac, 0x545f0d). The two habitual flakes
+(nspack_Bginfo 0.0314, rlpack_geek 0.0521, dur 86/87) failed again in both rounds. So:
+
+    refereed r111 = 2177 + 2 = 2179      refereed r112 = 2178 + 5 = 2183      -> +4, 0 real losses
+
+Suite 609/609, 0 failed. The OEP-exact count also climbs 2299 -> 2305 raw, and the 15-row pool shrinks to 11.

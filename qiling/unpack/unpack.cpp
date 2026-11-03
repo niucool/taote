@@ -1545,8 +1545,27 @@ int Unpacker::on_section_exec(std::uint64_t addr) {
         // The two hop-accept guards (the reference's UPX/NSPack/Molebox/JDPack
         // set). Both only ever DROP a candidate, so they are measured as a gate
         // on the families that use them rather than on every family.
+        // PEtite joins the payload-internal traffic guard. The 15-row
+        // decoded-but-OEP-wrong pool splits cleanly on one probe - does the true EP
+        // ever execute? - and 7 rows DO execute their true entry while claiming a
+        // LATER address (PEtite 5, Neolite 1, JDPack 1), which is exactly this
+        // guard's shape: the payload's own runtime writes reclaim a range around the
+        // executing flow and the replacement hop wins. Measured on the 73-row
+        // PEtite family: OEP exact 65 -> 72, all-three 61 -> 65 (+4: 7za, HDDScan,
+        // Hasher, md5summer), imports unchanged 66, ZERO rows lost, and the 15-row
+        // pool's petite_7za/HDDScan/Hasher/md5summer all land on their true EP.
+        // Neolite was measured in the same arm and REJECTED: 92 -> 73 all-three
+        // (-19), because its demand-paged .text legitimately re-hops inside the
+        // range. TAOTE_HOPGUARD_EXTRA=<Family[,Family]> keeps the A/B available.
+        static const std::string hop_extra = [] {
+            const char* e = std::getenv("TAOTE_HOPGUARD_EXTRA");
+            return std::string(e != nullptr ? e : "");
+        }();
         const bool hop_guarded = opts_.family == "UPX" || opts_.family == "NSPack" ||
-                                 opts_.family == "Molebox" || opts_.family == "JDPack";
+                                 opts_.family == "Molebox" || opts_.family == "JDPack" ||
+                                 opts_.family == "PEtite" ||
+                                 (!hop_extra.empty() &&
+                                  hop_extra.find(opts_.family) != std::string::npos);
         for (const auto& r : written_ranges_) {
             if (addr >= r.first && addr <= r.second) {
                 if (hop_guarded && have_hop_) {
