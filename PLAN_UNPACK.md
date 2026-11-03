@@ -12813,3 +12813,33 @@ max 0.207; Eronana 1 row - 0.094. So no family hides a picker-shaped pool: their
 reference also fails, and (c) decode-bound native rows in Amber/Exe32pack/Eronana/TELock whose stubs need emulator
 work beyond taote's current fidelity. Any new project should start from a *decode-fidelity* comparison against the
 reference at a common point (the gap 0.17jt names for TELock applies to all three), not from a picker heuristic.
+
+#### 0.17jv TELock decode: 0x418da8 is a SECOND transform, so the first divergence is upstream of it - and the
+#### PRNG is not fit-able
+
+Two results from the last instrumentation pass, both narrowing the problem without solving it.
+
+**1. The loop at 0x418da8 is a second transform on already-transformed bytes.** Watch data recorded in 0.17ji and the
+stage-1 keystream recorded in 0.17jt together give, for the same eight bytes:
+
+    .text at CreateMutexA  (before stage 1): ed 49 14 09 7e 0e 1f 57 ...
+    stage-1 output         (after 0x418da8): 16 9a af e6 9b 52 bd ef ...
+    reference payload      (.text+0)       : 33 c0 39 05 e8 61 41 00 ...
+
+So the ciphertext that stage 1 consumes is NOT the packed file's zeros - something earlier already wrote an
+`ed 49 14 09 ...` stream into .text before CreateMutexA. That means 0.17jt's "first divergence at byte 0 of the key
+stream" is really "first divergence in the stream written *before* CreateMutexA", i.e. in an earlier self-decrypt
+stage, and stage 1 only amplifies it. The next localisation target is therefore that earlier writer, not 0x418da8 -
+and it is observable from taote alone (`TAOTE_WATCH_RANGE=0x401000:0x402000` reports every pc that writes the page).
+
+**2. The state sampled at 0x418da8 is not a multiplicative PRNG, so algebraic modelling is finished for good.**
+Eight consecutive `stos` samples of `(al, ebx, edx)`:
+
+    0x16 ac21fbc7 d1b05d29 | 0x9a ec77b6ea 071a76da | 0xaf 85bf5165 a0acf505 | 0xe6 74518fa2 47dcb872
+    0x9b b365f7d4 52b682f4 | 0x52 4ad36748 461c4e88 | 0xbd ed3722d0 c2483b50 | 0xef 9380e021 a0ca7521
+
+`edx` takes even values, so no constant multiplier maps sample i to i+1 (solving `edx[i+1]*edx[i]^-1 mod 2^32` is not
+even possible for those pairs), and `ebx` gives two different `imul` constants for the two odd pairs
+(`0x45ab2dc6`, `0xcdbc17fa`). So the recurrence is not `x <- x*K`, and the four-line linear model that the disassembly
+at 0x418d80 suggested is a misaligned read of that region, not the real loop. Any future attempt must read the *loop
+body* at runtime (a `TAOTE_WATCH_RANGE` on its own writes plus probes at successive pcs) instead of fitting constants.
