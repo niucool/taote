@@ -13850,3 +13850,38 @@ NEXT UNIT: find the ebx seed. Probe backward from 0x418faa at 4-byte steps (the 
 in the ~0x40 bytes before it) and compare `ebx` with the reference's, remembering that the reference's trace does NOT print
 ebx - so the comparison has to be made through its write log (`final == intermediate ^ bl`) or by adding ebx to the
 comparison via a probe of the reference's [stub] trace format.
+
+#### 0.17kx TELock's wrong key has a cause: the reference decrypts its OWN STUB first (6481 bytes), taote skips it after 64
+
+The reference's write log orders TELock's work unambiguously (line numbers in /tmp/wl.txt, 200k-write cap):
+
+    1      .. 6481   pc=0x418030  writes 0x418041 .. 0x419991  - the stub decrypting ITSELF, byte at a time
+    6482   .. 81657  pc=0x4199cb/0x4199cf/0x4199d2/0x4199d6    - a 4-instruction loop, 6474 writes (a copy)
+    81658  ..        pc=0x418da8                                - the .text copy pass
+    116986 ..        pc=0x418fc2 / 0x418fe0                     - the .text transform passes
+
+taote's equivalent, measured with `TAOTE_WATCH_RANGE=0x418000-0x41b000` and a pc census:
+
+    pc=0x418030   64 writes      (the reference: 6481)
+    pc=0x4199xx   NONE           (the reference: 6474 x4)
+
+and the first six writes are byte-identical in both engines (0x418041 = e8, 0x418042 = 7e, 0x418043 = 1b,
+0x418044 = 00, 0x418045 = 00, 0x418046 = c3). So the ladder code is right and taote simply LEAVES it after 64 bytes,
+then goes on to the .text passes - which is exactly why its rolling key byte differs (0.17kw) and its .text never decodes.
+
+This also matches the reference's own comment in TELockUnpacker::family_terminal_fill: "the stage 1 dump (taken early,
+before the 59K+ SEH ladder dispatches)" - the ladder is ~59K SEH dispatches, each decrypting a byte of the stub.
+
+taote's SEH activity on this row, counted with `TAOTE_SEHDBG=1`: 5 null reads, 2 sentinel fetches, 2 `ret`, 2 `exhausted`.
+It is not running a ladder at all.
+
+Knobs measured, all unchanged (64 bytes and .text 5133/65536): TAOTE_TF_TRAPS=200000 (the TF single-step budget, default
+4096 and raised to 40000 only for PEtite), TAOTE_NO_SEH_SEED=1, TAOTE_PROT_ENFORCE=1, TAOTE_SEH_FETCHPROT=1. The TF path in
+README/0.17ja only fires when `emu_start` returns CLEANLY with eflags.TF set; TELock's run ends in a fault, so that branch
+is never reached - which is the first thing to instrument next.
+
+NEXT UNIT: find why the ladder exits after 64 bytes. The exit is between two identical write sequences, so it is a branch
+whose condition reads memory/stack (the engines' esp differ: 0x121ffc0 vs 0x15fffc0). Instrument by probing the pcs around
+the ladder's loop end (the reference's ladder pc is 0x418030; its callers/handlers live at 0x4186xx-0x4199xx) and by making
+the TF single-step path reachable for TELock. Success is a single number: ladder writes 64 -> ~6481, then .text equal
+5133 -> 65536 on telock_7z, then the 116-row TELock family via tools/ref_parity.py.
