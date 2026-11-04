@@ -1594,6 +1594,17 @@ void Unpacker::poll_dyn_maps() {
 // The reference's on_section_exec (unpacker.cpp:5520-5810): a written section
 // that starts executing is the payload hand-off.
 int Unpacker::on_section_exec(std::uint64_t addr) {
+    // TAOTE_HOOK_FASTPATH=<level> (diagnostic, default off): return early so a run
+    // isolates the cost of each stage of THIS body from unicorn's own per-block trap
+    // plus the dispatch chain. level 1 = at entry, 2 = after the written-range test,
+    // 3 = after the stub-region / in-place tests.
+    static const int hook_fastpath = [] {
+        const char* v = std::getenv("TAOTE_HOOK_FASTPATH");
+        return v != nullptr ? std::atoi(v) : 0;
+    }();
+    if (hook_fastpath == 1) {
+        return 0;
+    }
     // EXPERIMENT (TAOTE_IF_USER=1): a Windows ring-3 thread runs with IF set and cannot clear it
     // (CLI faults with #GP; POPF ignores IF outside ring 0). Unicorn executes CLI silently and
     // taote's guest therefore runs with IF=0, while the reference runs at eflags=0x202. TELock
@@ -1673,6 +1684,9 @@ int Unpacker::on_section_exec(std::uint64_t addr) {
         return false;
     }();
 
+    if (hook_fastpath == 2) {
+        return 0;
+    }
     // TAOTE_HOP_TRACE=<hex addr>: one-line report the first time a given address
     // enters the hop detector, BEFORE any early return - the instrument the
     // claim-ledger questions need (which early return fires, which range matched,
@@ -1735,6 +1749,9 @@ int Unpacker::on_section_exec(std::uint64_t addr) {
                 break;
             }
         }
+    }
+    if (hook_fastpath == 3) {
+        return 0;
     }
     // the stub's own code near the packed EP is not the payload (unless the
     // stub decoded over itself there)

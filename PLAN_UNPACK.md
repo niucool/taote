@@ -15324,3 +15324,29 @@ everything else `--no-hop` also disables (write hooks and the import-tracking pa
 Where that leaves the throughput lever: the 12 cap rows that fail even at 85 s need real work reduction in the per-block path (the
 trampoline + std::map find + bound_check chain, i.e. LEVER 2's dispatch restructure), not hook removal. Measured shape for the next
 attempt: baseline on the 28 cap rows is ALL=16, so 12 rows are genuinely time-starved and 16 already pass.
+
+#### 0.17mm Where the per-block hook time actually goes (localized), and why the interval loops are not it
+
+Follow-up to 0.17ml, which showed hook LIFETIME is not the lever. This round localized the hook BODY with a graded early-out
+(`TAOTE_HOOK_FASTPATH=<level>`, kept as a default-off diagnostic) on mpress_geek (full run 91.9 s, oep 0x559760, imports 1414):
+
+    level 1 (return at entry)                68.2 s   -> trap + dispatch + prologue
+    level 2 (return after the written test)  78.6 s   -> the in_written test costs ~10 s
+    level 3 (return after stub/in-place)     77.4 s   -> those tests are free (within noise)
+    full run                                 91.9 s   -> the hop logic below costs ~14 s
+
+So of the 92 s: ~48 s is the guest itself, ~16 s is unicorn's per-block trap plus the dispatch chain (`--no-hop` is 52 s), and ~28 s
+is our body, split ~10 s in the written-range test and ~14 s in the hop logic.
+
+Measured and REVERTED: a per-page filter for those loops - a page count of live claims (negative test only, so a covered page still ran
+the exact range test and the semantics were unchanged by construction), an `ever_written_` page bit, and an O(1) `inside_inplace` via a
+per-page attribute built once in classify_sections. On mpress_geek it read 88.7 s (a 3.5% "win"), but on the 28 cap-bound rows at the
+corpus parameters it was a wash: baseline ALL=16 OEP=19 IMP=20, filtered ALL=16 OEP=19 IMP=20, per-row durations -2..+2 s (noise),
+zero rows gained or lost. Reverted, because the interval loops are evidently NOT where the 30% lives - the level-2 reading above
+over-attributed: with the range cache warm (`wr_cache_lo_/hi_`) most in-payload blocks never enter the loop at all.
+
+Implication for the throughput lever (the only systematic one left): the attackable mass is the STRUCTURAL per-block trap + dispatch
+(~16 s of 92 = 17%) plus whatever of the ~14 s hop logic can be made conditional, not the interval tests. A real attempt has to change
+how the unpacker installs hooks (a single direct callback instead of the generic multi-hook dispatch with its map lookup and
+shared_ptr bookkeeping per block), and it needs a measured target above ~15% to convert any of the 12 genuinely time-starved cap rows
+(baseline on the 28 cap rows is ALL=16).
