@@ -15175,3 +15175,35 @@ CLI, 74 vs 247 pairs on the sibling row).
 Next unit: the same treatment for the sibling memory APIs a stub may ask GetProcAddress for (RtlFillMemory, RtlCopyMemory,
 RtlCompareMemory) - each is a two-line body, and the remaining Exe32pack rows that still fail now fail on "API not implemented", which
 names the next one directly.
+
+#### 0.17mh Measured negative: adding the pointer-cookie decoders costs a row, and why (dispatch vs native cell)
+
+Follow-up to 0.17mg's lesson ("a minted GPA cell must behave like the real callee"). taote implements
+`EncodePointer(ptr) = ptr ^ 0x0b0b0b0b` but had NO `DecodePointer`, so a guest that encoded and decoded a pointer got an xored
+garbage value back and dereferenced it; the reference registers both (pegasus kernel32.cpp REG(Kernel32, DecodePointer, 1) and
+ntdll.cpp REG(Ntdll, RtlDecodePointer, 1) / REG(Ntdll, RtlEncodePointer, 1)).
+
+Implemented the missing halves (`DecodePointer`, `RtlEncodePointer`, `RtlDecodePointer`, all the same involution as the existing
+EncodePointer, which was left untouched) and measured the full corpus (r138, 2678 rows, 4 workers, 85 s, wallcap 120):
+
+    PE 2677 -> 2676, OEP 2328 unchanged, IMP 2377 -> 2376, ALL 2293 -> 2292
+    gained: none. lost: upx_Listdlls.exe - valid_pe True -> False, oep_found True -> None, dur 1 -> 120 = **wall-timeout**.
+
+So the change is net -1 and was reverted in full (both files back to the RtlZeroMemory/RtlMoveMemory state of 9681515).
+
+Why it hurt, and what it teaches: before the change a call to one of those names landed on the minted `xor eax,eax; ret` cell and
+executed NATIVELY (a few unicorn instructions). Registering a handler makes `hook_winapi` DISPATCH it through the engine instead -
+the same path that is fine for a bounded number of calls (RtlZeroMemory on the Exe32pack stubs) but catastrophic for a name a stub
+polls in a tight loop, which is what pushes upx_Listdlls past the 120 s wall. The distinguishing factor is CALL FREQUENCY, not the
+API's semantics.
+
+That points at the better mechanism (not yet implemented): for the small, pure, involution-shaped APIs - the pointer cookie pair and
+the memory fill/copy family - emit the answer as NATIVE CODE in the minted cell instead of registering a dispatch handler. A 16-byte
+cell is enough for `mov eax,[esp+4]; xor eax,imm32; ret 4` (DecodePointer) or `mov edi,[esp+4]; mov eax,[esp+8]; mov ecx,[esp+0xc];
+rep stosb; ret 0xc` (RtlZeroMemory), which keeps the hot path at native speed while still cleaning the stdcall stack. Measure that on
+the Exe32pack family first (13 rows currently depend on the dispatch version) and then the corpus.
+
+Also worth knowing from the same arm: the corpus-wide failure census at r137 is FETCH_UNMAPPED 493 rows, READ_UNMAPPED 232,
+"no section hop" 111, WRITE_UNMAPPED 41, "API not implemented" 4. Sampling 12 of the FETCH_UNMAPPED rows and reading the LAST minted
+GPA name before death showed no dominant name (user32!VirtualAlloc 3, mscoree!_CorExeMain 2, then singles such as
+ntdll!RtlFreeHeap, kernel32!RtlUnwind, kernelbase!DecodePointer, input.dll!ordinal_107), so that class is not one missing API.
