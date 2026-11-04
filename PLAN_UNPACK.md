@@ -14797,3 +14797,41 @@ Measured:
 Also worth keeping from this round: the two dumps are the same size and the reference's .text is *less* decoded than taote's
 (37227 vs 37371 nonzero, and the reference's head still has the interleaved key bytes), which corrects the assumption that the
 reference reaches these rows by decoding better.
+
+#### 0.17lw The 15 OEP-only rows: 3 are load artifacts, 12 genuine, and a VA/RVA trap
+
+Ran all 15 OEP-only rows standalone (no other load, `--unpack-timeout 300`):
+
+    bero_geek.exe             orig RVA 0x159760   standalone RVA 0x159760   OK   <- corpus said wrong
+    mpress_geek.exe           orig RVA 0x159760   standalone RVA 0x159760   OK   <- corpus said wrong
+    neolite_HDDScan.exe       orig RVA 0x483d20   standalone RVA 0x483d20   OK   <- corpus said wrong
+    amber_chgport/chgusr/mdbx_dump, jdpack_7z/7za/MxdwGc, pecompact_Everything/Hasher/md5summer,
+    petite_HashCalc, winupack_PEview, yoda-protector_livekd                      genuinely wrong
+
+So THREE of the fifteen are cap/load artifacts (they are correct when the sweep is not competing for the box), and twelve are real.
+Note the corpus reports them as misses on every run because the sweep's contention is what truncates them - the same phenomenon
+measured for MEW/MPRESS/RLPack in 0.17lq.
+
+MEASUREMENT TRAP (hit twice this round): `meta.oep` is a **VA** (base + RVA) while the report's `orig_ep` is the original's **RVA**.
+Comparing them directly makes the three correct rows above look wrong (0x883d20 vs 0x483d20, 0x559760 vs 0x159760). Always convert
+with `meta.base` before comparing.
+
+The twelve genuine ones split by image quality, and the split matters for what to do:
+
+    perfect image (code_sim 1.00), wrong EP FIELD only    5   jdpack_7z 0.ebc5, jdpack_7za 0x55641, jdpack_MxdwGc 0x8e08,
+                                                              petite_HashCalc 0x11e58, winupack_PEview 0x1000
+    partial decode (code_sim 0.87-0.91)                   3   the three pecompact rows
+    no decode (code_sim 0.02-0.04)                        4   amber_chgport/chgusr/mdbx_dump (all claim 0x1661),
+
+JD-Pack detail, since it is the largest of the perfect-image group: with TAOTE_LADDERDUMP the truth IS among the Pass-B
+candidates for two of three - jdpack_7z's four frames are 0xe924 0xe9a4 0xea18 **0xebc5 (truth, the last)**, jdpack_7za's 56
+candidates include **0x55641 (truth)**, but jdpack_MxdwGc's 19 candidates (0x4107..0x804e) do NOT include its truth 0x8e08. The
+tie-break ("with no hop, the first frame") is what picks wrong on the first two.
+
+Principle for that tie-break (next unit): the four 7z frames are the four CRT startup VARIANTS (main / wmain / WinMain / wWinMain),
+byte-identical except for their SEH handler immediate, and which one is the image's entry is decided by the PE **subsystem** - which
+the packed header still carries. So the rule is not "first frame" but "the frame matching the image's subsystem", and the
+discriminator between variants has to be found in the frame bodies (which CRT routine each one calls).
+
+Also measured on petite_HashCalc while looking: its truth never appears at all - the log is 5419 "hop skip self-traffic" events in
+the 0x4715xx region and one accepted hop at 0x482175, so PEtite's own decoded copy floods the ledger and no candidate reaches .text.
