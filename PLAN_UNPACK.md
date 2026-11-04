@@ -14945,3 +14945,44 @@ Next unit for this pocket: identify what amber_chgport's stub does with the buff
 ~40k times each) - whether it expects an MZ-headed image (in which case the adoption scan needs a second shape: a headerless
 section body), or whether the 0x401661 bootstrap is supposed to copy from the heap and dies because a register it needs was never
 set. The 25-byte bootstrap at 0x401661 is the concrete thing to disassemble next.
+
+#### 0.17mb Amber's junk latch: adopt the heap payload over WEAK hops only, and only for heap-payload families (+3 corpus)
+
+0.17ma left the Amber pocket with a concrete question and a suspicious fact: the stub's only accepted hop is a junk latch
+(amber_chgport 0x401661 at write ordinal 25, executing a .text that was never filled) and no MZ is ever written to the heap.
+Bisecting the corpus history answered it - `r45_report.json` (2026-10-28) has amber_chgport at oep 0x500f251 with
+oep_exact True and code_sim 0.9171, i.e. this row USED TO WORK. That run was the "adoption over a hop" arm (commits 0ce28a2 /
+872eb1f), which was rejected as 6 gains / 33 losses. So the payload is there; the engine's gate is what refuses it.
+
+The gate was `if (hop_ledger_.empty())`: one junk latch blocks adoption outright. Amber's stub writes those few bytes BEFORE
+the payload exists, so the gate is too strong. The engine already has a hop-strength notion - the decode_only precedence rule
+calls a hop STRONG at write ordinal >= 32 - so the relaxation reuses that bound instead of inventing one: adopt when every
+accepted hop is weak (all seq < 32).
+
+Measured in two arms, both at the corpus's own parameters (4 workers, 85 s budget, wallcap 120):
+
+  1. **Ungated** (r130, any family with only weak hops): +3 OEP (amber_chgport/chgusr/mdbx_dump, exactly the three rows that
+     claimed the same 0x401661 at cs 0.02) but -6 valid PE and 2 more losses: pecompact_Coreinfo, Dbgview, accesschk, cpuz_x32,
+     handle, portmon all lost valid PE. The base `Packer::adopt_embedded_pe` is packer-AGNOSTIC by design (the reference's
+     try_embedded_pe), and those families decode IN PLACE, so their weak first-exec hops are real hand-offs and the adoption
+     replaced a good image with junk from the heap. Corpus all-three 2275 -> 2270.
+  2. **Gated** (r131, the shipped version: `Packer::heap_payload_family()`, true only on AmberPacker, which AlienyzePacker
+     inherits): Amber family n=152 PE=152 OEP 115 -> 118, IMP 138 unchanged, ALL 114 -> 117; Alienyze n=126 PE=126 OEP=118
+     IMP=125 ALL=118 unchanged. Corpus PE 2677, OEP 2310 -> 2313, IMP 2361, ALL 2275 -> 2278. Gained the three Amber rows plus
+     rlpack_ComIntRep (the known contention row) and lost mew_procexp (the same pair that flips every few sweeps), so the
+     attributable gain is +3 with 0 real losses.
+
+The three rows now report the payload's own entry (oep - base = 0x4467 = the ORIGINAL's EP RVA) instead of 0x401661, and their
+code_sim goes 0.02 -> 0.80-0.92.
+
+**Harness fidelity, found while pinning the test.** The in-process test harness could not reproduce the CLI's behaviour on this
+sample at all, and the reason was a real divergence, not the sample: the CLI seeds each stub dll with the FULL SDK surface
+(`seed_sdk_surface=true`) and preserves the DLL's name casing for hashing families, while the harness wrote export surfaces
+containing only the packed file's own import names. A stub whose GetProcAddress misses mints a sentinel for every name and takes
+a different code path (measured: the CLI resolves `?terminate@@YAXXZ` immediately, the harness went on minting wcschr /
+_wsetlocale / swprintf_s / ... for 20+ names and the payload never got built). The harness now mirrors the CLI exactly: full SDK
+surface, case preservation, `uopts.family` from the test (the CLI gets it from its static `guess_family`), `uopts.debug` from
+TAOTE_UNPACK_DEBUG, and a `count` knob (the CLI's budget is 2e9; the harness's 40M truncated this stub).
+
+Pinned by UnpackCompat.AmberHeapPayloadIsAdoptedOverTheJunkLatch: amber_chgport unpacks to a base that is NOT 0x400000 and an
+entry of base+0x4467. Suite 610 -> 611 tests, 0 failed (serial).

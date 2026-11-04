@@ -4049,8 +4049,33 @@ UnpackResult Unpacker::finalize(Qiling& ql) {
         }
         // Amber-class: the payload PE is assembled in a heap buffer and the
         // original sections are never written, so there is no hop to find — adopt
-        // the embedded image (the reference's try_embedded_pe)
-        if (hop_ledger_.empty() && packer_ != nullptr) {
+        // the embedded image (the reference's try_embedded_pe).
+        //
+        // A junk latch must not block that: Amber's stub writes a few bytes into
+        // .text and jumps there BEFORE the payload exists (amber_chgport: the only
+        // accepted hop is 0x401661 at write ordinal 25 and it executes a section
+        // that was never filled), so "the ledger is empty" is too strong a gate.
+        // The engine already defines a STRONG hop as one at write ordinal >= 32
+        // (the decode_only precedence rule uses exactly that bound), so adopt over
+        // weak hops only and leave every real hand-off alone.
+        const bool heap_family = packer_ != nullptr && packer_->heap_payload_family();
+        bool ledger_blocks_adoption = !hop_ledger_.empty();
+        if (ledger_blocks_adoption && heap_family) {
+            bool all_weak = true;
+            for (std::size_t i = 0; i < hop_ledger_.size(); ++i) {
+                const auto seq = i < hop_write_seq_.size() ? hop_write_seq_[i] : 0;
+                if (seq >= 32) {
+                    all_weak = false;
+                    break;
+                }
+            }
+            ledger_blocks_adoption = !all_weak;
+            if (!ledger_blocks_adoption && opts_.debug) {
+                std::fprintf(stderr, "[unpack] adoption over %zu weak hop(s) (all seq < 32)\n",
+                             hop_ledger_.size());
+            }
+        }
+        if (!ledger_blocks_adoption && packer_ != nullptr) {
             packers::PackerContext actx;
             actx.ql = &ql;
             actx.image_ptr = &image;

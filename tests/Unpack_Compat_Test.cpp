@@ -22,6 +22,7 @@
 #include "qiling/const.hpp"
 #include "qiling/core.hpp"
 #include "qiling/unpack/packers/alienyze_names.hpp"
+#include "qiling/unpack/packers/factories.hpp"
 #include "qiling/unpack/packers/alienyze_ordinals.hpp"
 #include "qiling/unpack/unpack.hpp"
 
@@ -61,6 +62,14 @@ struct RunConfig {
     fs::path sample;
     fs::path out_dir;
     bool hop = true;
+    // Instruction budget. The default matches the CLI's shape for match-and-exit
+    // samples; a packer whose stub must execute tens of millions of instructions
+    // before it builds its payload needs more (the CLI's default is 2e9).
+    std::uint64_t count = 40000000;
+    // Packer family. The CLI detects it statically (tools/taote.cpp guess_family)
+    // and hands it to the library; a run without one uses the generic decode-only
+    // packer, so a test that pins a FAMILY mechanism must state the family.
+    std::string family;
 };
 
 // One in-process unpack run: the same shape the CLI drives (synthesize a stub
@@ -87,8 +96,18 @@ UnpackResult run_unpack(const RunConfig& cfg) {
     fs::remove_all(rootfs, ec);
     fs::create_directories(rootfs / "Windows" / "System32");
     fs::create_directories(rootfs / "Windows" / "registry");
+    // Mirror the CLI's rootfs exactly (tools/taote.cpp): the stub dlls must carry
+    // the FULL SDK surface for their dll, not just the packed file's own import
+    // names, and a family that resolves imports by hashing needs each name spelled
+    // the DLL's way. Without both, a stub's GetProcAddress misses, the engine mints
+    // a sentinel for every name it asks for, and the guest takes a different code
+    // path (measured on amber_chgport: the CLI resolves ?terminate@@YAXXZ at once
+    // and the harness went on minting wcschr/_wsetlocale/... for 20+ names).
+    const bool preserve_sdk_case =
+        qiling::unpack::packers::family_hashes_export_names(cfg.family);
     for (const auto& [dll, exports] : plan.imports) {
-        write_stub_dll(rootfs, dll, exports, plan.is64);
+        write_stub_dll(rootfs, dll, exports, plan.is64, /*seed_sdk_surface=*/true,
+                       preserve_sdk_case);
     }
     for (const char* key_dll : {"ntdll.dll", "kernelbase.dll", "kernel32.dll", "ucrtbase.dll", "mscoree.dll"}) {
         if (!fs::exists(rootfs / "Windows" / "System32" / key_dll)) {
@@ -98,7 +117,8 @@ UnpackResult run_unpack(const RunConfig& cfg) {
                     names = exports;
                 }
             }
-            write_stub_dll(rootfs, key_dll, names, plan.is64);
+            write_stub_dll(rootfs, key_dll, names, plan.is64, /*seed_sdk_surface=*/true,
+                           preserve_sdk_case);
         }
     }
     const auto staged = rootfs / "Windows" / cfg.sample.filename();
@@ -110,7 +130,7 @@ UnpackResult run_unpack(const RunConfig& cfg) {
     options.ostype = qiling::QL_OS::WINDOWS;
     options.archtype = plan.is64 ? qiling::QL_ARCH::X8664 : qiling::QL_ARCH::X86;
     options.timeout = 60;
-    options.count = 40000000;
+    options.count = cfg.count;
     options.argv.push_back(staged.string());
 
     UnpackOptions uopts;
@@ -118,7 +138,9 @@ UnpackResult run_unpack(const RunConfig& cfg) {
     uopts.out_dir = cfg.out_dir.string();
     uopts.enable_hop = cfg.hop;
     uopts.rootfs = rootfs.string();
+    uopts.family = cfg.family;
     uopts.allow_decoy_dlls = true;
+    uopts.debug = std::getenv("TAOTE_UNPACK_DEBUG") != nullptr;
     Unpacker unpacker(uopts);
 
     std::unique_ptr<qiling::Qiling> ql;
@@ -319,6 +341,28 @@ TEST(UnpackCompat, JdpackEntryIsTheSubsystemStartupVariant) {
     const auto res = run_unpack(RunConfig{sample, out, true});
     ASSERT_EQ(res.base, 0x400000u) << res.error;
     EXPECT_EQ(res.oep, res.base + 0xebc5u);   // truth; the first-frame vote said 0x40e924
+    fs::remove_all(out, ec);
+}
+
+// Amber's stub writes a few bytes into .text and jumps there BEFORE its payload
+// exists, so the hop ledger holds a junk latch (0x401661 at write ordinal 25) that
+// used to block the embedded-PE adoption outright: the artifact then executed a
+// .text that was never filled (code_sim 0.02) and claimed 0x401661. Adoption now
+// runs over WEAK hops (all write ordinals < 32) for heap-payload families only.
+TEST(UnpackCompat, AmberHeapPayloadIsAdoptedOverTheJunkLatch) {
+    const auto sample = fixture("Amber/amber_chgport.exe");
+    if (sample.empty()) {
+        GTEST_SKIP() << "packed corpus not present (set TAOTE_PACKED_DIR)";
+    }
+    const auto out = fs::temp_directory_path() / "taote_unpack_amber_junklatch";
+    std::error_code ec;
+    fs::remove_all(out, ec);
+    const auto res = run_unpack(RunConfig{sample, out, true, 2000000000ULL, "Amber"});
+    // The artifact is the heap-resident payload, not the stub image...
+    EXPECT_NE(res.base, 0x400000u) << res.error;
+    // ...and reports the payload's own entry, 0x4467 = the ORIGINAL's EP RVA (the
+    // junk latch claimed 0x401661 instead).
+    EXPECT_EQ(res.oep, res.base + 0x4467u);
     fs::remove_all(out, ec);
 }
 

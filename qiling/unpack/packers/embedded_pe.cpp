@@ -281,6 +281,7 @@ bool Packer::adopt_embedded_pe(PackerContext& ctx) {
 class AmberPacker : public Packer {
 public:
     const char* name() const override { return "Amber"; }
+    bool heap_payload_family() const override { return true; }
     bool adopt_embedded_pe(PackerContext& ctx) override {
         if (ctx.ql == nullptr) {
             return false;

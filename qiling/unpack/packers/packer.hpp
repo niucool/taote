@@ -199,6 +199,13 @@ public:
     // class: a payload built in a heap buffer is recovered the same way whatever
     // the label). Families with their own recovery override this.
     virtual bool adopt_embedded_pe(PackerContext& ctx);
+    // Amber-class stubs assemble the payload PE in a heap buffer and never write
+    // their own sections, so the engine may adopt that payload even when the hop
+    // ledger holds a junk latch (see the adoption site in Unpacker::finalize).
+    // Other families decode IN PLACE: their first-exec hops are real hand-offs, and
+    // a packer-agnostic adoption over one produced a bogus image on 6 PECompact
+    // rows (valid PE lost) when this was measured without the gate.
+    virtual bool heap_payload_family() const { return false; }
 };
 
 // The family factory: `family` is the detector's label (see packer_detector.hpp).
