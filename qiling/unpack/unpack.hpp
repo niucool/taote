@@ -201,6 +201,12 @@ private:
     std::uint64_t write_seq_ = 0;
     std::map<std::uint64_t, std::uint64_t> last_write_seq_;   // section start -> seq
     std::vector<std::uint64_t> hop_write_seq_;                // parallel to hop_ledger_
+    // PECompact placeholder-header rows (AddressOfEntryPoint == the first
+    // section's VA): the stub plants a mini-stub there and hands off tens of KB
+    // later, so the first execution past this bound is the payload entry. 0 for
+    // every other row, which costs one comparison per instruction.
+    std::uint64_t pc_far_hop_limit_ = 0;
+    std::uint64_t pc_far_hop_ = 0;
     // TAOTE_SEC_TRANS: the reference's sec_trans_hist_ (unpacker.h sec_trans_hist_,
     // consumed by the PEtite EP-exit walk). Recorded only when the env var is set,
     // because it costs a section lookup on every exec-hook fire.

@@ -634,6 +634,40 @@ void Unpacker::install(Qiling& ql) {
     // Off unless the family asks for it (or the env lever forces it for an A/B):
     // a family whose decode is not idempotent against the stub's own writeback
     // would be corrupted by pre-seeding, so this is opt-in per family.
+    // The PECompact placeholder bound (see pc_far_hop_limit_): read the mapped
+    // header once here. AddressOfEntryPoint == the first section's VirtualAddress
+    // means the packer did not preserve the entry, which is the class where the
+    // stub's hand-off is far into the payload (measured 29/29 on the family).
+    if (opts_.family == "PECompact" && image_size_ >= 0x400) {
+        try {
+            // the section table can start past 0x200 (pecompact_Everything's does:
+            // lfanew 0x100 + 24 + sopt 0xe0 = 0x1f8), so read a full header page
+            const auto head = ql.mem().read(base_, std::min<std::uint64_t>(0x1000, image_size_));
+            if (head.size() >= 0x60 && head[0] == 'M' && head[1] == 'Z') {
+                const auto rd = [&head](std::size_t o) {
+                    return o + 4 <= head.size()
+                               ? static_cast<std::uint32_t>(head[o]) |
+                                     (static_cast<std::uint32_t>(head[o + 1]) << 8) |
+                                     (static_cast<std::uint32_t>(head[o + 2]) << 16) |
+                                     (static_cast<std::uint32_t>(head[o + 3]) << 24)
+                               : 0u;
+                };
+                const auto lfanew = rd(0x3c);
+                const auto nsec = static_cast<std::size_t>(rd(lfanew + 6) & 0xffff);
+                const auto sopt = static_cast<std::size_t>(rd(lfanew + 20) & 0xffff);
+                const auto ep_rva = rd(lfanew + 24 + 0x10);
+                const auto first_va = nsec != 0 ? rd(lfanew + 24 + sopt + 12) : 0u;
+                if (ep_rva != 0 && ep_rva == first_va) {
+                    pc_far_hop_limit_ = base_ + ep_rva + 0x10000;
+                }
+                if (opts_.debug) {
+                    std::fprintf(stderr, "[unpack] pecompact placeholder: ep=0x%x first_va=0x%x far bound=0x%llx\n",
+                                 ep_rva, first_va, static_cast<unsigned long long>(pc_far_hop_limit_));
+                }
+            }
+        } catch (...) {
+        }
+    }
     if (packer_ != nullptr && image_size_ != 0 && base_ != 0 &&
         (packer_->seed_image_before_run() || std::getenv("TAOTE_SEED_STATIC") != nullptr)) {
         try {
@@ -1673,6 +1707,32 @@ int Unpacker::on_section_exec(std::uint64_t addr) {
                              static_cast<unsigned long long>(
                                  addr > packed_ep_va_ ? addr - packed_ep_va_ : packed_ep_va_ - addr),
                              static_cast<unsigned long long>(meta_oep_));
+            }
+        }
+    }
+    // PECompact placeholder rows only: remember the FIRST executed address far past
+    // the planted mini-stub. The stub decompresses, jumps into the payload tens of KB
+    // later, and by then the claim ledger has CONSUMED the section, so every branch
+    // below sees in_written == false and returns before a hop could be recorded
+    // (measured: pecompact_Everything's ledger holds one entry, 0x401016, while the
+    // truth 0x545f0d executes). This must therefore run BEFORE those early returns.
+    // pc_far_hop_limit_ is 0 for every other family and row.
+    // The capture demands payload EVIDENCE as well as distance: the address must
+    // lie inside a range the run WROTE (ever_written_, the never-erased claim set).
+    // Distance alone catches the stub's own tail - pecompact_Everything executes
+    // 0x5a095c, past the bound but outside its claim - which is why the bound is
+    // paired with this test. Both are cheap: the loop only runs for addresses past
+    // the bound, and only until the first capture.
+    if (pc_far_hop_ == 0 && pc_far_hop_limit_ != 0 && addr >= pc_far_hop_limit_ &&
+        addr - base_ < image_size_) {
+        for (const auto& r : ever_written_) {
+            if (addr >= r.first && addr <= r.second) {
+                pc_far_hop_ = addr;
+                if (opts_.debug) {
+                    std::fprintf(stderr, "[unpack] pecompact far hand-off captured at 0x%llx\n",
+                                 static_cast<unsigned long long>(addr));
+                }
+                break;
             }
         }
     }
@@ -3291,6 +3351,30 @@ std::uint64_t Unpacker::pick_oep(const std::vector<std::uint8_t>& image) const {
             }
             return 0;
         };
+        // The placeholder header EP has a second witness the ladder can lose: the
+        // stub plants a mini-stub AT the placeholder, so the first hop lands there
+        // and the payload is entered tens of KB later - and THAT hop is the original
+        // entry. Measured on pecompact_Everything/Hasher/md5summer: ledger hop
+        // 0x545f0d (or its family) against the ladder's startup frame 0x4bf150, with
+        // the reference reporting the same address and oep_source=hop. Only taken
+        // when the header EP is a placeholder (the 29/29 separated class above) and
+        // only for a hop FAR past it. The threshold is measured, not chosen: on the
+        // three rows this wins the first such hop is 0x145f0d / 0x82628 / 0x9ec68
+        // past the section start, while the two rows it must not touch (Diskmon,
+        // PEview - whose placeholder IS the entry) reach only 0x8a7e / 0xdc, so
+        // 0x10000 sits inside a 7x gap.
+        // Default ON (measured: PECompact OEP 92 -> 95, all-three 92 -> 95, exactly
+        // the three rows below, ZERO losses on the 97-row family). TAOTE_NO_PC_FARHOP=1
+        // keeps the A/B available.
+        static const bool pc_farhop = std::getenv("TAOTE_NO_PC_FARHOP") == nullptr;
+        if (pc_farhop && pep_is_placeholder && pc_far_hop_ != 0 &&
+            section_index_at(pc_far_hop_) == section_index_at(pep)) {
+            if (opts_.debug) {
+                std::fprintf(stderr, "[unpack] pecompact epfix: far hand-off %s beats placeholder %s\n",
+                             hex(pc_far_hop_).c_str(), hex(pep).c_str());
+            }
+            return pc_far_hop_;
+        }
         for (const auto va : hop_ledger_) {
             if (va > pep && va - pep <= 0x40 && section_index_at(va) == section_index_at(pep)) {
                 // The epfix must not preempt a REAL SEH-startup frame. Round

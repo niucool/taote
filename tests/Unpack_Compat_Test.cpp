@@ -366,6 +366,28 @@ TEST(UnpackCompat, AmberHeapPayloadIsAdoptedOverTheJunkLatch) {
     fs::remove_all(out, ec);
 }
 
+// PECompact keeps the ORIGINAL entry in the packed header and plants a ~0x16-byte
+// mini-stub there, so a placeholder header EP (RVA == the first section's VA) means
+// the real entry is elsewhere: the stub decompresses and hands off tens of KB later,
+// and by then the claim ledger has consumed the section. The engine captures that
+// first execution past a bound inside a WRITTEN range (the family's own evidence)
+// and the epfix prefers it over the ladder's look-alike frame. pecompact_Everything
+// is the measured case: claim 0x4bf150 before, truth 0x145f0d now, and the reference
+// reports the same address with oep_source=hop.
+TEST(UnpackCompat, PecompactPlaceholderEntryIsTheFarHandOff) {
+    const auto sample = fixture("PECompact/pecompact_Everything.exe");
+    if (sample.empty()) {
+        GTEST_SKIP() << "packed corpus not present (set TAOTE_PACKED_DIR)";
+    }
+    const auto out = fs::temp_directory_path() / "taote_unpack_pecompact_farhop";
+    std::error_code ec;
+    fs::remove_all(out, ec);
+    const auto res = run_unpack(RunConfig{sample, out, true, 2000000000ULL, "PECompact"});
+    ASSERT_EQ(res.base, 0x400000u) << res.error;
+    EXPECT_EQ(res.oep, res.base + 0x145f0du);   // truth; the ladder framed 0x4bf150
+    fs::remove_all(out, ec);
+}
+
 // FSG keeps its resolved-import list in the decoded image as 6-byte records after
 // each DLL name: `02 <u16 ordinal> 00 00` for a by-ordinal import. Without mining
 // them adrestore sits at recall 0.848 (its 10 missing pairs are all ordinals).

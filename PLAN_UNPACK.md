@@ -15062,3 +15062,38 @@ field win (23 -> 34 OEP if implemented, 0 all-three).
 Next unit, in order: (a) implement the Exe32pack EP record as a static-OEP rule and measure the family + corpus (it must not disturb
 the 92 rows already passing), then (b) go after the stub's write-unmapped end-of-`.k` decode, which is the only path to all-three
 on those 16 rows.
+
+#### 0.17me PECompact's placeholder rows: capture the far hand-off (+3, corpus 2278 -> 2281)
+
+The three PECompact rows that r131 missed with imports already TRUE and code_sim 0.87-0.91 (Everything, Hasher, md5summer)
+split PORTS from the family's other misses: the reference reports the true entry for all three with `oep_source: hop` and a
+code_sim EQUAL to taote's, so the artifact is the same and only the entry field differs.
+
+What taote did: the stub plants its ~0x16-byte mini-stub at the header EP (0x401000), the first hop latches 0x401016 at write
+ordinal 3, the ladder then finds a `55 8b ec 6a ff 68` startup look-alike (0x4bf150 / 0x47c6ed / 0x49a786) and the epfix's
+"startup frame outranks header ep" rule takes the look-alike. The true entry (0x545f0d / 0x482628 / 0x49ec68) DOES execute
+(TAOTE_PROBE counts a hit with a clean hand-off state: eax = the address itself, ebp = esp = 0x1220000) but the claim ledger has
+already CONSUMED the .text range at the first hop, so every hop branch below sees `in_written == false` and returns before a
+candidate can be recorded - which is exactly why TAOTE_CLAIM_LEDGER=0 shows 601 ledger entries including 0x545f0d@1653910.
+
+Two rejected attempts are worth recording so they are not repeated:
+
+  * **Keeping the written range alive for PECompact** (the MPRESS treatment): the ledger floods with 495 self-traffic hops and
+    Diskmon regresses 0x40b4b8 -> 0x406a90, because the generic strong-hop precedence then outruns the family epfix. Corpus arm
+    r133 (97 rows): ALL 92 -> 93 with 3 gains and 2 losses - net +1, not kept.
+  * **Distance alone** (first exec past the placeholder + 64 KB): catches the STUB'S OWN TAIL - Everything executes 0x5a095c,
+    past the bound but outside its claim - so the bound must be paired with payload EVIDENCE.
+
+Shipped: at install, a PECompact row whose AddressOfEntryPoint equals the first section's VirtualAddress (the measured 29/29
+class) sets `pc_far_hop_limit_ = base + ep_rva + 0x10000`, and the code hook records the FIRST execution past that bound that
+lies inside `ever_written_` (a range the run actually wrote) into `pc_far_hop_`. The epfix prefers that captured hand-off over
+the placeholder. Cost is one comparison per instruction for those rows and literally nothing for every other family.
+
+Measured: PECompact family (97 rows, 4 workers, 85 s) OEP 92 -> 95, IMP 95, ALL 92 -> 95 - exactly the three rows changed, ZERO
+other rows touched (Diskmon keeps 0x40b4b8, PEview keeps 0x401000, Bginfo's Pass-A answer 0x5b5d42 independently agrees with the
+captured hand-off). Corpus r135: PE 2677, OEP 2313 -> 2315, IMP 2361, ALL 2278 -> 2281 (+3; the two known contention rows
+mew_procexp/rlpack_ComIntRep offset each other). Pinned by UnpackCompat.PecompactPlaceholderEntryIsTheFarHandOff (suite 611 -> 612).
+
+Harness note: the in-process test needs the CLI's instruction budget (the 40M default stops this stub mid-flight, tail pcs
+0x5000ede-0x5000f17; at 2e9 it reproduces the CLI's tail 0x54e524-0x54e52b and the far hand-off). Same class of divergence as the
+Amber row in 0.17mb, so a test that pins a long-running stub must raise RunConfig::count.
