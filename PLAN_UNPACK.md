@@ -14886,3 +14886,35 @@ Measured limitations of the discriminator, so nobody re-opens them expecting a w
     also why it never appeared among the 19 Pass-B candidates.
 
 So those two need hop-ledger work (7za ends on an accepted section_hop at 0x43f1d9 that outranks the ladder), not frame logic.
+
+#### 0.17lz Four candidate mechanisms tested and rejected on data (so they are not retried blindly)
+
+Working the remaining 52 non-VM rows turned up four ideas that looked promising and are now measured negatives:
+
+1. **"The entry is the first write into the payload section"** - rejected. It fits winupack_PEview (its .text range
+   [0x401000,0x416000) has its first write exactly at 0x401000, the truth) but breaks the JDPack class immediately: jdpack_7z's
+   .text first write is also 0x401000 while its truth is 0xebc5. The two families differ in whether the payload's first byte is its
+   entry, and there is no signal in the write record to tell them apart.
+
+2. **Mining the ordinal-only DLL names from the packed file** - not available. Checked five ordinal-heavy samples: mew_Bginfo,
+   winupack_Everything, mew_Sysmon and petite_Everything contain ZERO occurrences of oleaut32/ws2_32/odbc32/winmm/comctl32 (only
+   petite_Everything has one ws2_32 and one comctl32); only rlpack_Bginfo carries all five, and a single occurrence each is as
+   likely a compressed-stream coincidence as a real table. So the packed import directory cannot supply the ordinal lane; that lane
+   needs the real DLLs' ordinal tables, which the harness does not have.
+
+3. **The three cap-bound rows are a HARNESS parameter, not a taote defect.** bero_geek, mpress_geek and neolite_HDDScan need ~90 s
+   of emulation (measured: mpress_geek finishes correctly standalone in ~90 s with --unpack-timeout 240, and produces one clean
+   emu_start and NO restart spin - it ends on a fetch at 0xe8006a00, so the reference's SE_RESTART_SPIN_N mechanism does not apply
+   here). The sweep passes `--unpack-timeout 85` by design and that budget must stay fixed for arm comparability, so these rows stay
+   capped. Note taote's own default is already 120 s - higher than the reference's 60 - so the reference's "cap audit" mechanism
+   is effectively already in place and cannot help under this harness.
+
+4. **Amber's three rows are not one bug after all.** amber_chgport (and chgusr/mdbx_dump) all claim 0x401661 with code_sim 0.02,
+   which looked like a shared defect, but the trace shows the stub at 0x500abeb decoding into a DYNAMIC region (last pcs 0x501f0d4..
+   0x501f0ef), writing only 25 bytes into .text (at 0x401661) and then entering it: Pass B finds ZERO frames in the decoded image
+   because there is no decoded image to scan. Amber relocates its whole output into an allocated region, so this needs an
+   Amber-specific decode investigation (where the payload lands and how it is copied back), not an OEP-picker change.
+
+State after these: the remaining non-VM headroom is 35 imports-only rows (ordinal lane, blocked as in 2), 12 genuine OEP-only rows
+(per-row: 5 perfect-image selection problems, 3 partial-decode PECompact, 4 no-decode Amber/livekd), and 222 Themida/Yoda rows that
+both engines fail.
