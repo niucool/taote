@@ -15097,3 +15097,43 @@ mew_procexp/rlpack_ComIntRep offset each other). Pinned by UnpackCompat.Pecompac
 Harness note: the in-process test needs the CLI's instruction budget (the 40M default stops this stub mid-flight, tail pcs
 0x5000ede-0x5000f17; at 2e9 it reproduces the CLI's tail 0x54e524-0x54e52b and the far hand-off). Same class of divergence as the
 Amber row in 0.17mb, so a test that pins a long-running stub must raise RunConfig::count.
+
+#### 0.17mf Exe32pack's decode fault is a stack shift that restores an API ARGUMENT; the stdcall seam is ruled out
+
+Chased the write-unmapped blocker on exe32pack_DriveCleanup (the family's 16 oep=False rows all die this way). The fault is
+`write unmapped addr=0x54 pc=0x818210` and the disassembly is decisive:
+
+```
+81820a: 6a 05              push $0x5
+81820c: 58                 pop  %eax          ; eax = 5
+81820d: ff 75 fc           push -0x4(%ebp)
+818210: 89 46 14           mov  %eax,0x14(%esi)      <-- fault, esi == 0x40
+818213: f3 ab              rep stos %eax,%es:(%edi)
+```
+
+esi is a *structure pointer* throughout this second stage (`lea 0x10(%esi),%eax`, `lea 0x154(%esi),%ecx`, `lea 0x9d4(%esi),%eax`
+pushed as arguments at 0x8181d2-0x8181f9), and measuring the register at two pcs pins the clobber: at 0x8181f0 esi = 0x818250,
+at 0x81820a esi = 0x40 - i.e. the `call 0x817522` between them restored esi from the STACK, not from its own frame. The callee's
+prologue/epilogue ARE balanced (`push ebp; mov ebp,esp; sub esp,0xe8; push ebx; push esi; push edi ... pop edi; pop esi; pop ebx;
+leave; ret`), so the stack it unwound was already shifted.
+
+What 0x40 is: the reference's own API trace on the same sample shows `kernel32.LocalAlloc` with args `["0x40", "0x480"]`,
+`(0x40, 0x1680)`, `(0x40, 0x8000)` - 0x40 is the LMEM flags ARGUMENT. So the classic stdcall-cleanup imbalance was the natural
+hypothesis: a dispatched API that does not pop its argument slots leaves the caller's `pop esi` reading an argument.
+
+Measured and REJECTED: `TAOTE_STDCALL_POP=1` (new default-off instrument in qiling/cc/intel.cpp that forces the callee-side pop in
+QlStdcall::unwind instead of the caller-cleans heuristic) changes nothing on this row - claim and error are byte-identical
+(oep=0x811199, UC_ERR_WRITE_UNMAPPED). So the imbalance does not happen at the QlStdcall::unwind seam; the stub dispatches through
+its own `call [ecx+0xc]` vtable inside the decrypted second stage (0x817xxx, which lives BEYOND `.i`'s raw data: the section is
+0x577e bytes at RVA 0x411000, so 0x818210 is in stub-decrypted memory, inside the page-rounded claim [0x811000,0x819000)).
+
+Also re-confirmed (no repeat needed): mapping the near-null write is NOT the fix - qiling/os/windows/seh.cpp's write branch already
+records why ("a store through a small uninitialised pointer right after its GetModuleHandleA, i.e. a value the stub computed from an
+API result, not a missing mapping"), and only reads are zero-page-mitigated (8 per run, below 0x10000000, measured 9 gains / 0
+losses when it was introduced).
+
+Next unit: the guest-side dispatch itself. Dump the terminal bytes of the second stage (TAOTE_DUMP_RANGE=0x817000-0x819000) and
+identify the vtable at `[ecx+0xc]` - whether the stub calls its own resolver with an argument count the engine's nested API
+dispatch does not unwind, or whether the structure at esi was never allocated because a LocalAlloc return was treated as a
+sentinel. The reference gets through it (recon runs=11, oep_rva=0x34e1, oep_source=hop), so the divergence is in the dispatch, not in
+the packer.

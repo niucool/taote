@@ -98,6 +98,13 @@ std::uint64_t QlStdcall::unwind(int nslots) {
             // the unmapped return address: keep the verbatim callee pop
         }
     }
+    // TAOTE_STDCALL_POP=1/0 forces the choice for an A/B: a packer stub that
+    // dispatches through its own IAT expects the callee-side pop even when the
+    // next instruction is not an `add esp` (measured on exe32pack_DriveCleanup,
+    // whose stub restores 0x40 - the LocalAlloc flags argument - into esi).
+    if (const char* forced = std::getenv("TAOTE_STDCALL_POP")) {
+        caller_cleans = std::string(forced) == "0";
+    }
     if (!caller_cleans) {
         arch().regs().set_arch_sp(arch().regs().arch_sp() + static_cast<std::uint64_t>(nslots) * 4);
     }
