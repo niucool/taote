@@ -1417,6 +1417,17 @@ void register_fileapi_family() {
         return api_get_int(get_param(params, "ptr")) ^ 0x0b0b0b0b0b0b0b0bull;
     };
 
+    // PVOID DecodePointer(PVOID ptr); — the other half of the cookie walk above. A
+    // sample that imports DecodePointer in its own IAT reaches this through the
+    // loader thunk, NOT through a minted cell (those carry the native involution from
+    // the loader), so without a body it got a zero answer and dereferenced it. The
+    // cookie is irrelevant as long as the pair is an involution.
+    WinsdkApi("DecodePointer", WinCc::Stdcall, {
+        {"ptr", PVOID_},
+    }) = [](Qiling&, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        return api_get_int(get_param(params, "ptr")) ^ 0x0b0b0b0b0b0b0b0bull;
+    };
+
     // BOOL GetExitCodeProcess(HANDLE hProcess, LPDWORD lpExitCode);
     WinsdkApi("GetExitCodeProcess", WinCc::Stdcall, {
         {"hProcess", HANDLE_},

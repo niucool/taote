@@ -454,6 +454,20 @@ void register_ntdll_family() {
         return dest;
     };
 
+    // PVOID RtlEncodePointer(PVOID Pointer) / PVOID RtlDecodePointer(PVOID Pointer):
+    // the ntdll spellings of the same involution (pegasus ntdll.cpp:436-446).
+    WinsdkApi("RtlEncodePointer", WinCc::Stdcall, {
+        {"Pointer", PVOID_},
+    }) = [](Qiling&, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        return api_get_int(get_param(params, "Pointer")) ^ 0x0b0b0b0b0b0b0b0bull;
+    };
+
+    WinsdkApi("RtlDecodePointer", WinCc::Stdcall, {
+        {"Pointer", PVOID_},
+    }) = [](Qiling&, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        return api_get_int(get_param(params, "Pointer")) ^ 0x0b0b0b0b0b0b0b0bull;
+    };
+
     // void RtlMoveMemory(void *Destination, const void *Source, size_t Length);
     // (pegasus ntdll.cpp REG(Ntdll, RtlMoveMemory, 3) - the same walk as memcpy,
     // registered under the kernel32 spelling packer stubs ask GetProcAddress for)

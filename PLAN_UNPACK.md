@@ -15232,3 +15232,22 @@ needs a native cell (unbounded calls).
 Next: with the minted path now native, the dispatch handlers can be re-added WITHOUT paying the hot-path cost, so the combination
 (handlers + native cells) is the arm to measure — a sample that imports DecodePointer in its own IAT goes through the loader thunk (not
 a minted cell) and currently still gets a zero answer.
+
+#### 0.17mj The combination (native cells + dispatch handlers) is neutral too: the corpus does not exercise DecodePointer
+
+Re-ran the 0.17mh arm now that the minted path is native (the reason that arm cost a row). Added `DecodePointer`,
+`RtlEncodePointer` and `RtlDecodePointer` bodies with the same involution as the existing `EncodePointer`, leaving the native cells in
+place so minted calls never reach the dispatch.
+
+Measured (corpus r140, 2678 rows, 4 workers, 85 s, wallcap 120): PE 2677, OEP 2328, IMP 2377, ALL 2293 - IDENTICAL to r139 in every
+column, zero gained, zero lost, and upx_Listdlls stays fast (`oep=0x409666`) because its calls go through the minted native cell.
+
+Conclusion recorded so this is not attempted a third time: the corpus does not import these names anywhere that a handler changes the
+outcome. The first arm (-1) was a pure dispatch cost on the minted path; with native cells the handlers are free but also worth
+nothing. Kept anyway (they turn a zero answer into a correct involution for any sample that imports DecodePointer in its own IAT, and
+cost nothing measurable), with the caveat that no future round should look for grade here.
+
+Net state after this pocket: corpus all-three 2293/2678, OEP 2328, imports 2377, valid PE 2677, session 1843 -> 2293 (+450). The
+mechanism rule distilled from the two rounds: an API a stub calls a BOUNDED number of times belongs behind a dispatch handler (the
+RtlZeroMemory port, +13 rows); one it POLLS belongs in the minted cell as native code; one that no sample exercises is worth nothing
+either way.
