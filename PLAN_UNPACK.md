@@ -14870,3 +14870,19 @@ with the mechanism untouched), so the attributable gain is +1 and the sweep's +2
 Not covered by the rule, and why: jdpack_7za still ends on an accepted section_hop (0x43f1d9) that outranks the ladder, and
 jdpack_MxdwGc's truth 0x8e08 is not among its 19 Pass-B candidates at all - so those two need the hop ledger work, not the frame
 vote.
+
+#### 0.17ly The app-type rule pinned by a test, and why the other two JDPack rows are out of its reach
+
+Locked 0.17lx in with `UnpackCompat.JdpackEntryIsTheSubsystemStartupVariant` (tests/Unpack_Compat_Test.cpp): it unpacks
+JDPack/jdpack_7z.exe and asserts `res.oep == base + 0xebc5`, the truth that the first-frame vote used to miss. Suite 609 -> 610
+tests, 0 failed.
+
+Measured limitations of the discriminator, so nobody re-opens them expecting a win:
+
+  * jdpack_7za: its truth 0x55641 DOES carry the full startup prologue
+    (`55 8b ec 6a ff 68 80 46 46 00 68 80 6a 45 00 64 a1 ... 83 ec 10 53 56 57 89 65 e8 ff 15 68 31 46 00`), but it calls its
+    import slot with a BARE `ff 15` - there is no `6a <n>` app-type push in the first 0x40 bytes - so the rule cannot classify it.
+  * jdpack_MxdwGc: its truth 0x8e08 is not a startup frame at all (`e8 54 28 00 00 e9 5a fe ff ff cc cc ...` - a thunk), which is
+    also why it never appeared among the 19 Pass-B candidates.
+
+So those two need hop-ledger work (7za ends on an accepted section_hop at 0x43f1d9 that outranks the ladder), not frame logic.

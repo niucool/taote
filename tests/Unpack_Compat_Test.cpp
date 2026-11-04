@@ -302,6 +302,26 @@ TEST(UnpackCompat, FsgEntryIsTheStubRel32HandOff) {
     fs::remove_all(out, ec);
 }
 
+// The four startup-shaped frames in 7z are byte-identical apart from their SEH
+// handler immediate, so frame ORDER cannot decide between them (Pass B used to take
+// the first, 0x40e924). Only the real entry calls __set_app_type, and it does so with
+// a CONSTANT that encodes the app type - 1 for a console image, 2 for a GUI one - and
+// the packed header's SUBSYSTEM selects the variant. jdpack_7z is console (subsystem
+// 3), so the entry is the frame that pushes 1: 0x40ebc5.
+TEST(UnpackCompat, JdpackEntryIsTheSubsystemStartupVariant) {
+    const auto sample = fixture("JDPack/jdpack_7z.exe");
+    if (sample.empty()) {
+        GTEST_SKIP() << "packed corpus not present (set TAOTE_PACKED_DIR)";
+    }
+    const auto out = fs::temp_directory_path() / "taote_unpack_jdpack_apptype";
+    std::error_code ec;
+    fs::remove_all(out, ec);
+    const auto res = run_unpack(RunConfig{sample, out, true});
+    ASSERT_EQ(res.base, 0x400000u) << res.error;
+    EXPECT_EQ(res.oep, res.base + 0xebc5u);   // truth; the first-frame vote said 0x40e924
+    fs::remove_all(out, ec);
+}
+
 // FSG keeps its resolved-import list in the decoded image as 6-byte records after
 // each DLL name: `02 <u16 ordinal> 00 00` for a by-ordinal import. Without mining
 // them adrestore sits at recall 0.848 (its 10 missing pairs are all ordinals).
