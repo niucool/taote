@@ -15295,3 +15295,32 @@ and each of those five has now been probed and requires the stub to EXECUTE a ha
 Next unit: pick among those by tractability, starting with jdpack_7za's wild-pointer read (pc 0x47e4d2) - if it is the same missing-API
 class as the RtlZeroMemory seam, it is a two-line fix; if it is the LZ decode divergence documented for jdpack_7z, the row stays
 blocked and the pocket is closed.
+
+#### 0.17ml jdpack_7za is LZ-decode bound (the pocket closes) and the block-hook lifetime is NOT the throughput lever
+
+**jdpack_7za (last open row of the perfect-image/wrong-EP pocket).** Probed the wild-pointer read: at pc 0x47e4d2 the state is
+eax=0x7b450 edx=0x400000 ebx=0x72 ecx=0 esi=0x50007c6 edi=0x47d3d0 ebp=0x7b440, and the code window at pc-0x40 holds 7-Zip's own
+strings ("Error reading input stream", "Unexpected end of input stream") followed by a decode loop whose bytes are
+key-interleaved (`16 46 10 d2 73 ef 00 d2 75 05 8a 16 46 10 d2 73 4a 31 c0 00 d2 ...` - an injected 0xd2 between instructions, the
+same shape recorded for TELock). So the stub is running its own LZ decode over a stream whose input diverges, exactly as documented
+for jdpack_7z, and the fault address 0xd217fa66 is decoded garbage rather than a missing API. It is NOT the RtlZeroMemory class.
+Consequence: the pocket (jdpack_7za, jdpack_MxdwGc, neolite_HDDScan, petite_HashCalc, winupack_PEview) is CLOSED - every row needs the
+stub to EXECUTE a hand-off it never reaches, and three of the five diverge inside their own decoders.
+
+**The block-hook lifetime is not the throughput lemma.** 28 of the 304 gradeable misses are cap-bound (dur >= 84 against the 85 s
+budget): MEW 5, RLPack 5, BeRoEXEPacker 4, MPRESS 3, NSPack 3, TELock 2, then singles. A live per-block hook costs unicorn its
+translated-block cache for every block in its range, so the hypothesis was that removing the section hook once the stub hands off
+would convert them (`--no-hop` on mpress_geek is 52 s against 89 s for the same entry point, which is what suggested it). Implemented
+an env-gated `TAOTE_UNHOOK_AFTER_HOP` that deletes the section block hook at the first accepted hop and measured the 28 rows in both
+arms at the corpus parameters (4 workers, 85 s, wallcap 120, sequential arms):
+
+    baseline  n=28 ALL=16 OEP=19 IMP=20
+    unhook    n=28 ALL=16 OEP=18 IMP=20      gained: none. lost OEP: one row.
+    per-row dur deltas: -4..+3 s, i.e. noise (mew_procexp 51->47, rlpack_geek 74->73, telock_HDDScan 71->73, ...)
+
+So the hook's LIFETIME is worth ~5-15% on a couple of rows and nothing in grade; the earlier 89-vs-52 s reading conflated the hook with
+everything else `--no-hop` also disables (write hooks and the import-tracking path). Reverted in full.
+
+Where that leaves the throughput lever: the 12 cap rows that fail even at 85 s need real work reduction in the per-block path (the
+trampoline + std::map find + bound_check chain, i.e. LEVER 2's dispatch restructure), not hook removal. Measured shape for the next
+attempt: baseline on the 28 cap rows is ALL=16, so 12 rows are genuinely time-starved and 16 already pass.
