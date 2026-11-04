@@ -14601,3 +14601,32 @@ reduction would help every other Dr-arming stub in the corpus.
 
 Also noted: rlpack_ComIntRep's import recall is not stable across runs (0.4231 vs 0.1879), so it should not be used as a
 single-row oracle for this work.
+
+#### 0.17lq SETTLED: the Dr0-3 port's cost is ZERO outside TELock. The three "losses" are sweep contention (measured)
+
+This was wrong twice, so here is the controlled experiment that settles it.
+
+Method: the three suspect rows (mew_procexp, mpress_geek, rlpack_ComIntRep) and then their whole families (MEW+MPRESS+RLPack,
+316 rows) run at the corpus's own parameters - 4 workers, 85 s budget, wallcap 120 - once with the mechanism ON (default) and
+once with `TAOTE_NO_HW_BREAKPOINTS=1`, in separate directories.
+
+    arm                        mew_procexp        mpress_geek            rlpack_ComIntRep
+    r117 (pre-port baseline)   83 s imp PASS      83 s cs 1.0000 PASS   81 s imp PASS
+    r119 (port on)             86 s imp FAIL      86 s claim 0x6f7025   86 s imp FAIL
+    r122 (port OFF)            86 s imp FAIL      86 s claim 0x6f7025   86 s imp FAIL
+
+The OFF arm reproduces the ON arm's failures *exactly* - same duration, same claim (0x6f7025), same import fields. And the family
+totals are identical: MEW 101 / MPRESS 102 / RLPack 94 = 297 all-three in BOTH arms (and the same 297 in the full corpora r118 and
+r119). Also, timing each row alone gives the CORRECT answer in both arms (mpress_geek 0x559760 with and without the flag) and
+installs ZERO breakpoints - these stubs never arm Dr0-3 at all, so the mechanism cannot be their cause by construction.
+
+Conclusion: the port is **inert outside TELock**, TELock is 0 -> 93 all-three, and the three rows are cap-bound in current box
+conditions (they reach dur 86 = the 85 s budget and truncate) regardless of the flag. r117 measured them at 81-83 s, i.e. the
+sweep ran faster then. So the honest corpus ledger for the port is **+93**, and the +90 seen in r118/r119 is +93 minus three
+contention rows that are not attributable to it.
+
+Measurement lesson (now used as the rule for this class of question): an A/B on a shared box must run BOTH arms at the same
+par/wallcap in the same session, and must be read per-row (same claim, same duration) rather than from family totals alone -
+comparing an old baseline against a new arm conflates the change with the box's load. My r303 reading (contention) was right,
+my r307 reading (mechanism cost, from two identically-loaded sweeps) was wrong, and this run is the control that distinguishes
+them.
