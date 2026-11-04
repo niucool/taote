@@ -14694,3 +14694,35 @@ NEXT UNIT (designed, not yet implemented): DEFER the hop validation instead of d
 with its reason, and re-run the same head test against the FINAL image during finalize, accepting it if it passes then. Two TELock
 rows (telock_OpenedFilesView, telock_RegDllView; both already have imports right, oep wrong) would become all-three, and the same
 gate may be rejecting true entries in other families. Grade on TELock (116 rows) first, then corpus.
+
+#### 0.17lt Deferred hop validation: implemented, measured NEUTRAL, reverted. TELock's 6 rows are DECODE truncations
+
+Implemented the 0.17ls design: dump_module records a hop it rejects at hop time into `deferred_hops_`, and finalize re-runs the
+same head test against the terminal image, adopting one only when the incumbent is weak (unset, a section start, or inside the
+stub's packed-EP section). Measured on the TELock family (116 rows, 4 workers, 85 s):
+
+    before  n=116 PE=116 OEP= 94 IMP=109 ALL= 93
+    after   n=116 PE=116 OEP= 94 IMP=109 ALL= 93        (identical)
+
+Reverted, because the design premise was wrong: telock_OpenedFilesView does defer its true entry 0x40fc10, but the terminal image
+at that address is **all zeros** (`dump 0x40fc10: 00 00 00 00 ...` against the original's `6a 70 68 60 04 41 00 e8 ...`), so the
+adopt rule correctly refuses. There is nothing to adopt - the payload was never decoded.
+
+What the 6 decode-bad TELock rows actually are (measured on telock_OpenedFilesView):
+
+  * the run ends **cleanly** (no emu error): TAOTE_LOWPC's window is `0x410015 ... 0x410035`, i.e. execution is running past the
+    end of .text (0x401000-0x410000) inside .rdata - the decode loop overruns the section;
+  * the Dr0-3 mechanism is NOT the problem here: it installs all four breakpoints at this row's own stub base
+    (`d=41e0a3,41e09e,41e099,41e090 dr7=0x155`) and all four hit, exactly as on telock_7z (whose stub base is 0x418000);
+  * the write census into .text is: 37376 writes at pc 0x41eda6 (the copy pass, = the 0x9200-byte raw span), then 11312 writes
+    each at 0x41efc2 and 0x41efe0 (the two transform passes) over a 0xF000-byte section - so the keyed transform covers only
+    ~18% of .text before the loop overruns.
+
+Also measured while looking for a decode/late-hop fix: `TAOTE_UNPACK_SHADOW_ALL=1` shadows 53140 bytes yet leaves the terminal
+head at 0x40fc10 zero, and the generic run already logs "exec-page overlay: 1 pages" + "shadow restored 7863 bytes" - both
+overlays have nothing to restore because the bytes were never produced.
+
+NEXT UNIT: the transform pass's loop bound. On telock_7z the same two-pc transform (0x418fc2/0x418fe0) covers its whole raw span
+and the payload expands to a full 0x10000; here it stops after 11312 of 0xF000. Compare the loop's counter/pointer setup between
+the two rows at the transform entry (TAOTE_PC_DUMP at 0x41efaa-equivalent, i.e. the pc that loads ecx/esi/edi/edx before the
+loop) - that is a bounded, single-site comparison in a family whose mechanism is already understood.
