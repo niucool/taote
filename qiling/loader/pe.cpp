@@ -10,6 +10,7 @@
 #include "qiling/os/windows/api.hpp"
 
 #include <cstdio>
+#include <set>
 #include <filesystem>
 #include <fstream>
 #include "qiling/os/os.hpp"
@@ -403,12 +404,34 @@ std::uint64_t QlLoaderPE::unbound_import_stub(const std::string& name, std::uint
     // real body would. cdecl, unknown and ordinal cells keep the plain `ret`
     // (a cdecl callee must not pop, and an ordinal has no signature here).
     if (!name.empty()) {
-        if (const auto* entry = os::ApiRegistry::instance().find(name)) {
+        // PURE, HOT names are answered by native code written INTO the cell. The
+        // engine dispatch costs roughly a thousand times a native cell, which is
+        // harmless for a name a stub calls a handful of times and fatal for one it
+        // polls: registering the pointer-cookie pair as handlers pushed
+        // upx_Listdlls from dur 1 to the 120 s wall (corpus r138, net -1). The same
+        // answer fits in the 16-byte cell as x86, so the hot path stays native and
+        // the stdcall args are still popped:
+        //   mov eax,[esp+4] ; xor eax,0x0b0b0b0b ; ret 4
+        // It is also an involution, so one cell serves both spellings of each
+        // direction (EncodePointer/DecodePointer, RtlEncodePointer/RtlDecodePointer).
+        static const std::uint8_t kCookieCell[12] = {0x8b, 0x44, 0x24, 0x04, 0x35, 0x0b,
+                                                     0x0b, 0x0b, 0x0b, 0xc2, 0x04, 0x00};
+        const auto lower = [](std::string v) {
+            for (auto& c : v) {
+                c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            }
+            return v;
+        };
+        static const std::set<std::string> kCookieNames = {"encodepointer", "decodepointer",
+                                                          "rtlencodepointer", "rtldecodepointer"};
+        if (kCookieNames.count(lower(name)) != 0) {
+            mem.write(cell_addr, std::vector<std::uint8_t>(kCookieCell, kCookieCell + sizeof(kCookieCell)));
+        } else if (const auto* entry = os::ApiRegistry::instance().find(name)) {
             if (entry->cc == os::WinCc::Stdcall && !entry->params.empty() && entry->params.size() <= 16) {
                 const auto bytes = static_cast<std::uint16_t>(entry->params.size() * 4);
                 mem.write(cell_addr, std::vector<std::uint8_t>{
                                         0x31, 0xc0, 0xc2, static_cast<std::uint8_t>(bytes & 0xff),
-                                        static_cast<std::uint8_t>(bytes >> 8)});
+                                         static_cast<std::uint8_t>(bytes >> 8)});
             }
         }
     }

@@ -15207,3 +15207,28 @@ Also worth knowing from the same arm: the corpus-wide failure census at r137 is 
 "no section hop" 111, WRITE_UNMAPPED 41, "API not implemented" 4. Sampling 12 of the FETCH_UNMAPPED rows and reading the LAST minted
 GPA name before death showed no dominant name (user32!VirtualAlloc 3, mscoree!_CorExeMain 2, then singles such as
 ntdll!RtlFreeHeap, kernel32!RtlUnwind, kernelbase!DecodePointer, input.dll!ordinal_107), so that class is not one missing API.
+
+#### 0.17mi Native cells for the pointer cookie: neutral on the corpus, and why it is still the right shape
+
+0.17mh measured that answering the pointer-cookie pair through the engine dispatch cost a row (upx_Listdlls wall-timed out because
+dispatch is ~1000x a native cell and the stub polled it). The same answer fits in the 16-byte cell as x86, so `unbound_import_stub`
+now writes
+
+    mov eax,[esp+4] ; xor eax,0x0b0b0b0b ; ret 4
+
+for `EncodePointer`, `DecodePointer`, `RtlEncodePointer` and `RtlDecodePointer` (one cell serves both directions — it is an
+involution), while every other stdcall name keeps the registry-derived `xor eax,eax; ret <4*nargs>` answer and cdecl/unknown/ordinal
+names keep the plain `ret`.
+
+Measured (corpus r139, 2678 rows, 4 workers, 85 s, wallcap 120): PE 2677, OEP 2328, IMP 2377, ALL 2293 — IDENTICAL to r137 in every
+column, zero rows gained, zero lost. upx_Listdlls is back to a fast run (`oep=0x409666`, no wall-timeout) and exe32pack_touch keeps its
+0.17mg result (oep 0x401020, 74 pairs in-process / 247 via the CLI).
+
+Kept for two reasons even at neutral: it restores the round-trip semantics the missing decoder denied (an encode/decode pair used to
+come back as an xored garbage pointer), and it establishes the pattern — a pure, hot API belongs in the cell as native code, not behind
+a dispatch handler. That distinction is the reusable part: the RtlZeroMemory win needed a real body (bounded calls), the cookie pair
+needs a native cell (unbounded calls).
+
+Next: with the minted path now native, the dispatch handlers can be re-added WITHOUT paying the hot-path cost, so the combination
+(handlers + native cells) is the arm to measure — a sample that imports DecodePointer in its own IAT goes through the loader thunk (not
+a minted cell) and currently still gets a zero answer.
