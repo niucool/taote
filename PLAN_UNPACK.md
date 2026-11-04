@@ -14986,3 +14986,39 @@ TAOTE_UNPACK_DEBUG, and a `count` knob (the CLI's budget is 2e9; the harness's 4
 
 Pinned by UnpackCompat.AmberHeapPayloadIsAdoptedOverTheJunkLatch: amber_chgport unpacks to a base that is NOT 0x400000 and an
 entry of base+0x4467. Suite 610 -> 611 tests, 0 failed (serial).
+
+#### 0.17mc The Amber detector could never fire on a case-only tail, and Amber's 13 real misses are a stub-shape question
+
+Re-censused Amber from r131: 35 misses, but 22 have oep_exact None (the .NET SDK-tool cluster) and one is imports-only
+(amber_chglogon, recall 0.9412 - the documented kernel32 Reg*W group). The honest OEP headroom is 13 rows that ALL claim
+0x4014ea (the packed EP) with code_sim 0.01-0.05, i.e. the stub image, plus chglogon.
+
+Diagnosing one (amber_sigcheck) printed `family=unknown`, which is why the Amber path never ran. The cause is a real bug in
+`parse_header` (qiling/unpack/packer_detector.cpp): it LOWERCASED every section name into `section_names`, while the Amber rule
+below it requires at least two of {lower, upper, digit} in the randomized 8-char tail - so `upper` could never hold and only
+tails that also carried a digit matched. Measured: amber_chgport `.dV9alxk` matched, amber_sigcheck `.rXbYTgK` did not,
+amber_procdump `.eLQlxVS` did not, amber_nslookup likewise.
+
+Fixed by storing the raw name and lowercasing at the comparison site in `has()`, i.e. the rule now behaves as documented.
+
+Blast radius measured over the corpus's own 2678 files rather than argued: exactly 41 samples change their verdict and ALL 41 are
+Amber-family files (Amber has 152) - zero flips in the other 2526 samples, so no other family can change. `detect_from_file` has
+one caller (tools/taote.cpp guess_family), which feeds `UnpackOptions.family`.
+
+Amber family re-measured with the fix (152 rows, 4 workers, 85 s budget): n=152 PE=152 OEP=118 IMP=138 ALL=117 - IDENTICAL totals,
+no row gained or lost. But 5 rows changed materially: amber_AddInUtil, InstallUtil, PresentationFontCache, RegSvcs, ppt2x now
+claim a heap payload at code_sim 0.9991-0.9997 instead of the stub image at 0x401661 / code_sim 0.05-0.08. All five have
+oep_exact None (managed originals) so the grade cannot move, but the artifact is the packed payload now instead of the stub. The
+corpus total is therefore unchanged at all-three 2278 by construction (the only family that can respond is the one just measured
+in full).
+
+**What the fix does NOT unlock.** The 13 honest OEP rows do not improve: 10 of them were already detected as Amber, and all 13
+still end at `family=Amber base=0x400000 oep=0x4014ea stages=0 reason=fallback_guess error="no section hop; OEP guessed"` with no
+adoption and no hop. Their stub self-relocates to 0x50009xx and runs there (measured on amber_sigcheck: TAOTE_LOWPC's tail is
+0x50009f7-0x5000a0f, the same self-decrypt region amber_chgport shows) but it never writes an MZ-headed image into the heap, so
+`adopt_embedded_pe` - which scans for a second PE image - finds nothing. So these are a STUB-SHAPE question (this Amber build
+patches in place from the heap instead of assembling a file-layout PE), not a detection or gate question.
+
+Next unit: on amber_procexp (detected Amber, cs 0.015), dump the heap region the stub writes at 0x5001xxx and identify what
+structure it builds - section bodies without a header (the adoption scan could accept a headerless body), or purely in-place
+patching (in which case the dump is right and only the EP field is wrong, and the entry must come from an execution record).

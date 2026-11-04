@@ -45,9 +45,15 @@ bool parse_header(const std::vector<std::uint8_t>& hdr, PeHeader& out) {
     const std::size_t secoff = lfanew + 24 + optsz;
     for (std::size_t i = 0; i < nsec && secoff + 40 * (i + 1) <= hdr.size(); ++i) {
         const std::size_t e = secoff + 40 * i;
+        // RAW case on purpose: the Amber rule below requires two of {lower, upper,
+        // digit} in the randomized tail, and lowercasing here made `upper` unable to
+        // ever hold - only tails that also carried a digit matched (measured:
+        // amber_chgport '.dV9alxk' matched, amber_sigcheck '.rXbYTgK' did not, so
+        // the tool ran that row as family=unknown and never reached AmberPacker at
+        // all). Every name-substring test lowercases at the comparison site instead.
         std::string name;
         for (std::size_t k = 0; k < 8 && hdr[e + k] != 0; ++k) {
-            name.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(hdr[e + k]))));
+            name.push_back(static_cast<char>(hdr[e + k]));
         }
         out.section_names.push_back(name);
         out.sections.push_back(PeHeader::Sec{rd32(hdr, e + 12), rd32(hdr, e + 8), rd32(hdr, e + 20),
@@ -75,7 +81,15 @@ Detection detect_from_file(const std::string& path) {
 
         const auto has = [&pe](const char* want) {
             return std::any_of(pe.section_names.begin(), pe.section_names.end(),
-                               [want](const std::string& n) { return n.find(want) != std::string::npos; });
+                               [want](const std::string& n) {
+                                   std::string lower;
+                                   lower.reserve(n.size());
+                                   for (char c : n) {
+                                       lower.push_back(
+                                           static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+                                   }
+                                   return lower.find(want) != std::string::npos;
+                               });
         };
         const auto set = [&det](const char* name, const char* sig, const char* detail) {
             det.name = name;
