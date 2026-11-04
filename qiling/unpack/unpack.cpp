@@ -1919,6 +1919,32 @@ void Unpacker::dump_module(Qiling& ql, std::uint64_t addr, const std::string& re
     } else if (printable > 12 && !privileged) {
         accept = false;  // a data blob, not code
     }
+    // TELock DEMAND-PAGES its payload: the stub jumps into .text while the page is still
+    // encrypted (or zeroed and filled on the first fault), so an EXECUTED hop into a section
+    // the run WROTE can read as all-zero here and still be the true entry. Measured: on the 6
+    // TELock rows that still fail, the reference reports exactly this address while its own
+    // dump is equally undecoded (telock_OpenedFilesView: ref dump 37227/61440 nonzero, 0xfc10
+    // all zero, ref OEP = 0xfc10 = the executed address). Family-scoped and restricted: the
+    // target must be an execution hit inside a WRITTEN range and outside the stub's own
+    // section, and the printable-blob rejection above still stands.
+    if (!accept && all_zero && opts_.family == "TELock") {
+        const int dsec = section_index_at(addr);
+        const int ep_sec = section_index_at(packed_ep_va_);
+        bool written = false;
+        for (const auto& r : written_ranges_) {
+            if (addr >= r.first && addr <= r.second) {
+                written = true;
+                break;
+            }
+        }
+        if (dsec >= 0 && dsec != ep_sec && written) {
+            accept = true;
+            if (opts_.debug) {
+                std::fprintf(stderr, "[unpack] accept undecoded TELock hop %s (written section, executed)\n",
+                             hex(addr).c_str());
+            }
+        }
+    }
     if (accept && meta_oep_ != 0) {
         const int new_sec = section_index_at(addr);
         const int cur_sec = section_index_at(meta_oep_);

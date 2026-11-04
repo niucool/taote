@@ -14768,3 +14768,32 @@ NEXT UNIT: dump the expansion's INPUT stream - the heap buffer at esi (0x50008e6
 compare with the same buffer in telock_7z's run (0x50008b2). Identical loop code plus different output length means the streams
 differ, so the question becomes where the stub's stream LOAD comes from (its own section? a decompression of the copy?) and why it
 is short here. That is the last link for these 6 rows, and 2 of them already have imports right (OEP only).
+
+#### 0.17lv WIN: TELock demand-pages its payload, so an EXECUTED all-zero hop is still the entry. TELock 93 -> 95, corpus +2
+
+The last link for the 6 decode-bad TELock rows, found by comparing dumps instead of code:
+
+    taote dump .text: 37371/61440 nonzero, head 55 8b ec 51 53 33 db ...   (decoded)
+    ref   dump .text: 37227/61440 nonzero, head 55 00 8b ec 51 53 ...      (still interleaved)
+    both: 0xfc10 is ALL ZERO - and the reference still reports OEP 0xfc10
+
+So the reference is not reporting decoded code at all: it reports an address the guest **executed**. TELock demand-pages its
+payload (decrypt/fill on first touch, re-encrypt after), which is why the dump holds zeros where the entry is. taote's own
+dump_module content gate rejected 0x40fc10 because the head read all-zero AT HOP TIME, and 0.17lt's deferred re-test refused it
+for the same reason on the terminal image.
+
+The rule added (family-scoped, deliberately narrow): for TELock, a hop whose head is all-zero is still accepted when it is an
+execution hit inside a **written** range and **outside the stub's own section**. The printable-blob rejection still stands, so data
+blobs are still refused; only the "zero page cannot be code" rule is relaxed, and only where the run itself wrote that section.
+
+    telock_OpenedFilesView.exe: "[unpack] accept undecoded TELock hop 0x40fc10 (written section, executed)" -> oep=0x40fc10
+
+Measured:
+
+    TELock family  (116 rows, 4 workers, 85 s):  OEP 94 -> 96, IMP 109 -> 109, ALL 93 -> 95   (+2)
+    corpus         (2678 rows, same params):     all-three 2271 -> 2273                        (+2)
+    gained exactly telock_OpenedFilesView + telock_RegDllView, LOST 0
+
+Also worth keeping from this round: the two dumps are the same size and the reference's .text is *less* decoded than taote's
+(37227 vs 37371 nonzero, and the reference's head still has the interleaved key bytes), which corrects the assumption that the
+reference reaches these rows by decoding better.
