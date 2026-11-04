@@ -15022,3 +15022,43 @@ patches in place from the heap instead of assembling a file-layout PE), not a de
 Next unit: on amber_procexp (detected Amber, cs 0.015), dump the heap region the stub writes at 0x5001xxx and identify what
 structure it builds - section bodies without a header (the adoption scan could accept a headerless body), or purely in-place
 patching (in which case the dump is right and only the EP field is wrong, and the entry must come from an execution record).
+
+#### 0.17md Amber closed as a family target, a terminal-range dump instrument, and Exe32pack's OEP record located
+
+**Amber is closed.** After 0.17mb its remaining 35 misses are: 22 with oep_exact None (the .NET SDK-tool cluster), 12 OEP rows,
+and 1 imports-only (amber_chglogon, recall 0.9412 - exactly the reference's, i.e. at parity). Checking the parity roster for the 12:
+the reference reproduces the EP on 26 Amber rows and NONE of the 12 Sysinternals rows except SmartDefragBootTime (where its own
+code_sim is 0.042 and recall 0.0, i.e. junk). So the 12 are both-engines-fail and Amber has no portable lever left.
+
+What the 12 do: `family=Amber base=0x400000 oep=0x4014ea stages=0 reason=fallback_guess error="no section hop; OEP guessed"` with
+no hop and no adoption. Dumping their heap (new instrument, below) shows the stub copies a ~1.8 MB region to 0x5100000 upward
+(1.8 M writes from pc 0x50009ef, distinct addresses 0x5100000-0x52bdbdc) and the terminal bytes there are `d3`-filled blocks
+(`db d3 db d3 60 cc d3 c8 ...`, and a 0x40-byte-stride table at 0x5100000 of `00 4a 6a 6a 76 6a 6a 6a 6a 6a 24 00 00 72 ...`)
+with no MZ anywhere in a 2 M-line write census. So this Amber build demand-pages an encrypted body instead of assembling a
+file-layout PE, which is why a second-PE scan finds nothing and the reference fails too.
+
+**New instrument: TAOTE_DUMP_RANGE=lo-hi[,lo-hi]** (default off) prints the TERMINAL bytes of any guest range at finalize. The
+write census says where a stub wrote but not what the structure became, and a heap-resident payload is outside the image dump.
+
+**Exe32pack is the largest remaining parity target** (r131: n=124, PE=124, OEP 92, IMP 105, ALL 92; 32 misses of which 30 are
+reference-reproducible). Its 32 misses split cleanly: 16 with oep_exact None (managed) and 16 with oep=False whose claims all end
+in 0x199 (0x410199, 0x41b199, 0x412199, 0x439199, 0x100b199, ...). For every one of those 16 rows the reference reports the true EP
+with code_sim EQUAL to taote's (0.13-0.21), so the reference wins the FIELD, not the decode.
+
+Located where it gets it: the original EP RVA is stored EXACTLY ONCE in each packed file as a little-endian dword, at
+`0x200k + 0x41`, in a record laid out `[ep_rva][ImageBase][last-import-section VA][?][file-offset][0][file-offset][file-offset]`
+(measured: exe32pack_touch 0x341 = `20 10 00 00 | 00 00 40 00 | 00 b0 00 00 | 00 00 00 00 | 67 04 01 00 | 00 00 00 00 | ...`).
+Scanned over all 124 Exe32pack rows with the constraints "dword+4 == the packed header's ImageBase, dword is 4-aligned, inside a
+section, < SizeOfImage, and dword+8 is a section VA": 83 rows yield exactly ONE candidate, 0 of them wrong, 11 of them matching the
+reference's EP (the rest are rows whose record field2 is not a section VA - the managed ones). Zero multiple-candidate rows, i.e. the
+rule is unambiguous where it fires.
+
+BUT it is OEP-field-only headroom: those rows' import recall is 0.02-0.20 and their code_sim equals the reference's, so the payload
+is not decoded by either engine and all-three cannot move. The real Exe32pack blocker was recorded earlier and still stands
+(observation from exe32pack_bzip2): the stub writes 7727 times inside `.k`, never writes `.text`, ends at 0x4178a0 near `.k`'s
+page-rounded end 0x419000 and dies with UC_ERR_WRITE_UNMAPPED. That is the decode to fix for all-three; the EP record is the cheap
+field win (23 -> 34 OEP if implemented, 0 all-three).
+
+Next unit, in order: (a) implement the Exe32pack EP record as a static-OEP rule and measure the family + corpus (it must not disturb
+the 92 rows already passing), then (b) go after the stub's write-unmapped end-of-`.k` decode, which is the only path to all-three
+on those 16 rows.

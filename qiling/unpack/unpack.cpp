@@ -3798,6 +3798,34 @@ UnpackResult Unpacker::finalize(Qiling& ql) {
         }
         std::fprintf(stderr, "\n");
     }
+    // TAOTE_DUMP_RANGE=lo-hi[,lo-hi]: the TERMINAL bytes of any guest range, printed
+    // at finalize. The write census (TAOTE_WATCH_RANGE) says where a stub wrote but
+    // not what the structure looks like afterwards, and a heap-resident payload is
+    // outside the image dump - this is how such a region is read out.
+    if (const char* dr = std::getenv("TAOTE_DUMP_RANGE")) {
+        const std::string spec = dr;
+        std::size_t pos = 0;
+        while (pos < spec.size()) {
+            const auto comma = spec.find(',', pos);
+            const auto end = comma == std::string::npos ? spec.size() : comma;
+            unsigned long long lo = 0, hi = 0;
+            if (std::sscanf(spec.c_str() + pos, "%llx-%llx", &lo, &hi) == 2 && hi > lo) {
+                std::fprintf(stderr, "[dumprng] 0x%llx-0x%llx (%llu bytes)\n", lo, hi, hi - lo);
+                try {
+                    const auto bytes = ql.mem().read(lo, static_cast<std::size_t>(hi - lo));
+                    for (std::size_t i = 0; i < bytes.size(); i += 16) {
+                        std::fprintf(stderr, "[dumprng] %08llx:", lo + i);
+                        for (std::size_t k = 0; k < 16 && i + k < bytes.size(); ++k) {
+                            std::fprintf(stderr, " %02x", bytes[i + k]);
+                        }
+                        std::fprintf(stderr, "\n");
+                    }
+                } catch (...) {
+                }
+            }
+            pos = end + 1;
+        }
+    }
     if (opts_.debug) {
         std::fprintf(stderr, "[unpack] finalize begin: imports=%zu\n", imports_.size());
     }
