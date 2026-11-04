@@ -14918,3 +14918,30 @@ Working the remaining 52 non-VM rows turned up four ideas that looked promising 
 State after these: the remaining non-VM headroom is 35 imports-only rows (ordinal lane, blocked as in 2), 12 genuine OEP-only rows
 (per-row: 5 perfect-image selection problems, 3 partial-decode PECompact, 4 no-decode Amber/livekd), and 222 Themida/Yoda rows that
 both engines fail.
+
+#### 0.17ma Amber's failing rows: the stub self-decrypts into the heap and no PE is ever written there
+
+Followed 0.17lz's Amber lead on amber_chgport. The GPA-sentinel path works as designed: the stub resolves VirtualAlloc through
+GetProcAddress, gets a sentinel, CALLS it, and the real handler runs - the dynamic maps appear immediately
+(`dyn map 0x5001000-0x500c000 rwx`, `0x500c000-0x5017000`, `0x5017000-0x5447000`). So the allocation is not the problem.
+
+What the run then does, measured:
+
+  * the stub SELF-DECRYPTS its own code from the heap: pc 0x50009ef writes descending bytes (`0x500abe7=0xd7, 0x500abe6=0xff,
+    0x500abe5=0xfa, 0x500abe4=0xe2, 0x500abe3=0x48, ...`);
+  * ~190k writes land in the heap from pcs 0x50009ef, 0x500ab46, 0x500ab48, 0x5014eac, 0x501f003, 0x501f005 (the stub runs from
+    0x5001xxx - it relocated itself into the allocation);
+  * NOT ONE of those writes stores a `MZ` header (0 occurrences of value 0x5a4d / 0x4d5a in the whole census), which is why
+    `adopt_embedded_pe` - whose contract is "scan every non-image map for a second PE image" - finds nothing here;
+  * it writes 25 bytes into .text at 0x401661 and jumps there, then dies reading garbage (`addr=0xec`, `0x4314c8d`,
+    `0x45cbea45` from pcs 0x401624/0x401663/0x401631), i.e. it executes a .text that was never filled.
+
+And the sample itself is unusual, which is worth knowing before treating cs 0.02 as a decode failure: the ORIGINAL's .text head is
+a thunk table - `b0 4a e1 77 4f cb e2 77 33 52 e2 77 89 c1 e2 77`, i.e. XP-era 0x77exxxxx kernel32 addresses - while the artifact's
+.text head is ordinary code (`c3 8d b4 26 00 00 00 00 8d b4 26 ...`). So this row's original layout puts a table where the artifact
+puts code, and the low code_sim is a layout mismatch rather than proof that the payload was never decoded.
+
+Next unit for this pocket: identify what amber_chgport's stub does with the buffer it fills (the 0x500ab46/0x500ab48 loops write
+~40k times each) - whether it expects an MZ-headed image (in which case the adoption scan needs a second shape: a headerless
+section body), or whether the 0x401661 bootstrap is supposed to copy from the heap and dies because a register it needs was never
+set. The 25-byte bootstrap at 0x401661 is the concrete thing to disassemble next.
