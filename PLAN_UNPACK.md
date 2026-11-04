@@ -14662,3 +14662,35 @@ only to fill names/ordinals inside it.
 Measurement trap worth recording: the PE32 data-directory base is optional-header + 0x60 (not 0x68), so entry 1 (Import) is at +0x68. Reading
 at +0x70 gives the Bound Import directory, which parses as plausible garbage and cost this round a wrong "the import RVA points at code"
 conclusion before it was spotted.
+
+#### 0.17ls Correction to 0.17lr, and TELock's 6 decode rows are a REJECTED true entry (one gate, two rows)
+
+FIRST, a correction. 0.17lr said mew_Bginfo's artifact "loses user32 247 and adds gdi32 147". That was WRONG - it came from printing
+only the first six descriptors of each table. Re-reading the artifact's full list, the DLL counts match the original exactly for
+user32 247, kernel32 198, gdi32 147, advapi32 48, comdlg32 5, version 3, netapi32 4; the actual miss is only the ORDINAL-ONLY
+DLLs (oleaut32 45, odbc32 6, winmm 1, ws2_32 1, comctl32 1 = the 54 misses, 53 of them ordinals). So the import gap is narrower
+than recorded: it is the ordinal lane, which the reference also lacks (recall parity measured), not a lost/aligned descriptor
+list. The proposed "rebuild the descriptor list from the image's own import directory" has NO data source either: mew_Bginfo's
+decoded image carries the STUB's table (one descriptor, kernel32 with 2 thunks, imp size 0x14).
+
+THEMIDA (122 rows, the largest block left) is not a target: valid PE 122/122, oep_exact 0, code_sim mean 0.065, runs die in
+11-16 s with garbage claims. The payload is never decoded - it is a VM-based protector and the reference fails identically. Out of
+scope for mechanism work.
+
+TELOCK'S 6 DECODE ROWS are the tractable pocket, and one of them is now explained end to end. telock_OpenedFilesView.exe
+(stub base 0x41e000 - TELock's stub base varies per sample, as recorded):
+
+    claim [0x41e000,0x421000) write=0x41e041 pc=0x41e030      the stub's own section, self-hop
+    OEP candidate 0x41e037 (section_hop)                      accepted: the STUB section
+    claim .text [0x401000,0x410000) write=0x401000 pc=0x41eda6  the copy pass into the payload section
+    [unpack] reject hop 0x40fc10 (section_hop)                 THE TRUE ENTRY (orig EP 0xfc10) IS FOUND AND REJECTED
+
+The rejection is the content gate at unpack.cpp:1926 (not the import-quiet guard - TELock is not in `hop_guarded`): the hop's head
+is read at the moment of the hop, but at that instant .text has not been decoded yet, so `head` is empty/zero and the section does
+not qualify as `privileged` either (TELock zeroes section Characteristics, so `is_exec` is false). The candidate is discarded and
+the run falls back to 0x401000.
+
+NEXT UNIT (designed, not yet implemented): DEFER the hop validation instead of dropping the candidate - record the rejected hop
+with its reason, and re-run the same head test against the FINAL image during finalize, accepting it if it passes then. Two TELock
+rows (telock_OpenedFilesView, telock_RegDllView; both already have imports right, oep wrong) would become all-three, and the same
+gate may be rejecting true entries in other families. Grade on TELock (116 rows) first, then corpus.
