@@ -438,6 +438,68 @@ std::uint64_t ladder_oep(const PackerContext& ctx) {
             if (startup_count == 1) {
                 hit_va = startup;
             }
+            // The APP-TYPE call separates startup VARIANTS that are otherwise identical.
+            // Every MSVC CRT startup variant opens with the same three pushes; the real one
+            // then calls __set_app_type with a CONSTANT that encodes the app type - 1 for
+            // console, 2 for GUI - and the image's SUBSYSTEM says which variant is the entry.
+            // So among startup-shaped frames, the one whose `6a <n> ff 15 <slot>` carries the
+            // subsystem's app type is the entry.
+            // Measured: jdpack_7z's four frames are all startup-shaped (so the rule above
+            // cannot decide) and the true entry 0xebc5 is the one pushing 1, with subsystem 3
+            // (console); jdpack_7za's truth 0x55641 is in the same family shape.
+            if (startup_count > 1 && image.size() > 0x40) {
+                const auto lfanew = static_cast<std::size_t>(image[0x3c]) |
+                                    (static_cast<std::size_t>(image[0x3d]) << 8) |
+                                    (static_cast<std::size_t>(image[0x3e]) << 16) |
+                                    (static_cast<std::size_t>(image[0x3f]) << 24);
+                std::uint32_t want_app_type = 0;
+                if (lfanew + 24 + 0x46 <= image.size() && image[lfanew] == 'P' && image[lfanew + 1] == 'E') {
+                    const auto sub = static_cast<std::uint32_t>(image[lfanew + 24 + 0x44]) |
+                                     (static_cast<std::uint32_t>(image[lfanew + 24 + 0x45]) << 8);
+                    if (sub == 3) {
+                        want_app_type = 1;  // console -> mainCRTStartup
+                    } else if (sub == 2) {
+                        want_app_type = 2;  // GUI -> WinMainCRTStartup
+                    }
+                }
+                if (want_app_type != 0) {
+                    std::uint64_t vt = 0;
+                    std::size_t vt_count = 0;
+                    for (const auto fva : frames) {
+                        if (fva < ctx.base || fva - ctx.base + 0x40 > image.size()) {
+                            continue;
+                        }
+                        const auto* f = image.data() + (fva - ctx.base);
+                        if (!(f[0] == 0x55 && f[1] == 0x8b && f[2] == 0xec && f[3] == 0x6a && f[4] == 0xff)) {
+                            continue;
+                        }
+                        for (std::size_t i = 0; i + 7 < 0x40; ++i) {
+                            if (f[i] != 0x6a || f[i + 1] != want_app_type || f[i + 2] != 0xff ||
+                                f[i + 3] != 0x15) {
+                                continue;
+                            }
+                            const auto slot = static_cast<std::uint64_t>(
+                                static_cast<std::uint32_t>(f[i + 4]) |
+                                (static_cast<std::uint32_t>(f[i + 5]) << 8) |
+                                (static_cast<std::uint32_t>(f[i + 6]) << 16) |
+                                (static_cast<std::uint32_t>(f[i + 7]) << 24));
+                            if (slot > ctx.base && slot < ctx.base + ctx.image_size) {
+                                vt = fva;
+                                ++vt_count;
+                            }
+                            break;
+                        }
+                    }
+                    if (vt_count == 1) {
+                        hit_va = vt;
+                        if (ctx.debug) {
+                            std::fprintf(stderr,
+                                         "[unpack] ladder: app-type variant (subsystem app=%u) entry 0x%llx\n",
+                                         want_app_type, static_cast<unsigned long long>(vt));
+                        }
+                    }
+                }
+            }
         }
         if (ctx.debug) {
             std::fprintf(stderr, "[unpack] ladder passB hits=%zu first=0x%llx last=0x%llx\n", hits,

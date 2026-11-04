@@ -14835,3 +14835,38 @@ discriminator between variants has to be found in the frame bodies (which CRT ro
 
 Also measured on petite_HashCalc while looking: its truth never appears at all - the log is 5419 "hop skip self-traffic" events in
 the 0x4715xx region and one accepted hop at 0x482175, so PEtite's own decoded copy floods the ledger and no candidate reaches .text.
+
+#### 0.17lx WIN: the startup VARIANTS are separated by the __set_app_type argument, not by frame order. JDPack 96 -> 97, corpus +2
+
+0.17lw's lead was right but the mechanism was not "the subsystem picks a variant" in the abstract - the frames carry the
+discriminator inline. Decoding 7z's four startup-shaped frames:
+
+    0x00e924  55 8b ec 6a ff 68 f8 14 41 00 ...   (a block-move helper with the same SEH prologue)
+    0x00e9a4  55 8b ec 6a ff 68 08 15 41 00 ...
+    0x00ea18  55 8b ec 6a ff 68 18 15 41 00 ...
+    0x00ebc5  55 8b ec 6a ff 68 28 15 41 00 68 e2 ec 40 00 64 a1 ... 83 ec 20 ...
+              89 65 e8 83 65 fc 00 6a 01 ff 15 0c 11 41 00 59 ...      <-- push 1 ; call [__set_app_type]
+
+Only the true entry calls `__set_app_type`, and it does so with a CONSTANT that encodes the app type: 1 for a console image, 2 for
+a GUI one (`msvcrt`'s mainCRTStartup passes 1, WinMainCRTStartup passes 2). The PE SUBSYSTEM - still present in the packed header -
+says which variant is the entry.
+
+Rule added in Pass B (decode_only_packer.cpp), applied only when MORE THAN ONE frame carries the full startup prologue (otherwise
+the existing single-startup rule already decides): take the image's Subsystem (3 -> app type 1, 2 -> app type 2), scan each
+startup-shaped frame's first 0x40 bytes for `6a <want> ff 15 <slot>` with the slot inside the image, and adopt that frame when
+EXACTLY ONE frame matches.
+
+    jdpack_7z.exe: "[unpack] ladder: app-type variant (subsystem app=1) entry 0x40ebc5"  -> oep=0x40ebc5 (the truth)
+
+Measured:
+
+    JDPack family (100 rows, 4 workers, 85 s):  OEP 97 -> 98, IMP 99 -> 99, ALL 96 -> 97    (+1)
+    corpus        (2678 rows, same params):     all-three 2273 -> 2275                      (+2)
+    gained jdpack_7z and mew_procexp, LOST 0.
+
+Honest attribution: only jdpack_7z is the new rule. mew_procexp is the load-flaky row identified in 0.17lw (it also passes standalone
+with the mechanism untouched), so the attributable gain is +1 and the sweep's +2 includes one contention flip.
+
+Not covered by the rule, and why: jdpack_7za still ends on an accepted section_hop (0x43f1d9) that outranks the ladder, and
+jdpack_MxdwGc's truth 0x8e08 is not among its 19 Pass-B candidates at all - so those two need the hop ledger work, not the frame
+vote.
