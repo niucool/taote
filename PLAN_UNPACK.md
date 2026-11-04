@@ -14630,3 +14630,35 @@ par/wallcap in the same session, and must be read per-row (same claim, same dura
 comparing an old baseline against a new arm conflates the change with the box's load. My r303 reading (contention) was right,
 my r307 reading (mechanism cost, from two identically-loaded sweeps) was wrong, and this run is the control that distinguishes
 them.
+
+#### 0.17lr Import headroom characterised: 52 rows are one-thing-away, and recall is already AT the reference's level
+
+Current miss census on r119 (2271 all-three):
+
+    fails ONLY imports (OEP right, PE valid)  35   WinUpack 12, PEtite 7, RLPack 6, MEW 5, singles
+    fails ONLY the OEP                        17   Amber 3, JDPack 3, PECompact 3, TELock 2, singles
+    fails both                               274   (Themida + Yoda-Protector are 222 of these)
+    invalid PE                                 0
+
+So 52 rows are one thing away, and the imports cluster is the bigger half. Two measurements decide what can be done there:
+
+1. **There is no porting path.** On all 35 imports-only rows the reference reaches recall >= 0.95 on ZERO, and on every row where both engines have data
+   taote's recall EQUALS the reference's to three decimals: amber_chglogon 0.941/0.941, jdpack_chglogon 0.941/0.941, mew_Bginfo 0.937/0.937,
+   mew_ComIntRep 0.899/0.899, mew_Sysmon 0.905/0.905, mew_procexp 0.946/0.946, nspack_ComIntRep 0.899/0.899, petite_Everything 0.935/0.935.
+   Any gain here is a taote-original mechanism, not a port.
+
+2. **What is missing is ordinal imports and whole descriptors.** Diffing with the grader's own walker: mew_Bginfo misses 54 of 57 needed with 53 of
+   them ordinals; mew_Sysmon 25/25 ordinals; petite_Everything 19/19 ordinals; nspack_ComIntRep 50/53; the other shape is a handful of named
+   kernel32 entries that always travel together (InterlockedDecrement/Exchange/Increment; RegCloseKey/RegCreateKeyExW/RegOpenKeyExW/
+   RegQueryValueExW/RegSetValueExW - the latter five in amber_chglogon and jdpack_chglogon, both at exactly 0.941).
+
+At the descriptor level mew_Bginfo is the clearest specimen: both tables parse cleanly, but the artifact has kernel32 198, version 3, netapi32 4,
+gdi32 147, comdlg32 5, advapi32 48 while the original has VERSION 3, snmpapi 3, NETAPI32 4, ODBC32 6, KERNEL32 198, USER32 247, and the
+ordinal-only DLLs (oleaut32 45, ws2_32, winmm) are absent. So the rebuild both LOSES whole DLLs the payload clearly needs (user32 247) and ADDS
+ones it does not (gdi32 147), i.e. the salvaged-pairs set is being used as the descriptor list instead of the payload's own directory order. That
+is the next unit's target: rebuild the descriptor list from the decoded image's own import directory when it is readable, and use the salvage
+only to fill names/ordinals inside it.
+
+Measurement trap worth recording: the PE32 data-directory base is optional-header + 0x60 (not 0x68), so entry 1 (Import) is at +0x68. Reading
+at +0x70 gives the Bound Import directory, which parses as plausible garbage and cost this round a wrong "the import RVA points at code"
+conclusion before it was spotted.
