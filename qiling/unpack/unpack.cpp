@@ -1404,17 +1404,19 @@ void Unpacker::install(Qiling& ql) {
         }
     }
 
-    for (const auto& ps : watched_) {
-        const std::uint64_t start = ps.start;
-        const std::uint64_t end = ps.end;
-
-        // the write-claim hook: first write into a watched section claims it
-        auto write_hook = std::make_shared<HookRet>(
-            ql.hook_mem_write([this, start](int /*access*/, std::uint64_t addr, std::uint32_t size,
-                                            std::int64_t value) -> int {
-                (void)start;
+    // ONE write-claim hook and ONE section-hop hook for the whole image, not one pair
+    // per watched section. Both bodies already filter by `watched_` themselves (the
+    // per-section hook ranges were redundant work), and each redundant hook costs a
+    // `bound_check` - plus a unicorn hook slot - on EVERY basic block and every store
+    // of the run: a nine-section image installed nine of each. The guards at the top of
+    // the two bodies keep the behaviour identical to the per-section ranges they
+    // replaced.
+    if (!watched_.empty()) {
+        auto write_hook = std::make_shared<HookRet>(ql.hook_mem_write(
+            [this](int /*access*/, std::uint64_t addr, std::uint32_t size, std::int64_t value) -> int {
                 return on_section_write(0, addr, size, static_cast<std::uint64_t>(value));
-            }, start, end));
+            },
+            base_, base_ + image_size_));
         if (write_hook->obj() != nullptr) {
             hooks_.push_back(std::move(write_hook));
         }
@@ -1426,10 +1428,11 @@ void Unpacker::install(Qiling& ql) {
         // the claimed section — a block entry — and firing per instruction
         // re-runs the written-range scan on every instruction of the payload's
         // hot code.
-        auto code_hook = std::make_shared<HookRet>(
-            ql.hook_block([this](std::uint64_t addr, std::uint32_t /*size*/) -> int {
+        auto code_hook = std::make_shared<HookRet>(ql.hook_block(
+            [this](std::uint64_t addr, std::uint32_t /*size*/) -> int {
                 return on_section_exec(addr);
-            }, start, end));
+            },
+            base_, base_ + image_size_));
         if (code_hook->obj() != nullptr) {
             hooks_.push_back(std::move(code_hook));
         }
@@ -1440,6 +1443,20 @@ void Unpacker::install(Qiling& ql) {
 // hook fires after the store, so the pc is read from the arch state.
 int Unpacker::on_section_write(std::uint64_t /*pc*/, std::uint64_t addr, std::uint32_t size,
                                std::uint64_t value) {
+    // the single image-wide write hook: an address outside every watched section must
+    // behave as if the hook never fired (no shadow bookkeeping either)
+    {
+        bool watched = false;
+        for (const auto& ps : watched_) {
+            if (addr >= ps.start && addr < ps.end) {
+                watched = true;
+                break;
+            }
+        }
+        if (!watched) {
+            return 0;
+        }
+    }
     // shadow the first write per byte: a store of `size` bytes lands little-endian
     if (shadow_wanted_ && addr >= base_ && addr - base_ < image_size_) {
         const auto off = static_cast<std::size_t>(addr - base_);
@@ -1604,6 +1621,20 @@ int Unpacker::on_section_exec(std::uint64_t addr) {
     }();
     if (hook_fastpath == 1) {
         return 0;
+    }
+    // The single image-wide hook must behave exactly like the per-watched-section
+    // hooks it replaced: an address outside every watched section never fired.
+    {
+        bool watched = false;
+        for (const auto& ps : watched_) {
+            if (addr >= ps.start && addr < ps.end) {
+                watched = true;
+                break;
+            }
+        }
+        if (!watched) {
+            return 0;
+        }
     }
     // EXPERIMENT (TAOTE_IF_USER=1): a Windows ring-3 thread runs with IF set and cannot clear it
     // (CLI faults with #GP; POPF ignores IF outside ring 0). Unicorn executes CLI silently and

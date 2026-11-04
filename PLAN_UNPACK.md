@@ -15350,3 +15350,26 @@ Implication for the throughput lever (the only systematic one left): the attacka
 how the unpacker installs hooks (a single direct callback instead of the generic multi-hook dispatch with its map lookup and
 shared_ptr bookkeeping per block), and it needs a measured target above ~15% to convert any of the 12 genuinely time-starved cap rows
 (baseline on the 28 cap rows is ALL=16).
+
+#### 0.17mn One hook for the image instead of one pair per watched section (+2 corpus, and a 5-10% speedup)
+
+0.17mm localized the per-block cost and concluded the attackable mass was structural. The first structural fact was hiding in plain
+sight: `install()` created one write hook AND one block hook PER WATCHED SECTION, while both bodies filter by `watched_` themselves -
+the per-section hook ranges were redundant. A nine-section image registered eighteen unicorn hooks, so every basic block and every
+store paid eighteen `bound_check` calls (plus unicorn's own per-hook bookkeeping).
+
+Now one write hook and one block hook span the whole image, with a `watched_` guard at the top of `on_section_exec` and of
+`on_section_write` (before the shadow bookkeeping) so the behaviour is identical to the per-section ranges they replaced.
+
+Measured:
+  * single rows: mpress_geek 91.9 -> 82.7 s (it now finishes inside the 85 s budget), mew_procexp 51.5 -> 48.9 s, all with identical
+    oep and import counts;
+  * the 28 cap-bound rows: ALL 16 -> 16 (durations -4..-6 s on neolite_HDDScan, telock_HDDScan, telock_adwcleaner), no gains yet;
+    the one apparent OEP loss (telock_adwcleaner 0xcfb5d8 -> 0x401000) is NOT from this change - standalone, BOTH the old and the new
+    binary report 0x401000, so that r141a reading was a load artifact;
+  * corpus r144 (2678 rows, 4 workers, 85 s, wallcap 120): PE 2677, OEP 2328 -> 2329, IMP 2377 -> 2379, ALL 2293 -> **2295**, gained
+    neolite_HDDScan (the documented cap row, now under budget) and rlpack_ComIntRep (the known contention row), ZERO lost.
+    Aggregate cost also fell: total wall 22164 -> 21871 s (-1.3%) and rows at dur >= 84 went 92 -> 90.
+
+So the structural per-block dispatch is worth ~5-10% and one cap row; the rest of the 86x gap has to come from the dispatch chain
+itself (map lookup + shared_ptr bookkeeping per block), which is the next rung of LEVER 2.
