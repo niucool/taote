@@ -391,6 +391,27 @@ std::uint64_t QlLoaderPE::unbound_import_stub(const std::string& name, std::uint
         ++stub_pages_;
     }
     const auto cell_addr = *stub_page_ + used * 16;
+    // A minted cell stands in for a function POINTER: a packer stub takes the
+    // GetProcAddress handle, stores it in its own IAT and calls THROUGH it, so the
+    // guest expects the callee to clean the stdcall argument stack. A bare `ret`
+    // leaves that stack shifted and the caller's own epilogue then restores its
+    // saved registers from its arguments - measured on exe32pack_DriveCleanup, whose
+    // stub calls the minted RtlZeroMemory(dst, 0x40) cell and whose `pop esi` then
+    // restores 0x40 (the length argument), after which it writes through esi and
+    // dies UC_ERR_WRITE_UNMAPPED at 0x54. When the name is a registered stdcall API,
+    // answer `xor eax,eax` through `ret <4*nargs>` so the frame unwinds exactly as the
+    // real body would. cdecl, unknown and ordinal cells keep the plain `ret`
+    // (a cdecl callee must not pop, and an ordinal has no signature here).
+    if (!name.empty()) {
+        if (const auto* entry = os::ApiRegistry::instance().find(name)) {
+            if (entry->cc == os::WinCc::Stdcall && !entry->params.empty() && entry->params.size() <= 16) {
+                const auto bytes = static_cast<std::uint16_t>(entry->params.size() * 4);
+                mem.write(cell_addr, std::vector<std::uint8_t>{
+                                        0x31, 0xc0, 0xc2, static_cast<std::uint8_t>(bytes & 0xff),
+                                        static_cast<std::uint8_t>(bytes >> 8)});
+            }
+        }
+    }
     stub_addr_names_.emplace(cell_addr, name.empty() ? key : name);
     stub_cells_.emplace(std::move(key), cell_addr);
     return cell_addr;

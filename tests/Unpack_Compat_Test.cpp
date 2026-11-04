@@ -388,6 +388,34 @@ TEST(UnpackCompat, PecompactPlaceholderEntryIsTheFarHandOff) {
     fs::remove_all(out, ec);
 }
 
+// Packer stubs resolve RtlZeroMemory/RtlMoveMemory through GetProcAddress and call
+// them THROUGH their own IAT. Without a real handler the minted stub cell answers a
+// bare `ret`, the guest's stdcall argument stack is never cleaned and the caller's
+// epilogue restores its saved registers from its own arguments - measured on
+// exe32pack_DriveCleanup, whose `pop esi` restored 0x40 (the Length argument) and
+// which then wrote through esi and died UC_ERR_WRITE_UNMAPPED. With the two handlers
+// ported from the reference the same stub decodes the payload and reaches its true
+// entry: 13 Exe32pack rows convert, corpus 2281 -> 2293. This is the family-level
+// proof (the row itself dies later on an unimplemented API, which is why the test
+// asserts the ENTRY and the recovered import count rather than all-three).
+TEST(UnpackCompat, Exe32packStubSurvivesTheRtlMemoryCalls) {
+    const auto sample = fixture("Exe32pack/exe32pack_touch.exe");
+    if (sample.empty()) {
+        GTEST_SKIP() << "packed corpus not present (set TAOTE_PACKED_DIR)";
+    }
+    const auto out = fs::temp_directory_path() / "taote_unpack_exe32pack_rtl";
+    std::error_code ec;
+    fs::remove_all(out, ec);
+    const auto res = run_unpack(RunConfig{sample, out, true, 2000000000ULL, "Exe32pack"});
+    ASSERT_EQ(res.base, 0x400000u) << res.error;
+    EXPECT_EQ(res.oep, res.base + 0x1020u);   // the payload entry, not the stub
+    // The pre-fix run recovered 18 pairs and never wrote the payload; in-process the
+    // run stops earlier than the CLI's (74 vs 247 on the sibling DriveCleanup row), so
+    // the bar is set where the old behaviour cannot reach it.
+    EXPECT_GT(res.imports.size(), 40u) << res.error;
+    fs::remove_all(out, ec);
+}
+
 // FSG keeps its resolved-import list in the decoded image as 6-byte records after
 // each DLL name: `02 <u16 ordinal> 00 00` for a by-ordinal import. Without mining
 // them adrestore sits at recall 0.848 (its 10 missing pairs are all ordinals).

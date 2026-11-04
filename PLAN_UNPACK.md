@@ -15137,3 +15137,41 @@ identify the vtable at `[ecx+0xc]` - whether the stub calls its own resolver wit
 dispatch does not unwind, or whether the structure at esi was never allocated because a LocalAlloc return was treated as a
 sentinel. The reference gets through it (recon runs=11, oep_rva=0x34e1, oep_source=hop), so the divergence is in the dispatch, not in
 the packer.
+
+#### 0.17mg Porting RtlZeroMemory/RtlMoveMemory from the reference converts 13 Exe32pack rows (corpus 2281 -> 2293)
+
+0.17mf left Exe32pack with the diagnosis but no fix, and this closes it with exactly the shape the workflow prefers: two API handlers
+the reference has and taote lacked.
+
+The proof of the mechanism, measured at the minted cell: `TAOTE_PROBE=0x819010` (the GetProcAddress handle the DriveCleanup stub got
+for RtlZeroMemory) printed `ret=0x81753a` and `stack[esp..+32]: 81753a 121ff14 40 5000c76 818250 50007f6`. That is the return
+address, `Destination=0x121ff14`, `Length=0x40`, then the callee's saved edi/esi/ebx. The minted cell is `xor eax,eax; ret`, which
+pops NOTHING, so at the routine's epilogue `pop edi` took Destination and `pop esi` took **0x40** - the Length argument - and the
+stub then wrote through esi at `mov %eax,0x14(%esi)` and died.
+
+Why taote's existing machinery could not fix it: `hook_winapi` dispatches a minted cell *only when ApiRegistry has a handler for the
+name* (qiling/os/windows/windows.cpp ~600). `RtlZeroMemory` and `RtlMoveMemory` exist only as names in qiling/unpack/api_db.inc, with
+no body, so the cell fell through to its raw `ret`. Two consequences: (a) the guest's stdcall argument stack was never cleaned, and
+(b) the call had no effect at all. Note the earlier rejected lever in 0.17mf (`TAOTE_STDCALL_POP`) targeted a different seam, which is
+why it was neutral - there is no dispatch here for QlStdcall::unwind to touch.
+
+Shipped: `RtlZeroMemory(Destination, Length)` and `RtlMoveMemory(Destination, Source, Length)` registered as Stdcall in
+qiling/os/windows/dlls/ntdll.cpp (params declared, bodies are the guest-memory zero/copy walks), ported from the reference
+(pegasus src/winenv/api/usermode/ntdll.cpp, REG(Ntdll, RtlZeroMemory, 2) / REG(Ntdll, RtlMoveMemory, 3)).
+
+Measured:
+  * exe32pack_DriveCleanup alone: the stub gets past the fault, decodes the payload, reaches 0x4034e1 = the ORIGINAL entry
+    (the reference's oep_rva 0x34e1) with imports 18 -> 247, and the row grades all-three (it previously failed all three).
+  * Exe32pack family (124 rows, 4 workers, 85 s): PE 124, OEP 92 -> 105, IMP 105 -> 122, ALL 92 -> 105 - THIRTEEN rows convert,
+    ZERO lost (DriveCleanup, Mode2CDMaker, SuperF4, auditpolreskit, bzip2, bzz, dat2file, djvmcvt, djvuextract, lpaq8, m2cdm,
+    touch, wabread).
+  * Corpus r137 (2678 rows): PE 2677, OEP 2315 -> 2328, IMP 2361 -> 2377, ALL 2281 -> 2293. 13 gained, 1 lost - mew_procexp, the
+    documented contention row - so the attributable gain is +12 all-three, +13 OEP, +16 imports.
+
+Pinned by UnpackCompat.Exe32packStubSurvivesTheRtlMemoryCalls (suite 612 -> 613): exe32pack_touch unpacks to base+0x1020 with more
+than 40 recovered import pairs (the pre-fix run recovered 18 and never wrote the payload; in-process the run stops earlier than the
+CLI, 74 vs 247 pairs on the sibling row).
+
+Next unit: the same treatment for the sibling memory APIs a stub may ask GetProcAddress for (RtlFillMemory, RtlCopyMemory,
+RtlCompareMemory) - each is a two-line body, and the remaining Exe32pack rows that still fail now fail on "API not implemented", which
+names the next one directly.

@@ -434,6 +434,44 @@ void register_ntdll_family() {
         return dest;
     };
 
+    // void RtlZeroMemory(void *Destination, size_t Length);
+    // Ported from the reference (pegasus src/winenv/api/usermode/ntdll.cpp:401,
+    // REG(Ntdll, RtlZeroMemory, 2)). Packer stubs resolve this through
+    // GetProcAddress and call it through their own IAT, so it must exist as a real
+    // handler: without one the minted stub cell answers a bare `ret`, the guest's
+    // stdcall argument stack is never cleaned and the caller's epilogue restores its
+    // saved registers from its own arguments (measured on exe32pack_DriveCleanup,
+    // whose `pop esi` restored 0x40 - the Length argument).
+    WinsdkApi("RtlZeroMemory", WinCc::Stdcall, {
+        {"Destination", PVOID_},
+        {"Length", UINT_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto dest = api_get_int(get_param(params, "Destination"));
+        const auto length = api_get_int(get_param(params, "Length"));
+        if (dest != 0 && length != 0) {
+            ql.mem().write(dest, std::vector<std::uint8_t>(static_cast<std::size_t>(length), 0));
+        }
+        return dest;
+    };
+
+    // void RtlMoveMemory(void *Destination, const void *Source, size_t Length);
+    // (pegasus ntdll.cpp REG(Ntdll, RtlMoveMemory, 3) - the same walk as memcpy,
+    // registered under the kernel32 spelling packer stubs ask GetProcAddress for)
+    WinsdkApi("RtlMoveMemory", WinCc::Stdcall, {
+        {"Destination", PVOID_},
+        {"Source", PVOID_},
+        {"Length", UINT_},
+    }) = [](Qiling& ql, std::uint64_t, const ResolvedParams& params) -> std::optional<std::uint64_t> {
+        const auto dest = api_get_int(get_param(params, "Destination"));
+        const auto src = api_get_int(get_param(params, "Source"));
+        const auto length = api_get_int(get_param(params, "Length"));
+        if (dest != 0 && src != 0 && length != 0) {
+            const auto data = ql.mem().read(src, length);
+            ql.mem().write(dest, data);
+        }
+        return dest;
+    };
+
     // NTSTATUS WINAPI ZwQueryInformationProcess( ... );  (the pair share the
     // body; the verbatim TODO: have no idea if is cdecl or stdcall)
     WinsdkApi("ZwQueryInformationProcess", WinCc::Stdcall, {
