@@ -15251,3 +15251,47 @@ Net state after this pocket: corpus all-three 2293/2678, OEP 2328, imports 2377,
 mechanism rule distilled from the two rounds: an API a stub calls a BOUNDED number of times belongs behind a dispatch handler (the
 RtlZeroMemory port, +13 rows); one it POLLS belongs in the minted cell as native code; one that no sample exercises is worth nothing
 either way.
+
+#### 0.17mk The ordinal lane, closed from five angles: no in-image source, no runtime source, reference at parity
+
+The corpus's remaining imports-only set is 35 rows (WinUpack 12, PEtite 7, RLPack 6, MEW 5, and singles in Amber/JDPack/NSPack/TELock/
+Yoda-Protector; median recall 0.905, 20 rows at or above 0.90, 10 at or above 0.94). Probing them from every angle available:
+
+1. **Composition (grader's own parser).** The missing pairs are ordinals, not names: petite missing 13/13 ordinals (FileTypesMan),
+   14/14 (shexview), 19/19 (Everything), 31/31 (PEViewer); WinUpack Dbgview 16/17 (ws2_32), Diskmon 12/12 (oleaut32), portmon 17/17,
+   FileTypesMan 15/15; MEW procexp 26/28, Bginfo 53/54, Sysmon 25/25, ComIntRep 52/53. The named remainder is a stray
+   ("winmm!PlaySoundW", "psapi!GetProcessMemoryInfo", the Interlocked/Reg*W groups).
+2. **What the grader wants.** `import_names` reports an ordinal import as `('#N')`, so the artifact must reproduce the ORDINAL NUMBER,
+   not a resolved name - the reference's ordinal->name tables are therefore not a lever even where they exist.
+3. **The rebuilder is not the problem.** `qiling/unpack/iat/import_rebuilder.cpp:26 ordinal_of()` already emits `ORDINAL_FLAG|N` for a
+   pair recorded as `ordinal_<N>`, so a pair taote *knows* is written correctly (verified: the artefact's ws2_32 descriptor simply has
+   2 entries, not 18).
+4. **The runtime evidence fires only where the stub asks.** taote's GetProcAddress handler records `dll!ordinal_<N>` for by-ordinal
+   probes (`unpack.cpp:497`) and does so on mew_procexp for exactly five: shlwapi!176, ws2_32!14, ws2_32!8, comctl32!410, comctl32!413.
+   The 45 oleaut32 ordinals are NEVER asked (`note_import oleaut32` = 0 occurrences), so these families' stubs do not resolve the
+   ordinal-flagged descriptors through GetProcAddress at all.
+5. **No in-image source.** The decoded image's own DataDirectory[1] is the STUB's single descriptor (winupack_Dbgview: imp_rva 0xb81ee,
+   size 0x14, one descriptor), and `mine_ordinal_records` (the FSG 6-byte-record miner, run for every family) finds nothing on these
+   rows. The payload's ordinal INT is not present in the dump.
+
+And the reference is at the same recall on every one of them (measured in earlier rounds: amber_chglogon 0.941, mew_Bginfo 0.937,
+mew_ComIntRep 0.899, mew_Sysmon 0.905, mew_procexp 0.946, nspack_ComIntRep 0.899, petite_Everything 0.935), so there is no porting path
+either. The named remainder is where a future mechanism would have to act, and it does not travel alone: a stub that resolved
+"InterlockedIncrement" by hash leaves no name anywhere.
+
+Consequence for planning: the 35 imports-only rows are OUT OF SCOPE until the stub's own loader walk is understood (why oleaut32 is
+never asked), which is the same walk that limits the families' import recall in the first place. The reachable headroom is now the
+OEP side: the 5-row "perfect image, wrong EP" pocket (jdpack_7za, jdpack_MxdwGc, neolite_HDDScan, petite_HashCalc, winupack_PEview) -
+and each of those five has now been probed and requires the stub to EXECUTE a hand-off it never reaches:
+
+  * jdpack_7za: the true 0x55641 never executes (probe 0 hits) and the stub dies reading a wild pointer (0xd217fa66 at pc 0x47e4d2),
+    while the reference reports it as `oep_source: hop` - so its stub gets further. Its truth IS Pass-B candidate #42 of 56, but
+    selection is moot while the hand-off never happens.
+  * jdpack_MxdwGc: the true 0x8e08 is a thunk and is not among its 19 Pass-B candidates.
+  * neolite_HDDScan: correct when run alone at a 300 s budget (the second of three section hops) - a cap row, not a picker row.
+  * petite_HashCalc: the truth is never a hop candidate (5419 self-traffic entries in 0x4715xx).
+  * winupack_PEview: the truth is never executed (probe 0 hits) and the accepted hop is inside the earlier claimed stub range.
+
+Next unit: pick among those by tractability, starting with jdpack_7za's wild-pointer read (pc 0x47e4d2) - if it is the same missing-API
+class as the RtlZeroMemory seam, it is a two-line fix; if it is the LZ decode divergence documented for jdpack_7z, the row stays
+blocked and the pocket is closed.
