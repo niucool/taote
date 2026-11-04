@@ -14726,3 +14726,45 @@ NEXT UNIT: the transform pass's loop bound. On telock_7z the same two-pc transfo
 and the payload expands to a full 0x10000; here it stops after 11312 of 0xF000. Compare the loop's counter/pointer setup between
 the two rows at the transform entry (TAOTE_PC_DUMP at 0x41efaa-equivalent, i.e. the pc that loads ecx/esi/edi/edx before the
 loop) - that is a bounded, single-site comparison in a family whose mechanism is already understood.
+
+#### 0.17lu TELock's 6 rows: the EXPANSION pass stops early (and my 18% claim was a watch-cap artifact)
+
+First, a correction to 0.17lt. Its "the keyed transform covers only ~18% of .text" was **my own TAOTE_WATCH_RANGE cap**, not the
+stub: with `:300000` the census on telock_OpenedFilesView is
+
+    37376 writes at 0x41eda6   (copy pass)
+    37376 writes at 0x41efc2   (transform 1)
+    37376 writes at 0x41efe0   (transform 2)
+     3735 writes at 0x41f128   (expansion)     <- 7z: 21404
+     1256 writes at 0x41f0ba   (expansion)     <- 7z:  4631
+
+so all three passes complete over the full 0x9200-byte raw span. This is the second time that cap produced a false reading; the
+rule stands: always pass a :max suffix large enough for the question.
+
+What is actually missing is the EXPANSION. The dump's .text is 60.8% decoded (37371 of 61440 nonzero, dense 4094/4094/4095/4096/4096
+per page) and the head is real code (`55 8b ec 51 53 33 db 88 1f 8a 06 eb 1f ...` = push ebp/mov ebp,esp/push ecx/push ebx/xor
+ebx,ebx/...), but the true entry 0x40fc10 lies beyond the decoded raw span (0x9200), and everything past it is zero. So the payload
+is compressed and the expansion pass is what does not finish.
+
+The expansion pass compared at the same relative offset (the two stubs differ by exactly 0x6000: base 0x418000 vs 0x41e000):
+
+    7z           pc 0x4190ba/0x419128: 4631 + 21404 writes      expansion completes
+    this row     pc 0x41f0ba/0x41f128: 1256 +  3735 writes      expansion stops early
+
+and at those pcs the LIVE CODE IS BYTE-IDENTICAL between the two rows, with identical entry state except the heap pointer and the
+stub's data offset:
+
+    pc=0x4190ba eax=0x50008b2 edx=0x5000880 esi=0x50008b2 edi=0x401000 ebp=0xc95e    (7z)
+    pc=0x41f0ba eax=0x50008e6 edx=0x5000880 esi=0x50008e6 edi=0x401000 ebp=0x1295e   (this row)
+
+so the loop is data-driven (an LZ expansion reading a stream through esi from a VirtualAlloc'd heap buffer) and the divergence is
+in its INPUT, not its code. Ruled out as the cause: page alignment (`TAOTE_VALLOC_ALIGNED=1` leaves .text at exactly 37371 nonzero
+with 0x40fc10 zero) and the breakpoint mechanism (all four Dr0-3 breakpoints install and hit at this row's own base).
+
+Also fixed in passing: TAOTE_PC_DUMP now prints ecx/edi/ebp as well as eax/edx/ebx/esi. A decode loop's bound is almost always ecx
+and a dump without it cannot answer "why did the loop stop", which is precisely this question.
+
+NEXT UNIT: dump the expansion's INPUT stream - the heap buffer at esi (0x50008e6 here) at the first expansion iteration - and
+compare with the same buffer in telock_7z's run (0x50008b2). Identical loop code plus different output length means the streams
+differ, so the question becomes where the stub's stream LOAD comes from (its own section? a decompression of the copy?) and why it
+is short here. That is the last link for these 6 rows, and 2 of them already have imports right (OEP only).

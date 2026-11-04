@@ -1340,11 +1340,19 @@ void Unpacker::install(Qiling& ql) {
                             return hx;
                         };
                         const auto& r = ql_->arch().regs();
-                        std::fprintf(stderr, "[pcdump] pc=0x%llx eax=0x%llx edx=0x%llx ebx=0x%llx esi=0x%llx\n",
+                        // ecx/edi/ebp included: a decode loop's BOUND is almost always ecx (or a
+                        // compare against edi), and a dump without them cannot answer "why did the
+                        // loop stop" - the question TELock's truncated transform rows ask.
+                        std::fprintf(stderr,
+                                     "[pcdump] pc=0x%llx eax=0x%llx edx=0x%llx ebx=0x%llx ecx=0x%llx "
+                                     "esi=0x%llx edi=0x%llx ebp=0x%llx\n",
                                      static_cast<unsigned long long>(a), static_cast<unsigned long long>(r.read("eax")),
                                      static_cast<unsigned long long>(r.read("edx")),
                                      static_cast<unsigned long long>(r.read("ebx")),
-                                     static_cast<unsigned long long>(r.read("esi")));
+                                     static_cast<unsigned long long>(r.read("ecx")),
+                                     static_cast<unsigned long long>(r.read("esi")),
+                                     static_cast<unsigned long long>(r.read("edi")),
+                                     static_cast<unsigned long long>(r.read("ebp")));
                         std::fprintf(stderr, "[pcdump] code( -0x40 ) %s\n", hexdump(a - 0x40, 0xC0).c_str());
                         std::fprintf(stderr, "[pcdump] stack %s\n", hexdump(r.arch_sp(), 0x40).c_str());
                         std::fprintf(stderr, "[pcdump] at_eax %s\n",
