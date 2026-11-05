@@ -15727,3 +15727,26 @@ reference also has.
     `rlpack_Bginfo` in 0.17my.
   * `install_alienyze_loopacc_` (a checksum-loop accelerator) and a WinUpack engage: the reference's own verdict on
     WinUpack is "no decodable stream at the entry, so no engage" (STATUS 468), so that lane is closed by its evidence.
+
+#### 0.17na MEW: the 6.1x is in the reference's FOUR-LOOP design, not in rc_get_bit (a single-bit hook measures 2%)
+
+Sizing before porting (as the previous unit asked). The reference's MEW accelerator is default-ON and, measured pinned and
+interleaved on `mew_Bginfo` with the same oep (rva 0x1b5d42) both ways: **60.45 s with `SE_NO_MEW_LZMA` vs 9.51-9.91 s
+with it = 6.1-6.4x**. Since the 4-worker sweep makes a 45 s standalone row need ~86 s (0.17mz), the three contention-bound
+MEW rows (`Bginfo`, `ComIntRep`, `Sysmon` - all recall 1.000 standalone with the same budget) need ~2.0x, so that 6.1x
+would clear them.
+
+**The port is not the bit decoder.** The reference's part is 1166 lines because it patches FOUR inner loops (DecodeBit, the
+BitTree forward and reverse helpers, the inlined literal tree, and the match copy), each executed as a whole loop. I ported
+only the one that is a complete function in the runtime image - the LZMA `rc_get_bit` at the reference's kSigDb signature
+(`56 8b 72 04 57 8b c6 0f b7 39 c1 e8 0b 0f af c7 8b 7a 08 3b f8 73 3f`, state `[edx]`=stream, `+4`=range, `+8`=code,
+`[ecx]`=probability) - computing the bit and the one-step normalization host-side and resuming at the caller's return
+address. It is functionally CORRECT (identical oep 0x5b5d42 and 1985 imports) and **measures 45.42 -> 44.32 s = 2%**.
+
+The reason is structural: an accelerated bit REPLACES ~20 guest instructions with one taote code-hook dispatch (unicorn trap
++ `Hook::trace` + the memory reads), so a per-BIT hook costs about what it saves. The reference's 6x comes from the
+per-LOOP entries (one hook per 8-bit literal, per BitTree, per match run), which is exactly the 1166-line design. Recorded
+so the next attempt starts from the four-loop shape rather than from the bit function, and so nobody re-derives the 2%.
+
+The accelerator was reverted (correct but valueless) - a per-bit code hook on the hottest loop of every MEW row would also
+add a new failure surface for zero gain.
