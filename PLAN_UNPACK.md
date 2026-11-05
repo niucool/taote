@@ -15907,3 +15907,29 @@ runs leaves the packed bytes in place.
 
 Consequence: the `fallback_guess` lane converts nothing today and its biggest family (Yoda-Protector) is closed
 both-engines-fail, so nothing here is worth another round.
+
+#### 0.17ng the last per-block getenv (TAOTE_HANDOFF_SNAP) was 13% of a block-bound run
+
+Chasing the 21% tail that `TAOTE_HOOK_FASTPATH=3` isolates on mpress_HDDScan (level 0 = 75.8 s, level 3 = 59.8 s), the
+levels were bisected further (temporary probes, not kept) and the tail measured: pre-loop 5.2 s, the candidate
+dedupe 4.3 s, `dump_module` + bookkeeping 6.5 s - but the finalize counts refuted the obvious suspects, since the run
+inserts only **443** dedupe entries and ledgers **443** candidates in ~111M block fires (`[sizes] dumped=443 ledger=443
+ranges=2 ever=2`). The cost was a plain `std::getenv` in the hand-off snapshot guard:
+
+    if (handoff_view_.empty() && std::getenv("TAOTE_HANDOFF_SNAP") != nullptr && ...)
+
+`handoff_view_` stays empty for every run that does not set the knob, so the getenv was re-evaluated on **every block**,
+in the hottest path in the project. Cached as a function-level static with the flag moved first - the same shape as the
+TAOTE_IF_USER fix (0.17mw / 7% of a 79 s run), and this was simply the last such call in either hot hook (the write hook's
+TAOTE_WRITE_FASTPATH and on_section_exec's other knobs were already function-level statics).
+
+Measured, `taskset -c 3`, interleaved pairs, byte-identical artifacts:
+* mpress_HDDScan.exe: **79.44 / 81.44 s -> 68.04 / 69.64 s (13%)**, oep 0x883d20 in both arms (imports 2512 -> 2541, the
+  new arm simply reaches further inside the same budget);
+* mpress_ComIntRep.exe: **27.71 / 27.72 s -> 23.91 / 23.81 s (14%)**, oep 0x42800a and 733 imports in BOTH arms.
+* MPRESS family sweep (106 rows, 4 workers, 85 s): ALL 102, and the single row that moved (mpress_ComIntRep, dur 75 pass
+  -> dur 86 cap) is a cap flake, not a regression: standalone it is byte-identical on both arms in ~24 s and only the
+  4-worker sweep inflates it to 75-86 s.
+
+Rule confirmed twice: the per-block hook bodies must contain no `getenv`, and any guard whose cache flag is constant
+must put that flag FIRST so the volatile test is never evaluated.
