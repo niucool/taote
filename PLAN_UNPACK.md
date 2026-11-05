@@ -15814,3 +15814,12 @@ or lazily on the first claim, and must verify the hooks FIRE (a debug counter) b
 Also recorded: the share is large - the decoder is essentially the whole MEW run (a ~4 MB payload costs ~50 guest
 instructions per output byte, i.e. the 45 s standalone run) - so the tree helpers alone (~40% of the bit decodes) should
 give ~1.4x, and the literal tree plus the match copy are needed for the >=2x that converts the three rows.
+
+**Addendum (same round): even a tolerant install-time scan finds nothing, because the decoder is MATERIALISED BY THE STUB.**
+A page-window scan (64 KB windows, 32-byte overlap, unreadable pages skipped) still finds neither BitTree signature at
+install time, so the bytes that execute at 0x7fd195/0x7fd22d/0x7fd267 are produced during the run - and the claim log says
+exactly where: `claim ..u.... [0x6ef000,0x7fd010) write=0x7fd129 pc=0x400162`, i.e. the stub's write at **0x7fd129** (inside
+the decoder region, immediately before DecodeBit) is the one that materialises it. So a MEW accelerator must install LAZILY:
+set a pending flag in the claim path and retry the scan from the block hook on a sparse schedule (every ~100k blocks, a
+handful of attempts) until both signatures are found, then verify with a fire counter. Two attempts this round produced
+nothing to measure because the hooks were never installed; the diagnosis above is what the next round starts from.
