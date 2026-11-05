@@ -15798,3 +15798,19 @@ Two consequences recorded: the tree-helper accelerator I wrote (one hook per Bit
 range-coder state, 3 memory ops per call) was discarded without a measurement because it could never have fired; and the
 next attempt must first LOCATE the executing decoder (probe the claim/dyn regions for the kSigDb bytes during a run, e.g. from
 the section-claim path) before any acceleration code is written.
+
+**CORRECTION to 0.17nc (same round, before any port work was based on it).** The "relocated at runtime" conclusion was an
+ARITHMETIC error, not a finding: the VA of image offset 0x3fd195 is `base + 0x3fd195 = 0x7fd195`, and I probed
+`0x43fd195` (one extra 0x4000000). Re-probed correctly, the decoder DOES execute in place:
+`TAOTE_PROBE=0x7fd22d`, `0x7fd267` and `0x7fd195` each record a hit, and a range trace shows execution at 0x7fd129 - the
+bytes immediately before DecodeBit. So the reference's signatures are hookable where the dump shows them, and the four-loop
+port is viable.
+
+What actually failed was the INSTALL-TIME scan: reading a whole exec section with `ql.mem().read()` at install time returned
+nothing usable (the section is not fully readable then), so the accelerator never installed and its "measurement" was of an
+idle hook. A future attempt must scan tolerantly (page windows with a signature-length overlap, skipping unreadable pages)
+or lazily on the first claim, and must verify the hooks FIRE (a debug counter) before timing anything.
+
+Also recorded: the share is large - the decoder is essentially the whole MEW run (a ~4 MB payload costs ~50 guest
+instructions per output byte, i.e. the 45 s standalone run) - so the tree helpers alone (~40% of the bit decodes) should
+give ~1.4x, and the literal tree plus the match copy are needed for the >=2x that converts the three rows.
