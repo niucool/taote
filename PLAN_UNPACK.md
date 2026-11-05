@@ -15417,3 +15417,35 @@ mpress_geek (74.5 s after the dispatch fast path):
 Standing picture after this round: corpus 2299, engine ~20% faster than at the round's start, 86 rows still at dur >= 84. The two
 changes that DID pay were both about the dispatch plumbing (redundant hooks 18 -> 2, and the per-event shared_ptr copy), which is the
 only reliable pattern so far: the cost lives around the callback, not inside it.
+
+#### 0.17mq NSPack's five decode rows are not headroom either, and the plateau census (2299/2678)
+
+**NSPack's 5 decode-fail rows** (listdlls, PsService, ldmdump, psping, psshutdown) dissolve on inspection:
+  * the packed file's section table is hostile: nsp1 (0x68000-0x48f78e, vsize 0x2778e) holds the whole file at raw offset
+    0x200, while nsp0 (0x401000-0x468000) claims raw=0x4 at offset 0x1d7 - four bytes, inside the header table. The EP
+    (0x101b) therefore points into a section with no data.
+  * both engines start at that EP anyway (the reference's own hop log: `[hop] addr=0x40101b sec=nsp0 exec=1 wr_n=0`), execute the
+    empty region, and land in nsp1 - the reference at 0x4689a0 and taote at 0x468093, where taote's registers are eax=0x5c,
+    edx=ebx=ecx=esi=0, edi=1 and the bytes it fetches are section-header-shaped data (the run ends "no section hop" with WRITES=0,
+    i.e. the stub never decompressed anything). The divergence is inside garbage execution of an empty section, not a mechanism
+    taote lacks.
+  * decisive for planning: these rows fail OEP **and** imports (recall 0.08-0.17), so even a perfect OEP pick would not make them
+    all-three. NSPack is not headroom.
+
+**Plateau census at 2299/2678 (r146).** The 379 misses split as:
+  * 223 = Themida 122 + Yoda-Protector 101, both-engines-fail (verified in earlier rounds: reference reproduces 0 and 1 of them);
+  * the managed (`.NET`) rows across families - comparable artefacts (code_sim often 0.999) with `oep_exact None`, so they can never
+    be graded all-three;
+  * 35 imports-only rows = the ordinal lane, CLOSED in 0.17mk (no in-image source, no runtime source, rebuilder already correct,
+    reference at the same recall);
+  * 5 perfect-image/wrong-EP rows = CLOSED in 0.17ml (three diverge inside their own LZ decoders; one is a cap row; one never
+    executes its truth);
+  * NSPack's 5 = above; the remaining scattered rows are family decode failures with equally bad reference artefacts.
+  * 1 invalid-PE row: fsg_Snap2HTML (a truncated packed file, documented when FSG closed).
+  * 86 rows still sit at dur >= 84 (cap pressure); the dispatch work of rounds 330-331 cut that from 92 and made the engine ~20%
+    faster, but nothing above has yet converted beyond the 6 rows those rounds added.
+
+Planning consequence: with every near-miss class closed by measurement, further grade movement needs a decoder-level win (a family's
+stub decode completing) rather than another picker, gate or plumbing change. The next session should start from the two families whose
+stubs die in their own decoder with the reference equally bad - NSPack (ruled out above) and RLPack (9 gradeable, 0 reference wins) -
+and treat any per-row claim of "the reference gets it" as unproven until its `oep_source` is read.
