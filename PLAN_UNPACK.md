@@ -16051,3 +16051,31 @@ marks versus 4.4-8.0 in r164; aggregate wall 19382 s versus 18074 s, rows at dur
 (24-40 s each, EP exact, recall 1.0: mew_HWMonitorPro_x32, mew_Procmon, mew_disk2vhd, mew_procexp, mpress_ADInsight,
 mpress_ComIntRep, mpress_Procmon, mpress_Sysmon). So the honest corpus figure is **2307 (r164's 2306 + the ASPack row)**,
 and r166's 2299 is a load artifact. **Re-baseline on a quiet box before using r166 for any comparison.**
+
+#### 0.17nl MEW's codec is NOT LZMA1: the driver is the stub's own 0x100-byte loop, so there is no frame to read
+
+Follow-up to 0.17ne, measured on the r164 dump of mew_Bginfo.exe (image 0x40c000, decoder materialised at image offset
+0x3fd100+). The expectation was that MEW's decoder is the LZMA **SDK** and could therefore be run host-side the way
+NSPack's and ASPack's are (read a standard props/len header, call `packers::lzma1_decode`, resume). It is not:
+
+* **The driver is guest code in the HEADER page**, not a library entry: `0x400154 mov esi,0x6EF01C; mov ebx,esi;
+  lodsd; lodsd; push eax; lodsd; xchg eax,edi; ...` then a bit loop whose every step is `call *(%ebx)` (an INDIRECT
+  dispatch through a table the stub materialises at 0x6EF01C) with the carry flag as the bit, `stos`/`movsb` for
+  literals, `rep movsb` for matches, and calls to 0x6EF000 / 0x7FD38C for the range-coder steps. There is no
+  props byte, no (destLen, srcLen) pair and no ABI frame: the state lives in the stub's own esi/edi/ebp and in the
+  materialised table.
+* **The stream header it reads instead** (0x6EF01C): `dword0 = 0x0040012C` (the address of the first bit-helper - the
+  same value `call *(%ebx)` dispatches to), `dword1 = 0x005B5D42` (mew_Bginfo's TRUE original entry point, stored
+  verbatim), `dword2 = 0x006EB8D6` (exactly the value the run's write claim reports: `claim MEW [0x401000,0x6ef000)
+  write=0x6eb8d6`). So dword1 is the OEP in the clear - a useful cross-check for the family's picks, but no taote miss
+  needs it (every MEW miss already has oep_exact true), and the compressed stream itself carries no decodable frame.
+
+Consequences: `packers::lzma1_host` (0.17my) cannot be reused for MEW; a host decode would have to transcribe the driver
+(bit loop + indirect helper table + backward rep-movsb match copy) exactly, which is why the reference instead patches
+four inner loops inside the materialised region (0.17ne: 1166 lines, 6.1x on its own cheap hook dispatch). For taote the
+same loop-patching measures 2% (DecodeBit) + 0% (BitTrees) + 6% (match copy), because taote's per-hook dispatch is
+~190 ns/insn (0.17nj), so the loop-patch route cannot reach the >3x these rows need.
+
+MEW is therefore CLOSED for taote as well, on a measured mechanism argument rather than on effort: the only remaining
+route is a full transcription of the guest driver with an exact write/claim mirror, and its payoff (+3) is bounded by a
+cost the reference measured at 1166 lines.
