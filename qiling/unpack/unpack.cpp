@@ -1443,6 +1443,12 @@ void Unpacker::install(Qiling& ql) {
 // hook fires after the store, so the pc is read from the arch state.
 int Unpacker::on_section_write(std::uint64_t /*pc*/, std::uint64_t addr, std::uint32_t size,
                                std::uint64_t value) {
+    // TAOTE_WRITE_FASTPATH (diagnostic, default off): skip the whole write body so a
+    // run isolates its cost from the dispatch plumbing around it.
+    static const bool write_fastpath = std::getenv("TAOTE_WRITE_FASTPATH") != nullptr;
+    if (write_fastpath) {
+        return 0;
+    }
     // the single image-wide write hook: an address outside every watched section must
     // behave as if the hook never fired (no shadow bookkeeping either)
     {

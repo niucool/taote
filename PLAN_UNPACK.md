@@ -15393,3 +15393,27 @@ Measured:
 
 Round total: 2293 -> 2299 (+6) from two dispatch-cost changes, and the engine is ~20% faster on hook-heavy runs. That is the first
 grade movement the throughput lever has produced; the remaining cap rows (86 at dur >= 84) need another step of the same kind.
+
+#### 0.17mp Two more plumbing candidates measured: the write body is 6%, and the ledger's std::set is not the cost
+
+Continuing 0.17mo's rule (count the plumbing before optimizing the body), this round measured the two remaining per-event costs on
+mpress_geek (74.5 s after the dispatch fast path):
+
+  * **the write hook body** - `TAOTE_WRITE_FASTPATH=1` (new default-off diagnostic that returns at the top of `on_section_write`)
+    reads 71.5 s against 76.2 s, i.e. the whole write body costs ~4.7 s (6%) of a write-heavy decode. Not the lever.
+  * **the candidate ledger's dedupe** - `dumped_addrs_` is a `std::set<std::uint64_t>` tested once per BASIC BLOCK at three hot
+    sites, i.e. a red-black tree lookup and, on a miss, a node allocation for every block of the payload phase. Implemented a
+    byte-granular bitset over the image (one bit per image byte, set/fallback for addresses outside) and measured the corpus:
+
+        r146 (before) PE 2677, OEP 2333, IMP 2381, ALL 2299, wall 20214 s, rows at dur >= 84: 86
+        r147 (bitset) PE 2677, OEP 2332, IMP 2381, ALL 2298, wall 20163 s, rows at dur >= 84: 86
+        gained: none. lost: telock_HDDScan.
+
+    A wash on the clock (0.25%) and one row lost, so it was REVERTED in full. Two lessons: the std::set is not the cost either, and a
+    row whose claim depends on a write ordinal (telock_HDDScan) can be flipped by a change that does not alter any logic - so an
+    all-three loss at this scale must be re-checked standalone before it is attributed to the mechanism (it was: the row reports its
+    true entry 0x883d20 alone in both builds, so the corpus loss is a timing flip in the 4-worker sweep).
+
+Standing picture after this round: corpus 2299, engine ~20% faster than at the round's start, 86 rows still at dur >= 84. The two
+changes that DID pay were both about the dispatch plumbing (redundant hooks 18 -> 2, and the per-event shared_ptr copy), which is the
+only reliable pattern so far: the cost lives around the callback, not inside it.
