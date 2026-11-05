@@ -15776,3 +15776,25 @@ So a `dur 86` row in a full corpus run needs roughly **1.85-2.0x** to fit, and t
 
 Nothing comparable is available for the rest of the cap population: their artifacts fail for reasons the reference shares
 (0.17mw), so throughput would only shorten them.
+
+#### 0.17nc MEW relocates its decoder at runtime, so the reference's static signatures cannot be hooked where the dump shows them
+
+Blocking finding for the four-loop port, measured before writing the port this time.
+
+The reference's MEW accelerator hooks four loops by byte signature (kSigDb/kSigBtf/kSigBtr/kSigLit). Those signatures ARE
+present in taote's dumped MEW image (`mew_Bginfo` image offsets 0x3fd195 DecodeBit / 0x3fd22d BitTreeF / 0x3fd267
+BitTreeR / 0x3fd46a LitTree; `mew_procexp` 0x3a48e7 / 0x3a497f / 0x3a49b9 / 0x3a4bbc), and the bodies disassemble
+cleanly (BitTreeF/BitTreeR are complete functions: entry ecx=probs, edx=numBits, [ebp+8]=rc, `ret 4`). But:
+
+  * a signature scan of the exec sections AT INSTALL TIME finds nothing (the debug line never prints), and
+  * `TAOTE_PROBE` at all three dump addresses records **0 hits** during a full run (0x43fd22d, 0x43fd267, 0x43fd2a9).
+
+So the copy in the dump is a TEMPLATE, not the executing code: the stub relocates/decrypts its decoder elsewhere (the run
+claims `[0x401000,0x6ef000)` and `[0x6ef000,0x7fd010)` plus dyn-mapped rwx pages at 0x80c000/0x5001000..0x5003000), and the
+decoder runs from that relocated copy. Any port of the reference's signature hooks must therefore (a) install lazily, when
+the relocated decoder becomes executable, and (b) scan the region the run actually touches - not the packed image.
+
+Two consequences recorded: the tree-helper accelerator I wrote (one hook per BitTree, whole tree run against a local
+range-coder state, 3 memory ops per call) was discarded without a measurement because it could never have fired; and the
+next attempt must first LOCATE the executing decoder (probe the claim/dyn regions for the kSigDb bytes during a run, e.g. from
+the section-claim path) before any acceleration code is written.
