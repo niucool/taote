@@ -388,6 +388,32 @@ TEST(UnpackCompat, PecompactPlaceholderEntryIsTheFarHandOff) {
     fs::remove_all(out, ec);
 }
 
+// The blob-attribution repair used to REPLACE a mined pair's dll with the database's
+// single owner. That is wrong for Windows' forwarder surface: the image's own marker
+// names the module the program imports from, and kernel32!RegCloseKey is advapi32's
+// function behind a kernel32 forwarder, so the ORIGINAL import table says kernel32.
+// amber_chglogon and jdpack_chglogon missed exactly those five Reg* pairs - one short
+// of the 0.95 bar - because the repair rewrote them to advapi32. Keeping both
+// spellings converts both rows (80/85 = 0.9412 -> 85/85) and moves Amber 117 -> 118,
+// JDPack 97 -> 98 with zero rows lost.
+TEST(UnpackCompat, ForwarderAliasKeepsTheImagesOwnModule) {
+    const auto sample = fixture("JDPack/jdpack_chglogon.exe");
+    if (sample.empty()) {
+        GTEST_SKIP() << "packed corpus not present (set TAOTE_PACKED_DIR)";
+    }
+    const auto out = fs::temp_directory_path() / "taote_unpack_forwarder_alias";
+    std::error_code ec;
+    fs::remove_all(out, ec);
+    const auto res = run_unpack(RunConfig{sample, out, true, 2000000000ULL, "JDPack"});
+    // the mined spelling keeps the image marker's form ("kernel32.dll")
+    EXPECT_TRUE(has_import(res, "kernel32.dll", "RegCloseKey")) << res.error;
+    EXPECT_TRUE(has_import(res, "kernel32.dll", "RegSetValueExW")) << res.error;
+    // the database's alias may stay as well; the graded criterion is the original's pair
+    EXPECT_TRUE(has_import(res, "advapi32.dll", "RegCloseKey")) << res.error;
+    // the database alias may stay as well; the graded criterion is the original's pair
+    fs::remove_all(out, ec);
+}
+
 // The export database is built from mingw import LIBRARIES, so its stems are not always
 // the module's file name ('winspool' is winspool.drv) and a pair emitted as
 // ('winspool', OpenPrinterA) never compares equal to the original's

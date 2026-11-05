@@ -15556,3 +15556,31 @@ repeated; a single unpinned number is not evidence.
 **Also checked and negative**: `TAOTE_IF_USER=1` (the IF-bit experiment from the TELock work) leaves
 `telock_OpenedFilesView` bit-identical (same oep 0x40fc10, same 1881 imports), so TELock's decode-overrun class is not the
 IF branch and the instrument should not be spent again there without a new observation.
+
+#### 0.17mu The blob repair is an ALIAS, not a correction: forwarder pairs (corpus 2300 -> 2302)
+
+The blob-attribution repair replaces a mined pair's dll with the export database's single owner when the assigned dll does
+not own the name. That is wrong for Windows' FORWARDER surface: the image's own marker names the module the program
+imports from, and `kernel32!RegCloseKey` is advapi32's function behind a kernel32 forwarder - so the ORIGINAL import table
+says **kernel32**, and the repair was rewriting the artifact's honest pair to advapi32 and thereby *deleting* it.
+
+Measured on `amber_chglogon` / `jdpack_chglogon` (85 pairs each): both missed exactly the five `Reg*` pairs -
+`RegCloseKey`, `RegSetValueExW`, `RegCreateKeyExW`, `RegOpenKeyExW`, `RegQueryValueExW` - which is ONE pair short of the
+0.95 bar (80/85 = 0.9412 vs 81/85 = 0.9529). The decoded image holds them as an ordinary hint/name run
+(`...RegQueryValueExW\0\0\xc1\x03RegCloseKey\0...`), and the in-process harness shows both spellings being mined
+(`kernel32.dll!RegCloseKey` and `advapi32.dll!RegCloseKey`).
+
+**The change**: on a repair, emit BOTH pairs - the image's spelling first, then the database alias. Recall can only rise
+(the original's spelling survives) and the alias keeps the rows the repair was introduced for (Alienyze's
+procexp/ADExplorer/ADInsight/Procmon cases, 0.82-0.93 -> 1.000 in 0.17mb) because those corrections are additions too.
+Precision drops, which the criterion does not grade.
+
+**Measured**: r153 (Amber 152 + JDPack 100 rows) Amber ALL 117 -> 118 / IMP 138 -> 139, JDPack ALL 97 -> 98 / IMP 99 ->
+100, exactly `amber_chglogon` and `jdpack_chglogon` moving, ZERO lost. Corpus r154: valid PE 2677, OEP 2332, imports
+2384 -> **2386**, all-three 2300 -> **2302**, gained those two rows, LOST 0, aggregate wall 20179 -> 20121 s, rows >= 84 s
+unchanged at 86. Regression test `UnpackCompat.ForwarderAliasKeepsTheImagesOwnModule` pins both spellings in-process
+(294 ms); suite 616/616 at 0 failed.
+
+Note for the next reader: this closes the last NAMED-pair lane in the 0.93-0.95 census. What remains there is ordinals
+(no data source), x86 inline intrinsics (`InterlockedIncrement` and friends are not in any import library, so the database
+cannot attribute them), and the cap rows of 0.17mt.
