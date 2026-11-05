@@ -15695,3 +15695,35 @@ imports. Suite 617/617.
 walk the zero-filled region into the next section, and the garbage execution diverges before the stub runs (0.17mq). The
 engage is idle on them, and the reference only reaches them because ITS garbage walk happens to land on the stub. That is
 the one thing the host decode cannot paper over: the stub has to run once.
+
+#### 0.17mz The 4-worker sweep is memory-bandwidth bound: cap rows run ~2x slower than the same command standalone
+
+Chasing MEW's four cap rows produced a measurement rule that changes how cap rows must be judged. `mew_Bginfo` reports
+recall 0.9373 at dur 86 in BOTH the r159 and r160 sweeps (identical number, so it is systematic, not random), yet the
+HARNESS'S OWN COMMAND run standalone - `taskset -c 0 timeout 120 taote -t ... --unpack-timeout 85` - finishes in **46 s
+with imports 1985 and recall 1.000**, and the sweep's run reaches only 812 imports in its 86 s. Memory is not the cause
+(max RSS 72 MB); the load recorded at reap is ~4.1-6.2 on an 8-core box while four workers each pin one core, so what the
+workers contend on is MEMORY BANDWIDTH (unicorn's TB plus the per-block image traffic), not cores.
+
+Consequence: a row that needs 45 s standalone needs ~86 s in the sweep, so a cap row needs a ~2x improvement, not the
+"~10%" earlier rounds assumed. MEW's `mew_Bginfo` / `mew_ComIntRep` / `mew_Sysmon` are exactly this class: all three pass
+standalone with the SAME budget (recall 1.000 measured on Bginfo) and all three fail in every sweep at the same recall.
+They are not mechanism targets until MEW's decode is at least twice as fast.
+
+**Alienyze has no headroom at all**: its 7 remaining misses on r159 all have `oep_exact: None` because the originals are
+managed (.NET) - ungradeable by construction - and the eighth (`alienyze_tinytask`, code_sim 0.148) is a decode failure the
+reference also has.
+
+**Ports the reference still holds that taote lacks** (from its git log, with the rows they could reach):
+  * `install_mew_lzma_acc_` - MEW's stub decodes its payload with an embedded LZMA SDK decoder; the reference accelerates
+    the four inner loops (DecodeBit, BitTree forward/reverse, the inlined literal tree, the match copy) against measured
+    signatures. This is the only thing that would make MEW's three contention-bound rows fit; it is a large port (four
+    patched interpreter loops with precise [ebp-relative] guest state) and must show ~2x on the family to matter.
+  * `install_aspack_hostdec_` - ASPack whole-decode single-shot engage (same shape as the NSPack engage that landed in
+    0.17my, but with three per-sample state bytes in its 0xA1-byte window). taote's ASPack is 93 of 94; the only miss is
+    the 31 MB `aspack_adwcleaner`, so the ceiling is +1.
+  * `bf177ef3`'s cross-start restart-spin detector: saves wall on livelocked rows (amber_accesschk 33 s -> 2.1 s) with an
+    IDENTICAL artifact, so it cannot convert a row by itself - only through the wall-time feedback that converted
+    `rlpack_Bginfo` in 0.17my.
+  * `install_alienyze_loopacc_` (a checksum-loop accelerator) and a WinUpack engage: the reference's own verdict on
+    WinUpack is "no decodable stream at the entry, so no engage" (STATUS 468), so that lane is closed by its evidence.
