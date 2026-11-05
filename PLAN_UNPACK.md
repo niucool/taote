@@ -16019,3 +16019,35 @@ decode is the bulk of the run. For the rows that currently miss, `post_import` i
 Housekeeping note for the next session: `/tmp` is a 7.6 GB tmpfs and the per-run dump directories fill it - at 73-80% used
 `ctest` produced 3 spurious failures and an artifact write of 0 bytes on a run that then reported imports=0. Clean the
 `/tmp/<tag>` run dirs before reading any red test or a zero-byte artifact as a code defect.
+
+#### 0.17nk ASPack's decoder runs host-side: family 93/94 -> 94/94 and its last row 87 s -> 1.8 s
+
+Ported the reference's ASPack single-shot host decode (pegasus `install_aspack_hostdec_` + `packers/aspack_unpacker`):
+`qiling/unpack/packers/aspack_host.hpp/.cpp` is the guest-free codec (canonical Huffman + LZ77 with the three slot
+tables and the post-decode E8/E9 transform), `aspack_stub_sig.hpp` carries the reference's verified blobs (a 271-byte
+engage window at `.aspack+0xA1` and the 2256-byte decoder body at `.aspack+0x6C8`), and `Unpacker::install_aspack_hostdec`
+verifies them on the section holding the packed EP, then hooks the stub's own `call` site (S+0xFC). At each fire the
+frame is validated (5 args, the entry table's rva/size, `[ebp+0x488] == base`, buf/scratch echoes), the section is decoded
+host-side, the output is written, the claim is mirrored exactly as the native rep-movsd would have claimed it, and the
+guest resumes at S+0x17B with the native post-call state (esp+0x10, eax=bytes, ecx=0, ebx=src, edi=end).
+
+Why it pays here and not on MEW: on `aspack_adwcleaner_7.2.4.0.exe` (the family's only miss) the true payload hop lands at
+**73.82 s of a 75.3 s run** - the decode IS the whole run, and the imports are harvested from the completed image 0.9 s
+later - so replacing the decode with a host call is the entire win (`post_import` on MEW's rows was 0.05 s, which is why
+the same trick cannot convert those).
+
+Measured: the row goes 75.3 s -> **1.80 s**, oep 0x8fb5d8 exact, code_sim 1.0, 603/603 imports; its dump differs from the
+native decode in **142 of 19,608,320 bytes** (application runtime state after the hop). ASPack family (94 rows, 4 workers,
+85 s): **ALL 93 -> 94, zero rows lost**.
+
+Porting trap, measured: the stub's one-shot E8/E9 gate is a SELF-MOD (`inc byte [ebp+0xEF]`), so a host decode must mirror
+that write. Without it every section is filtered, `.rdata`/`.data`/`.rsrc` come out byte-different from the native decode
+and the stub derails in its reloc fixup (final pc 0x100211f0, no payload hop, OEP picked from .reloc = 0x566dbf). With it,
+the dump matches to 142 bytes.
+
+Corpus r166 (2678 rows) read 2299 all-three under heavy external load (recorded load averages 13.1-15.6 at the 5/15-minute
+marks versus 4.4-8.0 in r164; aggregate wall 19382 s versus 18074 s, rows at dur>=84: 93 versus 79). All eight rows it
+"lost" were at exactly the 86 s cap with their r164 durations at 28-72 s, and all eight pass standalone on a quiet box
+(24-40 s each, EP exact, recall 1.0: mew_HWMonitorPro_x32, mew_Procmon, mew_disk2vhd, mew_procexp, mpress_ADInsight,
+mpress_ComIntRep, mpress_Procmon, mpress_Sysmon). So the honest corpus figure is **2307 (r164's 2306 + the ASPack row)**,
+and r166's 2299 is a load artifact. **Re-baseline on a quiet box before using r166 for any comparison.**
