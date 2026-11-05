@@ -15641,3 +15641,28 @@ Consequence for the next session: the corpus's remaining all-three headroom is n
 (mpress_HDDScan) and (b) the both-engines-fail families (Themida 122, Yoda-Protector 101, and the decode rows scattered
 through Amber/RLPack/BeRo/etc.), which need a mechanism NEITHER engine has. Before writing code for (b), look for external
 evidence (a public unpacker write-up for the specific family) rather than trying another picker.
+
+#### 0.17mx The hot path was calling getenv() once per basic block (corpus 2302 -> 2304, wall -5%)
+
+`Unpacker::on_section_exec` runs once per basic block, and its `TAOTE_IF_USER` experiment was written as a bare
+`std::getenv("TAOTE_IF_USER")` - a strlen plus a linear scan of the environment on EVERY block inside a watched section.
+Every other knob in that body is a function-level `static const bool`; this one was not.
+
+**Sized first, pinned and interleaved** on `mpress_HDDScan` (79 s run): the body costs 21.6 s of it
+(`TAOTE_HOOK_FASTPATH=1` gives 57.7 s), and of that the PREFIX before the written-range test is 7.6 s (level 2 gives
+65.3 s) - which is the `watched_` scan plus exactly this one getenv call.
+
+**The change**: hoist it to a `static const bool`.
+
+**Measured**: `mpress_HDDScan` pinned and interleaved, base **79.14 / 78.64 s** vs new **73.74 / 73.64 s** (-7%), byte-identical
+artefact (ep 0x483d20 = the truth, 2344 pairs). Corpus r157: valid PE 2677, OEP exact 2336 -> **2339** (90.1%), imports
+2386 -> **2387**, all-three 2302 -> **2304**, gained `rlpack_geek` (its 86 s sweep run now fits at 84 s) plus
+`mpress_Listdlls` returning from the r156 wall-timeout flake, **LOST 0**. Aggregate wall 20199 -> **19185 s (-5%)**, rows
+at dur >= 84: 88 -> **84**.
+
+`mpress_HDDScan` itself still measures 86 s in the 4-worker sweep and stays out: 7% was not enough (the sweep's per-run
+overhead on a 79 s standalone run is ~9-10%, not the ~5% this bought). It remains the one row that a further ~5% would
+convert.
+
+Lesson for the next reader: when a body is hot, check that every knob it reads is a `static`, not a live `getenv`. This is
+the same class of finding as the dispatch-plumbing rounds - the cost sat in the plumbing around the work, not in the work.

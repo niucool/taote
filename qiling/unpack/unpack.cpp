@@ -1647,7 +1647,11 @@ int Unpacker::on_section_exec(std::uint64_t addr) {
     // taote's guest therefore runs with IF=0, while the reference runs at eflags=0x202. TELock
     // reads its own flags back before choosing the decryptor's key seed and takes a different
     // branch when the interrupt flag is clear (measured: the seed block 0x418fb1.. at 0x418faf).
-    if (std::getenv("TAOTE_IF_USER") != nullptr) {
+    // cached: this body runs once per basic block, and an uncached getenv() here measured
+    // 7.6 s of mpress_HDDScan's 79 s run (the delta between TAOTE_HOOK_FASTPATH levels 1
+    // and 2 is exactly this call plus the watched_ scan)
+    static const bool if_user = std::getenv("TAOTE_IF_USER") != nullptr;
+    if (if_user) {
         auto& fl_regs = ql_->arch().regs();
         const auto fl = fl_regs.read("eflags");
         if ((fl & 0x200ull) == 0) {
