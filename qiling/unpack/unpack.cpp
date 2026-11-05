@@ -1553,6 +1553,10 @@ void Unpacker::install(Qiling& ql) {
             }
         }
     }
+    // ASPack single-shot host decode (0.17nk): family-scoped, before the run starts.
+    if (opts_.family == "ASPack" && std::getenv("TAOTE_NO_ASPACK_HOSTDEC") == nullptr) {
+        install_aspack_hostdec();
+    }
     if (!watched_.empty()) {
         auto write_hook = std::make_shared<HookRet>(ql.hook_mem_write(
             [this](int /*access*/, std::uint64_t addr, std::uint32_t size, std::int64_t value) -> int {
@@ -2107,6 +2111,16 @@ int Unpacker::on_section_exec(std::uint64_t addr) {
                     }
                 }
                 if (dumped_addrs_.insert(addr).second && stages_ < opts_.max_stages) {
+                    {
+                        static const auto t0 = std::chrono::steady_clock::now();
+                        static const bool on = std::getenv("TAOTE_DECTIME") != nullptr;
+                        if (on) {
+                            std::fprintf(stderr, "[dectime] first hop at %.2fs (addr %s)\n",
+                                         std::chrono::duration<double>(
+                                             std::chrono::steady_clock::now() - t0).count(),
+                                         hex(addr).c_str());
+                        }
+                    }
                     dump_module(*ql_, addr, "section_hop");
                     // consume the claim (the reference erases written_ranges_
                     // here) except for the lazy-decompressor families, whose
@@ -2143,6 +2157,318 @@ int Unpacker::on_section_exec(std::uint64_t addr) {
 // The reference's dump_module accept gate (unpacker.cpp:6610-6834), cut down to
 // the generic rules: never a zero page, never a printable data blob (unless the
 // target section is exec/hollow), first hop wins, later hops must not shrink.
+// ASPack single-shot host decode (PLAN_UNPACK.md 0.17nk), ported from the reference's
+// install_aspack_hostdec_ (pegasus src/unpacker/unpacker.cpp:4177-4531).
+//
+// The ASPack 2.x stub decompresses each payload section with a canonical-Huffman/LZ77
+// codec at .aspack+0x6C8 and copy-backs with rep movsd. That codec is byte-identical across
+// the whole corpus (apart from four per-sample STATE bytes), so it is verified here and run
+// host-side: the section is decoded in milliseconds instead of ~74 s of emulated bit work,
+// and the guest resumes at the stub's own post-call `pop esi` with the native register state.
+// Measured on aspack_adwcleaner_7.2.4.0.exe (the family's only miss): the true hop lands at
+// 73.82 s of a 75.3 s run, i.e. the decode IS the run, and its imports are harvested from the
+// completed image 0.9 s later.
+void Unpacker::install_aspack_hostdec() {
+    if (is_64_ || base_ == 0 || image_size_ == 0) {
+        return;
+    }
+    // Anchor on the .aspack section that HOLDS the packed EP (some builds carry two).
+    const PackSection* asp = nullptr;
+    for (const auto& ps : sections_) {
+        if (ps.name != ".aspack") {
+            continue;
+        }
+        if (asp == nullptr) {
+            asp = &ps;
+        }
+        if (packed_ep_va_ >= ps.start && packed_ep_va_ < ps.end) {
+            asp = &ps;
+            break;
+        }
+    }
+    if (asp == nullptr) {
+        return;
+    }
+    const std::uint64_t S = asp->start;
+    const std::uint64_t call_va = S + 0xFC;    // the `call decoder` site
+    const std::uint64_t resume_va = S + 0x17B; // the `pop esi` after the copy-back
+    bool guarded = false, only_e8 = false;
+    std::uint8_t tag = 0;
+    try {
+        std::vector<std::uint8_t> w1 = ql_->mem().read(S + 0xA1, sizeof(packers::kAspackEngageWin));
+        if (w1.size() != sizeof(packers::kAspackEngageWin)) {
+            return;
+        }
+        // four per-sample STATE/PARAMETER bytes: 0x61 the `mov bl,imm8` gate, 0x8A/0x96 the
+        // filter body's jmp rel8s, 0x99 the guarded flavour's reloc tag.
+        for (std::size_t i = 0; i < w1.size(); ++i) {
+            if (i == 0x61 || i == 0x8A || i == 0x96 || i == 0x99) {
+                continue;
+            }
+            if (w1[i] != packers::kAspackEngageWin[i]) {
+                if (opts_.debug) {
+                    std::fprintf(stderr, "[unpack] aspack hostdec: window mismatch at +0x%zx\n", i + 0xA1);
+                }
+                return;
+            }
+        }
+        const std::uint32_t rel = static_cast<std::uint32_t>(w1[0x5C]) |
+                                  (static_cast<std::uint32_t>(w1[0x5D]) << 8) |
+                                  (static_cast<std::uint32_t>(w1[0x5E]) << 16) |
+                                  (static_cast<std::uint32_t>(w1[0x5F]) << 24);
+        if (static_cast<std::uint64_t>((call_va + 5) + rel) != S + 0x6C8) {
+            return;
+        }
+        const std::uint8_t jskip = w1[0x8A], jrel = w1[0x96], tbyte = w1[0x99];
+        if (jskip == 0x04) {
+            only_e8 = true;
+        } else if (jskip != 0x00) {
+            return;  // unknown filter shape: native
+        }
+        if (jrel == 0x0A) {
+            guarded = false;
+        } else if (jrel == 0x00) {
+            guarded = true;
+            tag = tbyte;
+        } else {
+            return;  // unknown filter flavour: native
+        }
+        const std::vector<std::uint8_t> body =
+            ql_->mem().read(S + 0x6C8, sizeof(packers::kAspackDecoderBlob));
+        if (body.size() != sizeof(packers::kAspackDecoderBlob) ||
+            std::memcmp(body.data(), packers::kAspackDecoderBlob, body.size()) != 0) {
+            if (opts_.debug) {
+                std::fprintf(stderr, "[unpack] aspack hostdec: decoder blob mismatch\n");
+            }
+            return;
+        }
+        const auto t1 = ql_->mem().read(S + 0x732, 28);
+        const auto t2 = ql_->mem().read(S + 0x74E, 28);
+        const auto t3 = ql_->mem().read(S + 0x76A, 58);
+        if (t1.size() != 28 || t2.size() != 28 || t3.size() != 58) {
+            return;
+        }
+        std::memcpy(aspack_tabs_.extra_base, t1.data(), 28);
+        std::memcpy(aspack_tabs_.extra_bits, t2.data(), 28);
+        std::memcpy(aspack_tabs_.dist_bits, t3.data(), 58);
+    } catch (...) {
+        return;
+    }
+    aspack_call_va_ = call_va;
+    aspack_resume_va_ = resume_va;
+    aspack_guarded_ = guarded;
+    aspack_only_e8_ = only_e8;
+    aspack_tag_ = tag;
+    aspack_dead_ = false;
+    auto h = std::make_shared<HookRet>(
+        ql_->hook_code([this](std::uint64_t addr, std::uint32_t) -> int {
+            return aspack_hostdec_fire(addr);
+        }, call_va, call_va + 5));
+    if (h->obj() != nullptr) {
+        hooks_.push_back(std::move(h));
+    } else {
+        aspack_dead_ = true;
+    }
+    if (opts_.debug) {
+        std::fprintf(stderr, "[unpack] aspack hostdec armed: call=%s resume=%s %s\n",
+                     hex(call_va).c_str(), hex(resume_va).c_str(),
+                     guarded ? "guarded" : "plain");
+    }
+}
+
+// Mirror the native write hook's bookkeeping for a host-side decode: the claim sequence is
+// what the hop machinery consumes, so the decoded section must be claimed exactly as the
+// stub's own rep-movsd copy-back would have claimed it.
+void Unpacker::mirror_host_write(std::uint64_t dst, std::uint64_t total) {
+    const std::uint64_t dend = dst + total;
+    for (const auto& ps : watched_) {
+        if (ps.end <= dst || ps.start >= dend) {
+            continue;
+        }
+        if (claimed_.count(ps.start) != 0) {
+            continue;
+        }
+        ++write_seq_;
+        last_write_seq_[ps.start] = write_seq_;
+        std::uint64_t claim_start = ps.start;
+        std::uint64_t claim_end = ps.end;
+        const bool is_ep_section = packed_ep_va_ >= ps.start && packed_ep_va_ < ps.end;
+        if (is_ep_section) {
+            bool hollow_pred = false;
+            for (const auto& q : sections_) {
+                if (q.end <= ps.start && ps.start - q.end < 0x1000 && q.raw == 0 && q.vsize > 0) {
+                    hollow_pred = true;
+                    break;
+                }
+            }
+            if (hollow_pred && packed_ep_va_ > 0x100 && packed_ep_va_ - 0x100 > ps.start) {
+                claim_end = packed_ep_va_ - 0x100;
+            }
+        }
+        if (claim_end == ps.end && claim_end % 0x1000 != 0) {
+            const std::uint64_t aligned = (claim_end + 0xfff) & ~static_cast<std::uint64_t>(0xfff);
+            claim_end = std::min<std::uint64_t>(aligned, base_ + image_size_);
+        }
+        const auto claim = std::make_pair(claim_start, claim_end);
+        ever_written_.insert(claim);
+        written_ranges_.insert(claim);
+        wr_cache_lo_ = claim.first;
+        wr_cache_hi_ = claim.second;
+        claimed_.insert(ps.start);
+        if (opts_.debug) {
+            std::fprintf(stderr, "[unpack] host claim %s [%s,%s)\n", ps.name.c_str(),
+                         hex(claim_start).c_str(), hex(claim_end).c_str());
+        }
+    }
+}
+
+int Unpacker::aspack_hostdec_fire(std::uint64_t addr) {
+    if (aspack_dead_ || addr != aspack_call_va_) {
+        return 0;
+    }
+    const auto bail = [this](const char* why) -> int {
+        if (++aspack_bails_ >= 3) {
+            aspack_dead_ = true;
+        }
+        if (opts_.debug) {
+            std::fprintf(stderr, "[unpack] aspack hostdec bail #%d: %s\n", aspack_bails_, why);
+        }
+        return 0;
+    };
+    auto& regs = ql_->arch().regs();
+    std::uint32_t esp = 0, ebp = 0;
+    try {
+        esp = static_cast<std::uint32_t>(regs.read("esp"));
+        ebp = static_cast<std::uint32_t>(regs.read("ebp"));
+    } catch (...) {
+        return 0;
+    }
+    const auto rd32 = [this](std::uint64_t va, std::uint32_t& v) -> bool {
+        std::vector<std::uint8_t> t;
+        try {
+            t = ql_->mem().read(va, 4);
+        } catch (...) {
+            return false;
+        }
+        if (t.size() != 4) {
+            return false;
+        }
+        v = static_cast<std::uint32_t>(t[0]) | (static_cast<std::uint32_t>(t[1]) << 8) |
+            (static_cast<std::uint32_t>(t[2]) << 16) | (static_cast<std::uint32_t>(t[3]) << 24);
+        return true;
+    };
+    // the call frame: src, dst buffer, size, scratch, entry-table pointer
+    std::uint32_t src = 0, buf = 0, size = 0, scratch = 0, entp = 0;
+    if (!rd32(esp, src) || !rd32(esp + 4, buf) || !rd32(esp + 8, size) ||
+        !rd32(esp + 0xC, scratch) || !rd32(esp + 0x10, entp)) {
+        return bail("frame");
+    }
+    std::uint32_t rva = 0, esz = 0, f3 = 0, next_rva = 0;
+    if (!rd32(entp, rva) || !rd32(entp + 4, esz) || !rd32(entp + 8, f3) ||
+        !rd32(entp + 12, next_rva)) {
+        return bail("table");
+    }
+    (void)f3;
+    if (rva == 0 || esz == 0 || esz == 0xFFFFFEF2u) {
+        return bail("rva");
+    }
+    if (esz != size || esz > 0x4000000u) {
+        return bail("size");
+    }
+    std::uint32_t delta = 0, want_buf = 0, want_scratch = 0;
+    if (!rd32(ebp + 0x488, delta) || delta != static_cast<std::uint32_t>(base_)) {
+        return bail("base");
+    }
+    if (src != static_cast<std::uint32_t>(base_ + rva)) {
+        return bail("src");
+    }
+    if (!rd32(ebp + 0x144, want_buf) || want_buf != buf) {
+        return bail("buf");
+    }
+    if (!rd32(ebp + 0x148, want_scratch) || want_scratch != scratch) {
+        return bail("scratch");
+    }
+    const std::uint64_t dst = base_ + rva;
+    if (dst + size > base_ + image_size_) {
+        return bail("dst");
+    }
+    const std::uint64_t avail = image_size_ - rva;
+    std::vector<std::uint8_t> srcbuf;
+    try {
+        srcbuf = ql_->mem().read(src, static_cast<std::size_t>(avail));
+    } catch (...) {
+        return bail("read");
+    }
+    if (srcbuf.size() != avail) {
+        return bail("short");
+    }
+    std::vector<std::uint8_t> out(size + 0x120, 0);
+    const packers::AspackDecodeResult r =
+        packers::aspack_decode_section(srcbuf.data(), srcbuf.size(), size, aspack_tabs_,
+                                      out.data(), out.size());
+    if (!r.ok || r.total != size) {
+        return bail("decode");
+    }
+    // the stub's one-shot E8/E9 gate: [ebp+0xEF] is 0 for a section that still owes the pass
+    std::uint8_t gate = 1;
+    try {
+        const auto t = ql_->mem().read(ebp + 0xEF, 1);
+        if (t.size() == 1) {
+            gate = t[0];
+        }
+    } catch (...) {
+        return bail("gate");
+    }
+    if (gate == 0) {
+        packers::aspack_e8e9_unfilter(out.data(), r.total, aspack_guarded_, aspack_tag_,
+                                      aspack_only_e8_);
+        // mirror the stub's OWN self-mod (`inc byte [ebp+0xEF]`), which is what makes the
+        // E8/E9 pass one-shot: without it every section is filtered (measured: .rdata/.data/
+        // .rsrc came out byte-different from the native decode and the stub derailed during
+        // its reloc/import fixup at 0x100211f0).
+        try {
+            ql_->mem().write(ebp + 0xEF, std::vector<std::uint8_t>{static_cast<std::uint8_t>(gate + 1)});
+        } catch (...) {
+            return bail("gate-write");
+        }
+    }
+    // copies land in guest memory the same way the stub's rep movsd tail would
+    constexpr std::size_t kChunk = 1u << 20;
+    for (std::size_t off = 0; off < r.total; off += kChunk) {
+        const std::size_t take = std::min(kChunk, static_cast<std::size_t>(r.total) - off);
+        try {
+            ql_->mem().write(dst + off,
+                             std::vector<std::uint8_t>(out.begin() + static_cast<std::ptrdiff_t>(off),
+                                                       out.begin() + static_cast<std::ptrdiff_t>(off + take)));
+        } catch (...) {
+            return bail("write");
+        }
+    }
+    mirror_host_write(dst, r.total);
+    // the native post-call state: args popped, eax = bytes, ecx = 0, ebx = src,
+    // edi = decode end, resume at the stub's own `pop esi` (which pops the 5th arg).
+    try {
+        regs.write("esp", static_cast<std::uint64_t>(esp + 0x10));
+        regs.write("eax", static_cast<std::uint64_t>(r.total));
+        regs.write("ecx", 0);
+        regs.write("ebx", static_cast<std::uint64_t>(src));
+        regs.write("edi", static_cast<std::uint64_t>(dst + r.total));
+        regs.write("eip", aspack_resume_va_);
+    } catch (...) {
+        return bail("resume");
+    }
+    ++aspack_fires_;
+    if (opts_.debug) {
+        std::fprintf(stderr, "[unpack] aspack hostdec fire #%llu: rva=0x%x size=0x%x -> [%s..%s)\n",
+                     static_cast<unsigned long long>(aspack_fires_), rva, size,
+                     hex(dst).c_str(), hex(dst + r.total).c_str());
+    }
+    if (next_rva == 0) {
+        aspack_dead_ = true;  // last table entry: the import fixup runs natively
+    }
+    return 0;
+}
+
 void Unpacker::dump_module(Qiling& ql, std::uint64_t addr, const std::string& reason) {
     // The reference ledgers candidates during the run and emits the dump once at
     // pick time from terminal memory (unpacker.cpp:6789-6830 + pick_and_emit_oep

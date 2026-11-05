@@ -26,6 +26,7 @@
 #include <vector>
 
 #include "qiling/core.hpp"
+#include "qiling/unpack/packers/aspack_host.hpp"
 
 namespace qiling {
 namespace unpack {
@@ -245,6 +246,22 @@ private:
     // (measured: MPRESS's decode target is entered mid-decode first, and erasing
     // the range there lost the true OEP at 0x407a98)
     std::set<std::uint64_t> dumped_addrs_;
+    // ASPack single-shot host decode (PLAN_UNPACK.md 0.17nk): the stub's per-section
+    // decompressor runs host-side at its own call site, then the guest resumes at the
+    // post-call `pop esi`. Ported from pegasus install_aspack_hostdec_.
+    void install_aspack_hostdec();
+    int aspack_hostdec_fire(std::uint64_t addr);
+    void mirror_host_write(std::uint64_t dst, std::uint64_t total);
+    std::uint64_t aspack_call_va_ = 0;
+    std::uint64_t aspack_resume_va_ = 0;
+    bool aspack_guarded_ = false;
+    bool aspack_only_e8_ = false;
+    bool aspack_dead_ = true;
+    std::uint8_t aspack_tag_ = 0;
+    int aspack_bails_ = 0;
+    std::uint64_t aspack_fires_ = 0;
+    packers::AspackSlotTables aspack_tabs_{};
+
     // the FIRST write per image byte (the reference's shadow_image_/shadow_seen_,
     // unpacker.h:919-945): anti-dump stubs memset the decoded image after the
     // payload is in place (MEW) and just-in-time packers re-encrypt it (TELock), so

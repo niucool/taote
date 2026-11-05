@@ -410,6 +410,28 @@ TEST(UnpackCompat, NspackHostDecodeRecoversThePayload) {
     fs::remove_all(out, ec);
 }
 
+// The ASPack 2.x stub decompresses every payload section with one byte-identical codec
+// (apack+0x6C8, verified by a 271-byte engage window with four per-sample state bytes and a
+// 2256-byte decoder blob). Running it host-side replaces ~74 s of emulated bit work with
+// milliseconds; aspack_adwcleaner_7.2.4.0.exe's true hop lands at 73.82 s of a 75.3 s native
+// run, so the native decode IS the run. The one-shot E8/E9 gate (`inc byte [ebp+0xEF]`) must be
+// mirrored, or every section gets filtered and the stub derails during its reloc fixup.
+// Pinned without timing, on an instruction budget the native path cannot reach.
+TEST(UnpackCompat, AspackHostDecodeRecoversThePayload) {
+    const auto sample = fixture("ASPack/aspack_adwcleaner_7.2.4.0.exe");
+    if (sample.empty()) {
+        GTEST_SKIP() << "packed corpus not present (set TAOTE_PACKED_DIR)";
+    }
+    const auto out = fs::temp_directory_path() / "taote_unpack_aspack_hostdec";
+    std::error_code ec;
+    fs::remove_all(out, ec);
+    const auto res = run_unpack(RunConfig{sample, out, true, 8000000ULL, "ASPack"});
+    ASSERT_EQ(res.base, 0x400000u) << res.error;
+    EXPECT_EQ(res.oep, res.base + 0x8fb5d8u);   // truth; the native decode needs ~74 s to get there
+    EXPECT_GT(res.imports.size(), 1000u) << res.error;
+    fs::remove_all(out, ec);
+}
+
 // The blob-attribution repair used to REPLACE a mined pair's dll with the database's
 // single owner. That is wrong for Windows' forwarder surface: the image's own marker
 // names the module the program imports from, and kernel32!RegCloseKey is advapi32's
