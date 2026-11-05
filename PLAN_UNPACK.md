@@ -15610,3 +15610,34 @@ losing all-three to the cap flip, because the table is available without waiting
 Remaining TELock misses are now 4 decode rows (BlueScreenView, DriverView, shexview, sysexp) which get the RIGHT ENTRY
 from the table but still fail imports because the run dies (UC_ERR_READ_UNMAPPED at ~0x41e128) before the payload is
 decoded - OEP-only gain until that decode is fixed - plus the managed rows and `adwcleaner`.
+
+#### 0.17mw TELock's decoder lane and the last OEP candidates are both-engines-fail; the cap board is now two coin flips
+
+**TELock's four remaining decode rows are not headroom.** BlueScreenView, DriverView, shexview and sysexp now get the RIGHT
+entry from the stub's table (0.17mv) but still fail imports: their runs die at ~0x41e128 with UC_ERR_READ_UNMAPPED inside
+the stub's own `rep movsb` decompressor (pcdump: eax=4 edx=0x5000840, esi=0x401006 edi=0x40100a, i.e. an in-place move into
+`.text`). The reference does NOT decode them either - `[recon] dump=135168B meta.imports=0` and its dump is the packed stub
+image - it only reads the EP table (`oepfromtable`, 0.17mv). So both engines recover the entry and neither recovers the
+payload: these rows are both-engines-fail on imports and can never be all-three. TELock is therefore done at
+OEP 101 / IMP 110 / ALL 96 of 116, with its 12 managed rows ungradeable and `adwcleaner` (31 MB) failing on both engines.
+
+**Yoda-Protector's two imports-OK rows are not headroom either.** `yoda-protector_procdump` and `yoda-protector_livekd`
+have working imports and wrong entries, but the reference answers them from its `oep_source: "family"` rule with
+oep_rva 0x4bbd6 and 0x34ec0 against the originals' 0x171e7 and 0x9663 - WRONG on both. There is no reference mechanism to
+port here; its family rule is not a truth source on these samples.
+
+**`bero_geek` is not headroom**: the reference answers oep_rva 0xa771 against the original's 0x159760 (also wrong) with
+`meta.imports=0`. It only looked convertible because taote's own standalone run picks the truth when it has time.
+
+**The cap board is two coin flips.** After 0.17mv the only cap rows that would convert are ones whose standalone run is
+already correct:
+  * `mpress_HDDScan`: standalone with a 450 s budget it reports `oep=0x883d20` (= base+0x483d20, the truth) with 2541
+    imports in **79 s**, but the 4-worker sweep at an 85 s budget measures 86 s and loses it. It needs ~10% under load,
+    not a mechanism.
+  * `telock_HDDScan` is no longer one of them: the table read (0.17mv) gives it the truth without waiting for the hop.
+Everything else at dur >= 84 is either already all-three (63 of the 88) or a decode failure that fails for the reference too.
+
+Consequence for the next session: the corpus's remaining all-three headroom is now exactly (a) ~10% throughput on ONE row
+(mpress_HDDScan) and (b) the both-engines-fail families (Themida 122, Yoda-Protector 101, and the decode rows scattered
+through Amber/RLPack/BeRo/etc.), which need a mechanism NEITHER engine has. Before writing code for (b), look for external
+evidence (a public unpacker write-up for the specific family) rather than trying another picker.
