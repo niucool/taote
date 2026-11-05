@@ -16211,3 +16211,35 @@ Consequences, all of them planning-grade:
    (deterministic, 0 flips) and use the full sweep only for the aggregate picture. A full sweep that "loses" a row at
    dur>=84 must be re-run in a short sweep before it is read as a regression - and vice versa: a row that "gains" at
    dur 86 in one full sweep should be re-checked the same way.
+
+#### 0.17nr the ordinal spelling is measured HARMFUL (0 conversions, 112 regressions) - and the real blocker is a missing descriptor
+
+0.17ni closed the ordinal lane on provenance. A legitimate source turned up: the emulator's own Win7 rootfs
+(`rootfs/x8664_windows/WIN7X64/Windows/SysWOW64/*.dll`) is host SDK data - exactly what the reference reads from the real
+System32 - and its export tables carry the TRUE ordinal bases (ws2_32: bind=2, socket=23, WSAStartup=115,
+WSAAsyncSelect=101, matching the frozen classic table; 69 dlls parsed, oleaut32 400 names, comctl32 118, kernel32 1359).
+My earlier "the rootfs stub only exports ordinals 1..30" note was wrong: I added the image base instead of the export
+directory's Base field.
+
+So the lane was re-opened and SIMULATED over all 2678 r168 artifacts (add `(dll, #N)` for every emitted name that the
+host table has an ordinal for, then re-grade):
+
+* **conversions: 0**
+* **regressions: 112** - because `imports` needs PRECISION >= 0.95 too, and emitting both spellings roughly doubles the
+  emitted pair count. e.g. upx_PEview 0.9714 -> 0.4857, telock_PEview 1.0000 -> 0.5000, mpress_Snap2HTML 1.0000 -> 0.5000.
+  The rows it was meant to save have precision ~0.5-0.85 already, so recall gains cannot lift them either.
+
+Blanket emission is therefore a strict regression and must not be implemented. (Selective emission keyed on which spelling
+a row "wants" would be corpus-fitting.)
+
+**The real defect the simulation exposed**: for the closest rows taote does not emit the dll AT ALL, so there is nothing to
+translate. winupack_FileTypesMan emits 225 pairs at precision **1.0000** and misses 15 (comctl32#17 + 14 ws2_32 ordinals);
+its artifact contains **zero** ws2_32 pairs even though the decoded image holds the name string `WS2_32.DLL` at
+0x1e274 - with **no import descriptor pointing at it** (no 20-byte descriptor has Name == 0x1e274; the bytes right after
+the string are `ff 73 00 00 ff ...`, i.e. thunk data). So the payload's ws2_32 import table survives in the image with its
+descriptor header stripped, and recovering it means associating an orphan dll-name string with a nearby ordinal thunk
+array - the same "orphan descriptor" shape taote's mine_orphan_descriptors handles for other families, which does not fire
+here.
+
+That is the one concrete, non-circular import lead left: ~15 WinUpack + ~7 PEtite rows miss exactly this (their images are
+code_sim 1.0 and their precision is already 1.0, so a recall-side fix alone would convert them).
