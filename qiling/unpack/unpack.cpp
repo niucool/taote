@@ -4524,7 +4524,17 @@ UnpackResult Unpacker::finalize(Qiling& ql) {
                     break;
                 }
             }
-            const bool junk = meta_oep_ == 0 || (st_start != 0 && meta_oep_ >= st_start);
+            // The reference gates this read on the table merely being PRESENT in the shadow
+            // (SE_TELOCK_CRCFIX) because the stub's own record is authoritative. taote used to
+            // refuse it whenever the latched OEP merely LOOKED plausible (below the stub, e.g. a
+            // claim start), which skipped the truth on exactly the rows that need it: measured on
+            // 116 TELock rows, trusting the table whenever the stub wrote it moves OEP 97 -> 101
+            // and all-three 95 -> 96 with NO row losing its entry - BlueScreenView 0x401000 ->
+            // 0x40e78e, DriverView 0x401000 -> 0x40a36a, shexview 0x401000 -> 0x40ef60, sysexp
+            // 0x4011c4 -> 0x40acb2, HDDScan 0x7bb11e -> 0x883d20 (which also stopped that row losing
+            // all-three to the cap flip). TAOTE_NO_TELOCK_TABLE restores the old refusal.
+            static const bool table_always = std::getenv("TAOTE_NO_TELOCK_TABLE") == nullptr;
+            const bool junk = table_always || meta_oep_ == 0 || (st_start != 0 && meta_oep_ >= st_start);
             if (st_start != 0 && junk && st_start >= base_) {
                 const auto st_off = static_cast<std::size_t>(st_start - base_);
                 if (st_off + 0x1ce4 <= shadow_seen_.size() && shadow_seen_[st_off + 0x1cc0] &&

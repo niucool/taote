@@ -15584,3 +15584,29 @@ unchanged at 86. Regression test `UnpackCompat.ForwarderAliasKeepsTheImagesOwnMo
 Note for the next reader: this closes the last NAMED-pair lane in the 0.93-0.95 census. What remains there is ordinals
 (no data source), x86 inline intrinsics (`InterlockedIncrement` and friends are not in any import library, so the database
 cannot attribute them), and the cap rows of 0.17mt.
+
+#### 0.17mv TELock: trust the stub's own EP table whenever it is in the shadow (OEP 97 -> 101 on the family)
+
+The reference gets TELock's entry from the stub's OWN record, not from a hop: its log reads
+`[oepfromtable] ~K3=0xe78e -> oep=0x40e78e (was 0x41d037)` with `seen_1cc0=1 seen_1ce0=1`, i.e. it reads
+`[stub+0x1cc0]` (image base) and `[stub+0x1ce0]` (`~EP`) out of the FIRST-WRITE SHADOW and takes `~K3 + imgb`. It gates
+that read only on the two fields being present (SE_TELOCK_CRCFIX) because the stub's record is authoritative.
+
+taote has the same read (`telock oep-from-table`), but gated it further: it refused the table whenever the latched OEP
+merely LOOKED plausible, i.e. anything below the stub section - which is exactly a claim start such as `.text` 0x401000.
+On the rows that need the table most, the pick was a plausible claim start and the truth was skipped.
+
+**The change**: trust the table whenever the stub wrote both fields (`TAOTE_NO_TELOCK_TABLE` restores the old refusal).
+
+**Measured on the family (116 TELock rows, r155)**: OEP 97 -> **101**, all-three 95 -> **96**, imports unchanged, with
+exactly five entries moving and NONE regressing: BlueScreenView 0x401000 -> 0x40e78e, DriverView 0x401000 -> 0x40a36a,
+shexview 0x401000 -> 0x40ef60, sysexp 0x4011c4 -> 0x40acb2, and HDDScan 0x7bb11e -> 0x883d20 - which also stops that row
+losing all-three to the cap flip, because the table is available without waiting for the hop machinery.
+
+**Corpus r156**: OEP exact 2332 -> **2336** (90.0%), imports 2386, all-three 2302 with `telock_HDDScan` gained and
+`mpress_Listdlls` lost to an unrelated wall-timeout (dur 120 s vs its usual 6 s; standalone twice afterwards it reports
+`oep=0x409666` with 372 imports in 5.9 s). Attributable: **+1 all-three, +4 OEP**, zero real losses.
+
+Remaining TELock misses are now 4 decode rows (BlueScreenView, DriverView, shexview, sysexp) which get the RIGHT ENTRY
+from the table but still fail imports because the run dies (UC_ERR_READ_UNMAPPED at ~0x41e128) before the payload is
+decoded - OEP-only gain until that decode is fixed - plus the managed rows and `adwcleaner`.
