@@ -15750,3 +15750,29 @@ so the next attempt starts from the four-loop shape rather than from the bit fun
 
 The accelerator was reverted (correct but valueless) - a per-bit code hook on the hottest loop of every MEW row would also
 add a new failure surface for zero gain.
+
+#### 0.17nb The ~2x on cap rows is SUSTAINED-CLOCK throttling on a mobile 4C/8T CPU, proven by sweep length alone
+
+0.17mz blamed memory bandwidth. It is not that: it is the machine. The box is an **Intel i7-6770HQ (4 cores / 8 threads,
+mobile, 45 W) with the `powersave` governor**; a four-row sweep finishes in seconds at boost (cores read 2.8-3.0 GHz while
+idle), while a hundred- or thousand-row sweep holds four emulation threads at 100% for minutes and the package settles well
+below boost.
+
+The proof is a controlled pair on the SAME three rows and the SAME binary:
+  * 4-row sweep, `--unpack-timeout 85` (the corpus's own setting): `mew_Bginfo` **47 s, recall 1.000**; `mew_ComIntRep` 47 s
+    1.000; `mew_Sysmon` 47 s 1.000 - all three all-three.
+  * 4-row sweep, `--unpack-timeout 300`: the same three, 46 s, recall 1.000.
+  * 106-row sweep (r160) and 2678-row sweep (r159), both at 85 s: the same three at **86-87 s with recall 0.9373 / 0.8994 /
+    0.9053** - identical numbers in both sweeps, i.e. deterministic for a given sweep length, not random contention.
+Standalone with the same 85 s budget they take 43.6 s and reach 1985 imports.
+
+So a `dur 86` row in a full corpus run needs roughly **1.85-2.0x** to fit, and the budget value is irrelevant (85 vs 300 vs
+450 change nothing when the sweep is short). Two consequences:
+  * cap-row arithmetic from earlier rounds ("needs ~10%") was wrong by a factor of ~4; only a ~2x mechanism converts them.
+  * MEW's three rows are exactly that class, and the reference's MEW accelerator measures **6.1x** (60.45 s -> 9.51 s on
+    mew_Bginfo, 0.17na). The four-loop port is therefore a VALIDATED **+3 rows** if it lands anywhere near the reference's
+    speed - which is why it deserves its own round with the success criterion ">=2x on mew_Bginfo, standalone, before any
+    corpus run".
+
+Nothing comparable is available for the rest of the cap population: their artifacts fail for reasons the reference shares
+(0.17mw), so throughput would only shorten them.
