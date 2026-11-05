@@ -15950,3 +15950,43 @@ Two conclusions for planning:
    zero semantic change - but the corpus total does not move, because the corpus's wall is not dominated by block-hook
    dispatch and the cap rows are inflated by worker contention far more than the hook body.
 2. Cap-row conversion needs a mechanism that removes guest work wholesale (a host-side decode), not a faster hook.
+
+#### 0.17ni two lanes closed by measurement: no idle app-emulation to prune, and no honest name->ordinal table
+
+**(a) The reference's 7-arm decoded-payload hop-stop does not apply to taote's cap rows.** The hypothesis was that a row
+which decoded perfectly (code_sim 1.0) burns the rest of the budget emulating the unpacked APPLICATION, so stopping once
+the artifact is settled would convert it. Measured directly by stamping the wall clock of the last *fresh* import and
+comparing with the run's total (temporary instrumentation, not kept):
+
+| row | total | last import | post-import idle |
+|---|---|---|---|
+| mew_ComIntRep.exe | 33.97 s | 33.94 s | **0.03 s** |
+| mew_Sysmon.exe | 29.35 s | 29.31 s | **0.04 s** |
+| petite_DarkNamer.exe | 150.44 s | 150.38 s | **0.06 s** |
+| aspack_adwcleaner_7.2.4.0.exe | 74.91 s | 74.76 s | **0.15 s** |
+| mpress_HDDScan.exe | 74.01 s | 73.95 s | **0.06 s** |
+
+Imports keep arriving until the run's last fraction of a second on every one of them, so there is no post-settle phase to
+prune: these rows are import-resolution-bound, not application-emulation-bound. A hop-stop would therefore *truncate* the
+import table - exactly the failure the reference documents for its own stop rule ("stopping at the instruction plateau
+alone yields 97 imports against 131", its IAT arm and settle windows exist to prevent it). The mechanism is not portable
+to taote's cap rows and no early-stop design can convert them.
+
+**(b) PEtite's four near-bar import rows are unreachable without an authoritative name->ordinal table.** Their artifacts
+are code_sim 1.0 with recall just under the bar and the missing pairs are *all* ws2_32/oleaut32/comctl32 ordinals:
+petite_FileTypesMan 0.9458 (needs 1 more pair), petite_shexview 0.9419 (needs 2), petite_Everything 0.9349 (needs 5),
+petite_ShareEnum 0.9198 (needs 8). taote already HAS the names (`bind`, `connect`, `WSAStartup`, `WSASetLastError`,
+`getaddrinfow`, ...) while the originals use the frozen winsock ordinals (#2 bind, #23 socket, #115 WSAStartup, ...), so
+emitting BOTH spellings - the forwarder-alias trick that shipped as +2 rows (0.17mu) - would close all four. What is
+missing is only the name->ordinal map, and no honest source exists in-tree:
+* `third_party/tcc/lib/*.def` (the reference's own table) lists names with **no** ordinals;
+* the rootfs `ws2_32.dll` is a mingw stub exporting 30 names at ordinals 1..30 - it does not carry the real table;
+* `qiling/unpack/api_db.inc` is a name->owning-dll blob only (tools/gen_api_db.py);
+* deriving it from the corpus's own not-packed originals is circular, which that generator's docstring forbids by name.
+So this lane stays closed unless an SDK-grade or spec-grade ordinal table is checked in as data. Do not attempt it from
+corpus evidence.
+
+Consequence: with 0.17nf..0.17ni the import-side lanes (named pairs, ordinals, near-bar recall) are all measured closed,
+the OEP-side pocket is 46 ungradeable + 3 closed rows, and the cap rows need >3x. The corpus stands at 2306-2307 and the
+only remaining lever with a positive expected value is a wholesale host decode (the reference's 1166-line MEW
+symbol-level accelerator, +3 if it reaches >3x). 
