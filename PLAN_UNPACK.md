@@ -16079,3 +16079,17 @@ same loop-patching measures 2% (DecodeBit) + 0% (BitTrees) + 6% (match copy), be
 MEW is therefore CLOSED for taote as well, on a measured mechanism argument rather than on effort: the only remaining
 route is a full transcription of the guest driver with an exact write/claim mirror, and its payoff (+3) is bounded by a
 cost the reference measured at 1166 lines.
+
+#### 0.17nm clean corpus r168: 2308 all-three (the new baseline), and the ASPack row is a real +1
+
+Full corpus on a quiet box (2678 rows, 4 workers, 85 s budget, wallcap 120, commit 68e68fd):
+valid PE **2677**, OEP exact **2340**, imports **2391**, **all-three 2308**, aggregate wall **17736 s**, 80 rows at
+dur>=84 (max 98). Recorded load averages stayed at or below 8.05 for the whole sweep.
+
+Against r164 (2306 / 2339 / 2389 / wall 18074 s) this is **+2 all-three with zero rows lost**:
+* `aspack_adwcleaner_7.2.4.0.exe` - the ASPack host decode shipped in 0.17nk (87 s cap -> 2 s, recall 1.0);
+* `rlpack_Bginfo.exe` - back from the cap flake that r164 lost (dur 85, recall 1.0), exactly the class 0.17nh documented.
+So the honest statement of the ASPack port is **+1 (2307 -> 2308)** against a clean baseline, and 2308 is the figure every
+future comparison must diff against (r166's 2299 was load-contaminated and must not be used).
+
+Session tally: 1843 -> **2308** (86.2% of 2678; 88.9% of the 2597 gradeable base).
