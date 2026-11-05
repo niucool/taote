@@ -15872,3 +15872,38 @@ slightly (imports 2035 vs 1985, oep unchanged), which is extra risk for no grade
 Consequence - the MEW lane is CLOSED unless someone ports the symbol-level decode wholesale: within this session's reach the
 honest accounting is that MEW's three contention-bound rows (+3) cost a full LZMA-symbol host decoder, and every partial
 accelerator has now been measured and shown insufficient. Do not spend another round on MEW's inner loops.
+
+#### 0.17nf Amber's twelve no-hop rows are both-engines-fail, and the trap that invented a fake +11
+
+Census of r159's `fallback_guess` lane (111 rows, **zero** of them all-three): Yoda-Protector 88, Amber 13,
+NSPack 5, WinUpack 2, Alienyze 1, Eronana 1, MPRESS 1. The Amber cluster (12 gradeable rows, all claiming
+`0x4014ea`, dur 0-2 s) looked like free headroom because the guessed EP sits inside a `.text` that the run
+executed without decoding.
+
+**What taote actually does on amber_Hash.exe**: it executes the file's own header EP (`exec PAYLOAD 0x4014a0
+(written=0)`), claims only `.bss`/`.data`, records **16 stores in the whole run**, resolves
+`GetProcAddress(user32.dll, VirtualAlloc)` to a minted sentinel at 0x443000 and then jumps to **0x50009eb**, i.e.
+into taote's 32-bit guest heap (`heap_address = 0x5000000` in profiles/windows.ql), where nothing was ever
+written. The heap is mapped `UC_PROT_ALL` (memory.cpp:619/651), so the fault is *not* a missing exec permission -
+the stub's stage was never produced. `user32!VirtualAlloc` is also not a real export (VirtualAlloc is kernel32's),
+so real Windows returns NULL for that lookup and the stub takes a different branch; taote's sentinel hands it a
+callable thunk instead.
+
+**Both engines fail, on the same image**: on amber_Hash / LoadOrdC / chkdsk / sigcheck the reference publishes
+`payload_not_code` with EP 0x14000 / 0x34000 / 0x11000 / 0x60000 against true EPs 0x532c / 0x4de2 / 0x29a6 /
+0x1b7cb, and its artifact's code_sim equals taote's to four decimals (0.0137/0.0325/0.0160/0.0331) with import
+recall 0.0000 - the two engines produce the *same* undecoded image. ⇒ Amber's twelve are a shared decode failure
+of the heap-stage class, not headroom, and the reference's own `payload_not_code` is the verdict for the family.
+
+**The trap (worth more than the lane)**: grading a candidate against the *packed* sample instead of the manifest's
+`orig` fabricates a win. Compared against `packed/Amber/amber_Hash.exe` the artifact is code_sim **1.0000** with
+import recall **1.0000** and EP 0x14a0 exact-looking, because the packed `.text` that the run left untouched IS
+the packed file's bytes; against the manifest's `not-packed/Hash.exe` the same artifact is code_sim 0.0137, recall
+0.1176 and EP wrong. On that fake signal a header-EP preference was implemented (the reference's ordering,
+`meta_.oep ? meta_.oep : guess_oep()`) and it flipped eleven rows to "EP exact, sim 1.0, rec 1.0" - against the
+wrong baseline. It was reverted unmerged. **Always grade with `orig` from /home/jim/runs/r127.json**; a candidate
+that looks perfect against the packed file is the default failure mode of this lane, because a stub that never
+runs leaves the packed bytes in place.
+
+Consequence: the `fallback_guess` lane converts nothing today and its biggest family (Yoda-Protector) is closed
+both-engines-fail, so nothing here is worth another round.
