@@ -388,6 +388,29 @@ TEST(UnpackCompat, PecompactPlaceholderEntryIsTheFarHandOff) {
     fs::remove_all(out, ec);
 }
 
+// The export database is built from mingw import LIBRARIES, so its stems are not always
+// the module's file name ('winspool' is winspool.drv) and a pair emitted as
+// ('winspool', OpenPrinterA) never compares equal to the original's
+// ('winspool.drv', OpenPrinterA) - the grader only strips a '.dll' suffix. The image
+// names the module it imports from (petite_PEViewer holds 'WINSPOOL.DRV' at 0x826 and
+// again in its decoded table), so a pair whose spelling carries no extension is
+// re-spelled from the image's own marker. That is the row's whole gap: recall 0.9456
+// (539/570) -> 0.9509 (542/570) with its three winspool.drv pairs.
+TEST(UnpackCompat, ImportModuleSpellingComesFromTheImage) {
+    const auto sample = fixture("PEtite/petite_PEViewer.exe");
+    if (sample.empty()) {
+        GTEST_SKIP() << "packed corpus not present (set TAOTE_PACKED_DIR)";
+    }
+    const auto out = fs::temp_directory_path() / "taote_unpack_modspell";
+    std::error_code ec;
+    fs::remove_all(out, ec);
+    const auto res = run_unpack(RunConfig{sample, out, true, 2000000000ULL, "PEtite"});
+    ASSERT_EQ(res.base, 0x400000u) << res.error;
+    EXPECT_TRUE(has_import(res, "WINSPOOL.DRV", "OpenPrinterA")) << res.error;
+    EXPECT_TRUE(has_import(res, "WINSPOOL.DRV", "EnumPrintersA")) << res.error;
+    fs::remove_all(out, ec);
+}
+
 // RLPack and the ASPack-family name tables store each dll's names BEFORE the marker
 // that terminates its block - `...FilterGetMessage\0\0\x13\0FilterReplyMessage\0\0
 // FLTLIB.DLL\0` - while the container miner's forward walk attributes a name to the

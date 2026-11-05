@@ -15487,3 +15487,39 @@ Two measured notes:
 2383, all-three **2299 -> 2300**, gained `rlpack_Procmon`, LOST 0, aggregate wall 20214 -> 20130 s, rows >= 84 s
 unchanged at 86. Regression test `UnpackCompat.RlpackNameThenMarkerBlocksAreAttributed` pins the entry and two of the
 three fltlib pairs; serial suite 614/614 at 0 failed.
+
+#### 0.17ms Module spelling: 'winspool' is winspool.drv (petite_PEViewer converts)
+
+The export database (`api_db.inc`) is generated from mingw-w64 import LIBRARIES, whose stems are not always the module's
+file name: `winspool` is the print spooler's *winspool.drv*. A pair emitted as `('winspool', OpenPrinterA)` therefore never
+compares equal to the original's `('winspool.drv', OpenPrinterA)` - the grader lowercases and strips only a `.dll` suffix -
+so the artifact was scored as missing imports it had actually recovered.
+
+**The fix** (`TAOTE_NO_MODSPELL` opts out): the image names the module it imports from, so a stem->spelling map is built
+from the image's own markers (any `.dll`/`.drv`/`.ocx` string, lowest offset wins) and every pair whose spelling carries
+NO extension is re-spelled from it - unless the image's spelling is exactly `<stem>.dll`, which is what the rest of the
+pipeline already emits. Measured target: `petite_PEViewer` holds `WINSPOOL.DRV` at 0x826 and again in its decoded table,
+and its three `winspool.drv` pairs were the row's entire gap.
+
+**Measured**: family r151 (73 PEtite rows) IMP 66 -> 67, ALL 65 -> 66, only `petite_PEViewer` moving: recall 0.9456
+(539/570) -> **0.9509** (542/570, 3 pairs re-spelled). Corpus r152: valid PE 2677, imports 2383 -> **2384**, all-three
+2300 with `petite_PEViewer` gained and `telock_HDDScan` lost to the documented CAP FLIP - standalone with the new binary it
+reports `oep=0x883d20` = base+0x483d20, the true entry, in 55 s (the sweep kills it at 86 s). Attributable: **+1, zero real
+losses**. Aggregate wall 20130 -> 20179 s, rows >= 84 s unchanged at 86.
+
+Blast radius measured before the change: across all 2678 rows exactly ONE would cross the 0.95 bar under an
+extension-insensitive dll comparison (`petite_PEViewer` 0.9456 -> 0.9509), so this is a narrow correctness fix, not a
+metric trick.
+
+Two measured negatives recorded with it so they are not retried:
+  * `TAOTE_ANCHOR_ANY` (default OFF, kept as an instrument): dropping the descriptor-anchored pass's "owner must be a
+    declared dll" gate added 114 pairs on `petite_PEViewer` but gained NO matched pair - the extra names were already
+    present under another spelling, and its three real misses were the module-spelling case above.
+  * the remaining named misses in the 13-row recall 0.93-0.95 census are NOT recoverable by any of these passes:
+    `amber_chglogon`/`jdpack_chglogon` miss five `Reg*` names that the ORIGINAL imports from kernel32 while the SDK
+    database files them under advapi32 (kernel32's forwarder surface) - emitting the kernel32 spelling would be an
+    assumption about Windows' forwarder table, not evidence from the image, so it was not done; `petite_PEViewer`'s three
+    Interlocked* misses are inline intrinsics on x86 and are absent from every import library, so the database cannot
+    attribute them at all.
+
+Suite 615/615 at 0 failed, tree clean.
