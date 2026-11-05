@@ -15823,3 +15823,26 @@ the decoder region, immediately before DecodeBit) is the one that materialises i
 set a pending flag in the claim path and retry the scan from the block hook on a sparse schedule (every ~100k blocks, a
 handful of attempts) until both signatures are found, then verify with a fire counter. Two attempts this round produced
 nothing to measure because the hooks were never installed; the diagnosis above is what the next round starts from.
+
+#### 0.17nd MEW accelerator, attempt 3: three traps identified, and the trees measured worthless
+
+Attempt 3 got the hooks to the right place and measured them. Result: **the BitTree helpers are a negligible share**
+(44.53/44.73 s off vs 45.52/45.02 s on, identical oep 0x5b5d42 and 1985 imports), so nothing was kept. The three traps
+worth recording, because each one silently produced a "no effect" measurement:
+
+1. **MEW's sections carry NO exec bit.** The debug section list prints `MEW 0x401000-0x6ef000 vs=0x2ee000 raw=0x0 exec=0` and
+   `..u..... 0x6ef000-0x80c000 raw=0x10e129 exec=0`. Any signature scan gated on `ps.is_exec` therefore skips the whole
+   image; the scan must walk `[base_, base_+image_size_)` window-wise (64 KB windows, 32-byte overlap, unreadable windows
+   skipped). With that fix the two BitTree signatures are found at 0x7fd22d and 0x7fd267 on the first retry (block 65536).
+2. **A hook registered at RUNTIME never fires**, of either kind: `ql.hook_code(va, va+1)` and `ql.hook_block(va, va+1)` both
+   install successfully (`obj() != nullptr`) while the unpacker's own image-wide block hook reports execution at those exact
+   pcs. Dispatching from the existing image-wide block hook instead (`if (state==1 && (addr==fwd||addr==rev)) return
+   tree(addr);`) does reach the accelerator, so that is the working shape for any runtime-materialised target.
+3. **The trees are not where MEW's time goes.** With the dispatch working and the tree code executing host-side (whole tree
+   against a local range-coder state, 3 memory operations per call instead of 8 guest DecodeBit round trips), the wall time
+   does not improve. The run is dominated by the INLINED literal tree and the match-copy loop - exactly the two parts the
+   reference implements separately and the two this port did not touch.
+
+Consequence for the +3 rows: the >=2x gate cannot be met by the tree helpers; a future attempt must implement the inlined
+literal tree and the match-copy loop (the reference's remaining two of four), with the dispatch-from-block-hook shape and the
+whole-image scan above, and it must show >=2x on mew_Bginfo standalone before any family or corpus run.
