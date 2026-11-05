@@ -263,8 +263,32 @@ void QlCoreHooks::dispatch_intr(int intno, std::uint64_t hook_type) {
     }
 }
 
+namespace {
+// the small-index form of a UC_HOOK_* bit flag (they are powers of two)
+inline std::size_t hook_type_index(std::uint64_t type) noexcept {
+#if defined(__GNUC__) || defined(__clang__)
+    if (type != 0 && (type & (type - 1)) == 0) {
+        return static_cast<std::size_t>(__builtin_ctzll(type));
+    }
+#endif
+    return 64;  // not a single-bit type: no fast path
+}
+}  // namespace
+
 void QlCoreHooks::dispatch_trace(std::uint64_t hook_type, std::uint64_t address, std::uint32_t size) {
     trace_blocked_ = false;
+    // the cached single-hook fast path: no map find, no shared_ptr copy
+    const auto fast_idx = hook_type_index(hook_type);
+    if (fast_idx < 64 && fast_hook_gen_[fast_idx] == hook_gen_ && fast_hook_[fast_idx] != nullptr) {
+        const Hook* only = fast_hook_[fast_idx];
+        if (only->bound_check(address, size)) {
+            const int ret = only->trace ? only->trace(address, size) : 0;
+            if ((ret & QL_HOOK_BLOCK) != 0) {
+                trace_blocked_ = true;
+            }
+        }
+        return;
+    }
     const auto it = hook_.find(hook_type);
     if (it != hook_.end()) {
         // The hooks list might change from within a hook method, so it is
@@ -279,6 +303,10 @@ void QlCoreHooks::dispatch_trace(std::uint64_t hook_type, std::uint64_t address,
         // keep the hook alive if it removes itself mid-callback.
         static thread_local std::vector<std::shared_ptr<Hook>> scratch;
         if (it->second.size() == 1) {
+            if (fast_idx < 64) {
+                fast_hook_[fast_idx] = it->second.front().get();
+                fast_hook_gen_[fast_idx] = hook_gen_;
+            }
             const std::shared_ptr<Hook> only = it->second.front();
             if (only->bound_check(address, size)) {
                 const int ret = only->trace ? only->trace(address, size) : 0;
@@ -307,9 +335,30 @@ bool QlCoreHooks::dispatch_mem(std::uint64_t hook_type, int access, std::uint64_
                                std::int64_t value) {
     bool handled = false;
 
+    // fast path for the single-hook-per-type case: this runs per MEMORY ACCESS, and
+    // the generic path below copies the hook vector (a shared_ptr refcount pair per
+    // element) on every one of them. A decode that writes millions of bytes paid that
+    // copy millions of times.
+    const auto fast_idx = hook_type_index(hook_type);
+    if (fast_idx < 64 && fast_hook_gen_[fast_idx] == hook_gen_ && fast_hook_[fast_idx] != nullptr) {
+        const Hook* only = fast_hook_[fast_idx];
+        if (only->bound_check(address, size)) {
+            handled = true;
+            (void)(only->mem ? only->mem(access, address, size, value) : 0);
+        }
+        if (!handled && (hook_type & (UC_HOOK_MEM_UNMAPPED | UC_HOOK_MEM_PROT)) != 0) {
+            throw QlErrorCoreHook("_hook_mem_cb : not handled");
+        }
+        return true;
+    }
+
     const auto it = hook_.find(hook_type);
     if (it != hook_.end()) {
         static thread_local std::vector<std::shared_ptr<Hook>> scratch;
+        if (it->second.size() == 1 && fast_idx < 64) {
+            fast_hook_[fast_idx] = it->second.front().get();
+            fast_hook_gen_[fast_idx] = hook_gen_;
+        }
         scratch.assign(it->second.begin(), it->second.end());
 
         for (const auto& hook : scratch) {
@@ -490,6 +539,7 @@ void QlCoreHooks::ql_hook_impl(std::uint64_t hook_type, std::shared_ptr<Hook> ho
             const uc_hook handle = hook_internal(handler.type, handler.trampoline, 1, 0, handler.type);
             hook_fuc_[handler.type] = handle;
         }
+        ++hook_gen_;
         hook_[handler.type].push_back(std::move(hook));
     }
 }

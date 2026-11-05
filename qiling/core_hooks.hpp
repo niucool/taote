@@ -217,6 +217,14 @@ private:
     // list — one per event type (≤ the number of UC_HOOK_* types), released in
     // clear_hooks / the destructor.
     std::map<std::uint64_t, std::vector<std::shared_ptr<Hook>>> hook_;
+    // Fast path for the single-hook-per-type case. The unpacker installs exactly one
+    // per-block hook and that callback is THE hot path of a run: the generic dispatch
+    // does a std::map find plus a shared_ptr copy (an atomic refcount pair) per event,
+    // which is pure overhead when there is one hook to call. Cache the sole Hook* per
+    // hook type and invalidate the whole cache whenever the registries change.
+    std::uint64_t hook_gen_ = 0;
+    const Hook* fast_hook_[64] = {};
+    std::uint64_t fast_hook_gen_[64] = {};
     std::map<std::uint64_t, uc_hook> hook_fuc_;
     std::map<std::uint64_t, std::vector<std::shared_ptr<Hook>>> insn_hook_;
     std::map<std::uint64_t, uc_hook> insn_hook_fuc_;

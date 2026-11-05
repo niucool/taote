@@ -15373,3 +15373,23 @@ Measured:
 
 So the structural per-block dispatch is worth ~5-10% and one cap row; the rest of the 86x gap has to come from the dispatch chain
 itself (map lookup + shared_ptr bookkeeping per block), which is the next rung of LEVER 2.
+
+#### 0.17mo The dispatch chain: a single-hook fast path in the memory dispatch (+4 corpus, -7.6% wall)
+
+0.17mn removed the redundant hooks; this removes the per-EVENT cost inside the dispatch itself. `dispatch_mem` copied the hook vector
+(`scratch.assign`) on every memory access - a shared_ptr refcount pair per element, per write, which a decode that writes millions of
+bytes paid millions of times. `dispatch_trace` did the same for code/block events with a `std::map` find plus a shared_ptr copy.
+
+Both now cache the sole `Hook*` per hook type (`hook_gen_` invalidates the cache on any registration or removal) and call it directly.
+
+Measured:
+  * single rows: mpress_geek 82.7 -> 74.0 s, mew_procexp 48.9 -> 41.2 s (from the round's start: 91.9 -> 74.0 and 51.5 -> 41.2,
+    i.e. -19% and -20%), identical oep/imports on both;
+  * the 28 cap rows: ALL 16 -> 16 with durations down 8-22% across the board (rlpack_HDDScan 79 -> 68, telock_HDDScan 71 -> 55,
+    expressor_Bginfo 66 -> 55, mew_Bginfo 61 -> 53), zero lost;
+  * corpus r146 (2678 rows, 4 workers, 85 s, wallcap 120): PE 2677, OEP 2329 -> 2333, IMP 2379 -> 2381, ALL 2295 -> **2299** -
+    gained mew_procexp, mpress_geek (the ~90 s cap row now finishes inside 85 s), pecompact_Bginfo and telock_HDDScan, ZERO lost.
+    Aggregate wall 21871 -> 20214 s (-7.6%), rows at dur >= 84: 90 -> 86.
+
+Round total: 2293 -> 2299 (+6) from two dispatch-cost changes, and the engine is ~20% faster on hook-heavy runs. That is the first
+grade movement the throughput lever has produced; the remaining cap rows (86 at dur >= 84) need another step of the same kind.
