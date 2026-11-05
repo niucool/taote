@@ -15933,3 +15933,20 @@ Measured, `taskset -c 3`, interleaved pairs, byte-identical artifacts:
 
 Rule confirmed twice: the per-block hook bodies must contain no `getenv`, and any guard whose cache flag is constant
 must put that flag FIRST so the volatile test is never evaluated.
+
+#### 0.17nh corpus r164: the 13% per-row win is corpus-neutral (2306 vs 2307) - and the sweep inflates a cap row ~3x
+
+Full corpus after 0.17ng (2678 rows, 4 workers, 85 s budget, wallcap 120, commit 11e6c0d):
+valid PE 2677, OEP exact 2339, imports 2389, **all-three 2306**, aggregate wall 18074 s (r159: 2307 / 2390 / 18122 s).
+
+One row moved: rlpack_Bginfo.exe (dur 86 pass -> dur 86, recall 1.0 -> 0.8328). It is a cap flake, not a regression -
+standalone on the new build it is deterministic (oep 0x5b5d42, 1095 imports, 28.41 / 28.71 s). Note the factor: the
+same row needs **28.5 s standalone and 86 s inside the 4-worker sweep (~3x)**, which is far worse than the 1.85-2.0x
+inflation recorded in 0.17nb, and it is the quantitative reason a 13-14% per-row win cannot convert a cap row: the
+mechanism would have to be >3x, not >2x.
+
+Two conclusions for planning:
+1. The hand-off getenv cache (0.17ng) is kept on its own merits - byte-identical artifacts, 13-14% on block-bound rows,
+   zero semantic change - but the corpus total does not move, because the corpus's wall is not dominated by block-hook
+   dispatch and the cap rows are inflated by worker contention far more than the hook body.
+2. Cap-row conversion needs a mechanism that removes guest work wholesale (a host-side decode), not a faster hook.
