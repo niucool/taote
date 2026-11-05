@@ -15523,3 +15523,36 @@ Two measured negatives recorded with it so they are not retried:
     attribute them at all.
 
 Suite 615/615 at 0 failed, tree clean.
+
+#### 0.17mt The cap class, two measured negatives, and how to measure on this box
+
+**Cap census at r152**: of 86 rows at dur >= 84 s, 63 already grade all-three and the 23 that do not are decode or
+multi-field failures - `adwcleaner_7.2.4.0` (5 families, 31 MB image, code_sim 0.05-0.52), `Bginfo`/`HDDScan`/`geek`/
+`Sysmon`/`ComIntRep` clones - EXCEPT two that a few percent would convert and one that is pure load:
+  * `bero_geek` is CORRECT standalone (`oep=0x559760` = base+0x159760, imports 1735) at **82 s pinned** against the
+    harness's 85 s budget inside a 4-worker sweep: a coin flip, not a defect.
+  * `telock_HDDScan` reports its true entry in 55 s standalone but 86 s in the sweep - the documented cap flip.
+  * everything else at the cap needs the decode fixed, not the clock.
+
+**Negative 1 - bounding the hooks per section.** The bodies filter by `watched_`, so I bounded the write/block hooks to
+the watched ranges (1-3 native hooks) instead of `[base_, base_+image_size_)`, expecting the stub's own blocks and stores
+to stop trapping. Measured on `bero_geek`, interleaved: base **88.3 / 89.0 s** vs bounded **92.0 / 96.4 s**, identical
+output. Unicorn's per-block cost scales with the NUMBER of hook ranges, not with their width, so one wide hook beats three
+narrow ones. Reverted. (This also explains the round-330 consolidation: it removed the cost of nine UNBOUNDED hooks, not
+the cost of ranges.)
+
+**Negative 2 - index-keyed write bookkeeping.** `on_section_write` runs on every store (22 525 343 of them on
+`bero_geek`) and did three tree lookups per store: `muted_.count()`, `last_write_seq_[start] = seq` (a std::map lookup plus
+possible insert) and `claimed_.count()`. I replaced all three with vectors indexed by `sections_` index, updating the sets
+only on their rare transitions and deriving the cold readers' ordinals through a helper. Semantics bit-identical (the
+debug line still prints `sec=0x401000:22525343`), and **exactly neutral**: pinned and interleaved, base 81.24 / 82.84 /
+81.44 s vs new 81.94 / 82.34 / 81.74 s. Reverted. What is left on a store is unicorn's own dispatch, not our bookkeeping.
+
+**Measurement method (durable).** Unpinned, the same binary on the same sample drifted 81 s -> 94 s (a 15% swing from
+other load on this box), which is enough to invent or hide a regression. Pinning with `taskset -c 3` and running the two
+arms INTERLEAVED gives ~1% reproducibility (the numbers above). Any A/B on this box must be pinned, interleaved, and
+repeated; a single unpinned number is not evidence.
+
+**Also checked and negative**: `TAOTE_IF_USER=1` (the IF-bit experiment from the TELock work) leaves
+`telock_OpenedFilesView` bit-identical (same oep 0x40fc10, same 1881 imports), so TELock's decode-overrun class is not the
+IF branch and the instrument should not be spent again there without a new observation.
