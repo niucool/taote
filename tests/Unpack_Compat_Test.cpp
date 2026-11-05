@@ -410,6 +410,30 @@ TEST(UnpackCompat, NspackHostDecodeRecoversThePayload) {
     fs::remove_all(out, ec);
 }
 
+// Some packers keep the payload's per-dll table but strip the import descriptor's header, so the
+// harvest never sees it: winupack_FileTypesMan emitted 225 pairs at precision 1.0 and missed 14
+// ws2_32 ordinals although the image holds "WS2_32.DLL" with no descriptor pointing at it. The
+// packer's own table survives right after the name string as a run of 0x0000NNFF dwords (a 0xFF
+// tag byte plus the ordinal) - the payload's OWN ordinal data, so reading it is faithful. A second
+// pass adds the ordinal spelling for dlls a row already spells by ordinal (evidence gate), which
+// converts rows a packer rebuilt by name where the original's table used ordinals.
+TEST(UnpackCompat, StrippedDescriptorOrdinalsAreRecovered) {
+    const auto sample = fixture("WinUpack/winupack_FileTypesMan.exe");
+    if (sample.empty()) {
+        GTEST_SKIP() << "packed corpus not present (set TAOTE_PACKED_DIR)";
+    }
+    const auto out = fs::temp_directory_path() / "taote_unpack_ord_rec";
+    std::error_code ec;
+    fs::remove_all(out, ec);
+    const auto res = run_unpack(RunConfig{sample, out, true, 30000000ULL, "WinUpack"});
+    ASSERT_EQ(res.base, 0x400000u) << res.error;
+    // the 14 stricken ordinals (115,116,101,19,3,112,23,2,9,111,8,11,4,103) come back
+    EXPECT_TRUE(has_import(res, "ws2_32.dll", "ordinal_115")) << res.error;
+    EXPECT_TRUE(has_import(res, "ws2_32.dll", "ordinal_103")) << res.error;
+    EXPECT_TRUE(has_import(res, "ws2_32.dll", "ordinal_23")) << res.error;
+    fs::remove_all(out, ec);
+}
+
 // The ASPack 2.x stub decompresses every payload section with one byte-identical codec
 // (apack+0x6C8, verified by a 271-byte engage window with four per-sample state bytes and a
 // 2256-byte decoder blob). Running it host-side replaces ~74 s of emulated bit work with

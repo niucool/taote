@@ -126,6 +126,7 @@ add_library(qiling::qiling ALIAS qiling)
 add_library(qiling_unpack STATIC
     unpack/unpack.cpp
     unpack/api_db.cpp
+    unpack/ord_db.cpp
     unpack/packer_detector.cpp
     unpack/iat/iat_search.cpp
     unpack/iat/import_rebuilder.cpp
