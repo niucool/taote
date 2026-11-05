@@ -17,6 +17,7 @@
 #include "qiling/unpack/iat/iat_search.hpp"
 #include "qiling/unpack/iat/import_rebuilder.hpp"
 #include "qiling/unpack/packers/factories.hpp"
+#include "qiling/unpack/packers/lzma1_host.hpp"
 #include "qiling/unpack/packers/packer.hpp"
 
 #include <LIEF/PE.hpp>
@@ -1411,6 +1412,147 @@ void Unpacker::install(Qiling& ql) {
     // of the run: a nine-section image installed nine of each. The guards at the top of
     // the two bodies keep the behaviour identical to the per-section ranges they
     // replaced.
+    // NSPack single-shot host decode (ported from pegasus's SE_NSPACK_HOSTDEC driver,
+    // STATUS 467; TAOTE_NSPACK_HOSTDEC opts in while it is measured). NSPack's stage-2
+    // decoder is textbook LZMA1 called from the stub with ECX = the per-block header
+    // (props byte, [5] block length, [9] destination length, stream at +0xd) and EDX =
+    // the destination, so the payload can be produced host-side instead of emulating the
+    // range coder. Measured on the 97-row family: nspack_Bginfo and nspack_ComIntRep go
+    // from imports-fail at the 86 s cap to all-three in 2 s each (family ALL 90 -> 92, no
+    // row lost); TAOTE_NO_NSPACK_HOSTDEC restores the native decode. The five
+    // EP-in-a-hollow-section rows (Listdlls, PsService, ldmdump, psping, psshutdown) do
+    // NOT fire it - their stubs never reach the decoder call - so they stay out.
+    if (std::getenv("TAOTE_NO_NSPACK_HOSTDEC") == nullptr && opts_.family == "NSPack" && !is_64_) {
+        static const std::uint8_t kHead[] = {0x8B, 0xD6, 0x8B, 0xCF, 0x8B, 0x85};
+        static const std::uint8_t kTail[] = {0x05, 0xA9, 0x05, 0x00, 0x00, 0xFF, 0xD0};
+        std::vector<std::pair<std::uint64_t, std::uint64_t>> sites;  // call_va, ret_va
+        for (const auto& ps : sections_) {
+            if (!ps.is_exec || ps.end <= ps.start || ps.end - ps.start > 0x4000000ull) {
+                continue;
+            }
+            std::vector<std::uint8_t> buf;
+            try {
+                buf = ql.mem().read(ps.start, static_cast<std::size_t>(ps.end - ps.start));
+            } catch (...) {
+                continue;
+            }
+            for (std::size_t i = 0; i + 17 <= buf.size() && sites.size() < 6; ++i) {
+                if (std::memcmp(&buf[i], kHead, sizeof kHead) != 0) {
+                    continue;
+                }
+                if (std::memcmp(&buf[i + 10], kTail, sizeof kTail) != 0) {
+                    continue;
+                }
+                sites.emplace_back(ps.start + i + 15, ps.start + i + 17);
+            }
+            if (sites.size() >= 6) {
+                break;
+            }
+        }
+        if (!sites.empty()) {
+            if (opts_.debug) {
+                std::fprintf(stderr, "[unpack] nspack host decode: %zu call sites\n", sites.size());
+            }
+            auto ns_state = std::make_shared<int>(0);
+            auto nh = std::make_shared<HookRet>(ql.hook_code(
+                [this, &ql, sites, ns_state](std::uint64_t addr, std::uint32_t) -> int {
+                    std::uint64_t ret_va = 0;
+                    for (const auto& s : sites) {
+                        if (s.first == addr) {
+                            ret_va = s.second;
+                            break;
+                        }
+                    }
+                    if (ret_va == 0) {
+                        return 0;
+                    }
+                    auto& regs = ql.arch().regs();
+                    const auto ecx = regs.read("ecx");
+                    const auto edx = regs.read("edx");
+                    const auto esp = regs.read("esp");
+                    const auto in_image = [this](std::uint64_t a, std::uint64_t n) {
+                        return a >= base_ && a - base_ < image_size_ && n < image_size_ &&
+                               a - base_ + n <= image_size_;
+                    };
+                    if (!in_image(ecx, 0x20) || !in_image(edx, 1)) {
+                        return 0;
+                    }
+                    std::vector<std::uint8_t> hdr;
+                    try {
+                        hdr = ql.mem().read(ecx, 0x20);
+                    } catch (...) {
+                        return 0;
+                    }
+                    if (hdr.size() < 0x20 || hdr[0] >= 225) {
+                        return 0;
+                    }
+                    const std::uint32_t props = hdr[0];
+                    const std::uint32_t pb = props / 45, lp = (props % 45) / 9, lc = (props % 45) % 9;
+                    if (pb > 4 || lp > 4 || lc > 8) {
+                        return 0;
+                    }
+                    std::uint32_t blk_len = 0, dst_len = 0;
+                    std::memcpy(&blk_len, &hdr[5], 4);
+                    std::memcpy(&dst_len, &hdr[9], 4);
+                    if (blk_len == 0 || blk_len > 0x4000000u || dst_len == 0 || dst_len > 0x4000000u) {
+                        return 0;
+                    }
+                    if (!in_image(static_cast<std::uint64_t>(static_cast<std::uint32_t>(ecx)) + 0x0d, blk_len) ||
+                        !in_image(edx, dst_len)) {
+                        return 0;
+                    }
+                    std::vector<std::uint8_t> comp;
+                    try {
+                        comp = ql.mem().read(static_cast<std::uint64_t>(static_cast<std::uint32_t>(ecx)) + 0x0d,
+                                             blk_len);
+                    } catch (...) {
+                        return 0;
+                    }
+                    if (comp.size() != blk_len) {
+                        return 0;
+                    }
+                    auto R = packers::lzma1_decode(comp, dst_len, lc, lp, pb);
+                    if (!R.ok || R.pos != dst_len || R.consumed != blk_len) {
+                        if (opts_.debug) {
+                            std::fprintf(stderr, "[unpack] nspack host decode bail: ok=%d pos=%u/%u consumed=%llu/%u\n",
+                                         static_cast<int>(R.ok), R.pos, dst_len,
+                                         static_cast<unsigned long long>(R.consumed), blk_len);
+                        }
+                        return 0;
+                    }
+                    try {
+                        ql.mem().write(edx, R.out);
+                    } catch (...) {
+                        return 0;
+                    }
+                    // mirror the claim the native stores would have produced: the hop
+                    // detector only accepts an exec inside written_ranges_
+                    for (const auto& ps : watched_) {
+                        if (ps.end <= edx || ps.start >= edx + dst_len) {
+                            continue;
+                        }
+                        ever_written_.insert({ps.start, ps.end});
+                        written_ranges_.insert({ps.start, ps.end});
+                        wr_cache_lo_ = ps.start;
+                        wr_cache_hi_ = ps.end;
+                        claimed_.insert(ps.start);
+                    }
+                    regs.write("esp", esp + 8);   // the wrapper's `ret 8`
+                    regs.write("eax", 1);         // wrapper success value
+                    regs.write("eip", ret_va);
+                    ++(*ns_state);
+                    if (opts_.debug) {
+                        std::fprintf(stderr, "[unpack] nspack host decode #%d dest=%s len=%u lc=%u lp=%u pb=%u\n",
+                                     *ns_state, hex(edx).c_str(), dst_len, lc, lp, pb);
+                    }
+                    return 0;
+                },
+                base_, base_ + image_size_));
+            if (nh->obj() != nullptr) {
+                hooks_.push_back(std::move(nh));
+            }
+        }
+    }
     if (!watched_.empty()) {
         auto write_hook = std::make_shared<HookRet>(ql.hook_mem_write(
             [this](int /*access*/, std::uint64_t addr, std::uint32_t size, std::int64_t value) -> int {

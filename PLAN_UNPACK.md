@@ -15666,3 +15666,32 @@ convert.
 
 Lesson for the next reader: when a body is hot, check that every knob it reads is a `static`, not a live `getenv`. This is
 the same class of finding as the dispatch-plumbing rounds - the cost sat in the plumbing around the work, not in the work.
+
+#### 0.17my NSPack stage-2 is textbook LZMA1: host decode the payload instead of emulating the range coder (corpus 2304 -> 2307)
+
+Ported from pegasus (`src/unpacker/packers/lzma1_host.{h,cpp}` + the `SE_NSPACK_HOSTDEC` engage driver): NSPack's stage-2
+decoder is textbook LZMA1, and the stub calls it with **ECX = the per-block header** (props byte, `[5]` block length,
+`[9]` destination length, stream at `+0xd`) and **EDX = the destination**, from a call site whose 17-byte shape is
+`8B D6 8B CF 8B 85` ... `05 A9 05 00 00 FF D0` (`8B D6 8B CF 8B 85` + call). So the payload can be produced host-side and
+the guest resumed at the wrapper's continuation (`ret 8` => esp += 8, eax = 1, eip = the instruction after the call).
+
+**Landed**: `qiling/unpack/packers/lzma1_host.{hpp,cpp}` (the reference decoder, 253 lines, self-contained) and the engage
+in `Unpacker::install` (default ON; `TAOTE_NO_NSPACK_HOSTDEC` restores the native decode). The engage validates the frame
+(bounds, props, lengths, stream/dest inside the image), decodes, writes the payload, mirrors the claim the native stores
+would have produced (`ever_written_`/`written_ranges_` so the hop detector can accept the hand-off) and rebuilds the
+post-call state.
+
+**Measured**: family r158 (97 NSPack rows) ALL 90 -> **92**, exactly two rows moving and none lost:
+`nspack_Bginfo` imports 0.0314 -> 1.000 and `nspack_ComIntRep` 0.8994 -> 1.000, each **86 s -> 2 s** (the range coder
+emulation was the cap). Corpus r159: valid PE 2677, OEP 2339, imports 2387 -> **2390**, all-three 2304 -> **2307**,
+gained `nspack_Bginfo`, `nspack_ComIntRep` and `rlpack_Bginfo` (imports 0.7596 -> 1.000; it was a cap row that the
+wall-time reduction brought inside the budget), **LOST 0**. Aggregate wall 19185 -> **18122 s (-5.5%)**, rows at
+dur >= 84: 84 -> **79**. Regression test `UnpackCompat.NspackHostDecodeRecoversThePayload` pins it WITHOUT timing: a
+30M-instruction budget is far below what the native decode needs, and the host decode still lands the entry and 1000+
+imports. Suite 617/617.
+
+**What this does NOT fix**: the five EP-in-a-hollow-section rows (`nspack_Listdlls`, `_PsService`, `_ldmdump`, `_psping`,
+`_psshutdown`) never reach the decoder call at all - their EP points into a section whose raw size is 4 bytes, both engines
+walk the zero-filled region into the next section, and the garbage execution diverges before the stub runs (0.17mq). The
+engage is idle on them, and the reference only reaches them because ITS garbage walk happens to land on the stub. That is
+the one thing the host decode cannot paper over: the stub has to run once.

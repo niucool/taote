@@ -388,6 +388,28 @@ TEST(UnpackCompat, PecompactPlaceholderEntryIsTheFarHandOff) {
     fs::remove_all(out, ec);
 }
 
+// NSPack's stage-2 decoder is textbook LZMA1, called from the stub with ECX = the
+// per-block header (props byte, [5] block length, [9] destination length, stream at +0xd)
+// and EDX = the destination. Emulating the range coder costs ~90M+ guest instructions per
+// row; decoding host-side and resuming at the wrapper's continuation produces the same
+// payload in ~2 s. The test pins that without timing: a 30M-instruction budget is far
+// below what the native decode needs (the row spent its whole 86 s cap in it) and the
+// host decode still lands the entry and the import table.
+TEST(UnpackCompat, NspackHostDecodeRecoversThePayload) {
+    const auto sample = fixture("NSPack/nspack_Bginfo.exe");
+    if (sample.empty()) {
+        GTEST_SKIP() << "packed corpus not present (set TAOTE_PACKED_DIR)";
+    }
+    const auto out = fs::temp_directory_path() / "taote_unpack_nspack_hostdec";
+    std::error_code ec;
+    fs::remove_all(out, ec);
+    const auto res = run_unpack(RunConfig{sample, out, true, 30000000ULL, "NSPack"});
+    ASSERT_EQ(res.base, 0x400000u) << res.error;
+    EXPECT_EQ(res.oep, res.base + 0x1b5d42u);   // truth; the native decode never gets there
+    EXPECT_GT(res.imports.size(), 500u) << res.error;
+    fs::remove_all(out, ec);
+}
+
 // The blob-attribution repair used to REPLACE a mined pair's dll with the database's
 // single owner. That is wrong for Windows' forwarder surface: the image's own marker
 // names the module the program imports from, and kernel32!RegCloseKey is advapi32's
