@@ -15846,3 +15846,29 @@ worth recording, because each one silently produced a "no effect" measurement:
 Consequence for the +3 rows: the >=2x gate cannot be met by the tree helpers; a future attempt must implement the inlined
 literal tree and the match-copy loop (the reference's remaining two of four), with the dispatch-from-block-hook shape and the
 whole-image scan above, and it must show >=2x on mew_Bginfo standalone before any family or corpus run.
+
+#### 0.17ne MEW, measured in three parts: bits 2%, trees 0%, match copy 6% - the per-symbol machine is the other ~92%
+
+Attempt 4 ported the **match-copy loop** (reference's kSigCp: `out=[ebp-8]`, `base=[ebp-0x18]` a POINTER,
+`len=[ebp-0xc]`, `limit=[ebp-0x28]`, `last=[ebp-1]`, dist in edi; run host-side as one bulk copy with LZ77 overlap
+semantics - byte-by-byte when `dist < n` - then resume at `sig+0x25`). It installs and fires (found at 0x7fd626 on
+mew_Bginfo, first retry), and it measures:
+
+| accelerator | mew_Bginfo standalone | note |
+|---|---|---|
+| none | 47.53 / 49.33 s | imports 1985 |
+| rc_get_bit (per bit) | 45.42 -> 44.32 s = **2%** | 0.17na |
+| BitTree fwd+rev (per tree) | 44.53/44.73 vs 45.52/45.02 = **0%** | 0.17nd |
+| match copy (per run) | 48.4 s avg -> **45.5 s avg = 6%** | imports 2035 vs 1985, oep identical |
+
+So the three cheap pieces together are ~8%, and MEW's 2x cannot be assembled from them: the remaining ~92% is the per-symbol
+state machine (isMatch/isRep selection, state and rep-distance updates, and the INLINED literal tree, which the reference
+handles by latching a symbol head `kSigSym` and its tail and running the whole symbol host-side). That is the reference's
+1166-line design in one piece, not a set of small loops, and nothing shorter will reach the >=2x gate.
+
+The match-copy accelerator was reverted: 6% cannot convert (the three rows need ~1.85-2.0x, 0.17nb), and its run diverges
+slightly (imports 2035 vs 1985, oep unchanged), which is extra risk for no grade gain.
+
+Consequence - the MEW lane is CLOSED unless someone ports the symbol-level decode wholesale: within this session's reach the
+honest accounting is that MEW's three contention-bound rows (+3) cost a full LZMA-symbol host decoder, and every partial
+accelerator has now been measured and shown insufficient. Do not spend another round on MEW's inner loops.
