@@ -15990,3 +15990,32 @@ Consequence: with 0.17nf..0.17ni the import-side lanes (named pairs, ordinals, n
 the OEP-side pocket is 46 ungradeable + 3 closed rows, and the cap rows need >3x. The corpus stands at 2306-2307 and the
 only remaining lever with a positive expected value is a wholesale host decode (the reference's 1166-line MEW
 symbol-level accelerator, +3 if it reaches >3x). 
+
+#### 0.17nj the wall decomposed: hooks are 46%, and that is unicorn's dispatch, not taote's bodies
+
+The project has assumed "the hook overhead is ~86% of the wall" (the 174 ns/insn figure from the dispatch_trace
+instrumentation). Measured directly this time, by temporarily skipping BOTH hook registrations in `install()` so the same
+run pays no hook cost at all (temporary probe, reverted; the no-hook arm cannot produce artifacts, only timing):
+
+| mpress_HDDScan.exe, pinned, ~76 s run | wall |
+|---|---|
+| full (write hook + block hook, both bodies live) | 75.6 s / 74.5 s |
+| block body skipped (`TAOTE_HOOK_FASTPATH=1`) | 59.8 s |
+| **both hooks never registered** | **40.9 s** |
+
+So the wall splits into **guest emulation 41 s (54%), unicorn hook dispatch 19 s (25%), hook bodies 16 s (21%)** - the
+hooks total 46%, and of that only a third is taote's own code. Every knob-level attack on the body has already been
+measured (getenv caches 0.17mw/0.17ng, dedupe neutral, per-section bounded ranges *slower* - unicorn's cost scales with
+the number of ranges, not their width, 0.17mo). The remaining 19 s is unicorn's per-store/per-block callback dispatch,
+which taote cannot reduce from the outside: the write hook needs every store in the image (that is what a claim IS) and
+the block hook needs every block (that is what a hop IS).
+
+Consequence, and it settles the throughput axis: **a cap row cannot be converted by making the hooks cheaper.** The only
+lever left inside a run is executing fewer guest instructions, i.e. a host-side decode, and that only pays where the
+decode is the bulk of the run. For the rows that currently miss, `post_import` is ~0.05 s (0.17ni), so the import phase
+- not the decode - is what consumes the budget, which is why the reference's own host decoders bought it +1 (ASPack) and
++3 (MEW) rather than the family-wide gains its 6.1x MEW figure suggests.
+
+Housekeeping note for the next session: `/tmp` is a 7.6 GB tmpfs and the per-run dump directories fill it - at 73-80% used
+`ctest` produced 3 spurious failures and an artifact write of 0 bytes on a run that then reported imports=0. Clean the
+`/tmp/<tag>` run dirs before reading any red test or a zero-byte artifact as a code defect.
