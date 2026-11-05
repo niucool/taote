@@ -2643,6 +2643,109 @@ std::size_t Unpacker::mine_orphan_descriptors(const std::vector<std::uint8_t>& i
     // ('JetModuleHandleA' is GetModuleHandleA, 'OocalAlloc' is LocalAlloc). Walk the
     // blob in order: a dll-like string starts a group, the strings after it name that
     // dll, until the next dll-like string (the reference's orphan-name mining).
+    // Third, the INVERSE walk. RLPack and its relatives store each dll's names
+    // BEFORE the marker, because the marker terminates its own block:
+    //   ... FilterGetMessage\0 \0\x13\0 FilterReplyMessage\0\0 FLTLIB.DLL\0
+    // The forward walks above attribute positionally (name -> the marker that PRECEDED
+    // it), so such a block is filed under the previous dll or dropped. Measured on
+    // rlpack_Procmon: 410 of 432 pairs recovered, and the 22 misses include exactly the
+    // three fltlib Filter* names that sit in front of its FLTLIB.DLL marker while the
+    // image's dll-name list (WS2_32/VERSION/COMCTL32/FLTLIB/USER32/GDI32/...) names
+    // fltlib. Walk left from every marker instead. The attribution rule is the export
+    // database, not proximity: a name the database assigns to a DIFFERENT dll is
+    // misfiled and skipped, so a kernel32 name cannot be stolen by a following USER32
+    // marker; names the database does not know at all (fltlib's Filter family) are
+    // taken from the block that terminates on their own marker.
+    if (std::getenv("TAOTE_NO_BACK_BLOB") == nullptr) {
+        std::size_t back_pairs = 0;
+        const auto ident_at = [&image](std::size_t i) {
+            const auto c = static_cast<unsigned char>(image[i]);
+            return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                   (c >= '0' && c <= '9') || c == '_' || c == '@' || c == '?';
+        };
+        // find the markers by their extension rather than by testing every offset:
+        // cstr()+dll_like() per byte cost 8 s on rlpack_ComIntRep's image and pushed it
+        // over the 85 s budget (measured: 78 s -> 86 s, imports collapsing to 0.047)
+        for (std::size_t o = 0x200; o + 6 < image.size() && back_pairs < 4096; ++o) {
+            const auto lc_at = [&image](std::size_t i) {
+                const auto c = image[i];
+                return static_cast<int>(c >= 'A' && c <= 'Z' ? c + 32 : c);
+            };
+            if (image[o] != '.' || image[o + 4] != 0) {
+                continue;
+            }
+            const int a = lc_at(o + 1), b = lc_at(o + 2), c3 = lc_at(o + 3);
+            const bool is_ext = (a == 'd' && b == 'l' && c3 == 'l') ||
+                                (a == 'd' && b == 'r' && c3 == 'v') ||
+                                (a == 'o' && b == 'c' && c3 == 'x');
+            if (!is_ext) {
+                continue;
+            }
+            std::size_t dstart = o;
+            while (dstart > 0x200 && ident_at(dstart - 1)) {
+                --dstart;
+            }
+            const auto dll = cstr(dstart, 48);
+            if (dll.empty() || !dll_like(dll)) {
+                continue;
+            }
+            std::string stem = dll;
+            for (auto& ch : stem) {
+                ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+            }
+            for (const char* ext : {".dll", ".drv", ".ocx"}) {
+                const auto n = std::strlen(ext);
+                if (stem.size() > n && stem.compare(stem.size() - n, n, ext) == 0) {
+                    stem.resize(stem.size() - n);
+                    break;
+                }
+            }
+            std::vector<std::string> names;  // image order, filled right-to-left
+            std::size_t p = dstart;
+            int skipped = 0;
+            for (int guard = 0; guard < 512 && p > 0x200; ++guard) {
+                // step back over the hint word between entries (2 bytes) and the NULs
+                while (p > 0x200 && skipped < 8 && !ident_at(p - 1)) {
+                    --p;
+                    ++skipped;
+                }
+                if (p <= 0x200 || skipped >= 8) {
+                    break;
+                }
+                const std::size_t e = p;  // one past the run end
+                while (p > 0x200 && ident_at(p - 1)) {
+                    --p;
+                }
+                std::string piece(reinterpret_cast<const char*>(&image[p]), e - p);
+                skipped = 0;
+                const auto first = static_cast<unsigned char>(piece[0]);
+                const bool alpha = (first >= 'a' && first <= 'z') || (first >= 'A' && first <= 'Z') ||
+                                   first == '_';
+                if (!alpha || piece.size() < 4 || piece.size() > 64 || dll_like(piece)) {
+                    break;
+                }
+                names.push_back(std::move(piece));
+            }
+            if (names.empty()) {
+                continue;
+            }
+            std::reverse(names.begin(), names.end());
+            const bool shifted_block = block_is_shifted(names);
+            for (const auto& fn : names) {
+                const auto nm = block_name(fn, shifted_block);
+                const auto owners = api_owners(nm);
+                if (!owners.empty() &&
+                    std::find(owners.begin(), owners.end(), stem) == owners.end()) {
+                    continue;  // the database files this name under another dll
+                }
+                note_import(sanitize_ascii(dll), sanitize_ascii(nm));
+                ++back_pairs;
+            }
+        }
+        if (opts_.debug) {
+            std::fprintf(stderr, "[unpack] backward blob pass: %zu pairs\n", back_pairs);
+        }
+    }
     std::size_t blob_pairs = 0;
     // Descriptor-less packers only: when the image already carries a real import
     // descriptor chain (harvest_image_imports found >= 4), the bare-string blob

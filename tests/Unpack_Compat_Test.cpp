@@ -388,6 +388,32 @@ TEST(UnpackCompat, PecompactPlaceholderEntryIsTheFarHandOff) {
     fs::remove_all(out, ec);
 }
 
+// RLPack and the ASPack-family name tables store each dll's names BEFORE the marker
+// that terminates its block - `...FilterGetMessage\0\0\x13\0FilterReplyMessage\0\0
+// FLTLIB.DLL\0` - while the container miner's forward walk attributes a name to the
+// marker that PRECEDED it (or drops the block). rlpack_Procmon therefore recovered 410
+// of 432 pairs and sat at recall 0.9491, exactly one pair under the 0.95 bar; the three
+// fltlib Filter* names sitting in front of its FLTLIB.DLL marker were the whole
+// difference. The inverse walk takes a name only when the export database does not file
+// it under a different dll, so a kernel32 name cannot be stolen by a later USER32
+// marker and data strings (the image's '000102...' hex tables) cannot enter.
+TEST(UnpackCompat, RlpackNameThenMarkerBlocksAreAttributed) {
+    const auto sample = fixture("RLPack/rlpack_Procmon.exe");
+    if (sample.empty()) {
+        GTEST_SKIP() << "packed corpus not present (set TAOTE_PACKED_DIR)";
+    }
+    const auto out = fs::temp_directory_path() / "taote_unpack_rlpack_backblob";
+    std::error_code ec;
+    fs::remove_all(out, ec);
+    const auto res = run_unpack(RunConfig{sample, out, true, 2000000000ULL, "RLPack"});
+    ASSERT_EQ(res.base, 0x400000u) << res.error;
+    EXPECT_EQ(res.oep, res.base + 0x755cbu);   // truth; recall needed 411 of 432 pairs
+    // the marker's own spelling is kept by the miner, exactly as it is in the image
+    EXPECT_TRUE(has_import(res, "FLTLIB.DLL", "FilterGetMessage")) << res.error;
+    EXPECT_TRUE(has_import(res, "FLTLIB.DLL", "FilterSendMessage")) << res.error;
+    fs::remove_all(out, ec);
+}
+
 // Packer stubs resolve RtlZeroMemory/RtlMoveMemory through GetProcAddress and call
 // them THROUGH their own IAT. Without a real handler the minted stub cell answers a
 // bare `ret`, the guest's stdcall argument stack is never cleaned and the caller's

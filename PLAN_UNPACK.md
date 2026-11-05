@@ -15449,3 +15449,41 @@ Planning consequence: with every near-miss class closed by measurement, further 
 stub decode completing) rather than another picker, gate or plumbing change. The next session should start from the two families whose
 stubs die in their own decoder with the reference equally bad - NSPack (ruled out above) and RLPack (9 gradeable, 0 reference wins) -
 and treat any per-row claim of "the reference gets it" as unproven until its `oep_source` is read.
+
+#### 0.17mr RLPack stores its names BEFORE the dll marker: corpus 2299 -> 2300
+
+RLPack's container miner walked the import string blob forward: a dll-like piece starts a group and the strings after it
+belong to it. RLPack (and the ASPack-family tables) write the opposite - the MARKER TERMINATES its own block:
+
+```
+          ...\0 \0\x13\0 FilterReplyMessage\0\0 FLTLIB.DLL\0 \0h\x01 FreeLibrary\0 L\x02 GetProcAddress\0 ...
+              ^ names of fltlib                          ^ fltlib's marker      ^ kernel32's names (marker follows)
+```
+
+so a forward walk files each name under the marker that PRECEDED it, or drops the block entirely. Measured on
+`rlpack_Procmon`: 410 of 432 pairs recovered and recall stuck at 0.9491 - exactly ONE pair under the 0.95 bar, and the 22
+misses included the three `fltlib` Filter* names that sit in front of `FLTLIB.DLL` while the image's own dll-name list
+(`WS2_32/VERSION/COMCTL32/FLTLIB/USER32/GDI32/...`) names fltlib.
+
+**The change**: an inverse walk (`TAOTE_NO_BACK_BLOB` opts out) that, for every dll marker in the image, walks LEFT over
+NULs and the 2-byte hint word, collects the identifier-shaped runs, reverse them into image order, and attributes them to
+that marker subject to the export database: a name `api_owners()` files under a DIFFERENT dll is skipped. That is what
+makes it safe in both directions - a kernel32 name cannot be stolen by a following USER32 marker (it is owned by
+kernel32), while names the database does not know at all (fltlib's Filter family) are taken from the block that
+terminates on their own marker. The image's `000102...` hex tables carry no owner and are never adjacent to a marker, so
+no junk enters from this pass.
+
+Two measured notes:
+  * the first implementation scanned every offset with `cstr()`+`dll_like()`, which cost 8 s on `rlpack_ComIntRep`'s image
+    and pushed it past the 85 s budget (78 s -> 86 s, imports collapsing 1.0 -> 0.047). Finding the markers by their
+    extension (`.dll`/`.drv`/`.ocx` followed by a NUL) instead makes the pass cost ~0-1 s (28.0 s vs 27.3 s standalone,
+    both arms repeated).
+  * `rlpack_ComIntRep` still reports 86 s inside the 4-worker sweep and drops out of all-three there. Standalone it
+    recovers 527/527 pairs (recall 1.0) with the new binary, so this is the documented cap flip, not the change; the
+    corpus run confirms zero rows lost.
+
+**Measured**: family r149 (104 RLPack rows) IMP 96 -> 97 with `rlpack_Procmon` converting (0.9491 -> 0.956) and
+`rlpack_Bginfo` improving 0.0453 -> 0.3148 (still under the bar); corpus r150: valid PE 2677, OEP 2333, imports 2381 ->
+2383, all-three **2299 -> 2300**, gained `rlpack_Procmon`, LOST 0, aggregate wall 20214 -> 20130 s, rows >= 84 s
+unchanged at 86. Regression test `UnpackCompat.RlpackNameThenMarkerBlocksAreAttributed` pins the entry and two of the
+three fltlib pairs; serial suite 614/614 at 0 failed.
