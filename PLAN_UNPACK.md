@@ -16179,3 +16179,35 @@ State of the board after this round: corpus 2308/2678 all-three (r168), valid PE
 gradeable lane has a measured closure, two host decoders shipped this session (NSPack, ASPack), and the only remaining
 movement would come from external evidence about a both-engines-fail family's VM/protector design (Themida 122,
 Yoda-Protector 100, Amber's 12, TELock's 4 fast rows).
+
+#### 0.17nq the marginal band is DETERMINISTIC but sweep-length dependent: 7 rows, and the factor is 1.7-2.4x
+
+Question this round: how much of the "miss" set is harness flakiness? Measured on the 81 rows with dur>=80 in r168 by
+re-running exactly that band twice (4 workers, 85 s budget, wallcap 120, load <= 6.83):
+
+* **Run-to-run inside a short sweep: 0 flips.** Both band runs grade 71 of 81 identically, so taote itself is deterministic
+  and the harness is stable for short sweeps.
+* **Against the full 2678-row sweep: 7 rows flip, in BOTH band re-runs** - i.e. not noise, a reproducible sweep-length
+  effect. Same binary, same budget, same worker count; only sweep length differs:
+
+| row | full sweep (r168) | band run A | band run B |
+|---|---|---|---|
+| mew_Bginfo.exe | 86 (cap) | **49** | **48** |
+| mew_ComIntRep.exe | 86 | **37** | **36** |
+| mew_Sysmon.exe | 87 | **44** | **45** |
+| mpress_Bginfo.exe | 86 | **39** | **38** |
+| expressor_Bginfo.exe | 86 | **50** | **49** |
+| bero_Bginfo.exe | 86 | **52** | **52** |
+| rlpack_HDDScan.exe | 87 | **63** | **62** |
+
+Consequences, all of them planning-grade:
+1. The per-row factor a full sweep imposes is **1.67-2.39x** (86/49, 86/37, 87/44, 86/39, 86/50, 86/52, 87/63) - which
+   CONFIRMS 0.17nb's 1.85-2.0x and SUPERSEDES 0.17nh's ">3x" (that figure came from a sweep that also carried external
+   load). A mechanism needs roughly **2x, not 3x**, to convert a marginal row.
+2. Those 7 rows are a **capability** pass that the harness reports as failure: the honest capability figure is
+   **2315/2678**, while the official corpus number stays 2308. Every future +1 change lands inside this 7-row artifact
+   band, so a single full sweep can neither prove nor disprove a small gain.
+3. Practical rule for future measurements: evaluate any change on a **short, targeted sweep** of the affected band
+   (deterministic, 0 flips) and use the full sweep only for the aggregate picture. A full sweep that "loses" a row at
+   dur>=84 must be re-run in a short sweep before it is read as a regression - and vice versa: a row that "gains" at
+   dur 86 in one full sweep should be re-checked the same way.
