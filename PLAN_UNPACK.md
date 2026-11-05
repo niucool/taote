@@ -16093,3 +16093,35 @@ So the honest statement of the ASPack port is **+1 (2307 -> 2308)** against a cl
 future comparison must diff against (r166's 2299 was load-contaminated and must not be used).
 
 Session tally: 1843 -> **2308** (86.2% of 2678; 88.9% of the 2597 gradeable base).
+
+#### 0.17nn Themida's decoder is a SHARED compact LZ with a recoverable frame - the strongest remaining lead
+
+The family was closed earlier from "the reference fails it too". Re-verified that this is literally true - the reference
+publishes the SAME undecoded image (themida_7z code_sim 0.1073 = taote's 0.1073, themida_ADExplorer 0.0543 = taote's
+0.0543, both at 0.6-7% recall) - but taote's own trace shows WHY, and the why is tractable:
+
+* A Themida run is a tight loop inside the stub (exec fires reporting 0x8c91ca / 0x8c91de / 0x8c9241 / 0x8c9288 /
+  0x8c929f / 0x8c92b3 / 0x8c92c8 / 0x8c92d5 for millions of blocks, `written=1`), i.e. it is DECODING, slowly.
+* Disassembling taote's own dump at that region gives a self-contained LZ routine: an MSB-first bit reader
+  (`add dl,dl; jne L; mov dl,[esi]; inc esi; adc dl,dl; L:` - note the refill injects the just-extracted bit into the new
+  mask's LSB, so each byte contributes 7 data bits plus a constant 1 and the terminator is a byte that is 0/1), a literal
+  path (0x8c91ca), a 5-bit short-copy path (0x8c9205-0x8c9235), a rep-distance match (0x8c9260, distance in ebp), a
+  new-distance path (0x8c9288: `dec eax; shl 8; al=[esi++]; ebp=eax`) and distance-classed length adjustments
+  (0x8c92ac: >=0x7d00 -> +2, >=0x500 -> +1, <=0x7f -> +2). The function is `ret 0x10` and returns `edi - [ebx+0x10]`,
+  i.e. the produced length; args are src at [ebx+8] and dest at [ebx+0x10].
+* A code probe at the loop head (0x8c91ca) captured the live frame: `esi=0x8c934f` (the compressed stream starts
+  immediately after the routine), `edi=0x47d000` (the .themida section start), `edx/dl=0x80` (the bit mask), `ebp` the
+  running rep distance - and edi advances monotonically (0x47d000 -> 0x47d034 over ten symbols). So this is a ONE-SHOT
+  in-place decode of the section, exactly the ASPack shape, not a per-block codec.
+* The native run's dump at 0x47d000 holds real decoded content (`e8 00 00 00 00 5d 81 ed 05 ...`, 45183 of the first
+  65536 bytes nonzero, all 256 byte values present), so there IS ground truth to validate a host decode against.
+* The signature is SHARED: the 22-byte loop body (`8a 06 46 88 07 47 bb 02 00 00 00 00 d2 75 05 8a 16 46 10 d2 73 ea`)
+  appears exactly once in each of themida_ADExplorer / 7z / AccessEnum / Autoruns / ADInsight dumps.
+
+A first transcription (Python, bit-exact, against the native dump) reproduced the first literal and then diverged - the
+refill semantics above are easy to get subtly wrong - so it is NOT shipped. But this is the only remaining lead with
++100-row potential and all the pieces are now recorded: the routine's address map, its ABI, the live frame values, the
+bit-reader rule, and a validation oracle (the native dump). Next session: write the 1:1 transcription with explicit
+CF/ZF per instruction (the UPX NRV accelerator's proven shape), validate the first 64 KB against the native dump, then
+install it by dispatching from the existing block hook at the loop head (0x8c91ca) - the loop executes in place, so no
+lazy installation is needed once the section is claimed writable.
