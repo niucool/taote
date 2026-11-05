@@ -16125,3 +16125,31 @@ bit-reader rule, and a validation oracle (the native dump). Next session: write 
 CF/ZF per instruction (the UPX NRV accelerator's proven shape), validate the first 64 KB against the native dump, then
 install it by dispatching from the existing block hook at the loop head (0x8c91ca) - the loop executes in place, so no
 lazy installation is needed once the section is claimed writable.
+
+#### 0.17no Themida transcription: the executing bytes ARE the dump, but the mask/register model is still wrong
+
+Two facts nailed down this round, and one still open.
+
+**Confirmed (needed before any transcription work):** the bytes at 0x8c91b8 in the executed run are byte-identical to the
+dump (`e8 4b 01 00 00 53 89 e3 53 8b 73 08 8b 7b 10 fc b2 80 8a 06 46 88 07 47 bb 02 00 00 00 00 d2 75 05 8a 16 46
+10 d2 73 ea`), read live inside a hook at the loop head. So unlike MEW (whose decoder is materialised elsewhere), this
+Themida routine executes exactly where the dump shows it and the disassembly map in 0.17nn is of real code.
+
+**Confirmed: the symbol flow matches a straight transcription.** A hand simulation of the routine (bit reader + literal /
+short-copy / rep / new-distance paths) against the guest's own state trace at the loop head 0x8c91ca reproduces the
+*positions* exactly:
+* guest frame #0: `esi=0x8c934f edi=0x47d000 dl=0x80 ebx=0x121ffcc ebp=0x1220000`
+* guest frame #1: `esi=0x8c9353 edi=0x47d005 dl=0x1c ebx=1 ebp=1`
+* the simulation consumes 4 source bytes and produces 5 output bytes for the same two symbols (literal 0xe8, then the
+  L92dd short-match path with `ecx = 2 + CF` = 3 bytes), i.e. **esi and edi agree to the byte**.
+
+**Still open: the register bookkeeping.** At frame #1 the simulation has `dl=0x07` where the guest has `0x1c`, and
+`ebp=0x03` where the guest has `0x01`. Both look like a doubling/rounding difference (`0x07 << 2 = 0x1c`), i.e. the mask
+advances differently from the naive "double-or-refill" model, and `ebp` suggests the short-match path stores the shifted
+byte rather than the pre-shift one. Until those two are pinned, a host transcription must not be shipped - a wrong mask
+desynchronises the whole stream.
+
+Concrete next step (cheap, mechanical): instrument the loop head to print the FULL register file (eax/ebx/ecx/edx/esi/edi/
+ebp/eflags) for the first 20 iterations of one sample, then drive a candidate Python transcription over the same stream
+and diff iteration by iteration - each mismatch localises to one instruction, which is how the UPX NRV accelerator was
+validated. Only then port to C++ and validate a 64 KB prefix against the native dump at 0x47d000.
