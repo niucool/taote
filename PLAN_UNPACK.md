@@ -16153,3 +16153,29 @@ Concrete next step (cheap, mechanical): instrument the loop head to print the FU
 ebp/eflags) for the first 20 iterations of one sample, then drive a candidate Python transcription over the same stream
 and diff iteration by iteration - each mismatch localises to one instruction, which is how the UPX NRV accelerator was
 validated. Only then port to C++ and validate a 64 KB prefix against the native dump at 0x47d000.
+
+#### 0.17np Themida CLOSED for good: the decode produces the protector's SECOND STAGE, not the payload
+
+The 0.17nn/0.17no lead was "host-decode the shared LZ loop and the family's 122 rows open up". Measured what that loop
+actually produces, and the answer settles the family:
+
+* the decode runs in place into `.themida` from 0x47d000 and fills it to **3,295,308 of 4,505,600 bytes (73.1%)** - it is
+  not starved, it is doing its job;
+* the product is the protector's OWN machinery: the decoded bytes are relocation/VM stubs
+  (`e8 00 00 00 00 5d 81 ed 05 00 00 00 c3 e8 00 00 00 00 5d 81 ed 12 00 00 00 ...`);
+* **none of the payload is there**: zero 16-byte runs of the original `not-packed/ADExplorer.exe` occur anywhere in the
+  decoded section (checked over the original's first 0x7000 bytes against all 4.5 MB).
+
+So a host decode of the loop would hand taote 3.3 MB of Themida's VM driver, and recovering the payload from THAT requires
+executing the VM - a virtual-machine implementation, not a decoder. That is precisely why both engines fail this family
+with the same undecoded image (0.0543 code_sim each), and it is not reachable by any of the accelerator shapes this
+project has used (frame-based host decode: NSPack, ASPack; inner-loop patching: MEW, measured 2%/0%/6% in taote).
+
+The Themida lane is therefore CLOSED on evidence, and the earlier transcription work (0.17nn disassembly map, 0.17no live
+frame + symbol-flow validation) is recorded only as evidence, not as a to-do. Do NOT resume it: there is no payload behind
+the decoder to win.
+
+State of the board after this round: corpus 2308/2678 all-three (r168), valid PE 2677, OEP exact 2340, imports 2391. Every
+gradeable lane has a measured closure, two host decoders shipped this session (NSPack, ASPack), and the only remaining
+movement would come from external evidence about a both-engines-fail family's VM/protector design (Themida 122,
+Yoda-Protector 100, Amber's 12, TELock's 4 fast rows).
