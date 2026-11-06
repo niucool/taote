@@ -16399,3 +16399,44 @@ one gain (rlpack_Bginfo returning from the sweep-length band), zero losses.
 (0x4039ce, 0x41bfd4, 0x489a98) are never reached, even though Themida's image carries 119 rdtsc and 44 cpuid sites. So the
 reference's synthetic-TSC mechanism cannot help either family: Yoda's spin is the `eb 01` walk at 0x49b644..0x49b6a3
 (written=0) and Themida's run is the LZ decoder that builds its VM stage (0.17np).
+
+#### 0.18c NSPack's hollow-EP loader stub: the first mechanism this session that the PARITY CENSUS produced
+
+The old note in the NSPack host-decode block read "the five EP-in-a-hollow-section rows (Listdlls,
+PsService, ldmdump, psping, psshutdown) do NOT fire it - their stubs never reach the decoder call - so
+they stay out". The second half was true and the conclusion was wrong: the stubs never reached the
+decoder because THEY NEVER RAN. Re-derived from the reference:
+
+* `tools/ref_parity.py` over the 58 gradeable misses outside the two closed blocks (Themida 122, Yoda
+  100) says the reference reproduces the original EP on 27 of them - and grading the reference's
+  artifact with `tools/unpack_report.py`'s own `code_sim`/`import_names` (not just its EP field)
+  shows it DECODES 10 of taote's misses completely: nspack x5, winupack notmyfault/puttytel_32/mtinst,
+  amber_SmartDefragBootTime, bero_Bginfo. (Comparing the reference's artifact against the PACKED input
+  instead of the original is a trap: the reference writes an artifact that is 99.9% identical to its
+  input on the rows where it does nothing.)
+* Take nspack_Listdlls: taote's artifact has THREE non-zero bytes in `nsp0` while the reference's has
+  308,443. The header's EP (RVA 0x101b) sits in `nsp0`, whose PointerToRawData is a 4-byte fragment of
+  the section table, so the mapped image is zero there; taote executed zero bytes (`[pcdump] at
+  0x40101b` is all zeros), wrote nothing and guessed. The reference's first instruction there is
+  `e9 80 79 06 00` - byte for byte the file's bytes at offset 0x1b, i.e. file offset
+  (EP_rva - section_rva) - and it lands at 0x4689a0, inside the stub's own section.
+* Following that jump is enough: starting at 0x4689a0, taote decodes the payload completely -
+  oep 0x409666 = the original RVA 0x9666, imports 27 -> 370.
+
+Shipped as `Unpacker::detect_hollow_ep_loader_stub` (install-time), gated on: 32-bit, the EP's section
+raw < 0x20, sixteen zero bytes in the MAPPED image at the EP, and a `jmp rel32` at that file offset
+whose target is inside another EXEC section. Nothing is written and no family constant is assumed.
+
+Measured: NSPack 92 -> **97/97** all-three (+5, 0 losses, every gained row code_sim 1.0 / recall 1.0);
+corpus r176 = PE 2677, OEP 2345, imports 2403, **all-three 2320** (r174 2316), wall 17799 s, 5 gains and
+1 loss (rlpack_Bginfo, the documented dur-86 band row: standalone oep 0x5b5d42, 1123 imports, 28.6 s).
+Only those five logs carry the new line, so no other family moved.
+
+Mechanism note that made it measurable: `TAOTE_UNPACK_START` never worked - `Qiling::run()` resets
+`entry_point_` to `begin.value_or(0)` and clears `entry_point_set_`, so a `set_entry_point()` before
+`run()` is void. Both drivers now pass the start into `run(begin)`.
+
+Remaining parity rows from the same census (the reference decodes, taote does not): winupack
+notmyfault / puttytel_32 / mtinst, amber_SmartDefragBootTime, bero_Bginfo - 5 rows, each needing its
+own structural read (WinUpack's two live in `.rsrc` with a non-jmp EP byte, so the NSPack rule does not
+apply). Suite 621/621, 0 failed.
