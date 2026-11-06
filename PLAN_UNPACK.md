@@ -16599,3 +16599,27 @@ question: not "why does taote stop early" but "what does the payload's own runti
 taote's stub loop never produces". With the decoy-bitness fix in place the fault disappears but the
 artifact is unchanged (91 pairs, recall 0.0060), so the fault is a downstream symptom: the resolver
 still finds no matching export and the loop exits with nothing.
+
+#### 0.18j Decoy-bitness lane closed at family scope (measured, net negative)
+
+Following the rule "measure on its family then the corpus", the decoy-bitness change (0.18h/0.18i) was
+re-applied and measured on the whole RLPack family (104 rows, r181rl vs r180):
+
+  target rows    rlpack_grepWin        recall 0.0060 -> 0.0060      0 effect
+                 PortableWinCDEmu      recall 0.5833 -> 0.5833      0 effect
+                 rlpack_adrestore      recall 0.0633 -> 0.0633      0 effect
+  side effects   rlpack_ComIntRep      recall 1.0000 -> 0.2030      LOSS (dur 70 -> 86, cap)
+                 rlpack_geek           recall 0.9985 -> 0.0537      LOSS (dur 80 -> 86, cap, sim 1.0 -> 0.89)
+  gains          rlpack_Bginfo         0.8676 -> 1.0000             gain but at dur 86 (cap-band row)
+
+Net: 1 gain of a cap-band row and 2 real cap regressions. The mechanism (the fix is correct in kind -
+PE32 for 32-bit guests, PE32_PLUS for 64-bit) neither moves the two rows it was aimed at nor withstands
+a swap on the family's own binary; it is reverted for a second and final time. The decoy is functionally
+sufficent: the resolver fault is benign and any change to the shared decoy runs the cap-row faucet.
+
+The 0.18h question stands unr*changed*: what the payload's own runtime import rebuild reads that taote's
+stub loop never produces. The one remaining live hint for it is the hash-target 0xf3af999d resolved at
+pc 0x585f6e against module base 0x100a0000 (0.18i probe) - the next mechanic is to read what that hash
+corresponds to (the rol-7/xor hash of each API name in `api_names_for`) and whether the stub is asking
+for a name the current decoy surface never offers; a fix that ADDS a name is a different, narrower
+change than the layout swap measured here.
