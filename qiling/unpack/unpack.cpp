@@ -5308,8 +5308,15 @@ UnpackResult Unpacker::finalize(Qiling& ql) {
                 while (k + 4 <= image.size()) {
                     std::uint32_t v = 0;
                     std::memcpy(&v, &image[k], 4);
-                    if ((v & 0xffu) != 0xffu || (v >> 16) != 0 || ((v >> 8) & 0xffu) == 0) break;
-                    ords.push_back((v >> 8) & 0xffu);
+                    // tag byte 0xFF low, ordinal in the upper 24 bits ((ord << 8) | 0xff). The
+                    // first version of this rule kept only bits 8-15 because the ws2_32 table it
+                    // was measured on has ordinals <= 255; a dll with a large ordinal space
+                    // (MFC42, ordinals in the thousands) is stored the same way, so the whole
+                    // 24 bits are the ordinal. winupack_mtinst misses 112 of its 163 imports as
+                    // mfc42 ordinals for exactly that reason (the reference emits recall 1.0).
+                    const auto ord = v >> 8;
+                    if ((v & 0xffu) != 0xffu || ord == 0 || ord > 0xffffu) break;
+                    ords.push_back(ord);
                     k += 4;
                 }
                 if (ords.size() >= 2) {

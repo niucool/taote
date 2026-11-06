@@ -409,6 +409,34 @@ TEST(UnpackCompat, PecompactPlaceholderEntryIsTheFarHandOff) {
 // decode target (.Upack, a hollow exec section) stays all zero (2 imports, OEP guessed). One page
 // past SizeOfImage lets the stub finish: this row then reaches the original entry point with 352
 // imports, and the reference behaves the same way (it decodes .Upack completely).
+// The stripped-descriptor table stores an ordinal as (ord << 8) | 0xff. The first version of the
+// scanner kept only bits 8-15, because the ws2_32 table it was measured on has ordinals <= 255; a dll
+// with a large ordinal space is encoded the same way and was invisible (winupack_mtinst misses 112 of
+// its 163 imports as mfc42 ordinals - MFC42's numbering is in the thousands). This pins a >255 ordinal.
+TEST(UnpackCompat, StrippedDescriptorRecoversLargeOrdinals) {
+    const auto sample = fixture("WinUpack/winupack_mtinst.exe");
+    if (sample.empty()) {
+        GTEST_SKIP() << "packed corpus not present (set TAOTE_PACKED_DIR)";
+    }
+    const auto out = fs::temp_directory_path() / "taote_unpack_mfc42_ord";
+    std::error_code ec;
+    fs::remove_all(out, ec);
+    // 200M: the mfc42 chain lives in the decoded payload, and a 30M budget stops before the decode
+    // finishes (measured: 15 imports at 30M against 382 here)
+    const auto res = run_unpack(RunConfig{sample, out, true, 200000000ULL, "WinUpack"});
+    ASSERT_EQ(res.base, 0x1000000u) << res.error;
+    EXPECT_GT(res.imports.size(), 300u) << res.error;   // 270 before, 382 with the mfc42 table
+    bool found = false;
+    for (const auto& pr : res.imports) {
+        if (pr.second == "ordinal_1776") {   // 0x06f0, the third entry of the MFC42 chain
+            found = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(found) << "the mfc42 ordinal table (ordinals > 255) was not read";
+    fs::remove_all(out, ec);
+}
+
 TEST(UnpackCompat, WinupackImageTailOverrunIsMapped) {
     const auto sample = fixture("WinUpack/winupack_notmyfault.exe");
     if (sample.empty()) {
