@@ -16440,3 +16440,26 @@ Remaining parity rows from the same census (the reference decodes, taote does no
 notmyfault / puttytel_32 / mtinst, amber_SmartDefragBootTime, bero_Bginfo - 5 rows, each needing its
 own structural read (WinUpack's two live in `.rsrc` with a non-jmp EP byte, so the NSPack rule does not
 apply). Suite 621/621, 0 failed.
+
+#### 0.18d WinUpack's image-tail overrun: the second row of the parity census
+
+winupack_notmyfault was the biggest remaining gap in the census (taote code_sim 0.1078 vs the
+reference 1.0000). Cause: the stub ends its self-decode and zero-fills a table with
+`mov ch,0x1c; rep stosd` from 0x45f040 - 0x7000 bytes landing **0x40 past SizeOfImage** (0x466000).
+taote maps the image exactly, so the last iteration took the guard page and the run aborted at
+0x45ed31 after 7,195 writes with `.Upack` (the decode target, a hollow exec section) still ALL ZERO:
+"no section hop; OEP guessed", 2 imports. The reference maps past the image end, runs 21M
+instructions from the same EP and decodes `.Upack` completely.
+
+Shipped: one page mapped past SizeOfImage at install time, WinUpack-scoped. **Not** a grow-on-fault
+memory hook - mapping from inside a `UC_HOOK_MEM_UNMAPPED` callback segfaults the host (measured, core
+dumped), and the standing rule is that the harness never crashes.
+
+Measured: WinUpack 88 -> **90/97** (+2, 0 losses; notmyfault oep 0x404f25 = original RVA 0x4f25 with
+352 imports, puttytel_32 likewise, both code_sim 1.0 / recall 1.0); corpus r178 = PE 2677, OEP 2347,
+imports 2405, **all-three 2322** (r176 2320), wall 17781 s, 2 gains, 0 losses, zero crash signatures,
+rc 2677x0 + 1x1. Suite 622/622.
+
+Parity census after this round (reference decodes, taote does not): winupack_mtinst (0.883 -> 0.9023,
+a small gap), amber_SmartDefragBootTime (0.042 -> 0.9929), bero_Bginfo (0.803 -> 1.0). Session tally
+1843 -> 2322 (86.7% of 2678; 89.5% of the gradeable base).
