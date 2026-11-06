@@ -16349,3 +16349,21 @@ published analysis describe a usable VM-independent payload path (or a version w
 Yoda-Protector - what makes the stub leave its encrypted walk (a specific API/flag it waits for)? Amber's 12 - why does the
 stub jump into the guest heap at 0x5000xxx with 16 stores? TELock's 4 - the SEH navigation the reference also fails.
 Everything else on this board has a measured closure; another pass over taote's own seams would be a repeat.
+
+#### 0.18a host-safety audit of the full corpus, and what the one non-zero rc actually is
+
+The standing rule is host safety (QlErrorBase, never crash), and the corpus is the only place that can be audited at
+scale. Audit of r172 (2678 rows):
+
+* **return codes: 2677 x rc=0 and exactly 1 x rc=1** - no other value.
+* **zero crash signatures** in the 2678 logs: no `Segmentation fault`, `terminate called`, `std::bad_alloc`,
+  `std::length_error`, `core dumped` or `Aborted`, and no uncaught-QlError line.
+* the single rc=1 row is `fsg_Snap2HTML.exe`, and its refusal is CORRECT: the "packed" file is a **headerless blob** - it
+  starts `bb d0 01 40 00 bf 00 10 40 00 be 99 f1 42 00 53`, i.e. x86 code (`mov ebx,0x4001d0; mov edi,0x401000;
+  mov esi,0x42f199; push ebx`), with no MZ and no PE header anywhere for the loader to anchor on. taote reports
+  `reason=input_parse_failed` / "the input header is not recoverable", which is the honest answer for a stub fragment that
+  has no PE to unpack (and the row is ungradeable: the original is a managed assembly). This is the FSG family's
+  documented 97th row, not a defect.
+
+So the host-safety property holds across the whole corpus in this build: every row either produces an artifact or refuses a
+non-PE input with a reason, and nothing crashed or threw out of the emulation.
