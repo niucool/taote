@@ -16464,9 +16464,23 @@ Parity census after this round (reference decodes, taote does not): winupack_mti
 a small gap), amber_SmartDefragBootTime (0.042 -> 0.9929), bero_Bginfo (0.803 -> 1.0). Session tally
 1843 -> 2322 (86.7% of 2678; 89.5% of the gradeable base).
 
-#### 0.18e Census lead not yet shipped: amber_SmartDefragBootTime (and the rest of the five)
+#### 0.18e Census close-out: the three rows left after 0.18c/0.18d, each with its measured cause
 
-State measured for the remaining census rows, so the next round does not re-derive it:
+The parity census that produced 0.18c and 0.18d listed five rows. Two are now inside the corpus
+(NSPack x5 and WinUpack notmyfault/puttytel_32 were the gains). The other three are settled here:
+
+* **bero_Bginfo is NOT a mechanism gap - it is a cap row, and the capability figure is 2323.** In the
+  sweep it dies at dur 86 with code_sim 0.8016 / recall 0.0023, which is what made it look like a decode
+  failure. Standalone it takes **41.0 / 41.4 s** and produces an all-three artifact: oep 0x5b5d42 = base +
+  the original RVA 0x1b5d42, code_sim 1.0000, recall 1.0000 (imports 2922 emitted for 861 original pairs,
+  precision is not graded). A budget ladder (6/12/25/200 s) shows the decode growing 0.24 -> 0.38 -> 0.68
+  -> 1.00, so there is no "the payload is done, stop early" win: the stub needs the whole 40 s, and the
+  4-worker sweep charges it ~2.1x. It converts only with a real speedup, on the wrong side of the ~2x gate.
+* **winupack_mtinst (0.8825 vs the reference 0.9023) is an IMPORT-attribution gap, not a decode gap**:
+  both engines decode the image to about the same (partial) extent, but the reference emits recall 1.0000
+  where taote emits 0.3129 (standalone: oep 0x1003866 = correct, reason stack_oep, 270 imports). One row,
+  and the import lane's other mechanisms were closed by census (0.17nt), so this needs its own reading of
+  where the reference's 100% comes from before any code goes in.
 
 * **amber_SmartDefragBootTime** (taote code_sim 0.0420 vs reference 0.9929). taote starts at EP 0x4014c0,
   claims `.bss` [0x407000,0x408000) and `.data` [0x403000,0x404000) with a TOTAL of three writes, and
@@ -16482,3 +16496,11 @@ State measured for the remaining census rows, so the next round does not re-deri
   already passes the OEP and ~1.0 import recall on other rows) rather than entry-point picks.
 * Both mechanisms that came out of this census are loader-shaped and already shipped: 0.18c NSPack's
   hollow-EP stub (+5 rows) and 0.18d WinUpack's image-tail overrun (+2 rows), corpus 2320 -> 2322.
+
+#### 0.18f Board after the census round
+
+corpus r178 = valid PE 2677, OEP exact 2347, imports 2405, **all-three 2322 official**, **capability
+2323** (bero_Bginfo is deterministic all-three standalone, 41 s, and only misses in-sweep at dur 86).
+Session tally 1843 -> 2322 official / 2323 capability. Two census mechanisms shipped this round (0.18c
+NSPack hollow-EP loader stub +5, 0.18d WinUpack image-tail overrun +2); the census itself is exhausted
+for the families outside the two measured both-engines-fail blocks (Themida 122, Yoda 100).
