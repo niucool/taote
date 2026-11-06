@@ -16570,3 +16570,23 @@ synthesized decoy's export tables do not satisfy this resolver's walk (its name 
 mapped image, or the name count at [ebx+0x18] is larger than the table). The fix is therefore in the
 decoy's SHAPE - a page-filling image whose export directory, name array and name strings are all inside
 the mapping, with a sane NumberOfNames - not in the unpacker's logic and not a missing module.
+
+#### 0.18i Falsification test run: the decoy's bitness is NOT the blocker (measured, reverted)
+
+Hypothesis from 0.18h: the synthesized decoy is built as `PE32_PLUS` even for a 32-bit guest, so a
+32-bit resolver that walks `e_lfanew at +0x3c -> [hdr+0x78] export dir -> [dir+0x20] AddressOfNames`
+reads the 64-bit layout and lands on a bogus directory. The hypothesis is CORRECT as a defect - building
+the decoy with the guest's layout removes the fault outright (rlpack_grepWin no longer dies with
+READ_UNMAPPED at 0x585f8b; the run completes) - but it converts nothing: the row's artifact is unchanged
+in every graded field (oep 0x6db4b = the original RVA, code_sim 1.0000, pairs 91, recall 0.0060).
+
+So the resolver walk is definitively NOT what stands between taote and this row's imports. Per the
+falsification test written into 0.18h, the change was reverted (it touches the decoy every
+unresolved-import family shares, and a zero-row change is not worth an unvalidated corpus risk). What
+remains is the runtime reading: the reference runs 97,650,817 instructions inside the payload and its
+image then holds 10 rebuilt import descriptors / 301 functions; taote ends after ~1.1M writes with the
+stub-side work complete. The next question is where the payload's own runtime import rebuild lives, not
+anything in the decoy.
+
+Correction worth keeping: the decoy bitness IS a real (if inert) defect - recorded here so it is not
+re-discovered as a lead, and it can be revisited only with a measurement showing a row that needs it.
