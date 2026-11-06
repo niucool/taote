@@ -16623,3 +16623,31 @@ pc 0x585f6e against module base 0x100a0000 (0.18i probe) - the next mechanic is 
 corresponds to (the rol-7/xor hash of each API name in `api_names_for`) and whether the stub is asking
 for a name the current decoy surface never offers; a fix that ADDS a name is a different, narrower
 change than the layout swap measured here.
+
+#### 0.18k Hash decoded: the stub asks for shlwapi!StrCmpLogicalW, and the decoy answers with a bare `ret`
+
+The 0.18i probe gave hash 0xf3af999d. Rolling the resolver's own loop backwards (`rol eax,7 ; xor
+al,[edx]` over each byte, terminating zero ignored for the target) against the api_db surface finds a
+single exact match in 34,773 names: **StrCmpLogicalW**, and api_db attributes it to `shlwapi` - i.e. the
+stub was scanning the shlwapi decoy at 0x100a0000 for exactly the name that decoy DOES carry (api_db's
+name surface was seeded for that decoy). So the resolver is neither wrong nor blocked by an empty
+surface — it is correct and finds the name's entry, then the payload CALLS the resolved address, which
+is the decoy's per-name `ret` cell (0x0C3 + padding). The payload's next action is precisely its own
+runtime IAT rebuild; a `ret` with 0 pre-wheel behavior silently derails that control flow.
+
+Observation with the bitness fix in place (fix correct in kind, applied just to observe):
+  final pc=0x0 (clean exit, fault gone), writes=1123767,
+  `loadlib shlwapi.dll retval=0x0` (decoy materialized as before),
+  but `image import table harvest: 1 descriptors -> 5 imports (desc_rva=0x1867c2)`.
+  The reference's end-state is `image_import_descriptors: 10, image_import_functions: 301`.
+So the stub resolves the name, calls a cell that immediately returns, and the IAT rebuild - the thing
+that would give these rows their imports - is what never runs. The decoy is superficial (names yes,
+behavior no).
+
+Narrow fix candidate (not the layout swap measured 0.18j): give the few names a stub actually CALLS a
+real minimal implementation (StrCmpLogicalW = a case-insensitive compare, returning -1/0/1), not a bare
+`ret`. Blast radius is limited to the families whose stubs reach that cell (RLPack's resolver in this
+case) and it must be measured on the RLPack family (97 rows, expect all three target rows to move) then
+the corpus. If recall does not move, the payload's rebuild depends on something beyond the one cell -
+the next reading is the payload's own call site after the resolver returns (pc 0x585f8b is inside the
+resolver; the call site is the immediate caller, both recorded).
