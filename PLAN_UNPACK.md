@@ -16463,3 +16463,22 @@ rc 2677x0 + 1x1. Suite 622/622.
 Parity census after this round (reference decodes, taote does not): winupack_mtinst (0.883 -> 0.9023,
 a small gap), amber_SmartDefragBootTime (0.042 -> 0.9929), bero_Bginfo (0.803 -> 1.0). Session tally
 1843 -> 2322 (86.7% of 2678; 89.5% of the gradeable base).
+
+#### 0.18e Census lead not yet shipped: amber_SmartDefragBootTime (and the rest of the five)
+
+State measured for the remaining census rows, so the next round does not re-derive it:
+
+* **amber_SmartDefragBootTime** (taote code_sim 0.0420 vs reference 0.9929). taote starts at EP 0x4014c0,
+  claims `.bss` [0x407000,0x408000) and `.data` [0x403000,0x404000) with a TOTAL of three writes, and
+  stops at 0x4011c4 ("no section hop; OEP guessed", 137 imports). The reference's artifact is a 0x6e00
+  image with 3 sections reproducing the original .text at 0.9929 - but its own
+  `image_written_fraction` is 0.0004, i.e. it did NOT write that image during emulation: it is a
+  host-side product. The packed file has only the packed PE itself (its `.text` is 0x2000 bytes against
+  the original's 0x6000) and no embedded payload PE, so the payload has to come out of Amber's own
+  decoder - this needs the decoder frame read the way ASPack's and NSPack's were, not another
+  loader/emulation guard.
+* **bero_Bginfo** (0.8031 -> 1.0) and **winupack_mtinst** (0.8825 -> 0.9023): the reference's artifact
+  is complete/almost complete while taote's is partial; both are decode-completion gaps (BeRo's image
+  already passes the OEP and ~1.0 import recall on other rows) rather than entry-point picks.
+* Both mechanisms that came out of this census are loader-shaped and already shipped: 0.18c NSPack's
+  hollow-EP stub (+5 rows) and 0.18d WinUpack's image-tail overrun (+2 rows), corpus 2320 -> 2322.
