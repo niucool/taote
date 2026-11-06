@@ -16684,3 +16684,13 @@ NEXT PRIORITY (records priority order, unchanged): cap rows at dur >= 84 (a real
 ladder proves no early-stop win), then genuinely new external evidence for Themida 122 / Yoda 100 (both
 closed on their VM-stage findings in 0.17np), then Amber's decoder read (0.18e), then - only with a new
 observation - reopen the RLPack import rebuild.
+
+#### 0.18n External-evidence check (the one route the directive leaves for reopening a closed lane)
+
+Ran the check the directive requires before touching any closed lane: `git log --since="2026-11-05
+22:00"` on ../pegasus (the reference build all closures were measured against). **Zero new commits** — the
+head is still d74abde4 ("report: publish oep_source"), the same build the session's measurements used
+(meaning the audit in 0.18's handover "the last 25 commits were exhausted" remains current). Consequence:
+nothing in Themida 122 / Yoda 100 / RLPack import rebuild / Amber / cap rows has changed status this
+cycle; the priority order recorded in 0.18m stands, and this check is what must be repeated (quickly) any
+time a closed lane is considered for reopening.
