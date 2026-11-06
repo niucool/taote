@@ -16504,3 +16504,22 @@ corpus r178 = valid PE 2677, OEP exact 2347, imports 2405, **all-three 2322 offi
 Session tally 1843 -> 2322 official / 2323 capability. Two census mechanisms shipped this round (0.18c
 NSPack hollow-EP loader stub +5, 0.18d WinUpack image-tail overrun +2); the census itself is exhausted
 for the families outside the two measured both-engines-fail blocks (Themida 122, Yoda 100).
+
+#### 0.18g Stripped-descriptor ordinals are (ord << 8) | 0xff over the FULL range
+
+The 0.17ns scanner extracted only bits 8-15 of the table dword as the ordinal - correct for the ws2_32
+table it was measured on (bind=2, socket=23, WSAStartup=115) but wrong in general: the dword is
+literally `(ord << 8) | 0xff`, so the whole upper 24 bits carry the ordinal. A dll whose numbering runs
+into the thousands was therefore invisible. winupack_mtinst imports 163 pairs, **112 of them mfc42
+ordinals**, and taote emitted none (the reference emits recall 1.0 on the same image); the payload's
+chain sits at image 0xa11b1 as `MFC42.DLL\0` followed by dwords 0x0017a7ff, 0x000feeff, 0x0006f0ff
+(= 1776), ... - every one rejected by the old `(v >> 16) == 0` test.
+
+Fix: ordinal = v >> 8, tag byte 0xff, 1 <= ordinal <= 0xffff, run of >= 2, dll-name anchored, and still
+scoped to dlls that have no pairs yet. Faithful: it reads the payload's own table.
+
+Measured: winupack_mtinst recall 0.3129 -> **1.0000** (270 -> 382 pairs) and winupack_DarkNamer
+0.2367 -> **0.9878** (same shape, different dll); 4-family sweep 390 rows +3/-1 (the loss, rlpack_geek, is
+the documented dur-86 cap row: standalone oep 0x559760 = original RVA, recall 0.9985, 54.5/54.9 s);
+corpus r180 = PE 2677, OEP 2347, imports 2407, **all-three 2324** (r178 2322), wall 17736 s, 2 gains,
+0 losses, 0 crashes. Suite 623/623. Session tally 1843 -> 2324 (capability 2325: bero_Bginfo, 0.18e).
