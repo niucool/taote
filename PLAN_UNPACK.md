@@ -16590,3 +16590,12 @@ anything in the decoy.
 
 Correction worth keeping: the decoy bitness IS a real (if inert) defect - recorded here so it is not
 re-discovered as a lead, and it can be revisited only with a measurement showing a row that needs it.
+
+Measurement added to 0.18i (post-revert tree): rlpack_grepWin is NOT a stalled run - the block hook
+counts ~15.8M exec fires, all in the stub region (0x585e75..0x58672a), before the READ_UNMAPPED at
+0x585f8b; the 1.12M figure I quoted earlier is the WRITE count, not the instruction count. So the stub
+does millions of instructions of work and still produces no import table, which sharpens the remaining
+question: not "why does taote stop early" but "what does the payload's own runtime rebuild read that
+taote's stub loop never produces". With the decoy-bitness fix in place the fault disappears but the
+artifact is unchanged (91 pairs, recall 0.0060), so the fault is a downstream symptom: the resolver
+still finds no matching export and the loop exits with nothing.
