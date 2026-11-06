@@ -117,6 +117,31 @@ bool Unpacker::inside_inplace(std::uint64_t addr) const {
     return false;
 }
 
+// WinUpack's image-tail overrun (measured on winupack_notmyfault.exe). After the self-decode its
+// stub zero-fills a table with `mov ch,0x1c; rep stosd` from 0x45f040: 0x7000 bytes that land 0x40
+// PAST SizeOfImage (0x466000). taote maps the image exactly, so the last `rep stosd` iteration takes
+// the guard page, the run aborts at 0x45ed31 after 7,195 writes, `.Upack` (the decode target, a
+// hollow exec section) stays ALL ZERO, and the row ends "no section hop; OEP guessed" with 2
+// imports. The reference maps past the image end, keeps going 21M instructions and decodes `.Upack`
+// completely (its artifact reproduces the original .text at 1.0000, taote's at 0.1078).
+//
+// One page is mapped past SizeOfImage for the family, at install time. Deliberately NOT a
+// grow-on-fault memory hook: mapping from inside a UC_HOOK_MEM_UNMAPPED callback crashes the host
+// (measured: segfault, core dumped), and the standing rule is that the harness never crashes. The
+// page is one past the image, which no legitimate payload access needs, and the mapping is logged.
+void Unpacker::install_image_tail_slack(Qiling& ql) {
+    if (is_64_ || image_size_ == 0 || opts_.family != "WinUpack") {
+        return;
+    }
+    try {
+        ql.mem().map(base_ + image_size_, 0x1000, UC_PROT_ALL, "[img-tail]");
+        std::fprintf(stderr, "[unpack] image tail: mapped 1 page past %s (WinUpack stub overrun)\n",
+                     hex(base_ + image_size_).c_str());
+    } catch (...) {
+        // already mapped (or the loader claimed it): nothing to do
+    }
+}
+
 // NSPack's hollow-EP loader stub (measured 5/5: nspack_Listdlls, PsService,
 // ldmdump, psping, psshutdown). The packed header names an entry point inside a
 // section whose PointerToRawData is a FRAGMENT (raw = 0x3..0x1a, a few bytes of
@@ -714,6 +739,7 @@ void Unpacker::install(Qiling& ql) {
     ql_ = &ql;
     classify_sections(ql);
     detect_hollow_ep_loader_stub(ql);
+    install_image_tail_slack(ql);
 
     // TAOTE_SEED_STATIC / Packer::seed_image_before_run: run the family's static
     // image recovery against the guest's mapped image BEFORE the stub executes.

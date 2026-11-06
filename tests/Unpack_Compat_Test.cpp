@@ -404,6 +404,26 @@ TEST(UnpackCompat, PecompactPlaceholderEntryIsTheFarHandOff) {
 // end with "no section hop; OEP guessed" after a few hundred instructions. The packer's real loader
 // stub is the 5-byte `jmp rel32` at FILE offset (EP_rva - section_rva); following it decodes the
 // payload completely (this row goes from 27 imports to 370, at the original entry point).
+// WinUpack's stub zero-fills a table that lands 0x40 PAST SizeOfImage: with the image mapped exactly
+// the last `rep stosd` iteration takes the guard page, the run aborts after 7,195 writes and the
+// decode target (.Upack, a hollow exec section) stays all zero (2 imports, OEP guessed). One page
+// past SizeOfImage lets the stub finish: this row then reaches the original entry point with 352
+// imports, and the reference behaves the same way (it decodes .Upack completely).
+TEST(UnpackCompat, WinupackImageTailOverrunIsMapped) {
+    const auto sample = fixture("WinUpack/winupack_notmyfault.exe");
+    if (sample.empty()) {
+        GTEST_SKIP() << "packed corpus not present (set TAOTE_PACKED_DIR)";
+    }
+    const auto out = fs::temp_directory_path() / "taote_unpack_winupack_tail";
+    std::error_code ec;
+    fs::remove_all(out, ec);
+    const auto res = run_unpack(RunConfig{sample, out, true, 60000000ULL, "WinUpack"});
+    ASSERT_EQ(res.base, 0x400000u) << res.error;
+    EXPECT_EQ(res.oep, res.base + 0x4f25u);   // truth
+    EXPECT_GT(res.imports.size(), 300u) << res.error;
+    fs::remove_all(out, ec);
+}
+
 TEST(UnpackCompat, HollowEpLoaderStubIsFollowed) {
     const auto sample = fixture("NSPack/nspack_Listdlls.exe");
     if (sample.empty()) {

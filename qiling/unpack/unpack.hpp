@@ -127,6 +127,9 @@ private:
     // loader stub is stored at FILE offset (EP_rva - section_rva). Sets
     // start_override_va_ to that jump's in-image target.
     void detect_hollow_ep_loader_stub(Qiling& ql);
+    // WinUpack's image-tail overrun: map one page past SizeOfImage at install time (see unpack.cpp;
+    // a grow-on-fault memory hook crashes the host, so this is a bounded pre-map).
+    void install_image_tail_slack(Qiling& ql);
     bool inside_inplace(std::uint64_t addr) const;
     int section_index_at(std::uint64_t addr) const;
 
