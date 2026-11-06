@@ -16367,3 +16367,35 @@ scale. Audit of r172 (2678 rows):
 
 So the host-safety property holds across the whole corpus in this build: every row either produces an artifact or refuses a
 non-PE input with a reason, and nothing crashed or threw out of the emulation.
+
+#### 0.18b core hook handles: the moved-from bug that made every instruction/address handle null
+
+Found while chasing the reference's Yoda anti-debug mechanism (SE_YODA_ANTIDBG: hook RDTSC, return a synthetic monotonic
+TSC so the stub's timing check does not see emulator latency). taote's own diagnostic - `TAOTE_CPUIDBG`, which logs every
+CPUID/RDTSC - printed **`rdtsc hook ok=0`**, i.e. the hook had not been installed. Investigating that gave a core bug:
+
+* `QlCoreHooks::hook_insn` did `insn_hook_[type].push_back(std::move(hook))` and then
+  `return HookRet(this, UC_HOOK_INSN, hook);` - handing the HookRet a **moved-from (null)** shared_ptr.
+  `hook_address` did the same. So every instruction and address handle carried a null `obj()`.
+
+Two consequences, both real:
+1. callers that gate on `h->obj() != nullptr` (the CPUIDBG/RDTSC diagnostic, and the unpack hook-install paths) reported
+   failure while the hook WAS registered at the unicorn level - a genuine trap: "0 rdtsc events" proves nothing when the
+   hook may not exist, and this round nearly concluded "the guest never runs rdtsc" from that print;
+2. `hook_del` returns early when `obj()` is null, so those handles were never removable.
+
+Fix: the registry keeps its own reference and the handle holds the same object (copy, not move). Two UEFI call sites
+discarded the returned handle and relied on the leak (`pe_uefi`'s exit-trap registration and `services.cpp`'s
+installed-field hooks), so they now keep it (`QlLoaderPE_UEFI::uefi_addr_hooks_`, plus a static handle vector in
+services). `ntdll.cpp`'s deliberately leaked hook and `core.cpp`'s long-lived `exit_trap_handle_` are unaffected.
+
+Verified: suite 619 -> **620** (new `CoreHooks.InsnHookHandleOwnsItsHookAndIsRemovable` asserts `obj() != nullptr` and that
+the destructor unregisters); an 797-row sweep over the eight hook-heavy families is identical to r172 with zero losses;
+full corpus r174 = **316**... precisely: valid PE 2677, OEP exact 2340, imports 2399, **all-three 2316**, wall 17753 s,
+one gain (rlpack_Bginfo returning from the sweep-length band), zero losses.
+
+**And with the diagnostic now truthful, the anti-debug lane is closed with evidence**: Yoda's run logs zero rdtsc events
+(hook ok=1), which matches the direct probes - Yoda's 2 rdtsc sites (0x40a1b4, 0x40b377) and three sampled Themida sites
+(0x4039ce, 0x41bfd4, 0x489a98) are never reached, even though Themida's image carries 119 rdtsc and 44 cpuid sites. So the
+reference's synthetic-TSC mechanism cannot help either family: Yoda's spin is the `eb 01` walk at 0x49b644..0x49b6a3
+(written=0) and Themida's run is the LZ decoder that builds its VM stage (0.17np).
