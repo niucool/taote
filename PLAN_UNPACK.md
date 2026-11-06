@@ -16651,3 +16651,36 @@ case) and it must be measured on the RLPack family (97 rows, expect all three ta
 the corpus. If recall does not move, the payload's rebuild depends on something beyond the one cell -
 the next reading is the payload's own call site after the resolver returns (pc 0x585f8b is inside the
 resolver; the call site is the immediate caller, both recorded).
+
+#### 0.18m RLPack's import lane closed for good (bitness + real cell bodies, measured, both reverted)
+
+This closes 0.18h/0.18i/0.18j/0.18k at once, with the composed experiment the falsification tests demanded:
+the stub's resolver at pc 0x585f8b reads its call target through a name-hash walk (rol-7/xor, decoded
+0.18k as shlwapi!StrCmpLogicalW) and the decoy answered that name with a bare `ret`. Two changes were
+composed and measured on the whole RLPack family (104 rows, r182rl vs r180):
+
+  1. decoy built as PE32 for 32-bit guests (fixes the resolver's directory read; removes the READ_UNMAPPED
+     fault outright, `final pc=0x0` on rlpack_grepWin),
+  2. the six strcmp-family cells (StrCmpLogicalW/A, lstrcmpiW/A, lstrcmpW/A) carrying a real
+     case-insensitive wide compare returning -1/0/1 (verified machine code, stdcall `ret 8`,
+     position-independent), instead of a bare `ret`.
+
+Result: `image import table harvest: 1 descriptors -> 5 imports` is IDENTICAL to the un-fixed build (the
+reference's end-state is 10 descriptors / 301 functions) and the three target rows are unchanged to four
+decimals:
+  rlpack_grepWin        recall 0.0060 -> 0.0060   PortableWinCDEmu  0.5833 -> 0.5833   adrestore 0.0633 -> 0.0633
+Family net: +1 (rlpack_Bginfo, cap-band at dur 86) and -1 (rlpack_ComIntRep 1.0 -> 0.0474, dur 70 -> 86) =
+zero. Both changes are REVERTED; the shared decoy is left exactly where 0.18j left it.
+
+What the measurement settles: the payload's runtime IAT rebuild is NOT gated on the resolver succeeding
+and NOT on what its target cell does. After the resolver returns the payload just exits (`final pc=0x0`)
+with no descriptor written, so the rebuild is either (a) skipped because some *other* runtime condition
+the emulated environment does not satisfy is false (the SDK-surface stub dll vs a real kernel32, heap /
+PEB / TLS state, etc.), or (b) not a runtime rebuild at all and the reference's 10 descriptors come from
+its own salvage/reconstruct pass reading something else. Either way it is a multi-hour investigation
+with an unbounded blast radius and it is NOT the next priority.
+
+NEXT PRIORITY (records priority order, unchanged): cap rows at dur >= 84 (a real ~2x speedup, budget
+ladder proves no early-stop win), then genuinely new external evidence for Themida 122 / Yoda 100 (both
+closed on their VM-stage findings in 0.17np), then Amber's decoder read (0.18e), then - only with a new
+observation - reopen the RLPack import rebuild.
