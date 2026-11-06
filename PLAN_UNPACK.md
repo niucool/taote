@@ -16561,3 +16561,12 @@ GetModuleHandle/LoadLibrary answer of 0x100a0000 was recorded without a matching
 measurement is to hook the pc just before the argument is pushed (the caller at 0x585b8e-0x586054) and
 log the push, then diff against the reference's dll base map; that decides between "decoy too small" and
 "a handle recorded for an image we never mapped".
+
+Correction to the 0.18h mechanism guess: the decoy for shlwapi IS mapped - the log has
+`map 0x100a0000-0x100a7000 rwx shlwapi.dll` (seven pages), so `[base+0x78]` at 0x100a1078 is inside it
+and nothing faults there. The READ_UNMAPPED at pc 0x585f8b is therefore inside the hash loop itself
+(`xor al,[edx]`), where `edx = [edi+esi*4] + base` comes from the decoy's AddressOfNames array: the
+synthesized decoy's export tables do not satisfy this resolver's walk (its name RVA leads outside the
+mapped image, or the name count at [ebx+0x18] is larger than the table). The fix is therefore in the
+decoy's SHAPE - a page-filling image whose export directory, name array and name strings are all inside
+the mapping, with a sane NumberOfNames - not in the unpacker's logic and not a missing module.
