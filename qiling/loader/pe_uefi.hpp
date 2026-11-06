@@ -65,6 +65,8 @@ public:
 
     std::unique_ptr<os::uefi::DxeContext> dxe_context;
     std::unique_ptr<os::uefi::SmmContext> smm_context;
+    // address-hook handles for the exit-trap callbacks: destroying one unregisters the hook
+    std::vector<HookRet> uefi_addr_hooks_;
     os::uefi::UefiContext* context = nullptr;
 
 private:

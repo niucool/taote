@@ -643,7 +643,11 @@ HookRet QlCoreHooks::hook_insn(InsnHookCallback callback, std::uint64_t insn_typ
         insn_hook_fuc_[insn_type] = handle;
         hook_contexts_.emplace_back(std::move(ctx));
     }
-    insn_hook_[insn_type].push_back(std::move(hook));
+    // copy, not move: the registry keeps its own reference and the returned handle must
+    // hold the SAME object, otherwise obj() is null (it was, which made every instruction
+    // and address handle report failure and never removable - the CPUIDBG diagnostic
+    // printed "rdtsc hook ok=0" while the hook was in fact registered).
+    insn_hook_[insn_type].push_back(hook);
 
     return HookRet(this, UC_HOOK_INSN, hook);
 }
@@ -679,7 +683,7 @@ HookRet QlCoreHooks::hook_address(AddressHookCallback callback, std::uint64_t ad
         addr_hook_fuc_[address] = handle;
         hook_contexts_.emplace_back(std::move(ctx));
     }
-    addr_hook_[address].push_back(std::move(hook));
+    addr_hook_[address].push_back(hook);   // see hook_insn: the handle must not be moved-from
 
     // note: assuming 0 is not a valid hook type (core_hooks.py)
     return HookRet(this, 0, hook);

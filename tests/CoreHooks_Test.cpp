@@ -187,6 +187,31 @@ TEST(CoreHooks, InterruptHookMatchesIntno) {
     EXPECT_EQ(seen[0], 0x80u);
 }
 
+// Every instruction and address hook used to come back with a NULL obj(): hook_insn and
+// hook_address did `push_back(std::move(hook))` and then handed the moved-from pointer to the
+// HookRet, so the handle held nothing. The visible symptoms were (a) callers that check
+// `h->obj() != nullptr` - the unpack CPUIDBG/RDTSC diagnostic - reporting "hook ok=0" while the
+// hook was in fact registered, and (b) those handles never being removable, because hook_del
+// returns early when obj() is null. The handle must own the same object the registry holds so its
+// destructor can unregister it.
+TEST(CoreHooks, InsnHookHandleOwnsItsHookAndIsRemovable) {
+    HookHarness h;
+    QlCoreHooks hooks(*h.uc);
+    int fired = 0;
+    {
+        auto handle = hooks.hook_insn([&fired](const std::vector<std::uint64_t>&) {
+            ++fired;
+            return 0;
+        }, UC_X86_INS_SYSCALL);
+        ASSERT_NE(handle.obj(), nullptr) << "the handle must own the registered hook";
+        uc_emu_start(h.uc, 0x1017, 0x1019, 0, 0);
+        EXPECT_EQ(fired, 1);
+    }
+    // the handle went out of scope: the hook must be gone
+    uc_emu_start(h.uc, 0x1017, 0x1019, 0, 0);
+    EXPECT_EQ(fired, 1) << "destroying the handle must unregister the instruction hook";
+}
+
 TEST(CoreHooks, SyscallInsnHookFires) {
     HookHarness h;
     QlCoreHooks hooks(*h.uc);

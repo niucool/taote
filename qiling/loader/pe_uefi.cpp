@@ -197,7 +197,8 @@ void QlLoaderPE_UEFI::register_eoe_trap(std::uint64_t address) {
         os_uefi.stop();
         return 0;
     };
-    ql_->hook_address(cb, address);
+    // keep the handle: destroying it unregisters the hook (see hook_address)
+    uefi_addr_hooks_.push_back(ql_->hook_address(cb, address));
 }
 
 void QlLoaderPE_UEFI::init_dxe_environment() {

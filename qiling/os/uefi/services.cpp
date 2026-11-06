@@ -839,7 +839,9 @@ void install_service_table(Qiling& ql, UefiContext& context, std::uint64_t base,
         const auto cb = [ql_ptr, fname, proto, hook]() -> int {
             return dispatch_service(ql_ptr, fname, hook, proto);
         };
-        ql.hook_address(cb, field_addr);
+        // keep the handle alive for the emulator's lifetime (destroying it unregisters)
+        static std::vector<HookRet> installed_handles;
+        installed_handles.push_back(ql.hook_address(cb, field_addr));
         os_uefi.uefi_installed_fields_.push_back(field_addr);
     }
 }
