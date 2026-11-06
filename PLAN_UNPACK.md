@@ -16273,3 +16273,27 @@ Full corpus r172: valid PE 2677, OEP exact 2340, imports 2398, **all-three 2315*
   839 imports on a row whose original declares 240 (precision 0.54);
 * keying the emission on which spelling a row "wants" is corpus-fitting.
 The evidence gate is the honest version: it converts what the image proves and leaves the rest alone.
+
+#### 0.17nt the import lane is now exhaustED by census: 7 real rows, and their tables are not in the images
+
+After 0.17ns (+7) the question is what is left on the import side. Census of r172's rows that are valid PE with an exact
+OEP and imports false at recall >= 0.85 gives 10 rows - and **three of them are cap-band rows, not import misses**
+(mew_Bginfo 86, mew_ComIntRep 86, mew_Sysmon 87: they pass in a short sweep, 0.17nq). So the real residual is **7 rows**:
+petite_FileTypesMan 0.9458, petite_shexview 0.9419, petite_ShareEnum 0.9198, petite_adrestore 0.9114,
+winupack_Dbgview 0.9460, winupack_portmon 0.9416, winupack_Everything 0.9247.
+
+For every one of those seven the decoded image contains **no ordinal table for the missing dlls**: scanning each dump for
+dll-name strings (`.dll/.drv/.ocx/.exe`) followed by >= 2 `0x0000NNFF` entries finds nothing for the dlls those rows miss
+(comctl32 / ws2_32 / oleaut32 / imm32 / shell32 / wldap32). The packer simply did not keep a per-dll table there, and the
+artifact carries none of the names either (only <1% of these rows' pairs come from those dlls).
+
+Two extensions were simulated on r172 and BOTH rejected, with numbers:
+* **ordinal -> name bridge** (the reference's F67 mechanism, which taote lacks): converts **0 rows** - taote is not
+  missing names where it holds ordinals, so the obverse direction has nothing to win.
+* **row-level gate for name -> ordinal** (convert a name to its ordinal when the row spells ANY dll by ordinal): converts
+  2 rows (petite_FileTypesMan 0.9458 -> 0.9708, petite_shexview 0.9419 -> 0.9710) but buys them by adding **253 and 255
+  pairs to rows whose originals declare 240 and 241** - i.e. claiming roughly twice the payload's real import table. The
+  per-dll evidence gate of 0.17ns is the faithful form; the row-level one is metric-scoring, so it stays out.
+
+With that, the import side of the board is closed by evidence rather than by assertion: the remaining 7 rows need data the
+dumps do not contain.
