@@ -16617,7 +16617,7 @@ PE32 for 32-bit guests, PE32_PLUS for 64-bit) neither moves the two rows it was 
 a swap on the family's own binary; it is reverted for a second and final time. The decoy is functionally
 sufficent: the resolver fault is benign and any change to the shared decoy runs the cap-row faucet.
 
-The 0.18h question stands unr*changed*: what the payload's own runtime import rebuild reads that taote's
+The 0.18h question stands unchanged: what the payload's own runtime import rebuild reads that taote's
 stub loop never produces. The one remaining live hint for it is the hash-target 0xf3af999d resolved at
 pc 0x585f6e against module base 0x100a0000 (0.18i probe) - the next mechanic is to read what that hash
 corresponds to (the rol-7/xor hash of each API name in `api_names_for`) and whether the stub is asking
