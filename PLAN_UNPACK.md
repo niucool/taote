@@ -16552,3 +16552,12 @@ the stub passes and where it got it (its own table, a PEB walk, or a GetModuleHa
 compare against the reference's dll base map for the same row. If the stub walks the PEB module list,
 the fix is the decoy's size/shape (a page-filling image with a real export directory) rather than
 anything in the unpacker's own logic.
+
+Probe result (0.18h follow-up): at pc 0x585f6e, `ebx = 0x100a0000` and `eax = 0xf3af999d` - i.e. the base
+comes in as the resolver's argument and the hash being looked up is 0xf3af999d, so the stub is resolving
+a name in the module it believes sits at 0x100a0000. Since taote's last stub dll ends at 0x10097000 and
+the decoy for shlwapi is one page, either the stub computed that base itself or a
+GetModuleHandle/LoadLibrary answer of 0x100a0000 was recorded without a matching image. The next
+measurement is to hook the pc just before the argument is pushed (the caller at 0x585b8e-0x586054) and
+log the push, then diff against the reference's dll base map; that decides between "decoy too small" and
+"a handle recorded for an image we never mapped".
