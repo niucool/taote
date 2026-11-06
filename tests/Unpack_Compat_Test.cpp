@@ -151,7 +151,10 @@ UnpackResult run_unpack(const RunConfig& cfg) {
         ql->os().set_stdout(captured);
         unpacker.install(*ql);
         try {
-            ql->run();
+            // the packed layout can name a start the header's EP cannot be (NSPack's
+            // hollow-EP loader stub); install() decided it, mirroring the CLI
+            const auto start_override = unpacker.start_override();
+            ql->run(start_override != 0 ? std::optional<std::uint64_t>(start_override) : std::nullopt);
         } catch (const qiling::QlErrorBase&) {
             // a guest fault still yields the artifact
         }
@@ -395,6 +398,27 @@ TEST(UnpackCompat, PecompactPlaceholderEntryIsTheFarHandOff) {
 // payload in ~2 s. The test pins that without timing: a 30M-instruction budget is far
 // below what the native decode needs (the row spent its whole 86 s cap in it) and the
 // host decode still lands the entry and the import table.
+// NSPack's hollow-EP loader stub: five family rows (Listdlls, PsService, ldmdump, psping,
+// psshutdown) name an entry point inside a section whose PointerToRawData is a 3-26 byte fragment, so
+// the mapped image is ZERO at the EP and the emulation used to execute zero bytes, write nothing and
+// end with "no section hop; OEP guessed" after a few hundred instructions. The packer's real loader
+// stub is the 5-byte `jmp rel32` at FILE offset (EP_rva - section_rva); following it decodes the
+// payload completely (this row goes from 27 imports to 370, at the original entry point).
+TEST(UnpackCompat, HollowEpLoaderStubIsFollowed) {
+    const auto sample = fixture("NSPack/nspack_Listdlls.exe");
+    if (sample.empty()) {
+        GTEST_SKIP() << "packed corpus not present (set TAOTE_PACKED_DIR)";
+    }
+    const auto out = fs::temp_directory_path() / "taote_unpack_hollow_ep";
+    std::error_code ec;
+    fs::remove_all(out, ec);
+    const auto res = run_unpack(RunConfig{sample, out, true, 30000000ULL, "NSPack"});
+    ASSERT_EQ(res.base, 0x400000u) << res.error;
+    EXPECT_EQ(res.oep, res.base + 0x9666u);   // truth: the header EP is a zero-filled decoy
+    EXPECT_GT(res.imports.size(), 300u) << res.error;
+    fs::remove_all(out, ec);
+}
+
 TEST(UnpackCompat, NspackHostDecodeRecoversThePayload) {
     const auto sample = fixture("NSPack/nspack_Bginfo.exe");
     if (sample.empty()) {

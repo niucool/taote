@@ -403,16 +403,23 @@ int main(int argc, char** argv) {
         try {
             // TAOTE_UNPACK_START=<hex>: start the emulation somewhere other than the
             // header EP (a dev switch for the samples whose packed EP is bogus —
-            // NSPack writes 0x101b into a zero-filled section head)
+            // NSPack writes 0x101b into a zero-filled section head). The value must
+            // ride Qiling::run(begin): run() resets entry_point_ to begin.value_or(0)
+            // and clears entry_point_set_, so a set_entry_point() before it is void.
+            std::uint64_t start_va = 0;
             if (const char* start_env = std::getenv("TAOTE_UNPACK_START")) {
-                const auto start_va = std::strtoull(start_env, nullptr, 0);
+                start_va = std::strtoull(start_env, nullptr, 0);
                 if (start_va != 0) {
-                    ql->set_entry_point(start_va);
                     std::fprintf(stderr, "[unpack] start forced to 0x%llx\n",
                                  static_cast<unsigned long long>(start_va));
                 }
             }
-            ql->run();
+            if (start_va == 0) {
+                // the packed layout itself can name a start the header's EP cannot
+                // be (NSPack's hollow-EP loader stub); Unpacker::install decided it
+                start_va = unpacker.start_override();
+            }
+            ql->run(start_va != 0 ? std::optional<std::uint64_t>(start_va) : std::nullopt);
         } catch (const qiling::QlErrorBase& e) {
             // the guest faulted: the artifact is still produced from whatever
             // state the run reached (the reference does the same)

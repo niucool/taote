@@ -115,9 +115,18 @@ public:
 
     // OEP candidate seam: a hop that the accept gate accepted (for tests).
     std::uint64_t oep() const noexcept { return meta_oep_; }
+    // Loader-quirk seam: a start address the packed layout itself dictates, when
+    // the header's EP cannot be executed (see detect_hollow_ep_loader_stub).
+    std::uint64_t start_override() const noexcept { return start_override_va_; }
 
 private:
     void classify_sections(Qiling& ql);
+    // NSPack's hollow-EP loader stub (see unpack.cpp): the header's EP sits in a
+    // section whose raw data is a fragment, so the mapped image holds zeros there
+    // and the emulation executes zero bytes; the packer's real 5-byte `jmp rel32`
+    // loader stub is stored at FILE offset (EP_rva - section_rva). Sets
+    // start_override_va_ to that jump's in-image target.
+    void detect_hollow_ep_loader_stub(Qiling& ql);
     bool inside_inplace(std::uint64_t addr) const;
     int section_index_at(std::uint64_t addr) const;
 
@@ -186,6 +195,7 @@ private:
     std::uint64_t base_ = 0;
     std::uint64_t image_size_ = 0;
     std::uint64_t packed_ep_va_ = 0;
+    std::uint64_t start_override_va_ = 0;
     bool is_64_ = false;
     std::uint32_t stages_ = 0;
     // every accepted hop, in order: the reference's OEP candidate ledger

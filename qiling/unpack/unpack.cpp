@@ -117,6 +117,89 @@ bool Unpacker::inside_inplace(std::uint64_t addr) const {
     return false;
 }
 
+// NSPack's hollow-EP loader stub (measured 5/5: nspack_Listdlls, PsService,
+// ldmdump, psping, psshutdown). The packed header names an entry point inside a
+// section whose PointerToRawData is a FRAGMENT (raw = 0x3..0x1a, a few bytes of
+// the section table), so the mapped image holds zeros at the EP: the emulation
+// executes zero bytes, produces NO write at all, and the run reports
+// "no section hop; OEP guessed" after a few hundred instructions. The packer's
+// real loader stub is a 5-byte `jmp rel32` stored at FILE offset
+// (EP_rva - section_rva) - i.e. the section's window in the file starts at the
+// file's beginning, a classic raw-pointer-inside-the-headers quirk. Both rows of
+// that layout place the jump at file+0x1b and it lands in the stub's own exec
+// section; starting there decodes the payload COMPLETELY (nspack_Listdlls:
+// oep 0x409666 = the original RVA 0x9666, imports 27 -> 370, and the reference
+// reaches the same image by executing the same jump).
+//
+// Gated on all of: 32-bit, the EP's section raw < 0x20, sixteen zero bytes in the
+// MAPPED image at the EP, and a `jmp rel32` at that file offset whose target is
+// inside another EXEC section of the image. Nothing is written and no family-wide
+// constant is assumed; the file's own bytes decide the start.
+void Unpacker::detect_hollow_ep_loader_stub(Qiling& ql) {
+    if (is_64_ || opts_.sample_path.empty() || packed_ep_va_ == 0) {
+        return;
+    }
+    const PackSection* sec = nullptr;
+    for (const auto& ps : sections_) {
+        if (packed_ep_va_ >= ps.start && packed_ep_va_ < ps.end) {
+            sec = &ps;
+            break;
+        }
+    }
+    if (sec == nullptr || sec->raw >= 0x20) {
+        return;
+    }
+    std::vector<std::uint8_t> epb;
+    try {
+        epb = ql.mem().read(packed_ep_va_, 16);
+    } catch (...) {
+        return;
+    }
+    if (epb.empty()) {
+        return;
+    }
+    for (const auto b : epb) {
+        if (b != 0) {
+            return;  // the EP is real code here - nothing to recover
+        }
+    }
+    const auto delta = static_cast<std::uint64_t>(packed_ep_va_ - sec->start);
+    std::ifstream in(opts_.sample_path, std::ios::binary);
+    if (!in) {
+        return;
+    }
+    in.seekg(static_cast<std::streamoff>(delta), std::ios::beg);
+    std::uint8_t b[5] = {0, 0, 0, 0, 0};
+    in.read(reinterpret_cast<char*>(b), 5);
+    if (in.gcount() != 5 || b[0] != 0xE9) {
+        return;
+    }
+    const auto rel = static_cast<std::int32_t>(static_cast<std::uint32_t>(b[1]) |
+                                              (static_cast<std::uint32_t>(b[2]) << 8) |
+                                              (static_cast<std::uint32_t>(b[3]) << 16) |
+                                              (static_cast<std::uint32_t>(b[4]) << 24));
+    const auto target = static_cast<std::uint64_t>(static_cast<std::int64_t>(packed_ep_va_) + 5 + rel);
+    if (target <= base_ || target >= base_ + image_size_) {
+        return;
+    }
+    bool in_stub = false;
+    for (const auto& ps : sections_) {
+        if (ps.is_exec && ps.start != sec->start && target >= ps.start && target < ps.end) {
+            in_stub = true;
+            break;
+        }
+    }
+    if (!in_stub) {
+        return;
+    }
+    start_override_va_ = target;
+    std::fprintf(stderr,
+                 "[unpack] hollow-EP loader stub: ep %s in %s (raw=0x%llx) -> start %s (file+0x%llx)\n",
+                 hex(packed_ep_va_).c_str(), sec->name.c_str(),
+                 static_cast<unsigned long long>(sec->raw), hex(target).c_str(),
+                 static_cast<unsigned long long>(delta));
+}
+
 // The reference's classify_sections (unpacker.cpp:95-171): turn the mapped
 // sections into PackSection records, then choose what to watch.
 void Unpacker::classify_sections(Qiling& ql) {
@@ -630,6 +713,7 @@ void Unpacker::install(Qiling& ql) {
     sec_trans_on_ = std::getenv("TAOTE_SEC_TRANS") != nullptr || pet_exit_on_;
     ql_ = &ql;
     classify_sections(ql);
+    detect_hollow_ep_loader_stub(ql);
 
     // TAOTE_SEED_STATIC / Packer::seed_image_before_run: run the family's static
     // image recovery against the guest's mapped image BEFORE the stub executes.
