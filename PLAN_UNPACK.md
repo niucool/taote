@@ -16523,3 +16523,32 @@ Measured: winupack_mtinst recall 0.3129 -> **1.0000** (270 -> 382 pairs) and win
 the documented dur-86 cap row: standalone oep 0x559760 = original RVA, recall 0.9985, 54.5/54.9 s);
 corpus r180 = PE 2677, OEP 2347, imports 2407, **all-three 2324** (r178 2322), wall 17736 s, 2 gains,
 0 losses, 0 crashes. Suite 623/623. Session tally 1843 -> 2324 (capability 2325: bero_Bginfo, 0.18e).
+
+#### 0.18h RLPack's import gap is a runtime issue, not a table read (measured, not yet fixed)
+
+rlpack_grepWin / rlpack_PortableWinCDEmu are the last import-side parity rows: taote emits 91 pairs
+(kernel32/ntdll only, recall 0.0060) where the reference emits 301 (advapi32, comdlg32, gdi32, ole32,
+shell32, shlwapi, urlmon; recall 0.8985), on images that are otherwise identical (the dumps differ in
+1,237 bytes, code_sim 1.0 for both).
+
+What the measurement rules out first: **the payload's import data is not in either image**. 13 of the
+original's 335 names appear in the reference's dump and 13 in taote's, and the packed file has none of
+them, so no table-read mechanism (0.18g's scanner included) can recover this row. The reference gets
+there at RUNTIME: its log shows `image_import_descriptors: 10`, `image_import_functions: 301` and
+**97,650,817 instructions** executed inside the payload - the stub rebuilds the import table in memory
+and the reference then reads the rebuilt descriptors.
+
+Where taote stops: 1,123,767 writes, then a READ_UNMAPPED at pc 0x585f8b with ebx=0x100a1000,
+ecx=edi=0x100a0000, esi=0. That pc is RLPack's **export-by-hash resolver** (`mov ebx,[esp+0x24]` = a
+module base, `add ebx,[ebx+0x3c]`, `mov ebx,[ebx+0x78]`, `edi=[ebx+0x20]+base`, then the
+`rol eax,7 / xor al,[edx]` name-hash loop). So the stub walks the export directory of the module it
+believes is at 0x100a0000. taote's loader maps its stub dlls at 0x10000000 (ntdll), 0x10020000
+(kernel32), 0x10040000 (kernelbase), 0x10050000 (mscoree), 0x10060000 (ucrtbase) - next free slot
+0x100a0000 - and 0x100a0000 is a ONE-PAGE decoy (`loadlib shlwapi.dll retval=0x0` -> `decoy shlwapi.dll
+-> 1`), so `[base+0x78]` at 0x100a1078 is past it and faults.
+
+Next step (recorded, not run): probe `[esp+0x24]` at 0x585f6a on the first hit to see which module base
+the stub passes and where it got it (its own table, a PEB walk, or a GetModuleHandle result), then
+compare against the reference's dll base map for the same row. If the stub walks the PEB module list,
+the fix is the decoy's size/shape (a page-filling image with a real export directory) rather than
+anything in the unpacker's own logic.
