@@ -16297,3 +16297,55 @@ Two extensions were simulated on r172 and BOTH rejected, with numbers:
 
 With that, the import side of the board is closed by evidence rather than by assertion: the remaining 7 rows need data the
 dumps do not contain.
+
+## 0.18 Handover (verified state, 2026-11-06)
+
+**Numbers.** Corpus r172 (full 2678 rows, 4 workers, 85 s budget, wallcap 120, quiet box): valid PE **2677**, OEP exact
+**2340**, imports **2398**, **all-three 2315**, aggregate wall 17834 s, 80 rows at dur>=84. Capability figure **2316** (the
+7-row sweep-length band of 0.17nq; rlpack_Bginfo is the row currently outside). Gradeable base 2597 (2678 - 81 ungradeable
+managed originals) => 89.2% of it; of the *reachable* base (2597 - 223 Themida/Yoda rows = 2374) taote is at 97.5%.
+Suite **619/619**, 0 failures. Session tally 1843 -> 2315.
+
+**Shipped this session** (each with its measured number):
+1. NSPack stage-2 payload decoded host-side (LZMA1): 86 s -> 1.5 s, corpus 2304 -> 2307 at the time.
+2. TELock's own EP table trusted whenever the stub wrote it (oepfromtable): OEP 97 -> 101, 5 flips.
+3. Forwarder alias kept alongside the database's spelling: +2 rows (amber/jdpack chglogon to recall 1.0).
+4. The last per-block `getenv` (TAOTE_HANDOFF_SNAP) cached: 13-14% on block-bound runs, byte-identical artifacts.
+5. ASPack per-section decompressor host-side: family 93/94 -> 94/94, its row 87 s -> 1.8 s.
+6. Stripped-descriptor ordinal recovery + evidence-gated ordinal spelling: +7 in the affected families at family scope,
+   corpus 2308 -> 2315.
+
+**Closed lanes, each with the number that closed it:**
+* named import pairs: no row in the 0.90-0.95 band carried more than ONE named missing pair.
+* ordinals: exhausted by census (0.17nt) - the 7 residual rows' images hold no ordinal table for the missing dlls. The
+  reference's F67 ordinal->name bridge converts 0 rows in taote; the row-level name->ordinal gate converts 2 by claiming
+  ~2x the real table (rejected as metric-scoring).
+* OEP pocket: 46 rows are ungradeable managed originals, 3 are the closed perfect-image/wrong-EP rows.
+* throughput: 46% of the wall is hooks (25% unicorn dispatch, 21% bodies) - irreducible from outside (0.17nj); the guest is
+  54%. Cap rows need 1.67-2.39x (0.17nq), not 3x (0.17nh was load-contaminated).
+* hop-stop: post-import idle is 0.03-0.15 s, so runs are import-bound, not app-emulation-bound (0.17ni).
+* MEW: NOT LZMA1; the driver is the stub's own loop with an indirect materialised helper table, so no frame exists to read.
+  Loop patches measure 2% / 0% / 6% vs a 2x gate (0.17ne/0.17nl).
+* Themida: the shared LZ decoder produces the protector's SECOND STAGE (3.3 MB of VM stubs, zero 16-byte runs of the
+  payload) - recovering the payload needs a VM, not a decoder (0.17np).
+* Yoda-Protector: both-engines-fail on the same image - the reference's artifacts for livekd/procdump have code_sim
+  0.0441/0.0456 against taote's 0.0440/0.0459 (identical undecoded image) with wrong EPs (0x34ec0 vs 0x9663, 0x4bbd6 vs
+  0x171e7). Taote's own trace shows why: ~1M blocks walking an obfuscated `eb 01` byte stream at 0x49b644..0x49b6a3 with
+  **written=0** and call/jmp targets outside the image (0x30ab8f4, 0xec0bb84b) - never a decoder.
+* Amber's 12 no-hop rows: both-fail, same undecoded image as the reference, `payload_not_code` (0.17nf).
+* TELock's 4 fast rows: both-fail, the reference's artifact is the packed stub (0.17mw).
+
+**Measurement rules learned this session (all paid for):**
+* grade against the manifest's `orig`, never the packed sample (0.17nf: a stub that never runs leaves the packed bytes, so
+  an artifact reads code_sim 1.0 / recall 1.0 / EP "exact" - a fake +11 was refuted this way);
+* the grader's `imports` flag is RECALL ONLY (precision is reported separately as `imp_exact`) - a rule that only wins by
+  inflating the emitted table is metric-scoring, not improvement;
+* short targeted sweeps are deterministic (0 flips over 81 band rows twice) while the full sweep inflates marginal rows
+  1.67-2.39x; re-check any dur>=84 flip in a short sweep before attributing it;
+* /tmp is a 7.6 GB tmpfs: at 73-80% used ctest gives spurious failures and runs write 0-byte artifacts.
+
+**What would move the number now.** Only external evidence, and here is the specific question per family: Themida - does any
+published analysis describe a usable VM-independent payload path (or a version whose decode loop precedes the VM)?
+Yoda-Protector - what makes the stub leave its encrypted walk (a specific API/flag it waits for)? Amber's 12 - why does the
+stub jump into the guest heap at 0x5000xxx with 16 stores? TELock's 4 - the SEH navigation the reference also fails.
+Everything else on this board has a measured closure; another pass over taote's own seams would be a repeat.
