@@ -16694,3 +16694,30 @@ head is still d74abde4 ("report: publish oep_source"), the same build the sessio
 nothing in Themida 122 / Yoda 100 / RLPack import rebuild / Amber / cap rows has changed status this
 cycle; the priority order recorded in 0.18m stands, and this check is what must be repeated (quickly) any
 time a closed lane is considered for reopening.
+
+#### 0.18o Deep-tail pegasus audit beyond the 25 already-checked commits (the directive's explicit lead)
+
+There was more history to check than the earlier audit's "last 25 commits": the tail carries many real
+mechanisms, and the check was re-run at depth. None can convert a currently-missing row:
+
+* `5003bdbb` UPX hop-stop import truncation (wall + instruction quiet floor) - UPX has zero misses now.
+* `14a2a849`/`3ee69c73` UPX import table materialisation + sidecar - UPX 109/109 already.
+* `5de920eb` Exe32pack wipe-degenerate section-table restore - the 2 remaining Exe32pack rows are
+  both-engines-fail rows where the reference's own code_sim equals taote's (0.13-0.21); no row to move.
+* `5cbb86f1` stub export surface from the SDK (RLPack +80 in the reference) - already present in taote
+  (`api_names_for` seeding, measured at 0.18g).
+* `ceaf347c` host fingerprinting (IP_ADAPTER_INFO offsets, GetThreadContext ContextFlags, MAC OUI) and
+  `2a7883dd` ZwQueryInformationProcess ProcessDebugPort/Flags - the reference reports 0 row changes for
+  them on its own families (UPX 109/109, TELock 106/118, MEW 112/112 unchanged).
+* `93e8e401` CONTEXT64 field drift (EFlags as u64 shifting every register after by 8 bytes; Dr0 0x50 not
+  0x48, Rax 0x80 not 0x78, Rip 0x100 not 0xF8) - a real layout bug in the reference, but taote has NO
+  64-bit CONTEXT path at all (seh.cpp is the x86 CONTEXT image only: kCtxEFlags=0xc0, kCtxDr0=0x04), and
+  the corpus has exactly one 64-bit miss (amber_SmartDefragBootTime, whose gap is Amber's own decoder
+  per 0.18e, not SEH). So it converts nothing today; it is the first thing to port IF a 64-bit row with
+  a handler-reaches-NtContinue shape ever appears (they are all Themida/Yoda, both closed).
+* `ea8c18b1` nested VEH raise resume + NtContinue/RtlRestoreContext - already present in taote ('resumes
+  it: only then is an NtContinue/RtlRestoreContext ours to apply', windows.hpp:225).
+
+Bottom line: the deep tail is a real inventory but every mechanism either already runs in taote, was
+measured at zero effect on the reference's own family, or has no row to convert today. The recorded
+priority list (0.18m) is untouched by it.
