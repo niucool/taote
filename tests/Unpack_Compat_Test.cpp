@@ -150,6 +150,10 @@ UnpackResult run_unpack(const RunConfig& cfg) {
         captured = qiling::QlFile::open_mode((rootfs / "guest_stdout.txt").string(), "w+b");
         ql->os().set_stdout(captured);
         unpacker.install(*ql);
+        // the data-export shim: the stub tree's _acmdln/_wcmdln cells are code
+        // cells by default and a stub that resolves the name itself (no import
+        // table to patch through) dereferences the 0xC3 fill as a pointer
+        qiling::testing::pe_sample_detail::patch_data_export_slots(*ql, run_sample);
         try {
             // the packed layout can name a start the header's EP cannot be (NSPack's
             // hollow-EP loader stub); install() decided it, mirroring the CLI

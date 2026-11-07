@@ -409,6 +409,14 @@ int main(int argc, char** argv) {
         captured = qiling::QlFile::open_mode(capture_path.string(), "w+b");
         ql->os().set_stdout(captured);
         unpacker.install(*ql);
+        // the data-export shim (Pe_Sample_Runner.hpp): the stub tree's
+        // _acmdln/_wcmdln cells are code cells by default; the shim writes the
+        // runtime command line into them. A stub that resolves the name itself
+        // (amber_SmartDefragBootTime has no import directory) dereferences the
+        // 0xC3 fill as a pointer without it. Only the synthesized stub tree.
+        if (uopts.allow_decoy_dlls) {
+            qiling::testing::pe_sample_detail::patch_data_export_slots(*ql, run_sample);
+        }
         try {
             // TAOTE_UNPACK_START=<hex>: start the emulation somewhere other than the
             // header EP (a dev switch for the samples whose packed EP is bogus —

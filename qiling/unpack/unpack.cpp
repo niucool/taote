@@ -470,6 +470,16 @@ bool Unpacker::materialize_decoy_dll(const std::string& dll_name) {
             }
             const std::size_t cell = 16;
             std::vector<std::uint8_t> code(std::max<std::size_t>(16, surf.size() * cell), 0xC3);
+            // CRT data exports are VARIABLES the guest dereferences: a `ret`
+            // cell would hand it 0xc3c3c3c3 as a pointer (amber_SmartDefragBootTime
+            // parses *_acmdln as its command line and dies on it). Zero those
+            // slots - the stubs' own null checks take their "no value" path.
+            for (std::size_t i = 0; i < surf.size(); ++i) {
+                if (loader::is_crt_data_export(surf[i])) {
+                    std::fill(code.begin() + static_cast<std::ptrdiff_t>(i * cell),
+                              code.begin() + static_cast<std::ptrdiff_t>((i + 1) * cell), 0);
+                }
+            }
             auto factory = LIEF::PE::Factory::create(LIEF::PE::PE_TYPE::PE32_PLUS);
             LIEF::PE::Section text(".text", code);
             factory->add_section(text);
@@ -5102,7 +5112,14 @@ UnpackResult Unpacker::finalize(Qiling& ql) {
                 stages_ = 1;
             }
         }
-        if (!hop_ledger_.empty()) {
+        if (!hop_ledger_.empty() && !adopted_ep) {
+            // An adopted embedded PE keeps its OWN header entry: the carve
+            // already proved the payload and its AddressOfEntryPoint is the
+            // strongest provenance there is (the reference publishes exactly
+            // this as SCF_HEADER_EP). Letting the hop pick run over the ledger
+            // demoted it to a ladder look-alike on amber_mmc (0x51998d6 exact ->
+            // 0x51a6d86, measured); a hop is evidence about the STUB's flow, and
+            // the junk latches the stub leaves behind are not entries.
             const auto picked = pick_oep(image);
             if (picked != meta_oep_) {
                 if (opts_.debug) {

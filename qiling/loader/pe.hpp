@@ -332,6 +332,14 @@ private:
     std::uint64_t regitry_path_address_ = 0;
 };
 
+// The CRT data-export surface: names a guest dereferences as VARIABLES, not
+// calls (amber_SmartDefragBootTime resolves _acmdln and parses *it as its
+// command line). A minted code cell (0xC3 / `xor eax,eax; ret` fill) hands such
+// a guest 0xc3c3c3c3 as a pointer and the run dies on the dereference, so these
+// names get a ZEROED data cell instead - the stubs' own "no value" path handles
+// NULL (the command-line parse is skipped when the pointer is 0).
+bool is_crt_data_export(const std::string& name);
+
 }  // namespace loader
 }  // namespace qiling
 

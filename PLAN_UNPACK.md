@@ -16863,3 +16863,65 @@ Shipped: the write-trap port (reference STATUS 455 / TASK D), the three map-spli
 (poll_dyn_maps / adopt_embedded_pe / the IAT scanner now recognise the image by RANGE, not by
 "one map entry at base_"), the trap-mode junk-latch rule, and the map-splitting-safe O(n) merge in
 adopt_embedded_pe.
+
+#### 0.18r Amber's decoder read (0.18e): the row class is settled, two reference mechanisms ported, corpus-neutral
+
+The 0.18m priority said "Amber's decoder read (0.18e)". The census first: Amber's 34 r183 misses split
+into **22 .NET originals** (oep_exact=None - never all-three by construction) and **13 real decode
+failures** (fallback_guess at 0x4014ea, cs 0.01-0.06). Of the 13 the reference solves exactly ONE
+(amber_SmartDefragBootTime, 0.9929); the other 12 are both-engines-fail (the reference's own artifact
+is the input at 0.9991 identical, reason payload_not_code). So the lane's honest ceiling is 1 row
+before a genuine Amber decode exists.
+
+What the reference actually does for that one row (read from its run JSON and its source): the stub is
+NOT a packer frame like ASPack/NSPack - it is a full statically-linked MSVC CRT program. The
+reference runs the payload to completion (3.6M instructions, NtCreateFile('\Device\SmartDefragDevice'))
+and then publishes `unpack.embedded_payload = true`: its **embedscan carve** (unpacker.cpp:13080-13180)
+scans mapped memory for PE candidates (EP-in-exec-section + import-dir gates, largest-file ranking),
+re-lays the VA image to file layout and un-applies relocations, and takes the OEP from the carved
+image's own header (SCF_HEADER_EP). taote's adopt_embedded_pe is a weaker cousin of the same idea.
+
+The taote-side divergence is now found and fixed at its root - three checked-in reference mechanisms
+taote lacked:
+
+1. **The driver/user decision** (pegasus `PeFile::is_driver`, common.cpp:624): a NATIVE-subsystem
+   image is a driver only when its entry point is 0 OR it imports kernel modules (ntoskrnl/hal/ndis/
+   bootvid/kdcom/win32k). taote's rule was "subsystem == NATIVE" alone, so amber_SmartDefragBootTime
+   (a user-mode CRT tool declaring NATIVE) loaded as a KERNEL DRIVER: the driver path skips
+   init_teb/init_peb/init_ldr_data and the stub's `mov rax, gs:0x30` (NT_TIB.Self) then read 0 and
+   died on [rax+8] after 3 writes. With the port the TLS callbacks run, the CRT startup matches the
+   reference's API list instruction-for-instruction (GetSystemTimeAsFileTime -> _initterm ->
+   SetUnhandledExceptionFilter -> strlen -> strncmp x4), and the row's import recall goes
+   0.000 -> **1.000** (137 -> 185 resolved names). The row is NOT yet converted: the stub's own
+   payload decode into its VirtualAlloc'd buffer (a 3-instruction self-decryptor at 0x50009e4) still
+   diverges before the payload is complete.
+2. **The CRT data-export shim now reaches the unpack path and the self-resolve path**
+   (tests/Pe_Sample_Runner.hpp patch_data_export_slots): `_acmdln`/`_wcmdln` are VARIABLES, and a
+   stub that resolves them itself (SmartDefragBootTime has no import directory at all - the packed
+   file's import dir is zeroed) walks the stub dll's export cell and dereferences the 0xC3 fill as a
+   pointer (0xc3c3c3c3 -> the command-line parse dies on it). The shim previously ran only in the
+   test harness and only for sample-import-table slots; it now sweeps every loaded dll's export-cell
+   registry and runs from the CLI. Data-export names also get a ZEROED cell instead of a `ret` cell
+   at both mint sites (the sentinel arena and the unpacker decoy builder).
+3. **x86-only minted cell bodies are gated to 32-bit guests**: the stdcall `ret 4*nargs` cleanup and
+   the EncodePointer cookie cell (`mov eax,[esp+4] ... ret 4`) corrupt an x64 caller's frame (a 64-bit
+   stub calling through one jumps to a garbled pointer).
+
+Plus one rule the measurement forced: an **adopted embedded PE keeps its own header entry** (the hop
+pick no longer runs over a ledger of stub junk latches and demotes it to a ladder look-alike -
+measured on amber_mmc: exact 0x51998d6 -> wrong 0x51a6d86 once the shim changed the stub's flow).
+
+Measurement (full `make -j8`, serial ctest **623/623 at 0 failed**; the driver rows (PMA wdm_test_*.sys)
+keep loading as drivers through the kernel-import rule):
+
+  * Amber family (152 rows, r189): 0 gains / 0 losses. Exe32pack (124 rows): 0 gains / 0 losses.
+    The two target rows: amber_SmartDefragBootTime recall 0.000 -> 1.000 (cs still 0.042, no decode),
+    exe32pack_SmartDefragBootTime unchanged (recall 0.929).
+  * Full corpus r190 (2678 rows, 4 workers, 85 s budget, wallcap 120): all-three **2335 = r183's 2335**,
+    per-row **0 gains / 0 losses**. The data-export shim touches every row and moved nothing.
+
+Session tally 1843 -> 2335 unchanged. What this round buys: the reference's driver rule and the
+data-export variable semantics are now in taote (both measured), the Amber lane's real ceiling is
+documented (1 row until the payload's own decode loop is emulated faithfully - it is a self-modifying
+heap decryptor, not a host-decodable frame), and the embedscan/reconstruct_pe carve (0x18e's "host-side
+product") is the recorded mechanism to port if that decode ever lands.

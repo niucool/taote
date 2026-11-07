@@ -346,6 +346,22 @@ std::pair<std::string, std::string> QlLoaderPE::dll_path_elements(const std::str
     return {host_path, folded};
 }
 
+// see pe.hpp: the CRT data-export surface (variables, not functions)
+bool is_crt_data_export(const std::string& name) {
+    std::string n;
+    n.reserve(name.size());
+    for (auto c : name) {
+        n.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    }
+    static const std::set<std::string> kData = {
+        "_acmdln",     "_wcmdln",     "_pgmptr",   "_wpgmptr",  "__initenv", "_aenvptr",
+        "_environ",    "_wenviron",   "__argv",    "__wargv",   "__argc",    "_iob",
+        "_pctype",     "_pwctype",    "_mbctype",  "_mbcasemap", "_ctype",   "_fmode",
+        "_commode",    "_osplatform", "_winver",   "_winmajor", "_winminor", "_osver",
+        "__mb_cur_max", "_fileinfo",   "_newmode",  "_dowildcard", "_aexit_rtn", "_dosphblnk"};
+    return kData.count(n) != 0;
+}
+
 std::uint64_t QlLoaderPE::unbound_import_stub(const std::string& name, std::uint64_t ordinal) {
     // Lazily map a run of executable pages full of xor eax,eax; ret cells (16
     // bytes each, int3-padded) and hand out one cell per unresolved symbol name.
@@ -424,10 +440,22 @@ std::uint64_t QlLoaderPE::unbound_import_stub(const std::string& name, std::uint
         };
         static const std::set<std::string> kCookieNames = {"encodepointer", "decodepointer",
                                                           "rtlencodepointer", "rtldecodepointer"};
-        if (kCookieNames.count(lower(name)) != 0) {
+        if (is_crt_data_export(name)) {
+            // a VARIABLE: the guest reads (and may write) the cell itself. The
+            // code-cell fill would hand it 0xc3c3c3c3 as a pointer value
+            // (amber_SmartDefragBootTime then parsed that as its command line
+            // and died on the dereference); a zeroed cell is the "no value"
+            // state the stubs' own null checks handle.
+            mem.write(cell_addr, std::vector<std::uint8_t>(16, 0));
+        } else if (ql_->arch().bits() == 32 && kCookieNames.count(lower(name)) != 0) {
             mem.write(cell_addr, std::vector<std::uint8_t>(kCookieCell, kCookieCell + sizeof(kCookieCell)));
         } else if (const auto* entry = os::ApiRegistry::instance().find(name)) {
-            if (entry->cc == os::WinCc::Stdcall && !entry->params.empty() && entry->params.size() <= 16) {
+            // the stdcall `ret 4*nargs` cleanup is an x86 ABI detail: on x64 the
+            // callee never pops and `ret 4` shifts rsp by 4 and corrupts the
+            // caller's frame (measured class: a 64-bit Amber stub calling
+            // through such a cell jumps to a garbled pointer)
+            if (ql_->arch().bits() == 32 && entry->cc == os::WinCc::Stdcall &&
+                !entry->params.empty() && entry->params.size() <= 16) {
                 const auto bytes = static_cast<std::uint16_t>(entry->params.size() * 4);
                 mem.write(cell_addr, std::vector<std::uint8_t>{
                                         0x31, 0xc0, 0xc2, static_cast<std::uint8_t>(bytes & 0xff),
@@ -991,14 +1019,45 @@ void QlLoaderPE::run() {
     } else {
         // the PE image path
         // loader/pe.py run(): self.is_driver = pe.is_driver() - the image
-        // subsystem (NATIVE) decides, so a .sys is never loaded as if it were
-        // a user process (its entry takes a DRIVER_OBJECT, and the TEB/PEB
-        // walk does not apply)
+        // The reference's PeFile::is_driver (pegasus common.cpp:624): a
+        // NATIVE-subsystem image is a driver only when its entry point is 0 or
+        // it imports kernel modules (ntoskrnl/hal/ndis/bootvid/kdcom/win32k) -
+        // NOT on subsystem alone. taote's old rule (subsystem == NATIVE) loaded
+        // user-mode CRT tools that merely declare NATIVE as kernel drivers: the
+        // driver path skips init_teb/init_peb/init_ldr_data, and
+        // amber_SmartDefragBootTime's stub then reads gs:0x30 (NT_TIB.Self) as 0
+        // and dies on [rax+8], where the reference runs the payload to
+        // completion (measured: 3.6M instructions and its carve emits the
+        // payload at 0x19000). A real .sys still trips the kernel-import rule.
         {
             const auto parsed = LIEF::PE::Parser::parse(ql_->path());
             is_driver_ = parsed != nullptr &&
                          parsed->optional_header().subsystem() ==
                              LIEF::PE::OptionalHeader::SUBSYSTEM::NATIVE;
+            if (is_driver_) {
+                const auto ep =
+                    static_cast<std::uint64_t>(parsed->optional_header().addressof_entrypoint());
+                bool kernel_imports = false;
+                for (const auto& imp : parsed->imports()) {
+                    std::string dll = imp.name();
+                    for (auto& c : dll) {
+                        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                    }
+                    for (const auto& suffix : {std::string(".dll"), std::string(".exe"), std::string(".sys")}) {
+                        if (dll.size() > suffix.size() &&
+                            dll.compare(dll.size() - suffix.size(), suffix.size(), suffix) == 0) {
+                            dll.resize(dll.size() - suffix.size());
+                        }
+                    }
+                    static const std::vector<std::string> kKernelDlls = {
+                        "ntoskrnl", "hal", "ndis", "bootvid", "kdcom", "win32k"};
+                    if (std::find(kKernelDlls.begin(), kKernelDlls.end(), dll) != kKernelDlls.end()) {
+                        kernel_imports = true;
+                        break;
+                    }
+                }
+                is_driver_ = ep == 0 || kernel_imports;
+            }
         }
 
         pe_image_address_ = load_image(ql_->path(), ql_->targetname());
@@ -1281,6 +1340,19 @@ void QlLoaderPE::init_teb() {
     }
 
     ql_->mem().write(teb_addr, image);
+    if (std::getenv("TAOTE_RUNDBG") != nullptr) {
+        try {
+            const auto rb = ql_->mem().read(teb_addr + layout.teb_off_teb_address, ptr);
+            std::uint64_t v = 0;
+            for (std::size_t i = 0; i < rb.size(); ++i) v |= static_cast<std::uint64_t>(rb[i]) << (8 * i);
+            std::fprintf(stderr, "[teb] addr=0x%llx self_off=0x%llx self=0x%llx gsbase_expected=0x%llx\n",
+                         static_cast<unsigned long long>(teb_addr),
+                         static_cast<unsigned long long>(layout.teb_off_teb_address),
+                         static_cast<unsigned long long>(v),
+                         static_cast<unsigned long long>(os::windows::GS_SEGMENT_ADDR));
+        } catch (...) {
+        }
+    }
 
     structure_last_addr_ = peb_addr;
     teb_address_ = teb_addr;

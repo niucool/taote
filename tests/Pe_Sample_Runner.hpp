@@ -529,6 +529,25 @@ inline void patch_data_export_slots(Qiling& ql, const fs::path& sample) {
             }
         }
     }
+
+    // A stub that RESOLVES the name itself never touches a sample import slot:
+    // amber_SmartDefragBootTime has no import directory at all and walks the
+    // stub dll's export table, landing on the same 0xC3 cell. Sweep every
+    // loaded dll's export-cell registry so the self-resolve path sees the same
+    // runtime value the IAT path gets (measured: without this the stub parses
+    // 0xc3c3c3c3 as its command line and dies on the dereference).
+    for (const auto& dll : loader.import_address_table_keys()) {
+        const auto* iat = loader.import_address_table_at(dll);
+        if (iat == nullptr) {
+            continue;
+        }
+        if (const auto cell = iat->lookup("_acmdln"); cell != 0) {
+            ql.mem().write_ptr(cell, static_cast<std::int64_t>(ensure_narrow()), ptr);
+        }
+        if (const auto cell = iat->lookup("_wcmdln"); cell != 0) {
+            ql.mem().write_ptr(cell, static_cast<std::int64_t>(ensure_wide()), ptr);
+        }
+    }
 }
 
 // a unique, wiped rootfs per run (the temp dirs persist across processes; the
