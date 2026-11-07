@@ -16925,3 +16925,28 @@ data-export variable semantics are now in taote (both measured), the Amber lane'
 documented (1 row until the payload's own decode loop is emulated faithfully - it is a self-modifying
 heap decryptor, not a host-decodable frame), and the embedscan/reconstruct_pe carve (0x18e's "host-side
 product") is the recorded mechanism to port if that decode ever lands.
+
+#### 0.18r bis Working-tree identity, and the priority queue for the next block (unchanged corpus)
+
+A landmine defused before it cost a wrong-direction round: the session's salv/chain-theory memory
+stream (rounds 87-190: `qiling/os/windows/dll_lab.cpp`, `tools/taote_import_reconstruct.cpp`,
+`tools/dump_rlp_chain.cpp`, tests SalvageUnsortedUnnamedImportSlots / StagingLeftoverVsRowsToFill /
+OkEntriesAlwaysLand / SafeOpsUsurpCosmeticDerefPasses / Pe32SehIssuesStayFixed, the gap_remainders /
+split_pitch_ailerons / tail_orphan class machinery, the forthcoming pickle) describes a SIBLING
+workspace - NONE of those files or test names exist in `~/source/jim/taote` (verified by find over
+the tree and by test-name greps; its commit hashes f962dd5/80da87b/9459651 do not resolve here).
+This checkout is the qiling-port origin tree (the upstream Arch_*/Loader_Elf_*/Qnx/Macos suite plus
+tests/Unpack_Compat_Test.cpp, tests/Pma_Compat_Test.cpp, tests/QilingPe_Compat_Test.cpp - 623
+tests) with the unpack layer as `Unpacker::salvage_iat` (unpack.cpp:3689) and
+`qiling/unpack/iat/import_rebuilder.cpp`. The corpus numbers overlap exactly (same 2678 rows, the
+same r183=2335), so the two lines measure the same corpus from two codebases. RULE: verify a
+memory-stream artifact exists in THIS tree before planning work against it.
+
+Priority queue left in THIS tree (all row-converting work, the monitor's preferred shape):
+1. the drift cluster's import-recall rows (alienyze_tinytask 0.0127, alienyze_nslookup 0.8726,
+   mew_fwtool 0.9232, aspack_default_winexe 0.8838) against THIS tree's salvage/import_rebuilder;
+2. amber_SmartDefragBootTime: the payload's self-modifying heap decryptor (the reference's
+   embedscan/reconstruct_pe carve is the recorded follow-on; recall is already 1.000);
+3. closed unless new external evidence appears: Themida 122 / Yoda 100 (both-fail), the RLPack
+   import lane, the 5 dur>=84 belts, the FSG 97th.
+No corpus run is outstanding for 0.18r-code: the shipped tree is measurement-complete at 2335.
