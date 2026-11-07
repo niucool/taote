@@ -270,19 +270,32 @@ void QlOsWindows::ensure_profile_state() {
     // int 0 -> STATUS_INTEGER_DIVIDE_BY_ZERO — the reference's own shape
     // (winemu.cpp:7549), so the per-instruction div decode is redundant.
     auto* self = this;
-    hook_handle_ = ql_->hook_code([self](std::uint64_t address, std::uint32_t) -> int {
-        ++self->instructions_;
-        const auto budget = self->ql_->count();
-        if (budget != 0 && self->instructions_ >= budget) {
-            self->instruction_budget_hit_ = true;
-            self->ql_->emu_stop();
-            return 1;
-        }
-        if (self->seh_check_iret(address)) {
-            return 1;  // iretq emulated: the run loop restarts at the restored rip
-        }
-        return 0;
-    });
+    // The per-instruction trap is the largest remaining fixed cost in the dispatch
+    // chain (measured on bero_geek's 300M-instruction decode: 33.4 s -> 26.8 s with
+    // the hook uninstalled, ~20% of wall), so install it only where its body does
+    // real work:
+    //   * x64 guests need the iretq pre-check (seh_check_iret) on every instruction,
+    //   * a configured budget needs the *cumulative* counter below - the native
+    //     uc_emu_start count restarts on every SEH segment, so the runaway guard
+    //     (PegasusParity.InstructionBudgetStopsRunawayGuest) cannot ride it.
+    // For a 32-bit guest with no instruction budget the body is inert (it only
+    // bumps the debug counter), and the trap is pure overhead - a corpus run then
+    // pays nothing per instruction.
+    if (bits_ == 64 || ql_->count() != 0) {
+        hook_handle_ = ql_->hook_code([self](std::uint64_t address, std::uint32_t) -> int {
+            ++self->instructions_;
+            const auto budget = self->ql_->count();
+            if (budget != 0 && self->instructions_ >= budget) {
+                self->instruction_budget_hit_ = true;
+                self->ql_->emu_stop();
+                return 1;
+            }
+            if (self->seh_check_iret(address)) {
+                return 1;  // iretq emulated: the run loop restarts at the restored rip
+            }
+            return 0;
+        });
+    }
 
     hook_dispatch_ = ql_->hook_block([self](std::uint64_t address, std::uint32_t size) -> int {
         self->hook_winapi(address, size);

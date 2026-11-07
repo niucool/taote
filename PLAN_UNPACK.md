@@ -16755,3 +16755,22 @@ Measured on bero_geek (full decode, standalone, taskset -c 0):
 Artifacts are identical to within the run-to-run noise this row already has: oep 0x559760, imports 2891,
 reason section_hop, stages 1 in both configurations, and the dump diffs are 247-248 bytes of 8,314,880
 (0.003%) for old-vs-new AND for new-vs-new alike.
+
+Measurement (the required family-then-corpus pair):
+
+  * BeRoEXEPacker family sweep (107 rows, /home/jim/runs/r183bero.json, 4 workers, 85 s budget,
+    wallcap 120): all-three 102 -> **104**, +2 (bero_Bginfo cs 0.7885 -> 1.0000/rec 0.0023 -> 1.0000,
+    bero_geek dur 87 -> 58), **0 losses**. The cap rows collapsed across the family: bero_procexp
+    87 -> 32 s, bero_ADInsight 84 -> 60 s, and the rows that stayed at dur 86-88 decode at cs/rec 1.0.
+  * Full corpus (2678 rows, /home/jim/runs/r183.json, same harness shape as r180): all-three 2324 ->
+    **2335 (+11, 0 losses)**, valid PE 2677, OEP exact 2353, imports 2417, aggregate wall 17736 ->
+    **13253 s (-25%)**, rows at dur >= 84: 80 -> 65, 0 crash signatures. The 11 gains are exactly the
+    cap-bound population the 0.18m priority asked for: bero_Bginfo, bero_HDDScan, bero_geek,
+    expressor_Bginfo, mew_Bginfo, mew_ComIntRep, mew_Sysmon, mpress_Bginfo, mpress_HDDScan,
+    rlpack_Bginfo, rlpack_HDDScan - all now cs 1.0 with recall >= 0.9983 (mew_Sysmon 87 -> 29 s,
+    rlpack_Bginfo 86 -> 42 s, rlpack_HDDScan 87 -> 52 s, mpress_Bginfo 86 -> 61 s).
+
+Note: bero_HDDScan was OEP-missed in the family sweep (ladder_scan claimed 0x27EBC, original EP RVA
+0x483BA0) but hit the exact OEP in the corpus run (out_ep == orig_ep) - the row is timing-sensitive in
+the pick, not decode-blocked, and it converted there. Suite 623/623 at 0 failed. Session tally 1843 ->
+2335 official (capability 2336: bero_adwcleaner stands alone in the >=84 band at cs 0.6112).

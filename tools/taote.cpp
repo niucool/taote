@@ -156,7 +156,16 @@ int main(int argc, char** argv) {
     // recall 1.000. Measured with the 86-sample fair set at a 300s budget: taote
     // 23/86 vs the reference's 74/86, with imports 28 vs 75 - the count, not the
     // wall clock, was the binding constraint on that whole class.
-    std::uint64_t count = 2000000000;
+    //
+    // Default 0 (= none), matching the reference: the budget is only a fallback
+    // and the per-instruction guard it needs is not free (a global unicorn code
+    // trap per instruction; measured 33.4 -> 26.8 s on bero_geek's 300M-instruction
+    // decode with it uninstalled). With the wall budget binding every corpus run
+    // at 85 s, a 2e9 cap could never fire first (~180 s of emulation at the same
+    // rate) - the corpus was paying the trap for a guard that never engages. An
+    // explicit --count N re-enables the cumulative guard (and the "timeout" error
+    // record the PMA hang-guard parity relies on).
+    std::uint64_t count = 0;
     bool json = false;
     // TAOTE_UNPACK_NO_HOP: the Phase 0 artifact-only mode, settable by env so the
     // reference harness (which only passes the pegasus flags) can drive it
