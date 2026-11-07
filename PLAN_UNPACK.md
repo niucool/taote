@@ -16943,8 +16943,10 @@ same r183=2335), so the two lines measure the same corpus from two codebases. RU
 memory-stream artifact exists in THIS tree before planning work against it.
 
 Priority queue left in THIS tree (all row-converting work, the monitor's preferred shape):
-1. the drift cluster's import-recall rows (alienyze_tinytask 0.0127, alienyze_nslookup 0.8726,
-   mew_fwtool 0.9232, aspack_default_winexe 0.8838) against THIS tree's salvage/import_rebuilder;
+1. alienyze_tinytask's failed-reconstruction row (recall 0.0000 here, cs 0.148) - the only surviving
+   drift-cluster row in THIS corpus (verified 7e812f6: alienyze_nslookup is already all-three here
+   at recall 1.000/cs 0.9886; mew_fwtool and aspack_default_winexe do not exist in this corpus
+   (they are the sibling's fixture names), so the rest of that list must not be planned against);
 2. amber_SmartDefragBootTime: the payload's self-modifying heap decryptor (the reference's
    embedscan/reconstruct_pe carve is the recorded follow-on; recall is already 1.000);
 3. closed unless new external evidence appears: Themida 122 / Yoda 100 (both-fail), the RLPack
