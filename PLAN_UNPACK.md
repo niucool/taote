@@ -16976,3 +16976,22 @@ Alienyze family, then the corpus.
 
 Queue after that (unchanged): amber_SmartDefragBootTime's heap decryptor (1 row at most; the
 embedscan/reconstruct_pe carve is the follow-on), then everything is behind its evidence gate.
+
+Revision to 0.18r ter (same row, one measured round later - the hypothesis is REFUTED and its
+change reverted at tree-clean): the body-copy relocation was implemented (score-scan the decode
+for the best 0x180 window, keep 0x7e0 only if nothing strictly better) and measured. It never
+fires. Instrumenting the scan with the REAL rubric `score_window` (not the python proxy that had
+suggested .rsrc+0x3c00 held a 22-pointer window) shows the reason: on alienyze_tinytask the entire
+decoded image [0x1000..0x16000) scores `base=0 best=4 off=0x8d00` - NOTHING in the decode is
+code-shaped at all under the rubric (the gate's 20 can never be reached from any window). The
+hypothesis "the body is in a window at the wrong offset" is dead: the body simply is not in the
+decode anywhere scoreable, and the failure is one step EARLIER - the decode step's output for this
+row (the crushed/two-run-times class) is not the payload body. Measured on all 126 Alienyze rows
+with the change: 0 gains / 0 losses (118/126 before and after), so the scan is inert-by-construction
+and the row is unchanged at recall 0.000 / cs 0.1482 / imports 0.
+
+Next target for THIS row (not the copy gate): the decode step's [0x1000..0x16000) output - what
+rule decides the key/source there (recover_key's 14-probe at embedded_pe.cpp:394 vs the
+.dll-plaintext recover_key_store at :421 chose key=0xff here), and what this sample's own body
+descriptor says (the crushed class's per-sample tails, the shape the r187 arbiter marks 'T-pruned'
+- don't go there without a concretely new artefact to parse or ground truth addresses).
