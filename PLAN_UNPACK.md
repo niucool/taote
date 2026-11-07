@@ -16952,3 +16952,27 @@ Priority queue left in THIS tree (all row-converting work, the monitor's preferr
 3. closed unless new external evidence appears: Themida 122 / Yoda 100 (both-fail), the RLPack
    import lane, the 5 dur>=84 belts, the FSG 97th.
 No corpus run is outstanding for 0.18r-code: the shipped tree is measurement-complete at 2335.
+
+#### 0.18r ter - the alienyze_tinytask row's precise failure (diagnosed, unsolved; the next fix target)
+
+Measured on the row (r190: rec 0.0000 / cs 0.1482 / oep_exact False / imports 0 of 104 /
+reason=fallback_guess): the Alienyze host decode itself is fine - `alienyze: key=0xff decoded
+[0x1000..0x16000)` runs - and the failure is a single gate in the row-reconstruction body copy,
+qiling/unpack/packers/embedded_pe.cpp:900: `if (score >= 20 && psrc >= hollow_end && n > 0x1000)`,
+where `psrc = a_lo + kPayloadOff` with `kPayloadOff = 0x7e0` hard-coded as "every corpus sample".
+The run prints `body copy skipped (score=0 n=19968 psrc=0xb7e0 hollow_end=0x6f7c)`: the source
+window at .alien+0x7e0 holds no code-shaped bytes for THIS row (its .alien is hollow (raw=0) and
+the file's only XOR-0xff code-shaped window, score 22, sits in .rsrc at fileoff 0x3c00), so no body
+is ever restored, `imports=0 of 104` and the guess path takes over.
+
+The fix shape (DO NOT guess at it blindly - it must be measured on this family, and this family's
+samples have idiosyncratic bodies per earlier verdicts): the 0x7e0 constant must be REFUSED AS A
+CONSTANT - locate the body by a scored scan over the runtime memory the decode produced (the code
+already has `score_window`, 14-window probing in `recover_key` at embedded_pe.cpp:394, and a
+known-plaintext `.dll` variant in `recover_key_store` at :421), then feed that offset to the copy
+gate. That is the same "refuse the constant, locate the fact" habit the FSG pallbearers run on.
+(Compare the r170e family: the S3 fixed byte-2 instance got its own named test.) Measure on the
+Alienyze family, then the corpus.
+
+Queue after that (unchanged): amber_SmartDefragBootTime's heap decryptor (1 row at most; the
+embedscan/reconstruct_pe carve is the follow-on), then everything is behind its evidence gate.
