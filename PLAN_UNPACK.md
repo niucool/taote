@@ -16774,3 +16774,92 @@ Note: bero_HDDScan was OEP-missed in the family sweep (ladder_scan claimed 0x27E
 0x483BA0) but hit the exact OEP in the corpus run (out_ep == orig_ep) - the row is timing-sensitive in
 the pick, not decode-blocked, and it converted there. Suite 623/623 at 0 failed. Session tally 1843 ->
 2335 official (capability 2336: bero_adwcleaner stands alone in the >=84 band at cs 0.6112).
+
+#### 0.18q The page write-trap: the per-store claim hook replaced by one write-protect fault per watched span (1.87x on the full decode)
+
+NEXT PRIORITY (0.18m item 1, the cap rows) continued: 0.18p removed the per-instruction trap and r183
+converted 11 cap-bound rows, but the image-wide per-store `UC_HOOK_MEM_WRITE` claim hook was still
+measured at ~48% of a full decode (bero_geek 45.7 s -> 23 s without it, body ~5%). The pegasus
+reference's STATUS 455 / TASK D names the fix: drive the same claim path from write-PROTECT faults
+instead of per-store hook fires. This round ports it.
+
+Mechanism (Unpacker::install -> QlOsWindows::write_trap_arm; the trap check sits at the very top of
+`seh_on_write_prot`, before the bits_/seh_dispatch_enabled_/loader_done gates and before seh_dispatch):
+arm the watched sections' currently-writable spans read-only, run the exactly unchanged
+`on_section_write` claim path on the FIRST write-protect fault per span, restore the span's perms,
+and return true so unicorn retries the guest store (the retry is what invalidates TBs for
+self-modifying decode; a belt-and-braces manual write covers stores <= 8 bytes if the engine ever
+skips instead of retrying). The per-store hook stays only where per-store fidelity is required:
+64-bit guests (the WRITE_PROT handler is registered in the bits_==32 block), the first-write shadow
+families (TELock's stub-record reads, MEW/PECompact restore scans), and the PEtite transition trail
+- `TAOTE_NO_WRITE_TRAP=1` forces the old hook anywhere.
+
+Three findings shaped the implementation (all measured, all recorded so they are not re-derived):
+
+1. **Unicorn's `uc_mem_protect` on a SUB-RANGE is O(region)**: `split_region` (vcpkg unicorn 2.1.4,
+   uc.c) copies the whole containing region and re-maps it on every sub-range protect - arming a
+   10 MB section page-by-page measured 16-23 ms per page (quadratic; the ASPack run appeared to hang
+   in the arm loop). BUT an EXACT-region protect no-ops in split_region. So the trap arms/restores
+   whole SPANS (one protect per watched section; the arm walk splits the run only at never-writable
+   pages), and every trap protect is an exact-region call. Per-page traps are NOT viable on this
+   unicorn without host-backed (uc_mem_map_ptr) mappings.
+2. **The map-splitting side effects**: per-span arming still splits the image's load-time mapping
+   into pieces, and three consumers assumed "the image is one map entry at base_" - `poll_dyn_maps`
+   promoted the pieces to guest allocations (dyn block hooks over the image + the bogus embedded-PE
+   adoption that wrecked FSG), `adopt_embedded_pe` scanned the stub's own decode and adopted a stray
+   MZ (fsg_livekd carries one at 0x4581c0), and the IAT scanner re-scanned them. All three now skip
+   map entries that OVERLAP [base_, base_+image_size_) (real dyn payloads live outside the image).
+3. **The junk-latch discriminator needs a second signal in trap mode**: the OEP pick rejects a hop
+   taken almost immediately at run start via the write ordinal (`seq >= 32`, calibrated in hook mode:
+   aspack_Cacheset latch @1 store vs the real hop @35973). One fault per span cannot measure write
+   volume, so trap mode falls back to the reference's OWN rule - its kJunkLatchMaxInstrs=32 is an
+   execution count - via `hop_is_strong` = seq >= 32 || exec_fires_ >= 32 (trap mode only; hook mode
+   is untouched), plus `mirror_host_write` charging the mirrored write's BYTE COUNT in trap mode
+   (ASPack's host decode is its decode; without the charge its true hop sat at ordinal 18 and the
+   pick demoted it to a ladder look-alike 0x566dbf).
+
+Measured (standalone, taskset -c 0, budgetless, --unpack-timeout 200):
+
+  * bero_geek full decode: 45.60 s hook vs **24.51 / 24.06 s trap = 1.87x** (the ~2x the cap rows
+    want). Result fields identical (base 0x400000, oep 0x559760, imports 2891, reason section_hop,
+    stages 1) and the dump differs in 248 of 8,314,880 bytes - exactly the recorded run-to-run noise
+    floor, and trap-vs-trap differs the same 248. The guest stores complete correctly.
+  * ASPack aspack_adwcleaner (host decode + native tail): 2.2 s, oep 0xcfb5d8, imports 1718 -
+    identical to hook mode.
+  * Full serial suite 623/623 at 0 failed (full `make -j8` rebuild first, per the measurement rule).
+
+Gate status: family sweeps (BeRoEXEPacker, MPRESS, RLPack, Alienyze) + the full corpus diffed
+against r183's 2335 + the commit are OUTSTANDING at this checkpoint. NOT shipped.
+
+0.18q GATE COMPLETE (same round, later measurement). The latch-rule work above turned out to need
+one more loop: the FIRST corpus gate (r185) showed 88 losses (83 exe32pack, 4 amber, 1 neolite -
+families outside the four swept) because the trap's coarse ordinal misclassifies junk latches. Two
+failed attempts are recorded so they are not repeated: (a) an execution-count rule at 32 blocks
+PROMOTES latches (amber's latch runs 131 blocks, exe32pack's 84), and (b) making the mapping
+page-granular (so per-page traps become exact-region cheap) is quadratic in unicorn's per-map cost
+(a 1000-instruction FSG run took 68 s instead of 0.5 s) and even 64 KB chunks cost +50% of a full
+decode (45.6 -> 69.1 s on bero_geek) - QlMemoryManager::map is back to one region per call and the
+trap arms/restores whole SPANS. The rule that reproduces hook-mode picks on every measured ledger is
+`strong = seq >= 32 || exec_fires_at_hop >= 512` (trap mode only), where 512 sits in the measured
+gap between junk latches (6/84/131/447 blocks: aspack_Cacheset 0x426035, exe32pack_antialias
+0x40d0eb, amber_chgport 0x401661, neolite_PEViewer 0x59bd4d) and real hand-offs (667+:
+aspack_Cacheset 0x4024a2, then 3860/43614/2.26M/4.2M/7.97M/21.7M), plus mirror_host_write charging
+its mirrored byte volume in trap mode (ASPack's host decode IS its decode). Verified per-row:
+exe32pack_antialias 0x4014c0, amber_chgport 0x500f23f, rlpack_calc 0x1012d6c, aspack_Cacheset
+0x4024a2, neolite_PEViewer 0x401504, molebox_AccessEnum 0x407a98 - all matching hook mode.
+
+Final gate (full `make -j8`, serial ctest 623/623 at 0 failed):
+
+  * bero_geek full decode (taskset -c 0, --unpack-timeout 200, budgetless): 45.60 s hook vs
+    **24.57 / 24.23 s trap = 1.87x**; dump differs 248 / 8,314,880 bytes = the recorded noise floor
+    (trap-vs-trap identical), result fields identical (oep 0x559760, imports 2891, section_hop).
+  * Full corpus r187 (2678 rows, /home/jim/runs/r187.json, 4 workers, 85 s budget, wallcap 120):
+    all-three **2335 = r183's 2335**, per-row **0 gains / 0 losses**, valid PE 2677, aggregate wall
+    13253 -> **11115 s (-16%)**, rows at dur >= 84: 65 -> 64. The trap is speed-neutral-or-better on
+    every row and changes no grade.
+
+Session tally 1843 -> 2335 official (unchanged this round - the round bought throughput, not rows).
+Shipped: the write-trap port (reference STATUS 455 / TASK D), the three map-splitting consumer fixes
+(poll_dyn_maps / adopt_embedded_pe / the IAT scanner now recognise the image by RANGE, not by
+"one map entry at base_"), the trap-mode junk-latch rule, and the map-splitting-safe O(n) merge in
+adopt_embedded_pe.
