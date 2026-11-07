@@ -18,6 +18,7 @@
 #include "qiling/os/windows/thread.hpp"
 #include "qiling/os/windows/seh.hpp"
 
+#include <functional>
 #include <map>
 #include <string>
 #include <vector>
@@ -241,6 +242,28 @@ public:
     // stops the run so it restarts at the handler; when nothing handles it,
     // completes the write (the reference's survive behavior).
     bool seh_on_write_prot(std::uint64_t address, std::uint32_t size, std::uint64_t value);
+
+    // The trap arms/restores whole SPANS: unicorn's split_region copies the
+    // whole containing region on every sub-range uc_mem_protect (16-23 ms per
+    // page over a 10 MB span), while an exact-region protect no-ops that split -
+    // so one protect per watched span (whose range matches its region) keeps the
+    // trap cheap. Per-page traps are NOT viable without page-granular regions,
+    // and page-granular MAPPING was measured and rejected (QlMemoryManager::map).
+    void write_trap_set_cb(std::function<int(std::uint64_t, std::uint32_t, std::uint64_t)> cb) {
+        write_trap_cb_ = std::move(cb);
+    }
+    // Arm the currently-writable pages of [lo,hi) as one trap span. A store into
+    // an already read-only page never reached the mem-write hook and produced no
+    // claim, so such pages must stay on the ordinary write-protect path
+    // (Alienyze's read-only .rsrc import-descriptor scrub). A span that is still
+    // armed reads as read-only and is skipped, so re-arming is a no-op while a
+    // faulted span re-arms cleanly.
+    void write_trap_arm(std::uint64_t lo, std::uint64_t hi);
+    // Drop the traps overlapping [lo,hi) WITHOUT touching permissions: the guest
+    // just installed its own (VirtualProtect), and an armed span there would
+    // later "restore" writability the guest asked to remove.
+    void write_trap_unarm(std::uint64_t lo, std::uint64_t hi);
+    bool write_trap_armed() const noexcept { return !write_trap_spans_.empty(); }
     // the invalid-instruction delivery (TELock's 0xf1 ICEBP ladder + the #UD
     // `lea reg,reg` trap): stages the given CPU exception into the fs:[0]
     // chain like seh_on_fault/seh_on_interrupt, then stops the run so it
@@ -393,6 +416,9 @@ private:
     uc_hook seh_hook_ = 0;
     uc_hook seh_prot_hook_ = 0;   // the sentinel-return fetch (MEM_FETCH_PROT)
     uc_hook seh_write_prot_hook_ = 0;  // the RO-page store (MEM_WRITE_PROT)
+    // the write-trap armed set: span_lo -> (span_hi, perms to restore at fault)
+    std::map<std::uint64_t, std::pair<std::uint64_t, std::uint32_t>> write_trap_spans_;
+    std::function<int(std::uint64_t, std::uint32_t, std::uint64_t)> write_trap_cb_;
     bool prot_enforce_ = false;        // set_prot_enforce: honour VirtualProtect
     unsigned tf_trap_cap_ = 4096;      // set_tf_trap_cap: TF single-step budget
     std::uint64_t seh_sentinel_ = 0;        // the staged return page (mapped rw-noexec)

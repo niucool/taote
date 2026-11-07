@@ -777,6 +777,47 @@ bool QlOsWindows::seh_seed_petite(std::uint64_t image_base) {
 }
 
 bool QlOsWindows::seh_on_write_prot(std::uint64_t address, std::uint32_t size, std::uint64_t value) {
+    // ---- the page write-trap (the reference's TASK D), checked FIRST ----
+    // An armed span's first store is the claim signal the per-store hook used to
+    // carry. This must run before the bits_/seh_dispatch_enabled_/loader_done
+    // gates and before seh_dispatch: a trap fault is never a guest exception.
+    if (!write_trap_spans_.empty()) {
+        auto sit = write_trap_spans_.upper_bound(address);
+        if (sit != write_trap_spans_.begin()) {
+            --sit;
+            if (address >= sit->first && address < sit->second.first) {
+                const auto span_lo = sit->first;
+                const auto span_hi = sit->second.first;
+                const auto restore = static_cast<int>(sit->second.second);
+                write_trap_spans_.erase(sit);
+                try {
+                    // an exact-region protect (the span is its own region): the
+                    // one case unicorn's split_region no-ops
+                    ql_->mem().protect(span_lo, span_hi - span_lo, restore);
+                } catch (...) {
+                    return false;
+                }
+                if (write_trap_cb_ != nullptr) {
+                    write_trap_cb_(address, size, value);
+                }
+                // Belt-and-braces: write the value the store carries so the store
+                // is complete even if the engine does not retry it. Only for
+                // stores that fit the hook's value register; wider stores complete
+                // on the retry.
+                if (size >= 1 && size <= 8) {
+                    try {
+                        std::vector<std::uint8_t> bytes;
+                        for (std::uint32_t i = 0; i < size; ++i) {
+                            bytes.push_back(static_cast<std::uint8_t>((value >> (8 * i)) & 0xff));
+                        }
+                        ql_->mem().write(address, bytes);
+                    } catch (...) {
+                    }
+                }
+                return true;  // let unicorn retry the store (this invalidates TBs)
+            }
+        }
+    }
     if (bits_ != 32 || !seh_dispatch_enabled_ || !loader_done()) {
         return false;
     }

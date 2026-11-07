@@ -1669,13 +1669,48 @@ void Unpacker::install(Qiling& ql) {
         install_aspack_hostdec();
     }
     if (!watched_.empty()) {
-        auto write_hook = std::make_shared<HookRet>(ql.hook_mem_write(
+        // TAOTE_NO_WRITE_HOOK (diagnostic, default off): 1 = no claim hook at all
+        // (prices the per-store fires), `dummy` = the hook over the image HEADER
+        // page only (nothing stores there).
+        const char* const nwh = std::getenv("TAOTE_NO_WRITE_HOOK");
+        const bool no_write_hook = nwh != nullptr;
+        const bool dummy_write_hook = nwh != nullptr && std::strcmp(nwh, "dummy") == 0;
+        // The claim signal: ONE write-protect fault per watched page (the
+        // reference's STATUS 455 / TASK D) instead of a per-store UC_HOOK_MEM_WRITE
+        // over the whole image. The hook's fires were ~48% of a full decode
+        // (bero_geek 46 -> 23 s without it) while its body is ~5%.
+        // Eligibility: 32-bit only (the UC_HOOK_MEM_WRITE_PROT handler reaching
+        // the trap lives in the bits_==32 block) and never for the runs that need
+        // per-store fidelity - the first-write shadow (TELock's stub-record reads,
+        // MEW/PECompact restore scans) and the PEtite transition trail - nor when
+        // TAOTE_NO_WRITE_TRAP forces the old hook.
+        const bool trap_ok = !is_64_ && !shadow_wanted_ && !sec_trans_on_ &&
+                             std::getenv("TAOTE_NO_WRITE_TRAP") == nullptr;
+        if (!no_write_hook && trap_ok) {
+            auto& wos = ql.os<os::windows::QlOsWindows>();
+            wos.write_trap_set_cb(
+                [this](std::uint64_t addr, std::uint32_t size, std::uint64_t value) -> int {
+                    // trap-mode write ordinal: one page-first-fault stands for
+                    // the stores into that page, so the ordinal advances by the
+                    // store width (min 1) - the same threshold-32 junk-latch
+                    // scale as the per-store hook (see hop_is_strong).
+                    return on_section_write(0, addr, size, value, size ? size : 1);
+                });
+            for (const auto& ps : watched_) {
+                wos.write_trap_arm(ps.start, std::min<std::uint64_t>(ps.end, base_ + image_size_));
+            }
+            write_trap_on_ = wos.write_trap_armed();
+        }
+        if (!no_write_hook && !write_trap_on_) {
+        std::shared_ptr<HookRet> write_hook;
+        write_hook = std::make_shared<HookRet>(ql.hook_mem_write(
             [this](int /*access*/, std::uint64_t addr, std::uint32_t size, std::int64_t value) -> int {
                 return on_section_write(0, addr, size, static_cast<std::uint64_t>(value));
             },
-            base_, base_ + image_size_));
+            dummy_write_hook ? base_ : base_, dummy_write_hook ? base_ + 0x1000 : base_ + image_size_));
         if (write_hook->obj() != nullptr) {
             hooks_.push_back(std::move(write_hook));
+        }
         }
 
         // the section-hop hook: an exec whose range was claimed is the
@@ -1699,7 +1734,7 @@ void Unpacker::install(Qiling& ql) {
 // The reference's on_section_write (unpacker.cpp:5197-5381). `pc` is unused: the
 // hook fires after the store, so the pc is read from the arch state.
 int Unpacker::on_section_write(std::uint64_t /*pc*/, std::uint64_t addr, std::uint32_t size,
-                               std::uint64_t value) {
+                               std::uint64_t value, std::uint32_t seq_step) {
     // TAOTE_WRITE_FASTPATH (diagnostic, default off): skip the whole write body so a
     // run isolates its cost from the dispatch plumbing around it.
     static const bool write_fastpath = std::getenv("TAOTE_WRITE_FASTPATH") != nullptr;
@@ -1742,8 +1777,10 @@ int Unpacker::on_section_write(std::uint64_t /*pc*/, std::uint64_t addr, std::ui
             return 0;
         }
         // keep the write ordinal current for the OEP pick (the hook stays armed
-        // for this even after the claim; the reference's YODA_PLATEAU stamp)
-        ++write_seq_;
+        // for this even after the claim; the reference's YODA_PLATEAU stamp).
+        // seq_step is 1 per store in hook mode and the store width per
+        // page-first-fault in trap mode (see install).
+        write_seq_ += seq_step ? seq_step : 1;
         last_write_seq_[ps.start] = write_seq_;
         if (sec_trans_on_) {
             for (std::size_t k = 0; k < sections_.size(); ++k) {
@@ -1826,9 +1863,18 @@ void Unpacker::poll_dyn_maps() {
         for (const auto& mi : ql_->mem().get_mapinfo()) {
             const auto lo = std::get<0>(mi);
             const auto hi = std::get<1>(mi);
-            if (hi <= lo || lo == base_ || lo >= 0x10000000 || hi - lo < 0x1000 ||
+            if (hi <= lo || lo >= 0x10000000 || hi - lo < 0x1000 ||
                 hi - lo > 0x4000000) {
-                continue;  // image, dll tree, or an engine scratch segment
+                continue;  // dll tree, or an engine scratch segment
+            }
+            // the image itself. Its single load-time mapping SPLITS into per-page
+            // entries as the page write-trap arms and restores pages, so an
+            // `initial_maps_` test alone would promote those pieces to "guest
+            // allocations" (measured: FSG then adopted a bogus embedded PE out of
+            // its own decode). Anything overlapping the image span is not a dyn
+            // map; a real dyn payload lives outside it (Amber's heap buffer).
+            if (image_size_ != 0 && lo < base_ + image_size_ && hi > base_) {
+                continue;
             }
             if (initial_maps_.count(lo) != 0) {
                 continue;  // pre-existing region, not a guest allocation
@@ -2399,7 +2445,12 @@ void Unpacker::mirror_host_write(std::uint64_t dst, std::uint64_t total) {
         if (claimed_.count(ps.start) != 0) {
             continue;
         }
-        ++write_seq_;
+        // Trap mode has no per-store hook, so its ordinal would count the host
+        // decode as nothing: charge the mirrored write's byte count (the host
+        // decode IS the decode - measured on ASPack, whose hop ordinal otherwise
+        // stays below the junk-latch bound and the pick demotes the true entry).
+        // Hook mode keeps its calibrated +1 per claim.
+        write_seq_ += write_trap_on_ ? std::max<std::uint64_t>(total, 1) : 1;
         last_write_seq_[ps.start] = write_seq_;
         std::uint64_t claim_start = ps.start;
         std::uint64_t claim_end = ps.end;
@@ -2725,6 +2776,19 @@ void Unpacker::dump_module(Qiling& ql, std::uint64_t addr, const std::string& re
     }
     hop_ledger_.push_back(addr);
     hop_write_seq_.push_back(write_seq_);
+    hop_exec_fires_.push_back(exec_fires_);
+    // page write-trap: the trap pages disarm after their first fault, so re-arm
+    // the hop TARGET section here - the "kept writing after the hop" rule at the
+    // OEP pick compares last_write_seq_ against this hop's ordinal and must see
+    // post-hop stores into that section.
+    if (write_trap_on_) {
+        const int hsec = section_index_at(addr);
+        if (hsec >= 0) {
+            const auto& hs = sections_[static_cast<std::size_t>(hsec)];
+            ql.os<os::windows::QlOsWindows>().write_trap_arm(
+                hs.start, std::min<std::uint64_t>(hs.end, base_ + image_size_));
+        }
+    }
     meta_oep_ = addr;
     last_oep_ = addr;
     reason_ = reason;
@@ -2763,11 +2827,24 @@ void Unpacker::harvest_loader_imports(Qiling& /*ql*/) {
     }
 }
 
-void Unpacker::detach_hooks() {
+void Unpacker::detach_hooks(Qiling* ql) {
     // HookRet::~HookRet -> QlCoreHooks::hook_del -> uc_hook_del: only valid while
     // the engine lives. Clearing here is what makes the tool's scope order safe.
     hooks_.clear();
     dyn_hooks_.clear();
+    // the page write-trap callback captures `this`: drop it (and the armed set)
+    // while the engine still lives
+    if (ql != nullptr) {
+        try {
+            auto& wos = ql->os<os::windows::QlOsWindows>();
+            wos.write_trap_unarm(0, ~static_cast<std::uint64_t>(0));
+            wos.write_trap_set_cb(nullptr);
+        } catch (...) {
+        }
+    }
+    // NOTE: write_trap_on_ is deliberately NOT cleared here - finalize() detaches
+    // the hooks at its start and the OEP pick later in finalize still needs the
+    // mode flag (hop_is_strong's execution-count rule is trap-only).
 }
 
 // The reference builds stub_map_ from the GPA sentinels + every emulated module's
@@ -3786,8 +3863,14 @@ void Unpacker::salvage_iat(Qiling& ql, const std::vector<std::uint8_t>& image) {
         for (const auto& mi : ql.mem().get_mapinfo()) {
             const auto lo = std::get<0>(mi);
             const auto hi = std::get<1>(mi);
-            if (hi <= lo || lo == base_ || hi - lo > 0x400000 || lo < 0x10000 || in_module(lo, hi)) {
+            if (hi <= lo || hi - lo > 0x400000 || lo < 0x10000 || in_module(lo, hi)) {
                 continue;  // the FS/GDT scratch, the engine's own maps, and loaded DLLs
+            }
+            // the image itself (already scanned above). Its map splits into
+            // per-page entries under the page write-trap, so `lo == base_` is not
+            // enough to recognise it.
+            if (image_size_ != 0 && lo < base_ + image_size_ && hi > base_) {
+                continue;
             }
             std::vector<std::uint8_t> bytes;
             try {
@@ -4210,7 +4293,7 @@ std::uint64_t Unpacker::pick_oep(const std::vector<std::uint8_t>& image) const {
         for (std::size_t i = hop_ledger_.size(); i-- > 0;) {
             const auto va = hop_ledger_[i];
             const auto seq = i < hop_write_seq_.size() ? hop_write_seq_[i] : 0;
-            if (seq >= 32 && shape_at(va) >= 2) {
+            if (hop_is_strong(i, seq) && shape_at(va) >= 2) {
                 if (opts_.debug) {
                     std::fprintf(stderr, "[unpack] pick OEP %s (accepted hop outranks the ladder, seq=%llu)\n",
                                  hex(va).c_str(), static_cast<unsigned long long>(seq));
@@ -4252,20 +4335,23 @@ std::uint64_t Unpacker::pick_oep(const std::vector<std::uint8_t>& image) const {
         // bero_Autologon 0x403980 over the post-payload write hop 0x439000.
         std::uint64_t lead = 0;
         std::uint64_t lead_seq = 0;
+        std::size_t lead_i = 0;
         for (std::size_t i = hop_ledger_.size(); i-- > 0;) {
             const auto seq = i < hop_write_seq_.size() ? hop_write_seq_[i] : 0;
-            if (seq >= 32 && shape_at(hop_ledger_[i]) >= 2) {
+            if (hop_is_strong(i, seq) && shape_at(hop_ledger_[i]) >= 2) {
                 lead = hop_ledger_[i];
                 lead_seq = seq;
+                lead_i = i;
                 break;
             }
         }
         if (lead == 0) {
             for (std::size_t i = 0; i < hop_ledger_.size(); ++i) {
                 const auto seq = i < hop_write_seq_.size() ? hop_write_seq_[i] : 0;
-                if (seq >= 32) {
+                if (hop_is_strong(i, seq)) {
                     lead = hop_ledger_[i];
                     lead_seq = seq;
+                    lead_i = i;
                     break;
                 }
             }
@@ -4273,9 +4359,10 @@ std::uint64_t Unpacker::pick_oep(const std::vector<std::uint8_t>& image) const {
         if (lead == 0) {
             lead = hop_ledger_.front();
             lead_seq = hop_write_seq_.size() == hop_ledger_.size() ? hop_write_seq_.front() : 0;
+            lead_i = 0;
         }
         const int lead_sec = section_index_at(lead);
-        const bool lead_is_latch = lead_seq != 0 && lead_seq < 32;
+        const bool lead_is_latch = lead_seq != 0 && !hop_is_strong(lead_i, lead_seq);
         // A hand-off into memory that holds no recognisable code shape is not an
         // entry: WinUpack's stub hops into the buffer it is still decompressing
         // (winupack_Cacheset: 0x42e80b, 16 zero bytes), and taking that hop made
@@ -4727,7 +4814,7 @@ UnpackResult Unpacker::finalize(Qiling& ql) {
             std::fprintf(stderr, "[pc] 0x%llx\n", static_cast<unsigned long long>(last_pcs_[i % n]));
         }
     }
-    detach_hooks();
+    detach_hooks(&ql);
     UnpackResult res;
     // an embedded-PE adoption replaces the image and moves base_ (Amber-class
     // payloads run from a heap buffer), so the adopted EP must also suppress the
@@ -4925,7 +5012,7 @@ UnpackResult Unpacker::finalize(Qiling& ql) {
             bool all_weak = true;
             for (std::size_t i = 0; i < hop_ledger_.size(); ++i) {
                 const auto seq = i < hop_write_seq_.size() ? hop_write_seq_[i] : 0;
-                if (seq >= 32) {
+                if (hop_is_strong(i, seq)) {
                     all_weak = false;
                     break;
                 }
@@ -4986,8 +5073,9 @@ UnpackResult Unpacker::finalize(Qiling& ql) {
         if (opts_.debug) {
             std::fprintf(stderr, "[unpack] hop ledger (%zu):", hop_ledger_.size());
             for (std::size_t i = 0; i < hop_ledger_.size(); ++i) {
-                std::fprintf(stderr, " %s@%llu", hex(hop_ledger_[i]).c_str(),
-                             static_cast<unsigned long long>(i < hop_write_seq_.size() ? hop_write_seq_[i] : 0));
+                std::fprintf(stderr, " %s@%llu/e%llu", hex(hop_ledger_[i]).c_str(),
+                             static_cast<unsigned long long>(i < hop_write_seq_.size() ? hop_write_seq_[i] : 0),
+                             static_cast<unsigned long long>(i < hop_exec_fires_.size() ? hop_exec_fires_[i] : 0));
             }
             std::fprintf(stderr, "\n[unpack] write ordinals:");
             for (const auto& kv : last_write_seq_) {

@@ -154,6 +154,10 @@ void register_memoryapi_family() {
         try {
             if (size != 0 && span != 0) {
                 ql.mem().protect(page, span, perms);
+                // the guest just chose these perms: drop any page write-trap over
+                // the range so a later store does not have writability "restored"
+                // the guest asked to remove (see QlOsWindows::write_trap_unarm)
+                w(ql).write_trap_unarm(page, page + span);
             }
             if (oldp != 0) {
                 ql.mem().write(oldp, std::vector<std::uint8_t>{0x04, 0x00, 0x00, 0x00});

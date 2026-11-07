@@ -295,6 +295,15 @@ void QlMemoryManager::map(std::uint64_t addr, std::uint64_t size, int perms, std
         throw QlMemoryMappedError("Requested memory is unavailable");
     }
 
+    // NOTE: one region per call, deliberately. Mapping page-by-page (to make
+    // per-page uc_mem_protect cheap: unicorn's split_region copies the whole
+    // containing region on a sub-range protect but no-ops an exact one) was
+    // measured and REVERTED - unicorn charges O(existing regions) per
+    // uc_mem_map (mem_map_check + the flatview rebuild), so per-page mapping made
+    // startup quadratic (a 1000-instruction FSG run took 68 s instead of 0.5 s)
+    // and even 64 KB chunks cost +50% of a full decode (45.6 -> 69.1 s on
+    // bero_geek). The unpacker's page write-trap therefore keeps whole-span
+    // arm/restore (exact-region protects against one mapped region).
     const uc_err err = uc_mem_map(uc_, addr, size, perms);
     if (err != UC_ERR_OK) {
         throw QlMemoryMappedError("failed to map memory (uc_err " + std::to_string(static_cast<int>(err)) + ")");

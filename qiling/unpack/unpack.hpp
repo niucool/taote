@@ -106,7 +106,7 @@ public:
 
     // Unregisters the armed hooks (idempotent). Must run before the Qiling that
     // install() was given is destroyed.
-    void detach_hooks();
+    void detach_hooks(Qiling* ql = nullptr);
 
     const UnpackOptions& options() const noexcept { return opts_; }
     // the classified sections + watch set (the tests assert on these)
@@ -133,9 +133,11 @@ private:
     bool inside_inplace(std::uint64_t addr) const;
     int section_index_at(std::uint64_t addr) const;
 
-    // write-claim (the reference's on_section_write, unpacker.cpp:5197-5381)
+    // write-claim (the reference's on_section_write, unpacker.cpp:5197-5381).
+    // seq_step: the write-ordinal advance for this event - 1 per store in hook
+    // mode, the store width per page-first-fault in page write-trap mode.
     int on_section_write(std::uint64_t pc, std::uint64_t addr, std::uint32_t size = 1,
-                         std::uint64_t value = 0);
+                         std::uint64_t value = 0, std::uint32_t seq_step = 1);
     // section-hop exec (on_section_exec, unpacker.cpp:5520-5810)
     int on_section_exec(std::uint64_t addr);
     // the accept gate + latch (dump_module, unpacker.cpp:6610-6834)
@@ -200,6 +202,24 @@ private:
     std::uint64_t packed_ep_va_ = 0;
     std::uint64_t start_override_va_ = 0;
     bool is_64_ = false;
+
+    // The junk-latch test (the reference's kJunkLatchMaxInstrs=32): a hop taken
+    // almost immediately at run start is not the payload hand-off. Hook mode
+    // measures it by the write ordinal (calibrated: aspack_Cacheset latch @1
+    // store, real hop @35973). The write-trap cannot count stores (one fault per
+    // armed span), so trap mode adds the EXECUTION count at the hop - the
+    // reference's own signal - with the threshold set from measured ledgers:
+    // junk latches land at 6/84/131/447 blocks (aspack_Cacheset 0x426035,
+    // exe32pack_antialias 0x40d0eb, amber_chgport 0x401661, neolite_PEViewer
+    // 0x59bd4d) while real hand-offs land at 667+ (aspack_Cacheset 0x4024a2) and
+    // typically 10^4-10^7, so 512 sits in the measured gap (256 promoted
+    // neolite's 447-block latch and lost the row). Hook mode is untouched.
+    bool hop_is_strong(std::size_t i, std::uint64_t seq) const {
+        if (seq >= 32) {
+            return true;
+        }
+        return write_trap_on_ && i < hop_exec_fires_.size() && hop_exec_fires_[i] >= 512;
+    }
     std::uint32_t stages_ = 0;
     // every accepted hop, in order: the reference's OEP candidate ledger
     // (unpacker.h:747-775). finalize picks among them instead of blindly keeping
@@ -215,6 +235,7 @@ private:
     std::uint64_t write_seq_ = 0;
     std::map<std::uint64_t, std::uint64_t> last_write_seq_;   // section start -> seq
     std::vector<std::uint64_t> hop_write_seq_;                // parallel to hop_ledger_
+    std::vector<std::uint64_t> hop_exec_fires_;               // parallel: per-block count at the hop
     // PECompact placeholder-header rows (AddressOfEntryPoint == the first
     // section's VA): the stub plants a mini-stub there and hands off tens of KB
     // later, so the first execution past this bound is the payload entry. 0 for
@@ -286,6 +307,8 @@ private:
     // every family was hot-path cost on the decompressor loops (millions of
     // writes into the image).
     bool shadow_wanted_ = false;
+    // page write-trap mode (replaces the per-store claim hook): see install
+    bool write_trap_on_ = false;
     // Fast path for the per-instruction written-range test: consecutive execs hit
     // the same claim, and the linear scan over the claim set was the hottest
     // thing in the exec hook.

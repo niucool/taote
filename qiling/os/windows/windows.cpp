@@ -336,6 +336,64 @@ void QlOsWindows::ensure_profile_state() {
     }
 }
 
+// ---- the page write-trap (the reference's STATUS 455 / TASK D) ----
+void QlOsWindows::write_trap_arm(std::uint64_t lo, std::uint64_t hi) {
+    if (write_trap_cb_ == nullptr || hi <= lo) {
+        return;
+    }
+    try {
+        // maximal contiguous runs of currently-writable pages, one protect per
+        // run (see the header: a sub-range protect copies the whole containing
+        // region, so the trap keeps every protect an exact-region call)
+        std::uint64_t run_lo = 0;
+        std::uint64_t run_hi = 0;
+        bool in_run = false;
+        const auto flush = [&]() {
+            if (!in_run) {
+                return;
+            }
+            in_run = false;
+            const auto* mi = ql_->mem().region_at(run_lo);
+            const auto restore =
+                mi != nullptr ? static_cast<std::uint32_t>(mi->perms) : static_cast<std::uint32_t>(UC_PROT_ALL);
+            ql_->mem().protect(run_lo, run_hi - run_lo,
+                               static_cast<int>(restore & ~static_cast<std::uint32_t>(UC_PROT_WRITE)));
+            write_trap_spans_[run_lo] = {run_hi, restore};
+        };
+        for (std::uint64_t page = lo & ~static_cast<std::uint64_t>(0xfff); page < hi; page += 0x1000) {
+            const auto* mi = ql_->mem().region_at(page);
+            const bool wr = mi != nullptr && (mi->perms & UC_PROT_WRITE) != 0;
+            if (wr) {
+                if (!in_run) {
+                    run_lo = page;
+                    run_hi = page + 0x1000;
+                    in_run = true;
+                } else {
+                    run_hi = page + 0x1000;
+                }
+            } else {
+                flush();  // a still-armed or never-writable page ends the run
+            }
+        }
+        flush();
+    } catch (...) {
+        // an unarmable span simply keeps its ordinary write path
+    }
+}
+
+void QlOsWindows::write_trap_unarm(std::uint64_t lo, std::uint64_t hi) {
+    if (write_trap_spans_.empty() || hi <= lo) {
+        return;
+    }
+    for (auto it = write_trap_spans_.begin(); it != write_trap_spans_.end();) {
+        if (it->first < hi && it->second.first > lo) {
+            it = write_trap_spans_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
 // the __p___initenv cell: a zeroed pointer-sized guest cell the CRT stores
 // the environment block pointer in (`*__p___initenv() = env`)
 std::uint64_t QlOsWindows::ensure_env_cell() {

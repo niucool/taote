@@ -33,26 +33,40 @@ bool adopt_embedded_pe(Qiling& ql, PackerContext& ctx, std::vector<std::uint8_t>
         // one region, otherwise the `soi <= hi - cand_base` gate below can never
         // hold for a heap-resident image.
         const auto maps = ql.mem().get_mapinfo();
-        const auto run_end = [&maps](std::uint64_t start) {
-            std::uint64_t end = start;
-            bool grew = true;
-            while (grew) {
-                grew = false;
-                for (const auto& m : maps) {
-                    const auto m_lo = std::get<0>(m);
-                    const auto m_hi = std::get<1>(m);
-                    if (m_lo == end && m_hi > m_lo) {
-                        end = m_hi;
-                        grew = true;
-                    }
-                }
+        // The heap is mapped in page chunks, so a payload written through a
+        // VirtualAlloc buffer straddles several map entries (amber_nbtstat's
+        // 0x11400-byte image starts at 0x50009ea inside a 0x1000-byte map whose
+        // successors are separate entries). Treat a CONTIGUOUS run of maps as
+        // one region, otherwise the `soi <= hi - cand_base` gate below can never
+        // hold for a heap-resident image. The runs are merged ONCE up front: the
+        // page write-trap splits the map metadata into per-page entries, and a
+        // per-entry rescan of all entries is O(n^2) - that stalled finalize
+        // outright on amber_chgport (measured).
+        std::vector<std::pair<std::uint64_t, std::uint64_t>> runs;
+        for (const auto& m : maps) {
+            const auto m_lo = std::get<0>(m);
+            const auto m_hi = std::get<1>(m);
+            if (m_hi <= m_lo) {
+                continue;
             }
-            return end;
-        };
-        for (const auto& mi : maps) {
-            const auto lo = std::get<0>(mi);
-            const auto hi = run_end(lo);
-            if (hi <= lo || lo == ctx.base || hi - lo < 0x1000 || hi - lo > 0x8000000) {
+            if (!runs.empty() && runs.back().second == m_lo) {
+                runs.back().second = m_hi;
+            } else {
+                runs.emplace_back(m_lo, m_hi);
+            }
+        }
+        for (const auto& run : runs) {
+            const auto lo = run.first;
+            const auto hi = run.second;
+            if (hi <= lo || hi - lo < 0x1000 || hi - lo > 0x8000000) {
+                continue;
+            }
+            // The stub's own image is not an embedded payload. Its load-time map
+            // SPLITS into per-page entries as the page write-trap arms and
+            // restores pages, so a `lo == ctx.base` test lets the pieces through
+            // and the scan adopts a false MZ out of the stub's own decode
+            // (measured: FSG fsg_livekd, which carries a stray MZ at 0x4581c0).
+            if (ctx.image_size != 0 && lo < ctx.base + ctx.image_size && hi > ctx.base) {
                 continue;
             }
             if (lo >= 0x10000000) {
