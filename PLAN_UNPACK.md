@@ -16721,3 +16721,37 @@ mechanisms, and the check was re-run at depth. None can convert a currently-miss
 Bottom line: the deep tail is a real inventory but every mechanism either already runs in taote, was
 measured at zero effect on the reference's own family, or has no row to convert today. The recorded
 priority list (0.18m) is untouched by it.
+
+#### 0.18p The per-instruction hook trap: the last global per-instruction cost, gated off where its body is inert
+
+NEXT PRIORITY (0.18m item 1) is the cap rows at dur >= 84: a real speedup, because the budget ladder
+(0.18m) ruled out any early-stop win. The old "dispatch is too expensive" lead (round 13) was retired in
+0.17e as hook *frequency*, and every body around a hook has since been made cheap (0.17mp: "the cost lives
+in the dispatch PLUMBING around a callback"). This round measured what is left of that plumbing directly:
+
+  * On bero_geek's full decode (`--unpack-timeout 200`, ~300M instructions): baseline 33.4 s.
+  * With the global per-instruction hook uninstalled: 26.8 s (-20%).
+  * With the write body short-circuited (TAOTE_WRITE_FASTPATH): 32.8 s (-2%).
+  * With the exec body short-circuited (TAOTE_HOOK_FASTPATH=1): 32.3 s (-3%).
+
+So both hook *bodies* are already noise and the remaining cost is unicorn's per-instruction CODE trap
+itself (~17 ns/instruction; the round-13 micro-bench number). The per-instruction hook (`hook_handle_`,
+windows.cpp) does exactly two things: the cumulative instruction budget (the deterministic hang guard -
+`uc_emu_start`'s native count restarts on every SEH segment, so the guard cannot ride it) and, on x64,
+the iretq pre-check (`seh_check_iret`). For a 32-bit guest with **no** instruction budget the body is
+inert - it only bumps the debug counter `instructions_`.
+
+Mechanism: install the per-instruction hook only when `bits_ == 64 || ql_->count() != 0` (windows.cpp),
+and make the CLI's instruction budget opt-in (`count` default 2e9 -> 0 in tools/taote.cpp, matching the
+reference which has no instruction cap at all). An explicit `--count N` reinstates the hook and the
+cumulative guard exactly as before, so PegasusParity.InstructionBudgetStopsRunawayGuest (count=300) and
+the PMA hang guard (count=40M) keep their semantics; the corpus, bounded by the 85 s wall budget that
+always binds first (2e9 instructions is ~180 s of emulation at the same rate), stops paying the trap.
+
+Measured on bero_geek (full decode, standalone, taskset -c 0):
+  old shape (`--count 2000000000`): 73.0/72.9/72.8 s
+  new default (no count):           45.2/45.8/46.0 s      = 1.6x
+
+Artifacts are identical to within the run-to-run noise this row already has: oep 0x559760, imports 2891,
+reason section_hop, stages 1 in both configurations, and the dump diffs are 247-248 bytes of 8,314,880
+(0.003%) for old-vs-new AND for new-vs-new alike.
