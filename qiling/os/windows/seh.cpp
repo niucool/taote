@@ -78,18 +78,23 @@ std::uint32_t get_u32(const std::vector<std::uint8_t>& image, std::size_t off) {
 }  // namespace
 
 // map the sentinel page: the staged return address for the guest SEH
-// handlers / filters. The page is deliberately NON-executable so the
-// handler's `ret` to it faults (UC_MEM_FETCH_PROT) and the dispatcher
-// continues the walk — and mapped (rw) so the address never gets reused by
-// the guest allocations
+// handlers / filters. The page holds int3 traps and is mapped read+exec (never
+// writable): the handler's `ret` to it raises INT3, which uc_hook_int delivers
+// as intno 3, and seh_on_interrupt recognises the address and continues the
+// walk. Measured: a non-executable sentinel works for a handful of fetches
+// and then unicorn's translator walks a stale TLB entry and host-faults
+// (SIGSEGV inside cpu_ldub_code_x86_64, si_addr 0x70000006) after ~8 consecutive
+// UC_MEM_FETCH_PROT events on the page; a real trap page never takes the
+// permission-fault path at all.
 bool QlOsWindows::seh_map_sentinel() {
     if (seh_sentinel_ != 0) {
         return true;
     }
     try {
         const auto base = ql_->mem().find_free_space(0x1000, 0x70000000ull, 0x78000000ull, 0x1000);
-        // rw without exec: the fetch at the sentinel faults PROT
         ql_->mem().map(base, 0x1000, UC_PROT_READ | UC_PROT_WRITE, "[SEH sentinel]");
+        ql_->mem().write(base, std::vector<std::uint8_t>(0x1000, 0xcc));
+        ql_->mem().protect(base, 0x1000, UC_PROT_READ | UC_PROT_EXEC);
         seh_sentinel_ = base;
         return true;
     } catch (...) {
@@ -275,34 +280,10 @@ bool QlOsWindows::seh_on_fault(int access, std::uint64_t address) {
         return false;
     }
 
-    // the sentinel fetch: a guest SEH handler / filter returned — continue
-    // the dispatch walk.
-    //
-    // The address is not always the page base: a real CRT handler that returns
-    // normally arrives as a fetch at 0x70000001 (unicorn reports the byte after
-    // the one it managed to fetch), so the whole page counts — but only on the
-    // real-CRT path (no synthetic frame recorded). With a synthetic walk in
-    // progress the exact address is the contract, because there the sentinel is
-    // reached by taote's own staged `ret` and any other fetch is a genuine
-    // guest fault (measured: matching the page turned a stub-mode run that ends
-    // cleanly into an exhausted-walk error).
-    const bool in_sentinel_page = seh_sentinel_ != 0 && address >= seh_sentinel_ &&
-                                  address < seh_sentinel_ + 0x1000;
-    if ((access == UC_MEM_FETCH_PROT || access == UC_MEM_FETCH_UNMAPPED) &&
-        (address == seh_sentinel_ || (in_sentinel_page && seh_frames_.empty()))) {
-        // A fetch at the sentinel is by contract a guest handler returning.
-        // With the dispatch already exhausted there is no answer to read, and
-        // acting on the stale eax re-enters the guest's handler forever
-        // (measured on telock_7z.exe). Surface the fault so uc_emu_start
-        // unwinds and the run loop applies any staged retarget.
-        if (!seh_call_outstanding_) {
-            if (std::getenv("TAOTE_SEHDBG") != nullptr) {
-                std::fprintf(stderr, "[sehc] sentinel fetch with no walk outstanding -> surface\n");
-            }
-            return false;
-        }
-        return seh_continue();
-    }
+    // The sentinel page (0xCC traps) is handled by seh_on_interrupt's int3
+    // branch - it is executable now, so no fetch fault can come from it. A
+    // fetch-prot report for the old sentinel address means something else is
+    // wrong and falls through to the paths below.
 
     // data faults (read/write against unmapped memory) and an execute on a
     // no-exec page (UC_MEM_FETCH_PROT, a #PF on instruction fetch) dispatch;
@@ -527,6 +508,39 @@ bool QlOsWindows::seh_on_interrupt(std::uint32_t intno) {
     // first fault, before any memory fault has created the page)
     if (seh_sentinel_ == 0 && !seh_map_sentinel()) {
         return false;
+    }
+    // The sentinel page is a 0xCC trap page: an INT3 raised at it means "a guest
+    // SEH handler returned to its staged return address", the same event the old
+    // UC_MEM_FETCH_PROT path caught, delivered here instead. Routing it through
+    // the interrupt path keeps the walk semantics identical while never relying
+    // on the fetch-fault path (a stream of them drove unicorn's translator into
+    // a host SIGSEGV). Bounded so a handler that cannot make progress surfaces
+    // the fault instead of spinning.
+    if (intno == 3 && seh_sentinel_ != 0) {
+        const auto pc = ql_->arch().regs().arch_pc();
+        const std::uint64_t lo = seh_sentinel_;
+        const std::uint64_t hi = seh_sentinel_ + 0x1000;
+        // pc is the byte after the int3 once the trap retires; either way the
+        // containing page is the sentinel
+        if ((pc >= lo && pc < hi) || (pc >= lo + 1 && pc - 1 < hi)) {
+            static std::size_t sentinel_traps = 0;
+            if (++sentinel_traps > 4096) {
+                if (std::getenv("TAOTE_SEHDBG") != nullptr) {
+                    std::fprintf(stderr, "[sehc] sentinel trap storm (>4096) -> surface\n");
+                }
+                return false;
+            }
+            if (!seh_call_outstanding_) {
+                if (std::getenv("TAOTE_SEHDBG") != nullptr) {
+                    std::fprintf(stderr, "[sehc] sentinel trap with no walk outstanding -> surface\n");
+                }
+                return false;
+            }
+            if (std::getenv("TAOTE_SEHDBG") != nullptr) {
+                std::fprintf(stderr, "[sehc] sentinel trap -> continue walk\n");
+            }
+            return seh_continue();
+        }
     }
     // Map the hardware exception vector to its NT status, matching the
     // reference's intr_to_ntstatus (unpacker.cpp:66-79). #GP (13) and #PF (14)
@@ -955,7 +969,7 @@ bool QlOsWindows::seh_dispatch(std::uint64_t fault_addr, std::uint32_t access_ty
     std::uint64_t page = 0;
     try {
         page = mem.find_free_space(0x1000, 0x70000000ull, 0x78000000ull, 0x1000);
-        mem.map(page, 0x1000, UC_PROT_ALL, "[SEH]");
+        mem.map(page, 0x1000, UC_PROT_READ | UC_PROT_WRITE, "[SEH]");
     } catch (...) {
         return false;
     }

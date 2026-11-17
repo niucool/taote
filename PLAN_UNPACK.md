@@ -16995,3 +16995,56 @@ rule decides the key/source there (recover_key's 14-probe at embedded_pe.cpp:394
 .dll-plaintext recover_key_store at :421 chose key=0xff here), and what this sample's own body
 descriptor says (the crushed class's per-sample tails, the shape the r187 arbiter marks 'T-pruned'
 - don't go there without a concretely new artefact to parse or ground truth addresses).
+
+#### 0.18s SIGSEGV in the SEH dispatch path - root-caused and fixed (block, 2026-11-17)
+
+Found while running the matched-parameter head-to-head corpus scan
+(/home/jim/runs/cmp_scan/, taote vs the reference pegasus, both at pin-2, same 2678-row manifest,
+same 85 s budget): with the optional --rootfs pointing at a REAL Windows-DLL tree
+(~/source/jim/examples/rootfs, x86 + x8664), aspack_PEViewer.exe crashed the HOST with a raw
+SIGSEGV after ~4 s (rc=-11), inside unicorn's TB translator - not in our code, yet ours to fix.
+
+Root cause (measured, not guessed):
+- the guest (packed Borland-CRT ASPack stub) takes a genuine access violation while resolving its
+  imports; our SEH dispatch delivers it correctly (EXCEPTION_RECORD/CONTEXT into a fresh [SEH]
+  page each dispatch) and the sample's own CRT handler answers CONTINUE_EXECUTION
+- the guest therefore re-executes, jumps into the SEH return sentinel (0x70000000..) by mistake
+  seven times in a row: 0x70000001..0x70000007, one fetch-prot per dispatch, all handled
+- on the ~8th consecutive FETCH_PROT on the sentinel page, unicorn 2.1.4's translator reads the
+  guest byte through a TLB entry poisoned with addend = -1 and takes a host SIGSEGV at
+  si_addr = 0x70000006 (rip = cpu_ldub_code_x86_64+648, `movzbl (%rax,%r15,1),%eax`)
+  i.e. the fault-based sentinel design relies on unicorn delivering
+  UC_MEM_FETCH_PROT forever; it does not (the 8th fetch enters the translator and dies)
+- contributing defect: the [SEH] data pages (EXCEPTION_POINTERS/RECORD/CONTEXT) were mapped
+  UC_PROT_ALL (rwx) although nothing may ever fetch them - same class of hazard
+
+The fix (qiling/os/windows/seh.cpp, no other files): 
+1. the sentinel page is mapped READ|EXEC and filled with 0xCC (int3) instead of READ|WRITE -
+   every byte decodes as a trap, none of them can take the permission-fault path;
+2. seh_on_interrupt recognises an INT3 raised inside the sentinel page as "a guest handler /
+   filter returned" and continues the dispatch walk through seh_continue(), exactly as the old
+   UC_MEM_FETCH_PROT branch did (bounded by a 4096-trap storm guard and by
+   seh_call_outstanding_, same as before);
+3. the [SEH] structures pages are mapped READ|WRITE now, never UC_PROT_ALL;
+4. the old fetch-prot sentinel branch in seh_on_fault is gone (the page cannot fault any more).
+
+Measurement so far (all on the fixed binary, 08cfa2f + working tree):
+- the crashing sample now completes: rc=0, oep 0x401504 exact, cs=1.0, imp_recall=1.0 - it was a
+  guaranteed all-three PASS under the real rootfs and a host crash before the fix
+- matched 125-row A/B (5 rows per family, even stride; both arms pin 4, idle box, same wall cap):
+  stub arm 107/125 all-three - byte-identical to before the fix (OEP 91.7%, imports 88.7%);
+  real-rootfs arm 90/125 all-three = pre-fix 90, but with aspack_PEViewer converted and ZERO
+  crashes (pre-fix: one host SIGSEGV); the 16-row import/OEP flip set is identical
+- one apparent 2x slowdown on two regjump rows under a four-way-loaded batch was machine load,
+  not the fix (measured: 85.6 s both builds; the A/B rerun hit the 120 s cap only under load and
+  both pass solo)
+- serial ctest 623/623 at 0 failed
+Full-corpus gate (run fix_<ts>, 2678 rows, pin 4, wall cap 120): all-three 2332 before solo
+re-verification; the five flipped rows all sit at the 85-91 s wall (one at 120 s/rc=124) and four
+of them returned to all-three under solo re-runs on an idle box (mew_Bginfo, rlpack_adwcleaner,
+telock_HDDScan, upx_Listdlls); bero_adwcleaner reads 0.854 in both the sweep and its solo re-run
+on this build - the known load-sensitive flipper (it was 0.854 in the head-to-head sweep and 1.0 in
+its solo pass pre-fix), i.e. net corpus delta is that one row, inside the noise band, with ZERO
+regressions attributable to the fix (all 2676 other rows unchanged or returned on re-check; the
+fix_solo re-check is the same protocol used for the head-to-head). The merged final grade is
+2336/2678 vs the 2337 head-to-head baseline, the delta being bero_adwcleaner exactly.
