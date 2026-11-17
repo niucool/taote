@@ -1200,8 +1200,14 @@ TEST(QilingPeCompat, PeDriverX8664Sioctl) {
     if (!fs::exists(sample)) GTEST_SKIP() << "missing fixture";
     qiling::os::register_dlls();
 
+    // the registry store has to exist (the sibling cases create it the same
+    // way); the upstream rootfs ships no Windows/registry directory
+    const auto rootfs = qiling_rootfs_dir() / "x8664_windows";
+    std::error_code ec;
+    fs::create_directories(rootfs / "Windows" / "registry", ec);
+
     qiling::QilingOptions options;
-    options.rootfs = (qiling_rootfs_dir() / "x8664_windows").string();
+    options.rootfs = rootfs.string();
     options.ostype = qiling::QL_OS::WINDOWS;
     options.archtype = qiling::QL_ARCH::X8664;
     options.verbose = qiling::QL_VERBOSE::OFF;
